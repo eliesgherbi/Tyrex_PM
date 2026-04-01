@@ -2,6 +2,8 @@
 
 Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 
+**Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
+
 ## Strategy (`StrategySettings` → `load_strategy_settings`)
 
 | Field | Required | Default | Notes |

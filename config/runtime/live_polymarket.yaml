@@ -2,7 +2,7 @@
 
 trader_id: "TYREX-GURU-001"
 
-execution_mode: live
+execution_mode: shadow
 
 guru_poll_interval_seconds: 30.0
 data_api_base_url: "https://data-api.polymarket.com"

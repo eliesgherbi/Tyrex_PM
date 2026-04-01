@@ -1,5 +1,7 @@
 # Operations — guru follow (v1)
 
+**Architecture:** [Architecture.md](Architecture.md) · **Strategy module (copy flow):** [modules/strategy/README.md](modules/strategy/README.md)
+
 ## Config files
 
 | File | Use |

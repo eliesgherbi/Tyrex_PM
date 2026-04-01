@@ -43,7 +43,9 @@ See `Docs/dependency_lock.md` for versions used in development.
 
 ## Documentation
 
-- **Developers:** [Docs/DEVELOPMENT.md](Docs/DEVELOPMENT.md) — modules, tests, `run_guru` wiring.
+- **Architecture:** [Docs/Architecture.md](Docs/Architecture.md) — system layout, diagrams, shadow vs live, limits.
+- **Per-module:** [Docs/modules/README.md](Docs/modules/README.md) — `core`, `config`, `data`, `signal`, `risk`, `execution`, `strategy`, `runtime`, etc.
+- **Developers:** [Docs/DEVELOPMENT.md](Docs/DEVELOPMENT.md) — tests, conventions, `run_guru` composition.
 - **Config fields:** [Docs/CONFIG_MODEL.md](Docs/CONFIG_MODEL.md) — strategy / risk / runtime YAML.
 - **Operators:** [Docs/OPERATIONS.md](Docs/OPERATIONS.md) — env, run commands, shadow vs live, logs.
 - **Runbooks:** `Docs/Runbooks/` (auth, order smoke, live stub).

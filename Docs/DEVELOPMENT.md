@@ -1,6 +1,8 @@
 # Developer guide — Tyrex_PM
 
-Full field reference for strategy / risk / runtime YAML: [`Docs/CONFIG_MODEL.md`](CONFIG_MODEL.md).
+**Big picture:** [Architecture.md](Architecture.md) · **Per-module:** [modules/README.md](modules/README.md)
+
+Full field reference for strategy / risk / runtime YAML: [CONFIG_MODEL.md](CONFIG_MODEL.md).
 
 ## Layout (`src/tyrex_pm/`)
 
