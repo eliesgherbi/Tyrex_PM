@@ -1,0 +1,8 @@
+# Strategy-only: guru target, allowlist, sizing. Replace wallet/tokens before prod.
+
+guru_wallet_address: "0x56687bf447db6ffa42ffe2204a05edaa20f55839"
+
+allowlisted_token_ids:
+  - "71321045679252212594626385532706912750332728571990565097336609381905283641860"
+
+copy_scale: 1.0

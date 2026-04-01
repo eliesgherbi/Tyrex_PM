@@ -1,0 +1,14 @@
+# Runtime: shadow vs live, polling, logging. Secrets stay in .env only.
+
+trader_id: "TYREX-GURU-001"
+
+execution_mode: shadow
+
+guru_poll_interval_seconds: 30.0
+data_api_base_url: "https://data-api.polymarket.com"
+guru_dedup_state_path: "var/guru_dedup.json"
+
+logging_level: INFO
+
+clob_host: "https://clob.polymarket.com"
+chain_id: 137

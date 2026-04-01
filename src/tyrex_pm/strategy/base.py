@@ -20,7 +20,7 @@ class BaseComposableStrategy(Strategy):
     Logs a single structured line on start for observability baseline (v1.03).
     """
 
-    def __init__(self, config: BaseComposableStrategyConfig) -> None:
+    def __init__(self, config: StrategyConfig) -> None:
         super().__init__(config)
 
     def on_start(self) -> None:

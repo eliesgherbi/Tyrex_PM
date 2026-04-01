@@ -11,3 +11,11 @@ guru:
   poll_interval_seconds: 30
   data_api_base_url: "https://data-api.polymarket.com"
   dedup_state_path: "var/guru_dedup.json"
+
+# Copy strategy — wire allowlist to resolved CLOB token ids from v1.01 resolution notes.
+execution:
+  mode: shadow
+
+copy:
+  allowlisted_token_ids: []
+  scale: 1.0

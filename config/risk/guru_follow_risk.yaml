@@ -1,0 +1,8 @@
+# Risk guards (fail-closed). Tune before live.
+
+max_order_quantity: 100.0
+max_notional_usd_per_order: 25.0
+max_token_notional_usd_open: 100.0
+
+kill_switch: false
+fail_on_missing_price_for_notional: true
