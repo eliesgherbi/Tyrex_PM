@@ -1,0 +1,9 @@
+# V1 copy-trading market allowlist (max 5 markets per milestone v1.01).
+# Replace slugs with your operational universe; keep inactive slugs out of live config.
+#
+# Resolution uses NautilusTrader PolymarketDataLoader.from_market_slug (same path as live catalog).
+# See: Docs/validation/v1_01_resolution_notes.md
+
+markets:
+  - slug: gta-vi-released-before-june-2026
+    note: "Reference market used in Nautilus Polymarket docs; verify still active before production."

@@ -1,0 +1,13 @@
+# Non-secret application config (milestone v1.03).
+# Copy and adjust; separate from secrets in `.env`.
+
+mode: backtest
+trader_id: TYREX-001
+log_level: INFO
+
+# Guru poller (v1.04) — placeholder wallet; Data API is public read.
+guru:
+  wallet_address: "0x0000000000000000000000000000000000000000"
+  poll_interval_seconds: 30
+  data_api_base_url: "https://data-api.polymarket.com"
+  dedup_state_path: "var/guru_dedup.json"
