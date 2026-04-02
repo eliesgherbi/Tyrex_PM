@@ -4,7 +4,7 @@
 
 ## A. Role
 
-**External reads** and **normalization** for Polymarket: HTTP Data API, guru trade parsing, deduplication, and the **`GuruMonitorActor`** that feeds the Nautilus message bus. Market tooling (allowlist, resolution, book check) lives here for reuse by scripts and validation.
+**External reads** and **normalization** for Polymarket: HTTP Data API (**`/activity` TRADE** feed for the live follower, `/trades` where still useful for tools), guru row parsing, **incremental watermark** (`guru_watermark.py`), optional dedup LRU, and **`GuruMonitorActor`**. Market tooling (allowlist, resolution, book check) lives here for scripts and validation — **not** used for unbounded historical crawls on the copy path.
 
 ## B. Boundaries
 
@@ -16,10 +16,11 @@
 
 | File | Role |
 |------|------|
-| `data_api_client.py` | HTTP client for trades (rate-limit aware / backoff hooks). |
-| `guru_parse.py` | Map API row → `GuruTradeSignal`. |
-| `guru_dedup.py` | Persistent dedup store (file-backed). |
-| `guru_monitor.py` | `GuruMonitorActor`, `GuruMonitorActorConfig`, topic constant `GURU_TRADE_TOPIC`. |
+| `data_api_client.py` | HTTP client: `get_trades`, **`get_user_trade_activity`** (`/activity`), 429 backoff. |
+| `guru_parse.py` | Map trade/activity rows → `GuruTradeSignal`; `api_timestamp_to_ms`. |
+| `guru_watermark.py` | `GuruWatermarkStore` — persisted `last_seen_ts_ms`. |
+| `guru_dedup.py` | Secondary dedup store (file-backed LRU). |
+| `guru_monitor.py` | `GuruMonitorActor`: incremental poll, resilient errors, `GURU_TRADE_TOPIC`. |
 | `allowlist.py` | Allowlist helpers (validation tooling). |
 | `resolution.py` | Market/token resolution (used by scripts / validation). |
 | `book_check.py` | Order book checks as needed for tooling. |
@@ -32,9 +33,9 @@
 
 ## E. Status
 
-**Production-shaped:** guru poll actor + client + dedup.
+**Production-shaped:** incremental guru poll (watermark + bounded pages + dedup safety net).
 
-**Tooling:** resolution / allowlist / book check support ops and tests, not the hot copy loop.
+**Tooling:** resolution / allowlist / book check; `get_trades` remains for non-follower tools.
 
 ## F. Extension guidance
 

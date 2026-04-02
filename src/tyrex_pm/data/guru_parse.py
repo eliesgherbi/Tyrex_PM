@@ -8,6 +8,23 @@ from typing import Any
 from tyrex_pm.core.types import GuruTradeSignal
 
 
+def api_timestamp_to_ms(raw: Any) -> int:
+    """
+    Normalize Data API ``timestamp`` (seconds or ms) to integer milliseconds.
+    Heuristic: values greater than ``1e12`` are treated as ms.
+    """
+
+    if raw is None:
+        return 0
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    if v > 10**12:
+        return v
+    return v * 1000
+
+
 def stable_source_trade_id(row: Mapping[str, Any]) -> str:
     """
     Stable id for Data API trades (no unique id in OpenAPI).
@@ -28,11 +45,7 @@ def stable_source_trade_id(row: Mapping[str, Any]) -> str:
 
 def trade_row_to_signal(row: Mapping[str, Any]) -> GuruTradeSignal:
     tid = stable_source_trade_id(row)
-    ts_raw = row.get("timestamp")
-    try:
-        ts_event_ms = int(ts_raw) if ts_raw is not None else 0
-    except (TypeError, ValueError):
-        ts_event_ms = 0
+    ts_event_ms = api_timestamp_to_ms(row.get("timestamp"))
 
     side = str(row.get("side") or "")
     token = row.get("asset")
@@ -53,6 +66,19 @@ def trade_row_to_signal(row: Mapping[str, Any]) -> GuruTradeSignal:
         price_raw=price_raw,
         raw_payload_ref=raw_payload_ref,
     )
+
+
+def activity_trade_row_to_signal(row: Mapping[str, Any]) -> GuruTradeSignal:
+    """
+    Map ``GET /activity`` row with ``type=TRADE`` to ``GuruTradeSignal``.
+
+    Shape matches Trade schema closely; reuse ``trade_row_to_signal`` after
+    normalizing timestamp to ms for stable id hashing.
+    """
+
+    d = dict(row)
+    d["timestamp"] = api_timestamp_to_ms(row.get("timestamp"))
+    return trade_row_to_signal(d)
 
 
 def _maybe_float(v: Any) -> float | None:

@@ -33,7 +33,11 @@ Session exposure is updated via `note_fill_assumption` after a successful live s
 | `execution_mode` | no | `shadow` | `shadow` or `live` |
 | `guru_poll_interval_seconds` | no | `30` | Data API poll interval |
 | `data_api_base_url` | no | `https://data-api.polymarket.com` | Trailing slash stripped |
-| `guru_dedup_state_path` | no | `var/guru_dedup.json` | Dedup store for guru trades |
+| `guru_state_path` | no | `var/guru_watermark.json` | **Watermark** JSON (`last_seen_ts_ms`) for incremental `/activity` polling |
+| `guru_dedup_state_path` | no | `var/guru_dedup.json` | Secondary dedup LRU for trade ids (replays / reorder) |
+| `guru_activity_limit` | no | `200` | Page size for `/activity` (1–500) |
+| `guru_max_activity_pages_per_poll` | no | `4` | Max pages per poll (bounds work per tick) |
+| `guru_startup_backfill_seconds` | no | `0` | Cold start: watermark = now − this many seconds (`0` = only trades **after** boot) |
 | `logging_level` | no | `INFO` | Nautilus `LoggingConfig.log_level` |
 | `clob_host` | no | `https://clob.polymarket.com` | Used for live `ClobClient` when composing |
 | `chain_id` | no | `137` | Polygon mainnet default |

@@ -92,6 +92,10 @@ def test_load_risk_and_runtime(tmp_path: Path) -> None:
     live = load_runtime_settings(rt)
     assert live.execution_mode == "live"
     assert live.guru_dedup_state_path == "var/guru_dedup.json"
+    assert live.guru_state_path == "var/guru_watermark.json"
+    assert live.guru_activity_limit == 200
+    assert live.guru_startup_backfill_seconds == 0.0
+    assert live.guru_max_activity_pages_per_poll == 4
 
 
 def test_runtime_rejects_bad_mode(tmp_path: Path) -> None:

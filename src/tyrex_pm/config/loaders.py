@@ -39,6 +39,10 @@ class RuntimeSettings:
     guru_poll_interval_seconds: float
     data_api_base_url: str
     guru_dedup_state_path: str
+    guru_state_path: str
+    guru_activity_limit: int
+    guru_startup_backfill_seconds: float
+    guru_max_activity_pages_per_poll: int
     logging_level: str
     clob_host: str
     chain_id: int
@@ -133,6 +137,21 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     dedup = raw.get("guru_dedup_state_path")
     dedup_s = str(dedup).strip() if dedup else "var/guru_dedup.json"
 
+    state = raw.get("guru_state_path")
+    state_s = str(state).strip() if state else "var/guru_watermark.json"
+
+    activity_limit = int(raw.get("guru_activity_limit", 200))
+    if not (1 <= activity_limit <= 500):
+        raise ValueError(f"{p}: guru_activity_limit must be between 1 and 500")
+
+    backfill = float(raw.get("guru_startup_backfill_seconds", 0.0))
+    if backfill < 0:
+        raise ValueError(f"{p}: guru_startup_backfill_seconds must be >= 0")
+
+    max_pages = int(raw.get("guru_max_activity_pages_per_poll", 4))
+    if not (1 <= max_pages <= 20):
+        raise ValueError(f"{p}: guru_max_activity_pages_per_poll must be between 1 and 20")
+
     log_level = str(raw.get("logging_level", "INFO")).upper()
     clob = str(raw.get("clob_host", "https://clob.polymarket.com")).rstrip("/")
     chain_id = int(raw.get("chain_id", 137))
@@ -143,6 +162,10 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         guru_poll_interval_seconds=poll,
         data_api_base_url=api,
         guru_dedup_state_path=dedup_s,
+        guru_state_path=state_s,
+        guru_activity_limit=activity_limit,
+        guru_startup_backfill_seconds=backfill,
+        guru_max_activity_pages_per_poll=max_pages,
         logging_level=log_level,
         clob_host=clob,
         chain_id=chain_id,

@@ -6,7 +6,13 @@ execution_mode: shadow
 
 guru_poll_interval_seconds: 30.0
 data_api_base_url: "https://data-api.polymarket.com"
+
+# Incremental guru polling: watermark file + optional dedup safety net
+guru_state_path: "var/guru_watermark.json"
 guru_dedup_state_path: "var/guru_dedup.json"
+guru_activity_limit: 200
+guru_max_activity_pages_per_poll: 4
+guru_startup_backfill_seconds: 0
 
 logging_level: INFO
 

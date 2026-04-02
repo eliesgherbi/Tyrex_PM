@@ -45,6 +45,10 @@ def build_guru_trading_node(
         poll_interval_secs=runtime.guru_poll_interval_seconds,
         data_api_base_url=runtime.data_api_base_url,
         dedup_state_path=dedup_path,
+        watermark_state_path=runtime.guru_state_path,
+        activity_limit=runtime.guru_activity_limit,
+        startup_backfill_seconds=runtime.guru_startup_backfill_seconds,
+        max_activity_pages_per_poll=runtime.guru_max_activity_pages_per_poll,
     )
     guru = GuruMonitorActor(guru_cfg)
 

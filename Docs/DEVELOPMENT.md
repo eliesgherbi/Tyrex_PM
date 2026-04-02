@@ -18,7 +18,7 @@ Full field reference for strategy / risk / runtime YAML: [CONFIG_MODEL.md](CONFI
 | `runtime/` | **`guru_compose.build_guru_trading_node`**, **`clob_factory.build_clob_client_from_env`** |
 | `reporting/` | Placeholder |
 
-**Data → strategy contract:** `GuruMonitorActor` publishes `GuruTradeSignal` on topic `tyrex_pm.guru.GuruTradeSignal` (see `data/guru_monitor.py`). `CopyStrategy` subscribes on that string topic via `msgbus.subscribe`.
+**Data → strategy contract:** `GuruMonitorActor` polls **`GET /activity`** (TRADE only) with a **timestamp watermark** (`guru_state_path`), publishes `GuruTradeSignal` on `tyrex_pm.guru.GuruTradeSignal`. `CopyStrategy` subscribes via `msgbus.subscribe`. Full `/trades` history crawling is **not** part of the follower path.
 
 ## `run_guru.py` composition
 

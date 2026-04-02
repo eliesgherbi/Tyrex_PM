@@ -60,7 +60,9 @@ Optional: `TYREX_PM_DOTENV=/path/to/.env` to load a non-default env file.
 | `event=` | Meaning |
 |----------|---------|
 | `guru_signal_emitted` | New deduped guru trade from `GuruMonitorActor` |
-| `guru_poll_tick` | Poll cycle / backoff |
+| `guru_poll_tick` | Poll cycle (`phase=on_start`, `timer`, or `sub=fetch`) |
+| `guru_poll_error` | Data API failure for one poll (actor survives, see backoff) |
+| `guru_poll_error_backoff` | Sleep before next retry after errors |
 | `copy_skip` | Strategy dropped signal (allowlist, zero qty, risk denied, …) |
 | `shadow_order_intent` | Shadow mode: intent reached execution port (no venue I/O) |
 | `live_order_intent` | Live mode: strategy forwarded intent to execution policy |
@@ -73,6 +75,7 @@ Risk denials appear on `copy_skip` with `reason_code=risk_denied` and the policy
 ## Troubleshooting
 
 - **No `shadow_order_intent` / `live_order_intent`:** check allowlist vs guru `asset`; watch `copy_skip` (`not_allowlisted`, `zero_qty`, `risk_denied`, …).
-- **Guru duplicates:** dedup store (`guru_dedup_state_path`); delete file for full replay in dev only.
+- **Guru polling:** follower uses **`GET /activity`** (`type=TRADE`) with a **watermark** (`guru_state_path`), not full `/trades` history. `guru_startup_backfill_seconds: 0` means only trades **after** the first boot watermark; increase for a short warm-up window. On API errors see **`guru_poll_error`** / **`guru_poll_error_backoff`** (the bot keeps running).
+- **Guru duplicates:** dedup store (`guru_dedup_state_path`); delete file for full replay in dev only. Watermark file controls incremental progress (`guru_state_path`).
 - **Live immediate rejects:** check `live_order_error`, min BUY notional, tick size, and balance; run order-lifecycle smoke first.
 - **Config validation errors:** messages cite the YAML path and field; see `CONFIG_MODEL.md`.

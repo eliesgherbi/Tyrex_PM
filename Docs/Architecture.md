@@ -14,7 +14,7 @@ Grounded in the current codebase (`src/tyrex_pm/`). For day-to-day runbooks, see
 
 **Implemented now:**
 
-- Data API polling + dedup + `GuruTradeSignal` publication (`data/guru_monitor.py`).
+- Incremental **Data API** polling (`GET /activity`, `type=TRADE`) + watermark + optional dedup + `GuruTradeSignal` publication (`data/guru_monitor.py`, `data/guru_watermark.py`).
 - Entry / exit / sizing policies (`signal/`).
 - `CopyStrategy` orchestration (`strategy/copy_strategy.py`).
 - Typed YAML split: strategy / risk / runtime (`config/loaders.py`).
@@ -139,8 +139,8 @@ Live path only: after a successful CLOB submit, `PolymarketExecutionPolicy` call
    - Injects `ConfiguredRiskPolicy` and either `NoOpExecutionPort` (**shadow**) or `PolymarketExecutionPolicy` (**live**, with `on_submit_ok` for exposure note).
    - Registers **actor** and **strategy** on the trader **before** `build()`.
 5. **Lifecycle:** `node.build()` then `node.run()` — Nautilus starts clocks; actor `on_start` runs first poll + timer; strategy subscribes to guru topic.
-6. **Signal flow:** each new deduped trade → `GuruTradeSignal` on bus → `CopyStrategy._on_guru_trade` → entry or exit branch → optional `copy_skip` log → `OrderIntent` → risk → execution.
-7. **Logs:** structured `event=` lines (`guru_signal_emitted`, `copy_skip`, `shadow_order_intent` / `live_order_intent`, execution events). Operators: [OPERATIONS.md](OPERATIONS.md).
+6. **Signal flow:** each poll fetches **recent** `TRADE` activity after the stored watermark; rows newer than the watermark emit `GuruTradeSignal` (dedup as safety net) on the bus → `CopyStrategy._on_guru_trade` → …
+7. **Logs:** structured `event=` lines (`guru_signal_emitted`, `guru_poll_error` on transient API faults, `copy_skip`, `shadow_order_intent` / `live_order_intent`). Operators: [OPERATIONS.md](OPERATIONS.md).
 
 ---
 
@@ -164,7 +164,7 @@ Live path only: after a successful CLOB submit, `PolymarketExecutionPolicy` call
 
 | Area | Current state | Sensible extension |
 |------|---------------|-------------------|
-| **Guru input** | Single wallet, HTTP polling | WebSocket / backfill / replay — keep publishing **`GuruTradeSignal`** on the same topic. |
+| **Guru input** | Single wallet, **recent `/activity` polling** + watermark file | Full history belongs in **analytics / guru-finder**, not `GuruMonitorActor`. |
 | **Risk exposure** | Session estimate from fills | Wire Nautilus portfolio or CLOB positions into `RiskPolicy` or a cache the policy reads. |
 | **Execution** | Sync `create_and_post_order` | Queue + worker, cancel/replace, idempotency keys — stay behind `ExecutionPort`. |
 | **Nautilus venues** | Empty `exec_clients` | Optional Polymarket adapter if you want first-class `Order` events in the kernel. |
