@@ -16,6 +16,7 @@
 
 | File | Contents |
 |------|----------|
+| `token_filter_spec.py` | **`TokenFilterSpec`** — explicit `enabled` + `allowlisted`; `allows_token()` used by entry/exit. |
 | `entry.py` | `GuruFollowEntryPolicy`, **`GuruMirrorExitPolicy`**, `SignalDecision`. |
 | `sizing.py` | `ProportionalSizingPolicy` (`copy_scale`). |
 | `__init__.py` | Public exports for policies. |

@@ -1,37 +1,42 @@
 # Module: `tyrex_pm.runtime`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)**
 
 ## A. Role
 
-**Wire** configuration and Tyrex components into a runnable **Nautilus `TradingNode`**: guru actor + copy strategy + risk + execution ports. Provide **`ClobClient`** construction from environment (and optional runtime host/chain overrides).
+**Wire** configuration and Tyrex components into a runnable **Nautilus `TradingNode`**: guru actor + copy strategy + risk + execution ports. Provide **canonical Nautilus/py-clob read boundaries** for risk (`state_readers.py`). Build **`ClobClient`** from environment when needed for legacy execution or dynamic resolve.
 
 ## B. Boundaries
 
-**Belongs here:** Composition roots, factory functions used by `scripts/run_guru.py`, optional smoke stubs.
+**Belongs here:** Composition roots, `build_guru_trading_node`, **`GuruTradingAssembly`**, instrument dynamic controller wiring, optional guru cache warmup, L2 env helper for Nautilus factories.
 
-**Does not belong here:** Individual policy logic (use `signal/` / `risk/`), Data API parsing (`data/`), or CLI argument parsing (scripts).
+**Does not belong here:** Signal/risk **policy** formulas, Data API row parsing, strategy orchestration.
 
 ## C. Internal structure (implemented)
 
 | File | Contents |
 |------|----------|
-| `guru_compose.py` | **`build_guru_trading_node(strategy, risk, runtime)`** — builds node, actor, strategy, wires ports. |
-| `clob_factory.py` | **`build_clob_client_from_env(runtime=None)`** — secrets from env; optional `RuntimeSettings` for `clob_host` / `chain_id`. |
-| `live_stub.py` | Legacy / opt-in live smoke placeholder. |
-| `__init__.py` | Minimal package marker. |
+| `guru_compose.py` | **`build_guru_trading_node`** — `TradingNode`, readers → risk, execution port branch, actor + strategy; **`GuruTradingAssembly.portfolio_exposure`** (B1) when framework submit; **B5** INFO log (`tyrex_pm phase_b:`). |
+| `phase_b_startup.py` | **B5:** `phase_b_startup_summary_line` — formatted active Phase B settings (informational). |
+| `portfolio_exposure.py` | **Phase B B1:** **`NautilusPortfolioExposureAggregator`** — canonical ``E_pending`` / ``E_filled_net`` / ``E_portfolio`` (§4; read-only). |
+| `state_readers.py` | **`NautilusExecutionStateReader`** (+ **B3** ``count_guru_resting_orders_open``, ``is_guru_resting_order``), **`NautilusAccountSnapshotProvider`**, **`ClobAllowanceStateProvider`**, **`NautilusPositionStateReader`**, `instrument_id_for_outcome_token`. |
+| `guru_instrument_dynamic.py` | **`GuruInstrumentDynamicController`** — Gamma + CLOB + `Cache` activation. |
+| `guru_cache_warmup.py` | Optional **`warm_polymarket_cache_from_guru_activity`**. |
+| `polymarket_nautilus_env.py` | L2 env for Nautilus factories. |
+| `clob_factory.py` | **`build_clob_client_from_env`**. |
+| `live_stub.py` | Legacy smoke placeholder. |
 
 ## D. Main interactions
 
-- **config:** consumes the three settings types.
-- **data:** instantiates `GuruMonitorActor`.
-- **strategy / risk / execution:** instantiates and injects dependencies.
+- **config:** three settings types.
+- **data:** `GuruMonitorActor`.
+- **strategy / risk / execution:** compose + inject.
 
 ## E. Status
 
-**Primary entry:** `guru_compose` + `run_guru.py`.
+**Operational:** Path A (Nautilus live) + optional **framework submit** + **zero-bootstrap** per runtime YAML. See **`Implementation/step_5_runtime_integration.md`**, **`phase_a_closure.md`**, **`OPERATIONS.md`** § Phase B, and **`Implementation/phase_b_operational_validation.md`** (pre–Phase C live-session checklist).
 
 ## F. Extension guidance
 
-- Add new runners (e.g. backtest) as **new compose functions** that reuse the same strategy/risk/execution types where possible.
-- Keep `TradingNodeConfig` differences (clients, clocks) explicit — avoid hiding env side effects inside strategies.
+- New runners: new compose functions; keep `TradingNodeConfig` differences explicit.
+- Do not move **`Cache`/`Portfolio` reads** into `CopyStrategy`; use **readers** + risk injection.

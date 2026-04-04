@@ -15,12 +15,17 @@ from tyrex_pm.execution.port import ExecutionPort, NoOpExecutionPort
 from tyrex_pm.risk.policy import RiskPolicy, ShadowAllPassRisk
 from tyrex_pm.signal.entry import GuruFollowEntryPolicy, GuruMirrorExitPolicy, SignalDecision
 from tyrex_pm.signal.sizing import ProportionalSizingPolicy
+from tyrex_pm.signal.token_filter_spec import TokenFilterSpec
 from tyrex_pm.strategy.base import BaseComposableStrategy
 
 
 class CopyStrategyConfig(StrategyConfig, frozen=True, kw_only=True):
-    """Allowlisted token ids as decimal strings (CLOB asset ids)."""
+    """
+    Token gate: set ``token_filter_enabled`` and ``allowlisted_token_ids`` per strategy YAML
+    ``token_filter`` block (see loaders). Risk / execution are unchanged.
+    """
 
+    token_filter_enabled: bool = False
     allowlisted_token_ids: tuple[str, ...] = ()
     execution_mode: str = "shadow"
     copy_scale: float = 1.0
@@ -34,9 +39,12 @@ class CopyStrategy(BaseComposableStrategy):
     def __init__(self, config: CopyStrategyConfig) -> None:
         super().__init__(config)
         self._cfg = config
-        allow = frozenset(config.allowlisted_token_ids)
-        self._entry = GuruFollowEntryPolicy(allow)
-        self._exit = GuruMirrorExitPolicy(allow)
+        tokens = TokenFilterSpec(
+            enabled=config.token_filter_enabled,
+            allowlisted=frozenset(config.allowlisted_token_ids),
+        )
+        self._entry = GuruFollowEntryPolicy(tokens)
+        self._exit = GuruMirrorExitPolicy(tokens)
         self._sizing = ProportionalSizingPolicy(config.copy_scale)
         self._risk: RiskPolicy = ShadowAllPassRisk()
         self._execution: ExecutionPort = NoOpExecutionPort()

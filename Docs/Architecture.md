@@ -10,24 +10,27 @@ Grounded in the current codebase (`src/tyrex_pm/`). For day-to-day runbooks, see
 
 **What Tyrex_PM is:** a Python package for **Polymarket** automation, organized around **NautilusTrader** patterns (actors, strategies, message bus) while keeping **venue I/O** and **risk** in explicit layers.
 
-**Current v1 scope:** a **guru-follow copy** path — poll a wallet’s trades from the public Data API, turn them into internal signals, size them, run **fail-closed risk**, and either **log-only shadow** execution or **live CLOB** orders via `py-clob-client`.
+**Current v1 scope:** a **guru-follow copy** path — poll a wallet’s trades from the public Data API, turn them into internal signals, size them, run **fail-closed risk**, and either **log-only shadow** or **live** execution (legacy py-clob and/or **Nautilus framework submit**).
 
 **Implemented now:**
 
 - Incremental **Data API** polling (`GET /activity`, `type=TRADE`) + watermark + optional dedup + `GuruTradeSignal` publication (`data/guru_monitor.py`, `data/guru_watermark.py`).
 - Entry / exit / sizing policies (`signal/`).
-- `CopyStrategy` orchestration (`strategy/copy_strategy.py`).
-- Typed YAML split: strategy / risk / runtime (`config/loaders.py`).
-- `ConfiguredRiskPolicy` (`risk/configured.py`).
-- `NoOpExecutionPort` vs `PolymarketExecutionPolicy` (`execution/`).
-- `scripts/run_guru.py` + `runtime/guru_compose.py` wiring into `TradingNode`.
+- **`CopyStrategy`** (`strategy/copy_strategy.py`) — thin orchestration; **no** direct `Cache` / `Portfolio` use.
+- Typed YAML: strategy / risk / runtime (`config/loaders.py`).
+- **`ConfiguredRiskPolicy`** — static limits + optional **framework-backed** pending (open orders, **leaves qty**), **filled** exposure (`Portfolio.net_exposure`), optional **capital gate** (account + py-clob allowance snapshots).
+- **`execution/`** — `NoOpExecutionPort`, **`PolymarketExecutionPolicy`** (py-clob), **`NautilusGuruExecutionPort`** (framework `submit_order`).
+- **`runtime/state_readers.py`** — canonical read boundary; injected into risk from `guru_compose`.
+- **Dynamic instruments / zero-bootstrap** — `guru_instrument_dynamic.py`, optional `guru_cache_warmup.py` (see `Implementation/step_5_runtime_integration.md`).
+- **`scripts/run_guru.py` + `guru_compose.py`** — `TradingNode` with **empty** or **Polymarket live** clients per runtime flags.
 
-**Intentionally not in scope yet (as of this codebase):**
+**Intentionally deferred / out of scope:**
 
-- Guru **discovery / ranking / analytics** (keep separate; do not fold into the live copy path).
-- Full **Nautilus-native Polymarket execution client** (kernel runs with empty `data_clients` / `exec_clients`; CLOB is app-level today).
-- **Position-synced** risk (exposure uses session assumptions after live submit, not venue positions).
-- Rich **reporting** and **indicators** packages (placeholders only).
+- Guru **discovery / ranking / analytics** (separate).
+- **Phase C** follow-policy knobs (cooldowns, per-cycle caps, suppression) — `road_map.md`.
+- Rich **reporting** / **indicators** (stubs).
+
+**Maintainer hub:** [`Implementation/current_state.md`](Implementation/current_state.md) · **Phase A:** [`Implementation/phase_a_closure.md`](Implementation/phase_a_closure.md).
 
 ---
 
@@ -53,10 +56,10 @@ Grounded in the current codebase (`src/tyrex_pm/`). For day-to-day runbooks, see
 | **config** | Typed settings dataclasses + YAML loaders for **strategy / risk / runtime** (no secrets). |
 | **data** | Market helpers (allowlist, resolution, book check), Data API HTTP client, guru parse/dedup, **`GuruMonitorActor`**. |
 | **signal** | Reusable decision + sizing logic **without** Nautilus or HTTP. |
-| **risk** | `RiskPolicy` protocol, `ShadowAllPassRisk` (tests), `ConfiguredRiskPolicy` (operations). |
-| **execution** | `ExecutionPort` protocol, `NoOpExecutionPort`, `PolymarketExecutionPolicy`. |
-| **strategy** | Nautilus `Strategy` subclasses: `BaseComposableStrategy`, **`CopyStrategy`**. |
-| **runtime** | `build_guru_trading_node`, `build_clob_client_from_env`, older `live_stub`. |
+| **risk** | `RiskPolicy`, `ConfiguredRiskPolicy` (readers injected from runtime). |
+| **execution** | `ExecutionPort`, `NoOpExecutionPort`, `PolymarketExecutionPolicy`, **`NautilusGuruExecutionPort`**. |
+| **strategy** | `BaseComposableStrategy`, **`CopyStrategy`**. |
+| **runtime** | `guru_compose`, **`state_readers`**, **`guru_instrument_dynamic`**, `polymarket_nautilus_env`, `clob_factory`, `live_stub`. |
 | **reporting** | Placeholder for future run reports. |
 
 `indicator/` exists as a stub; see [modules/indicator/README.md](modules/indicator/README.md).
@@ -94,10 +97,15 @@ flowchart TB
 
   subgraph RiskExec[risk + execution]
     Risk[ConfiguredRiskPolicy]
+    Readers[state_readers inject]
     XShad[NoOpExecutionPort]
     XLive[PolymarketExecutionPolicy]
+    XNau[NautilusGuruExecutionPort]
     CLOB[py-clob CLOB]
+    NT[Nautilus ExecEngine / Cache]
     XLive --> CLOB
+    XNau --> NT
+    Readers -.-> Risk
   end
 
   YAML --> Loaders
@@ -110,19 +118,19 @@ flowchart TB
   Copy -->|evaluate| Risk
   Copy -->|submit_intent| XShad
   Copy -->|submit_intent| XLive
+  Copy -->|submit_intent| XNau
 ```
 
-Live path only: after a successful CLOB submit, `PolymarketExecutionPolicy` calls `ConfiguredRiskPolicy.note_fill_assumption` (session exposure).
+**Live:** Shadow uses `NoOpExecutionPort`. **Legacy live** uses `PolymarketExecutionPolicy` → py-clob; **`note_fill_assumption`** updates `_token_open` for the token cap. **Framework live** (`polymarket_framework_submit`) uses `NautilusGuruExecutionPort` → `submit_order`; pending cap uses **`Cache` open orders** (leaves qty); token cap adds **filled** exposure from `Portfolio.net_exposure` when the position reader is wired (`note_fill_assumption` is a no-op for pending).
 
 **ASCII (same idea):**
 
 ```
-  [YAML] -> loaders -> guru_compose -> TradingNode
+  [YAML] -> loaders -> guru_compose -> TradingNode (+ optional/state readers -> risk)
                               |-> GuruMonitorActor --(bus)--> CopyStrategy
-                              |                               |-> signal policies
                               |                               |-> RiskPolicy
-                              |                               |-> ExecutionPort
-                              +-> (shadow: NoOp)   (live: PolymarketExecutionPolicy -> CLOB)
+                              |                               |-> ExecutionPort (NoOp / py-clob / Nautilus)
+                              +-> Path A: Polymarket DATA+EXEC clients on node
 ```
 
 ---
@@ -133,50 +141,51 @@ Live path only: after a successful CLOB submit, `PolymarketExecutionPolicy` call
 2. **Env:** `python-dotenv` loads repo `.env` or `TYREX_PM_DOTENV` (does not replace shell overrides).
 3. **Config:** `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings` validate and return dataclasses.
 4. **Composition:** `build_guru_trading_node(strategy, risk, runtime)`:
-   - Builds `TradingNodeConfig` (`trader_id`, `LoggingConfig`, empty data/exec clients).
+   - Builds `TradingNodeConfig` (`trader_id`, `LoggingConfig`, **`load_state=False`, `save_state=False`**; data/exec clients **empty** or **Polymarket live** when `polymarket_nautilus_live` + `execution_mode: live`).
    - Instantiates `GuruMonitorActor` (wallet, poll interval, dedup path, Data API URL).
-   - Instantiates `CopyStrategy` with allowlist + `copy_scale` + `execution_mode` from runtime.
-   - Injects `ConfiguredRiskPolicy` and either `NoOpExecutionPort` (**shadow**) or `PolymarketExecutionPolicy` (**live**, with `on_submit_ok` for exposure note).
+   - Instantiates `CopyStrategy` with `token_filter` + `copy_scale` + `execution_mode` from strategy YAML.
+   - Builds **state readers** (`NautilusExecutionStateReader`, `NautilusAccountSnapshotProvider`, optional `ClobAllowanceStateProvider`, optional `NautilusPositionStateReader`) and injects them into **`ConfiguredRiskPolicy`**.
+   - Injects execution port: **`NoOpExecutionPort`** (shadow), **`NautilusGuruExecutionPort`** (live + framework submit), or **`PolymarketExecutionPolicy`** (live legacy, with `on_submit_ok=note_fill_assumption`).
    - Registers **actor** and **strategy** on the trader **before** `build()`.
-5. **Lifecycle:** `node.build()` then `node.run()` — Nautilus starts clocks; actor `on_start` runs first poll + timer; strategy subscribes to guru topic.
-6. **Signal flow:** each poll fetches **recent** `TRADE` activity after the stored watermark; rows newer than the watermark emit `GuruTradeSignal` (dedup as safety net) on the bus → `CopyStrategy._on_guru_trade` → …
-7. **Logs:** structured `event=` lines (`guru_signal_emitted`, `guru_poll_error` on transient API faults, `copy_skip`, `shadow_order_intent` / `live_order_intent`). Operators: [OPERATIONS.md](OPERATIONS.md).
+5. **Phase A line:** For live framework mode, `run_guru.py` may print a short **phase_a** reminder; see `phase_a_closure.md`.
+6. **Lifecycle:** `node.build()` then `node.run()` — Nautilus starts clocks; actor `on_start` runs first poll + timer; strategy subscribes to guru topic.
+7. **Signal flow:** each poll fetches **recent** `TRADE` activity after the stored watermark; rows newer than the watermark emit `GuruTradeSignal` (dedup as safety net) on the bus → `CopyStrategy._on_guru_trade` → …
+8. **Logs:** structured `event=` lines (`guru_signal_emitted`, `guru_poll_error`, `copy_skip`, `shadow_order_intent` / `live_order_intent`, framework `LIVE_ORDER_SUBMIT` / guru `ReasonCode` from `nautilus_guru_exec`). Operators: [OPERATIONS.md](OPERATIONS.md).
 
 ---
 
 ## F. Shadow vs live
 
-| Aspect | Shared | Shadow only | Live only |
-|--------|--------|-------------|-----------|
-| **`CopyStrategy`** | Same code path | — | — |
-| **`OrderIntent`** | Always built the same way | — | — |
-| **`ConfiguredRiskPolicy`** | Same checks | — | — |
-| **`ExecutionPort`** | Interface | **`NoOpExecutionPort`** (records / no I/O) | **`PolymarketExecutionPolicy`** |
-| **Mode flag** | `CopyStrategyConfig.execution_mode` mirrors runtime | `"shadow"` | `"live"` |
-| **CLOB / keys** | — | Not used | `.env` + `build_clob_client_from_env(runtime)` |
-| **Exposure note** | — | `note_fill_assumption` not called | Called after successful submit |
+| Aspect | Shadow | Live (legacy py-clob) | Live (Path A + framework submit) |
+|--------|--------|----------------------|----------------------------------|
+| **`ExecutionPort`** | `NoOpExecutionPort` | `PolymarketExecutionPolicy` | `NautilusGuruExecutionPort` |
+| **Node clients** | Typically empty | May be empty or Nautilus (mixed ops) | **Polymarket DATA + EXEC** registered |
+| **Pending token cap** | N/A / same YAML | **`_token_open`** after HTTP OK | **`Cache` orders**, **leaves × price** |
+| **Filled token cap** | N/A | Not framework-based | **`net_exposure`** (adapter-dependent) |
+| **Capital gate** | Same YAML (allowance provider **None** in shadow) | Optional | Optional |
+| **Secrets** | — | `.env` + L2 | `.env` + L2 |
 
-**Why:** operators validate behavior in **shadow** without order-side risk; flipping **`execution_mode`** swaps only the execution adapter — no strategy rewrite.
+**Why:** operators validate in **shadow** without CLOB; live mode selects **legacy** vs **framework** submit via **`polymarket_framework_submit`** (requires **`polymarket_nautilus_live`**). Strategy code path unchanged; only ports and reader-derived risk behavior differ.
 
 ---
 
 ## G. Limitations and extension points
 
-| Area | Current state | Sensible extension |
-|------|---------------|-------------------|
-| **Guru input** | Single wallet, **recent `/activity` polling** + watermark file | Full history belongs in **analytics / guru-finder**, not `GuruMonitorActor`. |
-| **Risk exposure** | Session estimate from fills | Wire Nautilus portfolio or CLOB positions into `RiskPolicy` or a cache the policy reads. |
-| **Execution** | Sync `create_and_post_order` | Queue + worker, cancel/replace, idempotency keys — stay behind `ExecutionPort`. |
-| **Nautilus venues** | Empty `exec_clients` | Optional Polymarket adapter if you want first-class `Order` events in the kernel. |
-| **New strategies** | `CopyStrategy` only | New `Strategy` + policies in `signal/`; reuse risk/execution ports. |
-| **Guru finder** | Not in repo | Separate service or package that **outputs** wallets / lists — does not replace the **`run_guru`** pipeline. |
-| **Reporting** | Stub | Consume logs or internal events; avoid coupling to `CopyStrategy` internals. |
+| Area | Current state | Notes |
+|------|---------------|--------|
+| **Guru input** | Single wallet, **`/activity` polling** + watermark | Not full `/trades` history crawler. |
+| **Risk / exposure** | Framework path: **pending + filled + capital gate** (optional); legacy path: **`_token_open`** | **Filled** and **events** depend on **Nautilus + Polymarket adapter** updating `Portfolio` / `Cache`. |
+| **Execution** | Sync submit (py-clob or framework) | Queue/cancel/replace — future `ExecutionPort` work. |
+| **Restart** | **`load_state=False`** in `guru_compose` | Post-restart truth = **venue + adapter** + optional Tyrex warmup; see `phase_a_closure.md`. |
+| **Phase B / C** | **Deferred** roadmap work | Cooldowns, reserves, venue normalize — `road_map.md`. |
+| **New strategies** | `CopyStrategy` | Reuse injected `RiskPolicy` / `ExecutionPort` pattern. |
 
 ---
 
 ## Where to read next
 
-1. **[modules/README.md](modules/README.md)** — index of per-module docs.
-2. **[modules/strategy/README.md](modules/strategy/README.md)** — copy flow detail.
-3. **[DEVELOPMENT.md](DEVELOPMENT.md)** — tests, conventions.
-4. **[OPERATIONS.md](OPERATIONS.md)** — run and safety.
+1. **[Implementation/current_state.md](Implementation/current_state.md)** — migration / status hub.
+2. **[modules/README.md](modules/README.md)** — per-module docs.
+3. **[OPERATIONS.md](OPERATIONS.md)** — runbook, modes, log semantics.
+4. **[CONFIG_MODEL.md](CONFIG_MODEL.md)** — YAML fields.
+5. **[DEVELOPMENT.md](DEVELOPMENT.md)** — tests, conventions.

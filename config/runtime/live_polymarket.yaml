@@ -2,7 +2,7 @@
 
 trader_id: "TYREX-GURU-001"
 
-execution_mode: shadow
+execution_mode: live #shadow
 
 guru_poll_interval_seconds: 30.0
 data_api_base_url: "https://data-api.polymarket.com"
@@ -18,3 +18,22 @@ logging_level: INFO
 
 clob_host: "https://clob.polymarket.com"
 chain_id: 137
+
+# --- Polymarket / Nautilus (Path A + Step 4) ---
+# All are read by config/runtime loaders; secrets stay in .env only.
+#
+# polymarket_nautilus_live: register Polymarket live data + exec on TradingNode.
+# polymarket_framework_submit: guru submit via Nautilus (requires nautilus live). With an
+#   **empty** polymarket_instrument_ids list, Tyrex uses **zero-bootstrap** guru mode (dynamic
+#   resolve + optional warmup); see Docs/Implementation/step_5_runtime_integration.md.
+# polymarket_instrument_ids: optional full InstrumentId strings (YAML overlay / bootstrap).
+# polymarket_dynamic_instruments: opt-in when you have a non-empty list; if ids are **empty**,
+#   dynamic mode is **implicit** (loader sets it true).
+# polymarket_dynamic_max_activations / polymarket_startup_token_warmup_max / gamma keys: Step 5.
+#
+# .env: POLYMARKET_PK + L2 vars (or PK-only derivation). Run: scripts/run_guru.py
+polymarket_nautilus_live: true
+polymarket_framework_submit: true
+polymarket_instrument_ids: []
+# polymarket_startup_token_warmup_max: 32
+# polymarket_dynamic_max_activations: 32

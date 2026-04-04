@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import yaml
 
@@ -11,7 +13,10 @@ from tyrex_pm.config.loaders import (
     load_runtime_settings,
     load_strategy_settings,
 )
+from tyrex_pm.execution.nautilus_guru_exec import NautilusGuruExecutionPort
 from tyrex_pm.runtime.guru_compose import build_guru_trading_node
+from tyrex_pm.runtime.guru_instrument_dynamic import GuruInstrumentDynamicController
+from tyrex_pm.runtime.guru_run_logging import GuruNautilusFileLogging
 
 
 def test_compose_shadow_builds(tmp_path: Path) -> None:
@@ -31,7 +36,245 @@ def test_compose_shadow_builds(tmp_path: Path) -> None:
     )
     runtime = load_runtime_settings(live)
 
-    node, risk_pol = build_guru_trading_node(strat, risk, runtime)
-    assert risk_pol is not None
-    node.build()
-    assert node.is_built
+    assembly = build_guru_trading_node(strat, risk, runtime)
+    assert assembly.risk_policy is not None
+    assert assembly.execution_state is not None
+    assert assembly.account_snapshots is not None
+    assert assembly.allowance is None  # shadow: no CLOB allowance reads
+    assert assembly.position_state is None
+    assert assembly.portfolio_exposure is None
+    assembly.node.build()
+    assert assembly.node.is_built
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_live_nautilus_registers_factories(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Live + polymarket_nautilus: node config has data/exec clients and factories."""
+    root = Path(__file__).resolve().parent.parent
+    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-NAU-001",
+                "execution_mode": "live",
+                "polymarket_nautilus_live": True,
+                "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    with patch.dict(os.environ, {"POLYMARKET_PK": "0x" + "1" * 64}, clear=False):
+        with patch(
+            "tyrex_pm.runtime.guru_compose.build_clob_client_from_env",
+            return_value=MagicMock(),
+        ):
+            with patch(
+                "tyrex_pm.runtime.guru_compose.ensure_polymarket_l2_env_from_pk_if_missing",
+            ):
+                assembly = build_guru_trading_node(strat, risk, runtime)
+
+    assert assembly.allowance is not None
+    cfg = mock_node_cls.call_args.kwargs["config"]
+    assert len(cfg.data_clients) == 1
+    assert len(cfg.exec_clients) == 1
+    mock_instance.add_data_client_factory.assert_called_once()
+    mock_instance.add_exec_client_factory.assert_called_once()
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_live_framework_submit_wires_nautilus_port(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parent.parent
+    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-FW-001",
+                "execution_mode": "live",
+                "polymarket_nautilus_live": True,
+                "polymarket_framework_submit": True,
+                "polymarket_instrument_ids": ["0xabc-99999.POLYMARKET"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    with patch.dict(os.environ, {"POLYMARKET_PK": "0x" + "1" * 64}, clear=False):
+        with patch(
+            "tyrex_pm.runtime.guru_compose.ensure_polymarket_l2_env_from_pk_if_missing",
+        ):
+            assembly = build_guru_trading_node(strat, risk, runtime)
+
+    assert assembly.risk_policy.token_open_authoritative_for_pending is False
+    assert assembly.position_state is not None
+    add_strategy_calls = mock_instance.trader.add_strategy.call_args_list
+    assert add_strategy_calls
+    copy_strat = add_strategy_calls[0].args[0]
+    assert isinstance(copy_strat._execution, NautilusGuruExecutionPort)
+    assert assembly.portfolio_exposure is not None
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_zero_bootstrap_wires_dynamic_and_warmup(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parent.parent
+    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-ZB-001",
+                "execution_mode": "live",
+                "polymarket_nautilus_live": True,
+                "polymarket_framework_submit": True,
+                "polymarket_instrument_ids": [],
+                "polymarket_startup_token_warmup_max": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+    assert runtime.polymarket_instrument_ids == ()
+    assert runtime.polymarket_dynamic_instruments is True
+
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    with patch.dict(os.environ, {"POLYMARKET_PK": "0x" + "1" * 64}, clear=False):
+        with patch(
+            "tyrex_pm.runtime.guru_compose.ensure_polymarket_l2_env_from_pk_if_missing",
+        ):
+            with patch(
+                "tyrex_pm.runtime.guru_compose.build_clob_client_from_env",
+                return_value=MagicMock(),
+            ):
+                with patch(
+                    "tyrex_pm.runtime.guru_compose.warm_polymarket_cache_from_guru_activity",
+                ) as warm:
+                    _ = build_guru_trading_node(strat, risk, runtime)
+
+    warm.assert_called_once()
+    copy_strat = mock_instance.trader.add_strategy.call_args_list[0].args[0]
+    port = copy_strat._execution
+    assert isinstance(port, NautilusGuruExecutionPort)
+    assert isinstance(port._dynamic, GuruInstrumentDynamicController)
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_nautilus_file_logging_config_when_requested(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """TradingNode LoggingConfig gets framework file fields from GuruNautilusFileLogging."""
+    root = Path(__file__).resolve().parent.parent
+    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-LOG-001",
+                "execution_mode": "live",
+                "polymarket_nautilus_live": True,
+                "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
+                "logging_level": "INFO",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    nautilus_log = tmp_path / "logs" / "live" / "session_nautilus.log"
+    nfl = GuruNautilusFileLogging(
+        log_directory=str(nautilus_log.parent.resolve()),
+        log_file_stem=nautilus_log.stem,
+    )
+
+    with patch.dict(os.environ, {"POLYMARKET_PK": "0x" + "1" * 64}, clear=False):
+        with patch(
+            "tyrex_pm.runtime.guru_compose.build_clob_client_from_env",
+            return_value=MagicMock(),
+        ):
+            with patch(
+                "tyrex_pm.runtime.guru_compose.ensure_polymarket_l2_env_from_pk_if_missing",
+            ):
+                build_guru_trading_node(strat, risk, runtime, nautilus_file_logging=nfl)
+
+    cfg = mock_node_cls.call_args.kwargs["config"]
+    log_cfg = cfg.logging
+    assert log_cfg.log_directory == str(nautilus_log.parent.resolve())
+    assert log_cfg.log_file_name == "session_nautilus"
+    assert log_cfg.clear_log_file is True
+    assert log_cfg.log_level_file == "INFO"
+    assert log_cfg.log_level == "INFO"
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_without_nautilus_file_logging_uses_level_only(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parent.parent
+    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-LOG-DEF-001",
+                "execution_mode": "shadow",
+                "logging_level": "WARNING",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    build_guru_trading_node(strat, risk, runtime)
+
+    cfg = mock_node_cls.call_args.kwargs["config"]
+    log_cfg = cfg.logging
+    assert log_cfg.log_level == "WARNING"
+    assert log_cfg.log_level_file is None
+    assert log_cfg.log_directory is None
+    assert log_cfg.log_file_name is None

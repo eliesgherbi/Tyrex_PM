@@ -1,8 +1,12 @@
-# Strategy-only: guru target, allowlist, sizing. Replace wallet/tokens before prod.
+# Strategy: guru + optional token filter + sizing.
 
 guru_wallet_address: "0x204f72f35326db932158cba6adff0b9a1da95e14"
-#0x56687bf447db6ffa42ffe2204a05edaa20f55839
-allowlisted_token_ids:
-  - "71321045679252212594626385532706912750332728571990565097336609381905283641860"
+
+# Explicit switch: false = follow all guru tokens (risk/execution still apply).
+# true = only allowlisted_token_ids (production-style).
+token_filter:
+  enabled: false
+  allowlisted_token_ids: []
 
 copy_scale: 1.0
+# strategy_dedup_state_path: "var/guru_dedup_strategy.json"

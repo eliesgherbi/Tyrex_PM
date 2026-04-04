@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import GuruTradeSignal
+from tyrex_pm.signal.token_filter_spec import TokenFilterSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,15 +19,15 @@ class SignalDecision:
 class GuruFollowEntryPolicy:
     """BUY on allowlisted token → candidate entry (v1 shadow)."""
 
-    def __init__(self, allowlisted_token_ids: frozenset[str]) -> None:
-        self._allow = allowlisted_token_ids
+    def __init__(self, tokens: TokenFilterSpec) -> None:
+        self._tokens = tokens
 
     def evaluate(self, sig: GuruTradeSignal) -> SignalDecision:
         tid = sig.token_id
         if not tid:
             return SignalDecision(False, ReasonCode.MISSING_TOKEN_ID, "no token on signal")
-        if tid not in self._allow:
-            return SignalDecision(False, ReasonCode.NOT_ALLOWLISTED, tid)
+        if not self._tokens.allows_token(tid):
+            return SignalDecision(False, ReasonCode.NOT_ALLOWLISTED, _detail_token(tid))
         if sig.side != "BUY":
             return SignalDecision(
                 False,
@@ -39,15 +40,15 @@ class GuruFollowEntryPolicy:
 class GuruMirrorExitPolicy:
     """SELL on allowlisted token → mirror exit hypothesis (v1 shadow)."""
 
-    def __init__(self, allowlisted_token_ids: frozenset[str]) -> None:
-        self._allow = allowlisted_token_ids
+    def __init__(self, tokens: TokenFilterSpec) -> None:
+        self._tokens = tokens
 
     def evaluate(self, sig: GuruTradeSignal) -> SignalDecision:
         tid = sig.token_id
         if not tid:
             return SignalDecision(False, ReasonCode.MISSING_TOKEN_ID, "no token on signal")
-        if tid not in self._allow:
-            return SignalDecision(False, ReasonCode.NOT_ALLOWLISTED, tid)
+        if not self._tokens.allows_token(tid):
+            return SignalDecision(False, ReasonCode.NOT_ALLOWLISTED, _detail_token(tid))
         if sig.side != "SELL":
             return SignalDecision(
                 False,
@@ -55,3 +56,8 @@ class GuruMirrorExitPolicy:
                 f"exit path ignores side={sig.side}",
             )
         return SignalDecision(True, ReasonCode.GURU_EXIT_MIRROR, None)
+
+
+def _detail_token(tid: str) -> str:
+    """Log fragment: full id when filtered; short hint when unfiltered should not reach here."""
+    return tid

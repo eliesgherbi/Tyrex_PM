@@ -34,8 +34,12 @@ def _register(strat: CopyStrategy) -> MessageBus:
     return msgbus
 
 
-def test_shadow_emits_intent_for_allowlisted_buy() -> None:
-    cfg = CopyStrategyConfig(allowlisted_token_ids=("99",), execution_mode="shadow")
+def test_shadow_emits_intent_for_filtered_buy() -> None:
+    cfg = CopyStrategyConfig(
+        token_filter_enabled=True,
+        allowlisted_token_ids=("99",),
+        execution_mode="shadow",
+    )
     strat = CopyStrategy(cfg)
     port = NoOpExecutionPort()
     strat.set_execution_port(port)
@@ -63,7 +67,7 @@ def test_shadow_emits_intent_for_allowlisted_buy() -> None:
 
 
 def test_not_allowlisted_skips_intent() -> None:
-    cfg = CopyStrategyConfig(allowlisted_token_ids=("99",))
+    cfg = CopyStrategyConfig(token_filter_enabled=True, allowlisted_token_ids=("99",))
     strat = CopyStrategy(cfg)
     port = NoOpExecutionPort()
     strat.set_execution_port(port)
@@ -84,7 +88,7 @@ def test_not_allowlisted_skips_intent() -> None:
 
 
 def test_risk_deny_skips_execution() -> None:
-    cfg = CopyStrategyConfig(allowlisted_token_ids=("99",))
+    cfg = CopyStrategyConfig(token_filter_enabled=True, allowlisted_token_ids=("99",))
     strat = CopyStrategy(cfg)
     port = NoOpExecutionPort()
     strat.set_execution_port(port)
@@ -105,7 +109,7 @@ def test_risk_deny_skips_execution() -> None:
 
 
 def test_sell_mirror_branch() -> None:
-    cfg = CopyStrategyConfig(allowlisted_token_ids=("99",))
+    cfg = CopyStrategyConfig(token_filter_enabled=True, allowlisted_token_ids=("99",))
     strat = CopyStrategy(cfg)
     port = NoOpExecutionPort()
     strat.set_execution_port(port)
@@ -126,3 +130,30 @@ def test_sell_mirror_branch() -> None:
     intent, _ = port.records[0]
     assert intent.signal_kind == "exit"
     assert intent.side == "SELL"
+
+
+def test_unfiltered_accepts_any_token_buy() -> None:
+    cfg = CopyStrategyConfig(
+        token_filter_enabled=False,
+        allowlisted_token_ids=(),
+        execution_mode="shadow",
+    )
+    strat = CopyStrategy(cfg)
+    port = NoOpExecutionPort()
+    strat.set_execution_port(port)
+    msgbus = _register(strat)
+    strat.on_start()
+
+    sig = GuruTradeSignal(
+        source_trade_id="trade-open",
+        ts_event_ms=1,
+        side="BUY",
+        token_id="999999999",
+        size_raw=2.0,
+        price_raw=0.3,
+        raw_payload_ref=None,
+    )
+    msgbus.publish(GURU_TRADE_TOPIC, sig)
+    assert len(port.records) == 1
+    intent, _ = port.records[0]
+    assert intent.token_id == "999999999"

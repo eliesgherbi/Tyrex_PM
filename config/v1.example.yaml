@@ -12,7 +12,7 @@ guru:
   data_api_base_url: "https://data-api.polymarket.com"
   dedup_state_path: "var/guru_dedup.json"
 
-# Copy strategy — wire allowlist to resolved CLOB token ids from v1.01 resolution notes.
+# Copy strategy — for `run_guru.py` use split YAML under config/strategy/ with `token_filter:`.
 execution:
   mode: shadow
 

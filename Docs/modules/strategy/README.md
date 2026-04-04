@@ -15,7 +15,7 @@
 ## 2. Current example: guru follow (`CopyStrategy`)
 
 **Class:** `src/tyrex_pm/strategy/copy_strategy.py`  
-**Config:** `CopyStrategyConfig` (`allowlisted_token_ids`, `execution_mode`, `copy_scale`)  
+**Config:** `CopyStrategyConfig` (`token_filter_enabled`, `allowlisted_token_ids`, `execution_mode`, `copy_scale`) — mirrors strategy YAML `token_filter` via `guru_compose`.  
 **Base:** `BaseComposableStrategy` (`src/tyrex_pm/strategy/base.py`) for shared Nautilus `Strategy` behavior / startup log.
 
 ### What signals it consumes
@@ -41,15 +41,15 @@
 ### Execution
 
 - Calls **`self._execution.submit_intent(intent, mode=self._cfg.execution_mode)`**.
-- Injected ports: **`NoOpExecutionPort`** (shadow) or **`PolymarketExecutionPolicy`** (live) from `runtime/guru_compose.py`.
+- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live + framework submit); **`PolymarketExecutionPolicy`** (live legacy py-clob).
 
 ### Shadow vs live behavior
 
 | Step | Shadow | Live |
 |------|--------|------|
 | Policies + sizing | Same | Same |
-| Risk | `ConfiguredRiskPolicy` (operational path) | Same |
-| Execution port | `NoOpExecutionPort` | `PolymarketExecutionPolicy` |
+| Risk | `ConfiguredRiskPolicy` | Same (readers injected; behavior varies by submit path — see **Architecture** / **current_state**) |
+| Execution port | `NoOpExecutionPort` | **`NautilusGuruExecutionPort`** or **`PolymarketExecutionPolicy`** |
 | Log after submit | `event=shadow_order_intent` | `event=live_order_intent` |
 
 ---
@@ -58,7 +58,7 @@
 
 ### Guru BUY → happy path → shadow intent
 
-1. `GuruMonitorActor` publishes `GuruTradeSignal` (BUY, allowlisted token).
+1. `GuruMonitorActor` publishes `GuruTradeSignal` (BUY, token passes filter or filter off).
 2. `CopyStrategy._on_guru_trade` → entry policy **accepts**.
 3. Sizing returns **qty > 0**.
 4. `OrderIntent` built with guru `price_ref`.
@@ -70,11 +70,13 @@
 
 Same pipeline using **exit** policy instead of entry; still BUY/SELL branches inside `_on_guru_trade`.
 
-### Allowlist reject
+### Filtered-mode reject (`token_filter.enabled: true`)
 
 1. Guru signal token **not** in `allowlisted_token_ids`.
 2. Entry or exit policy returns **reject** (`SignalDecision.accept == False`).
-3. Log: **`copy_skip`** with policy reason (e.g. not allowlisted).
+3. Log: **`copy_skip`** with `not_allowlisted`.
+
+With **`token_filter.enabled: false`**, this path does not apply; missing `token_id` on the signal is still rejected.
 
 ### Risk reject
 
@@ -89,8 +91,8 @@ Shadow is steps 1–7 in the BUY flow with **`execution_mode: shadow`** — exec
 ### Live intent submission
 
 1. Same through risk approve.
-2. **`execution_mode: live`** → **`PolymarketExecutionPolicy.submit_intent`** runs with `mode=="live"`.
-3. Strategy logs **`live_order_intent`**; execution layer logs submit/error per `ReasonCode` / logger (see [OPERATIONS.md](../../OPERATIONS.md)).
+2. **`execution_mode: live`** → **`submit_intent`** on **`NautilusGuruExecutionPort`** or **`PolymarketExecutionPolicy`** (per runtime flags).
+3. Strategy logs **`live_order_intent`**; execution logs framework **`LIVE_ORDER_SUBMIT`** / **`LIVE_ORDER_ERROR`** or legacy py-clob messages (see [OPERATIONS.md](../../OPERATIONS.md)).
 
 ---
 

@@ -1,0 +1,31 @@
+# Runtime preset for Phase A/B log-validation runs (guru_follow + framework truth).
+#
+# This file is optional: the same triple is satisfied by config/runtime/live_polymarket.yaml
+# when execution_mode is live and Polymarket flags are true. This preset exists so operators
+# can pass an explicit path in run notes without touching production-like runtime YAML.
+#
+# Required triple (B2/B3/B4 framework gates): all three must be true with execution_mode live.
+
+trader_id: "TYREX-GURU-001"
+
+execution_mode: live
+
+guru_poll_interval_seconds: 30.0
+data_api_base_url: "https://data-api.polymarket.com"
+
+guru_state_path: "var/guru_watermark.json"
+guru_dedup_state_path: "var/guru_dedup.json"
+guru_activity_limit: 200
+guru_max_activity_pages_per_poll: 4
+guru_startup_backfill_seconds: 0
+
+logging_level: INFO
+
+clob_host: "https://clob.polymarket.com"
+chain_id: 137
+
+polymarket_nautilus_live: true
+polymarket_framework_submit: true
+polymarket_instrument_ids: []
+# polymarket_startup_token_warmup_max: 32
+# polymarket_dynamic_max_activations: 32

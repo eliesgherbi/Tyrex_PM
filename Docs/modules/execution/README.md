@@ -1,37 +1,38 @@
 # Module: `tyrex_pm.execution`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)**
 
 ## A. Role
 
-Translate approved **`OrderIntent`** into **venue actions** (or deliberate no-ops). Keeps `py-clob-client` and order semantics **out of** `strategy/`.
+Translate approved **`OrderIntent`** into **venue actions** (or deliberate no-ops). Keeps **`py-clob-client`** and Nautilus **`submit_order`** usage **out of** `strategy/`.
 
 ## B. Boundaries
 
-**Belongs here:** `ExecutionPort` protocol, `NoOpExecutionPort`, `PolymarketExecutionPolicy`.
+**Belongs here:** `ExecutionPort` protocol, `NoOpExecutionPort`, **`PolymarketExecutionPolicy`**, **`NautilusGuruExecutionPort`**.
 
-**Does not belong here:** Whether to copy a guru trade (strategy + signal), or notional limits (risk).
+**Does not belong here:** Whether to copy a guru trade (strategy + signal), or static notional limits (risk **`ConfiguredRiskPolicy`**).
 
 ## C. Internal structure (implemented)
 
 | File | Contents |
 |------|----------|
-| `port.py` | `ExecutionPort` protocol, `NoOpExecutionPort` (records intents; shadow). |
-| `polymarket_policy.py` | `PolymarketExecutionPolicy` — LIMIT via `create_and_post_order`, min BUY notional env, structured logging, optional `on_submit_ok` callback. |
+| `port.py` | `ExecutionPort` protocol, `NoOpExecutionPort`. |
+| `polymarket_policy.py` | **`PolymarketExecutionPolicy`** — LIMIT via **`create_and_post_order`**, min BUY notional env, optional **`on_submit_ok`** → **`note_fill_assumption`**. |
+| `nautilus_guru_exec.py` | **`NautilusGuruExecutionPort`** — **`order_factory.limit`** + **`submit_order`**; dynamic/static instrument resolve; structured **`ReasonCode`** logging. |
 | `__init__.py` | Exports. |
 
 ## D. Main interactions
 
-- **strategy:** `CopyStrategy.submit_intent` → port (`submit_intent(..., mode=execution_mode)`).
-- **runtime:** `guru_compose` selects shadow vs live port; live builds `ClobClient` via `runtime/clob_factory.py`.
-- **risk:** callback after successful submit for exposure note.
+- **strategy:** `CopyStrategy.submit_intent` → port.
+- **runtime:** `guru_compose` selects shadow vs legacy live vs **framework** live per **`RuntimeSettings`**.
+- **risk:** only legacy path uses **`on_submit_ok`** for session **`_token_open`**.
 
 ## E. Status
 
-**Live path** uses synchronous HTTP per intent — documented latency in `polymarket_policy.py` docstring.
+**Two live guru submit paths:** choose **one** per deployment via **`polymarket_framework_submit`** (requires Nautilus live). Framework path aligns guru orders with **`Cache`** for pending exposure in risk.
 
 ## F. Extension guidance
 
-- New venues: add a class implementing `ExecutionPort`; inject with `set_execution_port`.
-- Prefer **idempotency** and structured errors at this layer; surface `ReasonCode.LIVE_ORDER_*` in logs.
+- New venues: new `ExecutionPort` implementation; inject with `set_execution_port`.
+- Prefer idempotency and structured errors; surface **`ReasonCode.LIVE_ORDER_*`** / guru codes in logs.
 - Do not import `CopyStrategy` from execution code.
