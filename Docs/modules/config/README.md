@@ -16,7 +16,7 @@
 
 | File | Contents |
 |------|----------|
-| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`**, `RiskSettings`, `RuntimeSettings`; loaders; **Phase B B0:** `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. |
+| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`** (incl. **C2** conviction + min-notional fields), `RiskSettings`, `RuntimeSettings`; loaders; **C1** runtime keys (`guru_ingest_mode`, RTDS URLs/timeouts, gap-fill, fallback); **C3** `execution_*` runtime keys; **Phase B B0:** `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. |
 | `__init__.py` | Re-exports loaders and types. |
 
 ## D. Main interactions
@@ -33,5 +33,5 @@
 
 - Add new fields as **optional with defaults** when possible; fail loud on invalid combinations.
 - Never read private keys or API secrets in this module.
-- After changing loaders, update [CONFIG_MODEL.md](../../CONFIG_MODEL.md) and add/adjust tests in `tests/test_split_config_loaders.py`.
+- After changing loaders, update [CONFIG_MODEL.md](../../CONFIG_MODEL.md) (**C1** ingest, **C2** strategy, **C3** runtime execution fields) and add/adjust tests in `tests/test_split_config_loaders.py`.
 - **Phase B (B0):** framework-gate and reserve rules live in `loaders.py`; operator-facing **matrix** in [OPERATIONS.md](../../OPERATIONS.md) § Phase B.

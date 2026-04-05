@@ -4,6 +4,10 @@ Nautilus `Actor` that polls Polymarket Data API for **recent** guru TRADE activi
 Uses ``GET /activity`` (``type=TRADE``), a persistent **timestamp watermark**, and
 optional dedup as a safety net — **not** full historical ``/trades`` pagination.
 
+**C1:** With ``rtds_primary`` and healthy RTDS, poll timer may idle (no fetch); when
+fallback is active, poll resumes as the publisher. Shared dedup/watermark with
+:class:`~tyrex_pm.data.guru_stream_actor.GuruStreamActor` when passed from compose.
+
 Rate limits: https://docs.polymarket.com/quickstart/introduction/rate-limits
 
 No order placement — keep execution stack out of `data/`.
@@ -15,7 +19,7 @@ import random
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from nautilus_trader.common.actor import Actor
@@ -25,6 +29,8 @@ from nautilus_trader.config import ActorConfig
 from tyrex_pm.core.types import GuruTradeSignal
 from tyrex_pm.data.data_api_client import PolymarketDataApiClient
 from tyrex_pm.data.guru_dedup import GuruDedupStore
+from tyrex_pm.data.guru_ingest_pipeline import FactEmitFn, GuruSignalPipeline
+from tyrex_pm.data.guru_ingest_state import GuruIngestRuntimeState
 from tyrex_pm.data.guru_parse import activity_trade_row_to_signal, api_timestamp_to_ms
 from tyrex_pm.data.guru_watermark import GuruWatermarkStore
 
@@ -57,15 +63,24 @@ class GuruMonitorActor(Actor):
         config: GuruMonitorActorConfig,
         *,
         data_client: PolymarketDataApiClient | None = None,
+        dedup: GuruDedupStore | None = None,
+        watermark: GuruWatermarkStore | None = None,
+        ingest_state: GuruIngestRuntimeState | None = None,
+        stores_preloaded: bool = False,
+        emit_fact: Optional[FactEmitFn] = None,
     ) -> None:
         super().__init__(config)
         self._cfg = config
         self._client: PolymarketDataApiClient | None = data_client
+        self._ingest_state = ingest_state
+        self._stores_preloaded = stores_preloaded
         dedup_path = Path(config.dedup_state_path) if config.dedup_state_path else None
-        self._dedup = GuruDedupStore(dedup_path)
         wm_path = Path(config.watermark_state_path) if config.watermark_state_path else None
-        self._watermark = GuruWatermarkStore(wm_path)
+        self._dedup = dedup if dedup is not None else GuruDedupStore(dedup_path)
+        self._watermark = watermark if watermark is not None else GuruWatermarkStore(wm_path)
+        self._pipeline: GuruSignalPipeline | None = None
         self._poll_errors = 0
+        self._emit_fact = emit_fact
 
     def on_start(self) -> None:
         if self._client is None:
@@ -73,12 +88,25 @@ class GuruMonitorActor(Actor):
                 self._cfg.data_api_base_url,
                 log_backoff=self._backoff_log,
             )
-        self._dedup.load()
-        self._watermark.load()
-        self._watermark.ensure_initialized(backfill_seconds=self._cfg.startup_backfill_seconds)
-        self._watermark.persist()
+        if not self._stores_preloaded:
+            self._dedup.load()
+            self._watermark.load()
+            self._watermark.ensure_initialized(backfill_seconds=self._cfg.startup_backfill_seconds)
+            self._watermark.persist()
+        self._pipeline = GuruSignalPipeline(
+            self.msgbus,
+            GURU_TRADE_TOPIC,
+            self.log.info,
+            self._dedup,
+            self._watermark,
+            emit_fact=self._emit_fact,
+        )
         self.log.info("event=guru_poll_tick component=guru_monitor phase=on_start")
-        self._poll_trades_resilient("on_start")
+        run_initial = (
+            self._ingest_state is None or self._ingest_state.poll_run_initial_on_start()
+        )
+        if run_initial:
+            self._poll_trades_resilient("on_start")
         self.clock.set_timer(
             name="guru_monitor_poll",
             interval=timedelta(seconds=self._cfg.poll_interval_secs),
@@ -87,6 +115,8 @@ class GuruMonitorActor(Actor):
 
     def _handle_poll_tick(self, event: TimeEvent) -> None:
         _ = event
+        if self._ingest_state is not None and not self._ingest_state.poll_timer_should_run():
+            return
         self.log.info("event=guru_poll_tick component=guru_monitor phase=timer")
         self._poll_trades_resilient("timer")
 
@@ -118,6 +148,7 @@ class GuruMonitorActor(Actor):
     def _poll_incremental(self, phase: str) -> None:
         assert self._client is not None
         assert self._watermark.last_seen_ts_ms is not None
+        assert self._pipeline is not None
         self.log.info(f"event=guru_poll_tick component=guru_monitor phase={phase} sub=fetch")
 
         limit = max(1, min(500, int(self._cfg.activity_limit)))
@@ -157,6 +188,7 @@ class GuruMonitorActor(Actor):
             ),
         )
 
+        ts_poll_recv = int(time.time() * 1000)
         for row in ordered:
             if str(row.get("type") or "TRADE").upper() != "TRADE":
                 continue
@@ -164,20 +196,22 @@ class GuruMonitorActor(Actor):
             if ts_ms <= watermark_before:
                 continue
             sig = activity_trade_row_to_signal(row)
-            self._ingest_row(sig)
+            self._ingest_row(sig, ts_poll_recv=ts_poll_recv)
 
         self._watermark.advance(max_ts_ms)
 
-    def _ingest_row(self, sig: GuruTradeSignal) -> None:
-        if not self._dedup.is_new(sig.source_trade_id):
+    def _ingest_row(self, sig: GuruTradeSignal, *, ts_poll_recv: int) -> None:
+        if self._ingest_state is not None and not self._ingest_state.poll_should_publish():
             return
-        self._dedup.remember(sig.source_trade_id)
-        self._publish_signal(sig)
-        tok = sig.token_id or ""
-        self.log.info(
-            "event=guru_signal_emitted "
-            f"correlation_id={sig.source_trade_id} side={sig.side} token_id={tok}"
+        assert self._pipeline is not None
+        self._pipeline.try_publish(
+            sig,
+            source="poll",
+            ts_recv_ms=ts_poll_recv,
+            extra_kv=f" detection_to_emit_ms={ts_poll_recv - sig.ts_event_ms}",
         )
 
     def _publish_signal(self, sig: GuruTradeSignal) -> None:
+        """Reserved for tests / subclasses that override ingestion."""
+
         self.msgbus.publish(GURU_TRADE_TOPIC, sig)

@@ -157,3 +157,147 @@ def test_unfiltered_accepts_any_token_buy() -> None:
     assert len(port.records) == 1
     intent, _ = port.records[0]
     assert intent.token_id == "999999999"
+
+
+def test_min_follow_notional_skips_small_intent() -> None:
+    cfg = CopyStrategyConfig(
+        token_filter_enabled=True,
+        allowlisted_token_ids=("99",),
+        execution_mode="shadow",
+        min_follow_notional_usd=100.0,
+    )
+    strat = CopyStrategy(cfg)
+    port = NoOpExecutionPort()
+    strat.set_execution_port(port)
+    msgbus = _register(strat)
+    strat.on_start()
+
+    sig = GuruTradeSignal(
+        source_trade_id="small",
+        ts_event_ms=1,
+        side="BUY",
+        token_id="99",
+        size_raw=10.0,
+        price_raw=0.01,
+        raw_payload_ref=None,
+    )
+    msgbus.publish(GURU_TRADE_TOPIC, sig)
+    assert port.records == []
+
+
+def test_min_follow_notional_missing_price_skips_when_enabled() -> None:
+    cfg = CopyStrategyConfig(
+        token_filter_enabled=True,
+        allowlisted_token_ids=("99",),
+        execution_mode="shadow",
+        min_follow_notional_usd=1.0,
+    )
+    strat = CopyStrategy(cfg)
+    port = NoOpExecutionPort()
+    strat.set_execution_port(port)
+    msgbus = _register(strat)
+    strat.on_start()
+
+    sig = GuruTradeSignal(
+        source_trade_id="nop",
+        ts_event_ms=1,
+        side="BUY",
+        token_id="99",
+        size_raw=10.0,
+        price_raw=None,
+        raw_payload_ref=None,
+    )
+    msgbus.publish(GURU_TRADE_TOPIC, sig)
+    assert port.records == []
+
+
+def test_conviction_rejected_buy_does_not_seed_rolling_buffer() -> None:
+    """Accepted-entry-only observation: not-allowlisted BUY must not affect next entry's avg."""
+    cfg = CopyStrategyConfig(
+        token_filter_enabled=True,
+        allowlisted_token_ids=("99",),
+        execution_mode="shadow",
+        copy_scale=1.0,
+        conviction_sizing_enabled=True,
+        conviction_sizing_cap=2.0,
+        conviction_sizing_lookback_trades=10,
+    )
+    strat = CopyStrategy(cfg)
+    port = NoOpExecutionPort()
+    strat.set_execution_port(port)
+    msgbus = _register(strat)
+    strat.on_start()
+
+    msgbus.publish(
+        GURU_TRADE_TOPIC,
+        GuruTradeSignal(
+            "rej",
+            1,
+            "BUY",
+            "100",
+            10.0,
+            0.5,
+            None,
+        ),
+    )
+    msgbus.publish(
+        GURU_TRADE_TOPIC,
+        GuruTradeSignal(
+            "ok",
+            2,
+            "BUY",
+            "99",
+            20.0,
+            0.5,
+            None,
+        ),
+    )
+    assert len(port.records) == 1
+    assert port.records[0][0].quantity == 20.0
+
+
+def test_conviction_sizing_second_buy_larger_qty_than_flat() -> None:
+    cfg = CopyStrategyConfig(
+        token_filter_enabled=True,
+        allowlisted_token_ids=("99",),
+        execution_mode="shadow",
+        copy_scale=1.0,
+        conviction_sizing_enabled=True,
+        conviction_sizing_cap=2.0,
+        conviction_sizing_lookback_trades=10,
+    )
+    strat = CopyStrategy(cfg)
+    port = NoOpExecutionPort()
+    strat.set_execution_port(port)
+    msgbus = _register(strat)
+    strat.on_start()
+
+    msgbus.publish(
+        GURU_TRADE_TOPIC,
+        GuruTradeSignal(
+            "a",
+            1,
+            "BUY",
+            "99",
+            10.0,
+            0.5,
+            None,
+        ),
+    )
+    msgbus.publish(
+        GURU_TRADE_TOPIC,
+        GuruTradeSignal(
+            "b",
+            2,
+            "BUY",
+            "99",
+            20.0,
+            0.5,
+            None,
+        ),
+    )
+    assert len(port.records) == 2
+    q0 = port.records[0][0].quantity
+    q1 = port.records[1][0].quantity
+    assert q0 == 10.0
+    assert q1 == 40.0

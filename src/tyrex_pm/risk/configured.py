@@ -14,7 +14,7 @@ import logging
 import math
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_token_id
 from nautilus_trader.model.identifiers import InstrumentId
@@ -101,6 +101,7 @@ class ConfiguredRiskPolicy:
         position_reader: PositionStateReader | None = None,
         portfolio_exposure: NautilusPortfolioExposureAggregator | None = None,
         token_open_authoritative_for_pending: bool = True,
+        fact_emit: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._s = settings
         self._token_open: dict[str, float] = defaultdict(float)
@@ -112,6 +113,8 @@ class ConfiguredRiskPolicy:
         self._token_open_authoritative_for_pending = token_open_authoritative_for_pending
         self._account_cache = None
         self._allowance_cache = None
+        self._fact_emit = fact_emit
+        self._reporting_account_seq = 0
 
     @property
     def execution_reader(self):
@@ -158,6 +161,11 @@ class ConfiguredRiskPolicy:
             self._token_open[intent.token_id] += n
 
     def evaluate(self, intent: OrderIntent) -> tuple[bool, str]:
+        out = self._evaluate_impl(intent)
+        self._emit_risk_and_exposure(intent, out[0], out[1])
+        return out
+
+    def _evaluate_impl(self, intent: OrderIntent) -> tuple[bool, str]:
         if self._s.kill_switch:
             return False, ReasonCode.RISK_KILL_SWITCH
 
@@ -203,6 +211,43 @@ class ConfiguredRiskPolicy:
                 return False, rc_cg
 
         return True, "approved"
+
+    def _emit_risk_and_exposure(
+        self,
+        intent: OrderIntent,
+        allowed: bool,
+        reason_code: str,
+    ) -> None:
+        fe = self._fact_emit
+        if fe is None:
+            return
+        rc = str(reason_code)
+        fe(
+            "risk_decision",
+            {
+                "correlation_id": intent.correlation_id,
+                "allowed": bool(allowed),
+                "reason_code": rc,
+                "gate": "",
+            },
+        )
+        pe = self._portfolio_exposure
+        if pe is not None:
+            agg = pe.aggregate(
+                intent,
+                fail_on_unresolved=self._s.fail_on_unresolved_portfolio_exposure,
+            )
+            fe(
+                "exposure",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "b1_complete": agg.complete,
+                    "pending_notional_usd": agg.pending_notional_usd,
+                    "filled_net_exposure_usd": agg.filled_net_exposure_usd,
+                    "e_portfolio": agg.e_portfolio,
+                    "b1_error": agg.error or "",
+                },
+            )
 
     def _portfolio_wide_cap_eval(
         self,
@@ -360,6 +405,16 @@ class ConfiguredRiskPolicy:
         )
         if need_acct:
             self._account_cache = self._account_snapshot.snapshot()
+            fe = self._fact_emit
+            if fe is not None and self._account_cache is not None:
+                self._reporting_account_seq += 1
+                fe(
+                    "account_snapshot",
+                    {
+                        "account_snapshot_seq": self._reporting_account_seq,
+                        "account_present": bool(self._account_cache.account_present),
+                    },
+                )
         if self._account_cache is None or not self._account_cache.account_present:
             return False, ReasonCode.RISK_ACCOUNT_UNAVAILABLE
 

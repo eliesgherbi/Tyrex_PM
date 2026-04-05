@@ -25,26 +25,39 @@ def api_timestamp_to_ms(raw: Any) -> int:
     return v * 1000
 
 
-def stable_source_trade_id(row: Mapping[str, Any]) -> str:
+def ingest_source_trade_id(row: Mapping[str, Any]) -> str:
     """
-    Stable id for Data API trades (no unique id in OpenAPI).
+    Canonical dedup / correlation id for guru ingestion (poll + RTDS + gap-fill).
 
-    Prefers `transactionHash` when present; falls back to a composite key.
+    **C1:** When ``transactionHash`` is non-empty: ``f"{transactionHash}:{asset}"``
+    (``asset`` string stripped; empty if missing) so multi-leg same-tx trades on
+    different outcome tokens do not incorrectly dedupe. Otherwise: deterministic
+    composite (timestamp / asset / side / size / price). All sources use this
+    function via :func:`trade_row_to_signal` / :func:`activity_trade_row_to_signal`.
     """
 
-    tx = row.get("transactionHash") or ""
+    tx = row.get("transactionHash") or row.get("transaction_hash") or ""
+    stx = str(tx).strip()
+    if stx:
+        ar = row.get("asset")
+        asset_s = str(ar).strip() if ar is not None else ""
+        return f"{stx}:{asset_s}"
     ts = row.get("timestamp")
     asset = row.get("asset") or ""
     side = row.get("side") or ""
     size = row.get("size")
     price = row.get("price")
-    if tx:
-        return f"{tx}:{ts}:{asset}:{side}:{size}:{price}"
     return f"{ts}:{asset}:{side}:{size}:{price}"
 
 
+def stable_source_trade_id(row: Mapping[str, Any]) -> str:
+    """Backward-compatible name; delegates to :func:`ingest_source_trade_id`."""
+
+    return ingest_source_trade_id(row)
+
+
 def trade_row_to_signal(row: Mapping[str, Any]) -> GuruTradeSignal:
-    tid = stable_source_trade_id(row)
+    tid = ingest_source_trade_id(row)
     ts_event_ms = api_timestamp_to_ms(row.get("timestamp"))
 
     side = str(row.get("side") or "")

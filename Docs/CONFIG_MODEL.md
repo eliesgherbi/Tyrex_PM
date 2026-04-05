@@ -2,7 +2,7 @@
 
 Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 
-**Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
+**Navigation:** [README.md](README.md) · **Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
 
 ## Strategy (`StrategySettings` → `load_strategy_settings`)
 
@@ -10,8 +10,12 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 |-------|----------|---------|--------|
 | `guru_wallet_address` | yes | — | `0x` + 40 hex chars |
 | `token_filter` | yes | — | Mapping (see below); **explicit** filtered vs unfiltered mode |
-| `copy_scale` | no | `1.0` | `>= 0`; passed to proportional sizing |
-| `strategy_dedup_state_path` | no | — | If set, overrides runtime dedup path for `GuruMonitorActor` only |
+| `copy_scale` | no | `1.0` | `>= 0`; base scale for sizing (`base_scale` in C2 logs) |
+| **`conviction_sizing_enabled`** | no | **`false`** | **C2:** When **true**, follow **entry** quantity uses conviction-weighted `effective_scale` (see `Implementation/plan_C2_Capital-Allocation.md` §4.1). **false** = identical to pre-C2 proportional sizing. |
+| **`conviction_sizing_cap`** | no | `2.0` | **C2:** Upper bound on `trade_size / rolling_avg` multiplier; must be **`> 0`** when conviction enabled. |
+| **`conviction_sizing_lookback_trades`** | no | `20` | **C2:** Rolling window length (guru **BUY** sizes that passed entry policy only). Must be **`>= 1`** when conviction enabled. |
+| **`min_follow_notional_usd`** | no | `0` | **C2:** Policy floor on estimated `price_ref × qty` (USD). **`0`** disables. If **`> 0`** and price missing → policy skip (`min_follow_notional_price_missing`); not Phase B risk. |
+| `strategy_dedup_state_path` | no | `null` | If set, overrides runtime dedup path for `GuruMonitorActor` only |
 
 ### `token_filter` (required block)
 
@@ -63,6 +67,19 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | `guru_activity_limit` | no | `200` | Page size for `/activity` (1–500) |
 | `guru_max_activity_pages_per_poll` | no | `4` | Max pages per poll (bounds work per tick) |
 | `guru_startup_backfill_seconds` | no | `0` | Cold start: watermark = now − this many seconds (`0` = only trades **after** boot) |
+| **`guru_ingest_mode`** | no | **`poll_only`** | **`rtds_primary`** (recommended for production timing) · **`rtds_shadow`** (validation: poll publishes, stream logs only) · **`poll_only`** (REST only). See [OPERATIONS.md](OPERATIONS.md) § Guru ingestion (C1). |
+| `guru_ingest_phase` | no | `"0"` | Optional rollout tag for ops/logging. |
+| `guru_rtds_url` | no | `wss://ws-live-data.polymarket.com` | Polymarket RTDS WebSocket URL (`GuruStreamActor`). |
+| `guru_rtds_liveness_timeout_seconds` | no | `120` | Force reconnect if no RTDS traffic within this window. |
+| `guru_rtds_reconnect_retry_initial_seconds` | no | `1` | First reconnect backoff (seconds). |
+| `guru_rtds_reconnect_retry_max_seconds` | no | `60` | Reconnect backoff cap. |
+| `guru_rtds_ping_interval_seconds` | no | `5` | RTDS ping interval. |
+| `guru_poll_fallback_enabled` | no | `true` | If **true**, `rtds_primary` can switch to **poll** as publisher on stall/reconnect (when implemented path activates fallback). |
+| `guru_poll_fallback_interval_seconds` | no | — | Poll interval while fallback active; defaults to `guru_poll_interval_seconds` if omitted. |
+| `guru_gap_fill_enabled` | no | `true` | After reconnect, REST `/activity` gap-fill (`GuruStreamActor`). |
+| `guru_gap_fill_lookback_seconds` | no | `60` | Gap-fill lookback window. |
+| `guru_proxy_wallet_validation_required` | no | `false` | If **true**, stricter guru wallet format checks at startup when enabled in YAML. |
+| `guru_stream_queue_drain_interval_ms` | no | `50` | Timer interval draining RTDS queue into the ingest pipeline. |
 | `logging_level` | no | `INFO` | Nautilus `LoggingConfig.log_level` |
 | `clob_host` | no | `https://clob.polymarket.com` | Used for live `ClobClient` when composing |
 | `chain_id` | no | `137` | Polygon mainnet default |
@@ -74,8 +91,19 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | `polymarket_gamma_base_url` | no | `https://gamma-api.polymarket.com` | Gamma HTTP API for condition lookup. |
 | `polymarket_gamma_http_timeout_seconds` | no | `15` | Gamma client timeout. |
 | `polymarket_startup_token_warmup_max` | no | `32` | Max guru activity tokens to pre-resolve at compose when list empty (`0` = off). |
+| **`execution_venue_normalize_enabled`** | no | **`false`** | **C3:** Tick / size-step / min-notional feasibility **without** raising qty above risk-approved intent. |
+| **`execution_entry_guard_enabled`** | no | **`false`** | **C3:** Skip if top-of-book moved worse than slippage ticks vs guru reference (**framework path**). |
+| **`execution_max_entry_slippage_ticks`** | no | `0` | Max **ticks** (`instrument.price_increment`) against reference; **required &gt; 0** when guard enabled. |
+| **`execution_book_depth_clip_enabled`** | no | **`false`** | **C3:** Clip qty to `cap ×` best bid/ask size (single-level MVP). |
+| **`execution_book_depth_utilization_cap`** | no | `1.0` | **(0, 1]** when depth clip enabled. |
+| **`execution_book_rest_snapshot_enabled`** | no | **`false`** | If no `Cache` L2, allow one **REST** `get_order_book` snapshot for guard/clip. |
+| **`execution_book_strict`** | no | **`false`** | If **true**, missing book when guard/clip need it → **skip** (`exec_book_unavailable_skip`). |
+| **`execution_limit_timeout_enabled`** | no | **`false`** | **C3:** `clock` timer + `cancel_order` after timeout (**framework** only). |
+| **`execution_limit_timeout_seconds`** | no | `30` | Must be **&gt; 0** when timeout enabled. |
 
 **Derived (not YAML):** `polymarket_token_to_instrument` — built from non-empty `polymarket_instrument_ids`.
+
+**C3 scope:** `src/tyrex_pm/execution/nautilus_guru_exec.py` only; **`PolymarketExecutionPolicy`** (legacy py-clob) unchanged. See **`Implementation/plan_C3_Execution-Quality.md`**.
 
 ## `.env` (secrets only)
 
@@ -96,4 +124,5 @@ Repo templates (replace guru wallet / tokens before production):
 
 - `config/strategy/guru_follow.yaml`
 - `config/risk/guru_follow_risk.yaml`
-- `config/runtime/live_polymarket.yaml`
+- `config/runtime/live_polymarket.yaml` — set **`guru_ingest_mode: rtds_primary`** for production-shaped RTDS ingestion (see [OPERATIONS.md](OPERATIONS.md)).
+- `config/runtime/rtds_shadow.yaml` — **isolated** watermark/dedup paths for C1 shadow validation without touching normal `var/guru_*.json` state.

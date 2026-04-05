@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
+from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
 
@@ -38,10 +39,14 @@ class PolymarketExecutionPolicy:
         runtime: RuntimeSettings,
         *,
         on_submit_ok: Any | None = None,
+        fact_emit: Callable[[str, dict[str, Any]], None] | None = None,
+        order_registry: OrderCorrelationRegistry | None = None,
     ) -> None:
         self._client = client
         self._runtime = runtime
         self._on_submit_ok = on_submit_ok
+        self._fact_emit = fact_emit
+        self._order_registry = order_registry
 
     def submit_intent(self, intent: OrderIntent, *, mode: str) -> None:
         if mode != "live":
@@ -51,6 +56,17 @@ class PolymarketExecutionPolicy:
                 "event=%s component=polymarket_exec correlation_id=%s detail=missing_price",
                 ReasonCode.LIVE_ORDER_ERROR,
                 intent.correlation_id,
+            )
+            self._emit_exec(
+                "execution_outcome",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "outcome": "error",
+                    "reason_code": str(ReasonCode.LIVE_ORDER_ERROR),
+                    "instrument_id": "",
+                    "submitted_qty": 0.0,
+                    "submitted_price": 0.0,
+                },
             )
             return
 
@@ -66,6 +82,17 @@ class PolymarketExecutionPolicy:
                     intent.correlation_id,
                     price * qty,
                     min_n,
+                )
+                self._emit_exec(
+                    "execution_outcome",
+                    {
+                        "correlation_id": intent.correlation_id,
+                        "outcome": "error",
+                        "reason_code": str(ReasonCode.LIVE_ORDER_ERROR),
+                        "instrument_id": "",
+                        "submitted_qty": 0.0,
+                        "submitted_price": 0.0,
+                    },
                 )
                 return
 
@@ -86,6 +113,17 @@ class PolymarketExecutionPolicy:
                 intent.correlation_id,
                 exc,
             )
+            self._emit_exec(
+                "execution_outcome",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "outcome": "error",
+                    "reason_code": str(ReasonCode.LIVE_ORDER_ERROR),
+                    "instrument_id": "",
+                    "submitted_qty": 0.0,
+                    "submitted_price": 0.0,
+                },
+            )
             return
 
         oid = _extract_order_id(resp)
@@ -99,8 +137,38 @@ class PolymarketExecutionPolicy:
             oid[:18] + "…" if len(oid) > 20 else oid,
             payload,
         )
+        pseudo_coid = f"legacy_http:{oid}" if oid else f"legacy_http:{intent.correlation_id}"
+        reg = self._order_registry
+        if reg is not None and oid:
+            reg.register(pseudo_coid, intent.correlation_id)
+        self._emit_exec(
+            "order_correlation_map",
+            {
+                "correlation_id": intent.correlation_id,
+                "client_order_id": pseudo_coid,
+                "instrument_id": "",
+            },
+        )
+        self._emit_exec(
+            "execution_outcome",
+            {
+                "correlation_id": intent.correlation_id,
+                "outcome": "submit",
+                "reason_code": str(ReasonCode.LIVE_ORDER_SUBMIT),
+                "client_order_id": pseudo_coid,
+                "external_order_id": oid,
+                "instrument_id": "",
+                "submitted_qty": float(qty),
+                "submitted_price": float(price),
+            },
+        )
         if self._on_submit_ok:
             self._on_submit_ok(intent)
+
+    def _emit_exec(self, fact_type: str, payload: dict[str, Any]) -> None:
+        fe = self._fact_emit
+        if fe is not None:
+            fe(fact_type, payload)
 
 
 def _extract_order_id(response: object) -> str:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,6 +75,7 @@ def main() -> int:
         load_runtime_settings,
         load_strategy_settings,
     )
+    from tyrex_pm.reporting.context import create_run_context
     from tyrex_pm.runtime.guru_compose import build_guru_trading_node
     from tyrex_pm.runtime.guru_run_logging import (
         GuruNautilusFileLogging,
@@ -129,6 +131,22 @@ def main() -> int:
             "see Docs/Implementation/phase_a_closure.md",
         )
 
+    run_context = None
+    if runtime.reporting_enabled:
+        run_id = str(uuid.uuid4())
+        run_context = create_run_context(
+            repo_root=REPO_ROOT,
+            run_id=run_id,
+            strategy_name=args.strategy_conf.stem,
+            trader_id=runtime.trader_id,
+            reporting_base_dir=runtime.reporting_base_dir,
+            tyrex_log_path=str(tyrex_log_path.resolve()),
+            nautilus_log_path=str(nautilus_log_path.resolve()),
+            sink_max_queue=runtime.reporting_sink_max_queue,
+            sink_batch_size=runtime.reporting_sink_batch_size,
+        )
+        print(f"tyrex_pm reporting run_dir={run_context.run_dir.resolve()}")
+
     assembly = build_guru_trading_node(
         strat,
         risk,
@@ -137,14 +155,21 @@ def main() -> int:
             log_directory=str(nautilus_log_path.parent.resolve()),
             log_file_stem=nautilus_log_path.stem,
         ),
+        run_context=run_context,
     )
     node = assembly.node
     node.build()
+    clean = False
     try:
-        node.run(raise_exception=True)
-    except KeyboardInterrupt:
-        print("\nStopping…")
-        node.stop()
+        try:
+            node.run(raise_exception=True)
+            clean = True
+        except KeyboardInterrupt:
+            print("\nStopping…")
+            node.stop()
+    finally:
+        if run_context is not None:
+            run_context.finalize_manifest(run_ended_cleanly=clean)
     return 0
 
 

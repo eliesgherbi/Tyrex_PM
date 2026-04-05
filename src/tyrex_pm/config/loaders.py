@@ -31,7 +31,13 @@ class StrategySettings:
     guru_wallet_address: str
     token_filter: TokenFilterSettings
     copy_scale: float
-    strategy_dedup_state_path: str | None
+    strategy_dedup_state_path: str | None = None
+    #: C2 — conviction-weighted sizing (default off = pre-C2 behavior).
+    conviction_sizing_enabled: bool = False
+    conviction_sizing_cap: float = 2.0
+    conviction_sizing_lookback_trades: int = 20
+    #: C2 — skip when ``price_ref * qty`` below this USD floor (0 = disabled).
+    min_follow_notional_usd: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +128,38 @@ class RuntimeSettings:
     #: **Step 5:** Max guru outcome tokens to pre-resolve at node build from Data API ``/activity``
     #: (0 = skip self-bootstrap). Only used when ``polymarket_instrument_ids`` is empty.
     polymarket_startup_token_warmup_max: int
+    #: **C1:** ``poll_only`` | ``rtds_shadow`` | ``rtds_primary``
+    guru_ingest_mode: str = "poll_only"
+    #: **C1:** optional rollout label for logs (informational).
+    guru_ingest_phase: str = "0"
+    guru_rtds_url: str = "wss://ws-live-data.polymarket.com"
+    guru_rtds_liveness_timeout_seconds: float = 120.0
+    guru_rtds_reconnect_retry_initial_seconds: float = 1.0
+    guru_rtds_reconnect_retry_max_seconds: float = 60.0
+    guru_rtds_ping_interval_seconds: float = 5.0
+    guru_poll_fallback_enabled: bool = True
+    guru_poll_fallback_interval_seconds: float | None = None
+    guru_gap_fill_enabled: bool = True
+    guru_gap_fill_lookback_seconds: float = 60.0
+    guru_proxy_wallet_validation_required: bool = False
+    guru_stream_queue_drain_interval_ms: int = 50
+    #: ---- C3 execution quality (framework ``NautilusGuruExecutionPort`` only; default off) ----
+    execution_venue_normalize_enabled: bool = False
+    execution_entry_guard_enabled: bool = False
+    #: Max ticks market may move against follower vs guru reference (0 = treat guard as off).
+    execution_max_entry_slippage_ticks: int = 0
+    execution_book_depth_clip_enabled: bool = False
+    execution_book_depth_utilization_cap: float = 1.0
+    execution_book_rest_snapshot_enabled: bool = False
+    #: If true and guard/clip need L2 but no snapshot: skip submit; if false: skip feature only.
+    execution_book_strict: bool = False
+    execution_limit_timeout_enabled: bool = False
+    execution_limit_timeout_seconds: float = 30.0
+    #: Persist structured reporting facts under ``var/reporting/runs/<run_id>/`` when true.
+    reporting_enabled: bool = False
+    reporting_base_dir: str = "var/reporting/runs"
+    reporting_sink_max_queue: int = 50_000
+    reporting_sink_batch_size: int = 128
 
 
 def _polymarket_token_instrument_map(
@@ -200,11 +238,28 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
     dedup = raw.get("strategy_dedup_state_path")
     dedup_s = str(dedup).strip() if dedup else None
 
+    conv_en = bool(raw.get("conviction_sizing_enabled", False))
+    conv_cap = float(raw.get("conviction_sizing_cap", 2.0))
+    lookback = int(raw.get("conviction_sizing_lookback_trades", 20))
+    min_follow = float(raw.get("min_follow_notional_usd", 0.0))
+
+    if min_follow < 0:
+        raise ValueError(f"{p}: min_follow_notional_usd must be >= 0")
+    if conv_en:
+        if lookback < 1:
+            raise ValueError(f"{p}: conviction_sizing_lookback_trades must be >= 1 when enabled")
+        if conv_cap <= 0:
+            raise ValueError(f"{p}: conviction_sizing_cap must be > 0 when conviction_sizing_enabled")
+
     return StrategySettings(
         guru_wallet_address=gw,
         token_filter=token_filter,
         copy_scale=scale,
         strategy_dedup_state_path=dedup_s,
+        conviction_sizing_enabled=conv_en,
+        conviction_sizing_cap=conv_cap,
+        conviction_sizing_lookback_trades=lookback,
+        min_follow_notional_usd=min_follow,
     )
 
 
@@ -445,6 +500,73 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
 
     token_map = _polymarket_token_instrument_map(poly_ids, path=p) if poly_ids else ()
 
+    ingest_mode = str(raw.get("guru_ingest_mode", "poll_only")).lower().strip()
+    if ingest_mode not in ("poll_only", "rtds_shadow", "rtds_primary"):
+        raise ValueError(
+            f"{p}: guru_ingest_mode must be poll_only, rtds_shadow, or rtds_primary",
+        )
+    ingest_phase = str(raw.get("guru_ingest_phase", "0")).strip()
+    rtds_url = str(raw.get("guru_rtds_url", "wss://ws-live-data.polymarket.com")).strip()
+    rtds_live = float(raw.get("guru_rtds_liveness_timeout_seconds", 120.0))
+    if rtds_live <= 0:
+        raise ValueError(f"{p}: guru_rtds_liveness_timeout_seconds must be positive")
+    rtds_r0 = float(raw.get("guru_rtds_reconnect_retry_initial_seconds", 1.0))
+    rtds_rmax = float(raw.get("guru_rtds_reconnect_retry_max_seconds", 60.0))
+    if rtds_r0 <= 0 or rtds_rmax < rtds_r0:
+        raise ValueError(f"{p}: invalid RTDS reconnect backoff seconds")
+    rtds_ping = float(raw.get("guru_rtds_ping_interval_seconds", 5.0))
+    if rtds_ping <= 0:
+        raise ValueError(f"{p}: guru_rtds_ping_interval_seconds must be positive")
+    poll_fb_en = bool(raw.get("guru_poll_fallback_enabled", True))
+    poll_fb_iv = raw.get("guru_poll_fallback_interval_seconds")
+    poll_fb_interval = float(poll_fb_iv) if poll_fb_iv is not None else None
+    if poll_fb_interval is not None and poll_fb_interval <= 0:
+        raise ValueError(f"{p}: guru_poll_fallback_interval_seconds must be positive or omitted")
+    gap_fill_en = bool(raw.get("guru_gap_fill_enabled", True))
+    gap_lb = float(raw.get("guru_gap_fill_lookback_seconds", 60.0))
+    if gap_lb < 0:
+        raise ValueError(f"{p}: guru_gap_fill_lookback_seconds must be >= 0")
+    proxy_val = bool(raw.get("guru_proxy_wallet_validation_required", False))
+    drain_ms = int(raw.get("guru_stream_queue_drain_interval_ms", 50))
+    if drain_ms < 10:
+        raise ValueError(f"{p}: guru_stream_queue_drain_interval_ms must be >= 10")
+
+    ex_norm = bool(raw.get("execution_venue_normalize_enabled", False))
+    ex_guard = bool(raw.get("execution_entry_guard_enabled", False))
+    ex_slip_ticks = int(raw.get("execution_max_entry_slippage_ticks", 0))
+    ex_depth = bool(raw.get("execution_book_depth_clip_enabled", False))
+    ex_cap = float(raw.get("execution_book_depth_utilization_cap", 1.0))
+    ex_rest = bool(raw.get("execution_book_rest_snapshot_enabled", False))
+    ex_strict = bool(raw.get("execution_book_strict", False))
+    ex_to_en = bool(raw.get("execution_limit_timeout_enabled", False))
+    ex_to_s = float(raw.get("execution_limit_timeout_seconds", 30.0))
+
+    if ex_slip_ticks < 0:
+        raise ValueError(f"{p}: execution_max_entry_slippage_ticks must be >= 0")
+    if ex_guard and ex_slip_ticks <= 0:
+        raise ValueError(
+            f"{p}: execution_entry_guard_enabled requires execution_max_entry_slippage_ticks > 0",
+        )
+    if ex_depth and not (0.0 < ex_cap <= 1.0 + 1e-9):
+        raise ValueError(
+            f"{p}: execution_book_depth_utilization_cap must be in (0, 1] when depth clip enabled",
+        )
+    if ex_to_en and ex_to_s <= 0:
+        raise ValueError(
+            f"{p}: execution_limit_timeout_seconds must be positive when timeout enabled",
+        )
+
+    reporting_en = bool(raw.get("reporting_enabled", False))
+    reporting_base = str(raw.get("reporting_base_dir", "var/reporting/runs")).strip()
+    if not reporting_base or ".." in reporting_base:
+        raise ValueError(f"{p}: reporting_base_dir must be non-empty without '..'")
+    r_max_q = int(raw.get("reporting_sink_max_queue", 50_000))
+    if r_max_q < 100:
+        raise ValueError(f"{p}: reporting_sink_max_queue must be >= 100")
+    r_batch = int(raw.get("reporting_sink_batch_size", 128))
+    if r_batch < 1:
+        raise ValueError(f"{p}: reporting_sink_batch_size must be >= 1")
+
     return RuntimeSettings(
         trader_id=tid,
         execution_mode=mode,
@@ -467,4 +589,30 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         polymarket_gamma_base_url=gamma_url,
         polymarket_gamma_http_timeout_seconds=gamma_timeout,
         polymarket_startup_token_warmup_max=warmup_max,
+        guru_ingest_mode=ingest_mode,
+        guru_ingest_phase=ingest_phase,
+        guru_rtds_url=rtds_url,
+        guru_rtds_liveness_timeout_seconds=rtds_live,
+        guru_rtds_reconnect_retry_initial_seconds=rtds_r0,
+        guru_rtds_reconnect_retry_max_seconds=rtds_rmax,
+        guru_rtds_ping_interval_seconds=rtds_ping,
+        guru_poll_fallback_enabled=poll_fb_en,
+        guru_poll_fallback_interval_seconds=poll_fb_interval,
+        guru_gap_fill_enabled=gap_fill_en,
+        guru_gap_fill_lookback_seconds=gap_lb,
+        guru_proxy_wallet_validation_required=proxy_val,
+        guru_stream_queue_drain_interval_ms=drain_ms,
+        execution_venue_normalize_enabled=ex_norm,
+        execution_entry_guard_enabled=ex_guard,
+        execution_max_entry_slippage_ticks=ex_slip_ticks,
+        execution_book_depth_clip_enabled=ex_depth,
+        execution_book_depth_utilization_cap=ex_cap,
+        execution_book_rest_snapshot_enabled=ex_rest,
+        execution_book_strict=ex_strict,
+        execution_limit_timeout_enabled=ex_to_en,
+        execution_limit_timeout_seconds=ex_to_s,
+        reporting_enabled=reporting_en,
+        reporting_base_dir=reporting_base,
+        reporting_sink_max_queue=r_max_q,
+        reporting_sink_batch_size=r_batch,
     )

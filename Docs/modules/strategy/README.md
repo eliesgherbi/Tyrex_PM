@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.strategy`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [DEVELOPMENT](../../DEVELOPMENT.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [developer_guide](../../developer_guide.md)
 
 ## 1. General purpose of the strategy module
 
@@ -15,12 +15,12 @@
 ## 2. Current example: guru follow (`CopyStrategy`)
 
 **Class:** `src/tyrex_pm/strategy/copy_strategy.py`  
-**Config:** `CopyStrategyConfig` (`token_filter_enabled`, `allowlisted_token_ids`, `execution_mode`, `copy_scale`) — mirrors strategy YAML `token_filter` via `guru_compose`.  
+**Config:** `CopyStrategyConfig` — `token_filter_*`, `execution_mode` (from **runtime** YAML), `copy_scale`, optional **C2** `conviction_sizing_*` and `min_follow_notional_usd` (from strategy YAML via `guru_compose`).  
 **Base:** `BaseComposableStrategy` (`src/tyrex_pm/strategy/base.py`) for shared Nautilus `Strategy` behavior / startup log.
 
 ### What signals it consumes
 
-- Topic: **`GURU_TRADE_TOPIC`** (`tyrex_pm.guru.GuruTradeSignal`), same string as in `data/guru_monitor.py`.
+- Topic: **`GURU_TRADE_TOPIC`** (`tyrex_pm.guru.GuruTradeSignal`), same string as in `data/guru_monitor.py` / ingest pipeline (published by poll and/or RTDS stream per **`guru_ingest_mode`** — strategy unchanged).
 - Payload: **`GuruTradeSignal`** (`core/types.py`) — includes `side`, `token_id`, sizes, price, `source_trade_id`, etc.
 
 ### Entry / exit
@@ -29,9 +29,10 @@
 - **`side == "SELL"`** → `GuruMirrorExitPolicy.evaluate`.
 - Other sides → `copy_skip` with `ReasonCode.UNSUPPORTED_SIDE`.
 
-### Sizing
+### Sizing & worthiness (C2)
 
-- **`ProportionalSizingPolicy.size(signal)`** (`signal/sizing.py`) with strategy `copy_scale`.
+- **`build_sizing_policy` / `SizingPolicy.size`** (`signal/sizing.py`) — `copy_scale` and optional conviction weighting for **BUY entries**; `record_accepted_entry_size` updates the rolling average after a positive entry size.
+- **`FollowWorthinessGate`** (`signal/follow_worthiness.py`) — optional min estimated notional **before** risk.
 
 ### Risk
 
@@ -41,7 +42,11 @@
 ### Execution
 
 - Calls **`self._execution.submit_intent(intent, mode=self._cfg.execution_mode)`**.
-- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live + framework submit); **`PolymarketExecutionPolicy`** (live legacy py-clob).
+- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live + framework submit, **C3** when enabled); **`PolymarketExecutionPolicy`** (live legacy py-clob).
+
+### Order events (C3)
+
+- **`on_order_event`** calls **`super()`** then, if the port implements **`notify_order_event`**, forwards the event — used by **`NautilusGuruExecutionPort`** for limit-timeout cancellation timers.
 
 ### Shadow vs live behavior
 
@@ -130,4 +135,5 @@ Nautilus **Strategy** implementations: orchestrate signal policies, risk, and ex
 
 - New strategies: new `Strategy` subclass + policies; **reuse** `RiskPolicy` / `ExecutionPort` injection pattern.
 - Keep **`OrderIntent`** as the handoff to execution unless you introduce a versioned successor type.
+- **Do not** add `Cache`/`Portfolio` reads, venue I/O, or durable follow ledger state here — see [developer_guide.md](../../developer_guide.md).
 - See [Architecture.md](../../Architecture.md) §G for guru finder and replay extensions.

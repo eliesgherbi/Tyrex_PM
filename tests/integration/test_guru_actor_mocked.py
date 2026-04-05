@@ -36,8 +36,13 @@ class RecordingGuruMonitorActor(GuruMonitorActor):
         super().__init__(*args, **kwargs)
         self.recorded: list[GuruTradeSignal] = []
 
-    def _publish_signal(self, sig: GuruTradeSignal) -> None:
+    def _ingest_row(self, sig: GuruTradeSignal, *, ts_poll_recv: int = 0) -> None:
+        if self._ingest_state is not None and not self._ingest_state.poll_should_publish():
+            return
+        if not self._dedup.is_new(sig.source_trade_id):
+            return
         self.recorded.append(sig)
+        super()._ingest_row(sig, ts_poll_recv=ts_poll_recv)
 
 
 def _wire_actor(actor: GuruMonitorActor) -> None:
@@ -131,7 +136,26 @@ def test_actor_skips_rows_trailing_the_watermark(tmp_path) -> None:
     _wire_actor(actor)
     actor.on_start()
     assert len(actor.recorded) == 1
-    assert actor.recorded[0].source_trade_id.startswith("0xnew")
+    assert actor.recorded[0].source_trade_id == "0xnew:99"
+
+
+def test_actor_emits_both_legs_same_tx_different_assets(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("tyrex_pm.data.guru_watermark.utc_now_ms", lambda: 0)
+    cfg = GuruMonitorActorConfig(
+        guru_wallet_address="0x56687bf447db6ffa42ffe2204a05edaa20f55839",
+        watermark_state_path=str(tmp_path / "wm.json"),
+        dedup_state_path=str(tmp_path / "dedup.json"),
+    )
+    fake = MagicMock()
+    fake.get_user_trade_activity.return_value = [
+        _row(ts_sec=100, tx="0xmult", asset="111"),
+        _row(ts_sec=100, tx="0xmult", asset="222"),
+    ]
+    actor = RecordingGuruMonitorActor(cfg, data_client=fake)
+    _wire_actor(actor)
+    actor.on_start()
+    assert len(actor.recorded) == 2
+    assert {s.source_trade_id for s in actor.recorded} == {"0xmult:111", "0xmult:222"}
 
 
 @pytest.mark.parametrize("now_ms", [1_800_000_000_000])

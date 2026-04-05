@@ -1,269 +1,258 @@
 # plan_C1_Time-to-Follow — Event-driven guru ingestion (C1)
 
-Implementation planning document for **Phase C / C1 — Time-to-Follow**, aligned with `Docs/Implementation/phase_c_merged_plan.md` **objective** (maximize follower alpha capture) but **updating the C1 delivery target**: the minimum valuable C1 implementation is **event-driven guru ingestion**, not adaptive polling as the primary path.
+Parent planning document for **Phase C / C1 — Time-to-Follow**: **event-driven guru ingestion** as the design center, **stable** `GuruTradeSignal` + `GURU_TRADE_TOPIC`, **polling demoted** to shadow / fallback / recovery—not latency architecture.
+
+---
+
+## Roadmap alignment (what this plan does **not** change)
+
+C1 here is a **source replacement + observability upgrade** for guru detection. It does **not**:
+
+- alter **Phase A/B** ownership (framework-visible state, risk/runtime consuming real state),
+- move bookkeeping into `CopyStrategy` or thicken strategy beyond today’s subscribe → policy → risk → port path,
+- redesign **C2** (capital allocation) or **C3** (execution quality),
+- replace **Nautilus Polymarket**’s role for **follower** execution and market/user feeds where already wired.
 
 ---
 
 ## 1. Objective
 
-**C1** reduces **time-to-follow** by making guru trade **detection** effectively real-time: replace **poll-interval-bound** discovery (`GET /activity`) with an **event-driven** ingestion path so follower detection latency is no longer dominated by `guru_poll_interval_seconds`. Downstream **signal → sizing → risk → submit** should stay intact; only the **source** and its **translation to `GuruTradeSignal`** change.
+Reduce **time-to-follow** by removing **poll-interval-bound** guru discovery (`GET /activity` timer) as the primary path. **Detection** should be **event-driven** so latency is not dominated by `guru_poll_interval_seconds`. Downstream **signal → sizing → risk → submit** stays unchanged; only ingestion **source** and **translation into `GuruTradeSignal`** evolve.
 
 ---
 
 ## 2. Why C1 changes now
 
-`phase_c_merged_plan.md` still lists adaptive polling under C1 MVP; the team is **reprioritizing** so C1’s first shipped architecture is **websocket/stream-first**. Polling remains acceptable only as **fallback / rollout safety**, not as the design center—because poll interval is an upper bound on detection delay and directly drives **alpha leak #1** (detection latency) and worsens **guru price impact** (follower arrives later).
+Polling sets a hard upper bound on **detection delay** (alpha leak #1) and worsens **guru price impact**. C1 implementation target is **stream-first**; polling remains **operational safety**, not the design center.
 
 ---
 
-## 3. Current workflow audit (codebase-specific)
+## 3. Evidence classification
 
-### 3.1 Discovery start and composition root
+Do not treat the bullets below as interchangeable.
 
-- **Entry:** `scripts/run_guru.py` → `tyrex_pm.runtime.guru_compose.build_guru_trading_node`.
-- **Wiring:** `build_guru_trading_node` constructs `GuruMonitorActorConfig` from `RuntimeSettings`, instantiates `GuruMonitorActor`, `CopyStrategy`, registers with `node.trader.add_actor(guru)` then `add_strategy(strat)` (actor before strategy).
+### 3.1 Verified in **current Tyrex codebase**
 
-### 3.2 Polling actor and HTTP client
+- Guru discovery is **`GuruMonitorActor`** (`guru_monitor.py`): `clock.set_timer("guru_monitor_poll", …)` → **`PolymarketDataApiClient.get_user_trade_activity`** (`data_api_client.py`) → `activity_trade_row_to_signal` (`guru_parse.py`) → **`msgbus.publish(GURU_TRADE_TOPIC, sig)`**.
+- **Composition:** `build_guru_trading_node` (`guru_compose.py`) registers **`GuruMonitorActor`** then **`CopyStrategy`**; strategy subscribes to **`GURU_TRADE_TOPIC`** (`copy_strategy.py`).
+- **Types:** `GuruTradeSignal` (`core/types.py`); topic constant in `guru_monitor.py`.
+- **State:** `GuruWatermarkStore`, `GuruDedupStore` (`guru_watermark.py`, `guru_dedup.py`); config via `RuntimeSettings` (`loaders.py`) / runtime YAML (`guru_poll_interval_seconds`, etc.).
+- **Nautilus Polymarket (installed dependency):** MARKET WS **`last_trade_price`** (`PolymarketTrade`) has **no** wallet / tx fields suitable for guru attribution; USER WS is **follower-authenticated**. **Forcing guru detection through those feeds is incorrect** for copy-trading **another** wallet.
 
-| Piece | Location |
-|-------|----------|
-| Actor | `src/tyrex_pm/data/guru_monitor.py` — `GuruMonitorActor` (`nautilus_trader.common.actor.Actor`) |
-| HTTP | `src/tyrex_pm/data/data_api_client.py` — `PolymarketDataApiClient.get_user_trade_activity` → `GET {data_api_base_url}/activity` with `type=TRADE`, pagination (`activity_limit`, `max_activity_pages_per_poll`) |
-| Incremental state | `src/tyrex_pm/data/guru_watermark.py` — `GuruWatermarkStore` (`last_seen_ts_ms` JSON); `src/tyrex_pm/data/guru_dedup.py` — `GuruDedupStore` (LRU + optional JSON persistence) |
+### 3.2 Externally sourced (docs, REST shape, community reports) — **not** proven in Tyrex
 
-### 3.3 Poll timer configuration
+- Polymarket **REST** trade/activity-style payloads are described with fields such as **`proxyWallet`**, **`asset`**, **`side`**, **`size`**, **`price`**, **`timestamp`**, **`eventSlug`**, **`transactionHash`** (useful **reference** for parser design; exact RTDS field parity is **not** code-verified here).
+- **Proxy wallet model:** visible / profile / funder address is often the **proxy**, not EOA — affects **`guru_wallet_address`** correctness (operational validation required).
+- **RTDS documentation gaps:** official RTDS docs **may not** clearly document **`activity` / `trades`** at the time of planning — treat stream API as **integration-dependent**.
+- **Community/issue signals (unverified in repo):** reports that **empty-filter** `activity/trades` works while **filtered** subscriptions (`market_slug`, `event_slug`) **do not**; reports of **liveness / stall** over time despite an **open** socket — **inputs to spike**, not facts for design certainty.
 
-- **Code:** `GuruMonitorActor.on_start` calls `self.clock.set_timer(name="guru_monitor_poll", interval=timedelta(seconds=self._cfg.poll_interval_secs), callback=self._handle_poll_tick)`.
-- **Config model:** `RuntimeSettings.guru_poll_interval_seconds` in `src/tyrex_pm/config/loaders.py`.
-- **YAML:** e.g. `config/runtime/live_polymarket.yaml` → `guru_poll_interval_seconds: 30.0`, plus `guru_activity_limit`, `guru_max_activity_pages_per_poll`, `guru_startup_backfill_seconds`, `data_api_base_url`, paths `guru_state_path` / `guru_dedup_state_path`.
+### 3.3 Still to confirm by **Phase 0.5 spike** (mandatory before implementation tickets)
 
-### 3.4 Internal signals and message bus
+- RTDS connect URL, subscribe envelope, message framing, and error behaviors.
+- Whether **`activity/trades`** delivers messages at all under Tyrex’s runtime constraints.
+- **Message rate** (unfiltered global trades) vs operational limits.
+- Whether **`proxyWallet`** on real stream payloads matches **operational `guru_wallet_address`** (and normalization rules).
+- Whether **filtered** subscriptions work; if not, v1 default (unfiltered + client filter) is **confirmed** or must be revised.
+- **Replay / initial burst** on subscribe; ordering and duplicate semantics on reconnect.
+- **Stall-with-open-socket** behavior and need for **hard reconnect** / **liveness timeout**.
 
-- **Topic:** `GURU_TRADE_TOPIC = "tyrex_pm.guru.GuruTradeSignal"` in `guru_monitor.py`.
-- **Publish:** `GuruMonitorActor._publish_signal` → `self.msgbus.publish(GURU_TRADE_TOPIC, sig)`.
-- **Consume:** `CopyStrategy.on_start` → `self.msgbus.subscribe(topic=GURU_TRADE_TOPIC, handler=self._on_guru_trade)` in `src/tyrex_pm/strategy/copy_strategy.py`.
-- **Payload type:** `src/tyrex_pm/core/types.py` — `GuruTradeSignal` (`source_trade_id`, `ts_event_ms`, `side`, `token_id`, `size_raw`, `price_raw`, `raw_payload_ref`).
+### 3.4 Phase 0.5 spike deliverable (named artifact)
 
-### 3.5 Parse path from API rows to signals
+**Implementation estimates, rollout dates, and production confidence in unfiltered RTDS remain provisional until a written spike artifact exists.**
 
-- `activity_trade_row_to_signal` / `trade_row_to_signal` / `stable_source_trade_id` in `src/tyrex_pm/data/guru_parse.py` (Data API `/activity` row shape).
-
-### 3.6 Timestamps and latency loss today
-
-| Timestamp / event | Role |
-|-------------------|------|
-| `GuruTradeSignal.ts_event_ms` | Venue-related time from API `timestamp` (normalized to ms in `guru_parse.api_timestamp_to_ms`). |
-| Poll phase | `guru_poll_tick` logs `phase=on_start` / `phase=timer` / `sub=fetch` — **no** `ts_received_http` or detection latency metric. |
-| **Dominant gap** | Worst-case delay ≈ **poll interval** + HTTP round-trip + pagination batching; backoff on errors uses `time.sleep` in-thread (`_error_backoff_sleep`). |
-| Downstream | `CopyStrategy` logs `shadow_order_intent` / `live_order_intent` with `correlation_id` but **no** structured `ts_submit_ms` vs `ts_event_ms`. |
-
-### 3.7 Websockets / streaming in this repo
-
-- **Tyrex:** **No** websocket client for guru or Data API; only HTTP (`httpx`) in `PolymarketDataApiClient`.
-- **Nautilus Polymarket (dependency):** `nautilus_trader[polymarket]>=1.220.0` registers live **CLOB** websocket clients when `polymarket_nautilus_live` and live mode (`guru_compose.py`):
-  - **Data client** (`…/adapters/polymarket/data.py`): **MARKET** channel → book / quotes / **`last_trade_price`** (`PolymarketTrade` in `schemas/book.py`) → `TradeTick` etc. **Fields do not include maker/taker wallet or tx hash** — **cannot** assert “this trade is the guru’s.”
-  - **Exec client** (`…/adapters/polymarket/execution.py`): **USER** channel (authenticated **follower** L2 creds) → `PolymarketUserOrder` / `PolymarketUserTrade` — **wrong identity** for copying **another** wallet.
-- **`py-clob-client`:** `get_market_trades_events(condition_id)` is HTTP to `/live-activity/events/` — **not** wired into Tyrex guru flow.
-- **Conclusion (verified):** Today’s **in-repo** Nautilus Polymarket websocket surfaces **do not** provide a third-party guru wallet activity feed. Event-driven guru ingestion requires a **new** integration (see §4).
-
-### 3.8 Related flows (not guru detection)
-
-- `src/tyrex_pm/runtime/guru_cache_warmup.py` — one-shot Data API `/activity` to warm `Cache` for dynamic instruments (resolution only).
-
-### 3.9 Bottlenecks and assumptions
-
-- **Assumption:** `guru_wallet_address` in strategy YAML matches the address that appears on trades in the **chosen** stream (Polymarket often uses **proxy** wallets — **must** match RTDS / API field used for filtering; see §10).
-- **Bottleneck:** timer-driven polling; error backoff blocks the actor thread.
-- **Strategy thickness:** `CopyStrategy` stays thin (subscribe + policies + risk + port); **good** — preserve this.
+- **Artifact:** `Docs/Implementation/spike_C1_rtds_report.md` (filled in after running `scripts/spike_rtds_activity.py` and capturing observations).
+- **The report must capture:** connection success/failure; **subscribe envelope** actually used; confirmation of **real message arrival**; observed **message rate**; **`proxyWallet`** validation vs a known deployed **`guru_wallet_address`**; **filtered vs unfiltered** subscription behavior; **burst / replay / reconnect** notes; **stall / liveness** notes; explicit **go / no-go** for unfiltered RTDS as v1 production source.
 
 ---
 
-## 4. Event-driven target architecture
+## 4. Current workflow audit (codebase-specific)
 
-### 4.1 Source of truth for “guru traded”
+| Stage | Module / symbol |
+|-------|------------------|
+| Entry | `scripts/run_guru.py` → `build_guru_trading_node` |
+| Poll actor | `GuruMonitorActor` — `on_start`: immediate `_poll_trades_resilient`, then timer `guru_monitor_poll` |
+| HTTP | `PolymarketDataApiClient.get_user_trade_activity` → `GET …/activity`, `type=TRADE`, pagination |
+| Incremental cursor | `GuruWatermarkStore` (JSON `last_seen_ts_ms`) |
+| Dedup | `GuruDedupStore` (`source_trade_id`) |
+| Publish | `GuruMonitorActor._publish_signal` → `msgbus.publish(GURU_TRADE_TOPIC, ...)` |
+| Consume | `CopyStrategy.on_start` → `msgbus.subscribe(GURU_TRADE_TOPIC, _on_guru_trade)` |
+| Config | `RuntimeSettings.guru_poll_interval_seconds`, `guru_activity_limit`, `guru_max_activity_pages_per_poll`, paths, `data_api_base_url` |
+| Latency today | Dominated by **poll interval**; structured **receive-time vs submit-time** logging largely absent |
+| Unrelated | `guru_cache_warmup.py` — **Cache** warm from Data API, not the bus signal path |
 
-- **Target:** Streaming **activity trades** with **wallet identity** in the payload, filtered to the configured guru address.
-- **Recommendation (external, codified in Polymarket RTDS docs / `real-time-data-client`):** **RTDS** websocket — topic `activity`, type `trades` — payload includes `proxyWallet`, `transactionHash`, `asset`, `side`, `price`, `timestamp`, `slug` / `eventSlug`, etc. Subscribe with **`event_slug` / `market_slug` filters** per upstream docs; **client-side filter** `proxyWallet.lower() == guru_wallet_address.lower()` (unless docs add a user-address subscription filter).
-- **Explicit non-option:** Reusing only Nautilus **CLOB MARKET** `last_trade_price` as guru detection — **rejected** (no wallet identity in `PolymarketTrade`).
+---
 
-### 4.2 Ownership
+## 5. Target architecture (post–Phase 0.5)
 
-| Concern | Owner (target) |
-|---------|----------------|
-| WebSocket connect / reconnect loop | New **Tyrex** component (Actor or dedicated client owned by Actor) — *not* `CopyStrategy`. |
-| Subscription set (markets/slugs/tokens) | Same Actor or small **`GuruRtdsSubscriptionController`** helper under `tyrex_pm/data/` or `tyrex_pm/runtime/`. |
-| Raw message → `GuruTradeSignal` | `tyrex_pm/data/` parser module (parallel to `guru_parse.py`). |
-| Dedup / idempotency | Reuse `GuruDedupStore`; optional watermark for REST **recovery** only. |
-| Publish to followers | **Unchanged:** `msgbus.publish(GURU_TRADE_TOPIC, GuruTradeSignal)`. |
+### 5.1 Locked v1 actor shape (**validated recommendation**)
 
-### 4.3 Downstream consumers
+**v1 uses a new `GuruStreamActor`** (Nautilus `Actor`). **`GuruMonitorActor` stays intact** for fallback, shadow comparison, and recovery.
 
-- **`CopyStrategy`**, **`ConfiguredRiskPolicy`**, **`NautilusGuruExecutionPort`** / `PolymarketExecutionPolicy` — **no contract change** if `GuruTradeSignal` stays stable.
+**Code-based reasoning:** `GuruMonitorActor` couples **timer lifecycle**, **httpx polling**, **watermark advancement**, and **msgbus publish**. Folding RTDS into it would mix **async/long-lived socket** concerns with **synchronous poll + `time.sleep` backoff** in one class, complicating testing and shadow/dual-path wiring. A **separate actor** keeps poll behavior **unchanged** for operators, allows **both** actors registered during shadow (only one publishes in primary mode), and limits risky edits to a **new** file. Shared logic = **small extracted helpers** (dedup + publish + optional “normalize to `GuruTradeSignal`” glue), not a rewrite of the poller.
 
-### 4.4 Text diagram
+### 5.2 Locked default v1 subscription (**validated recommendation**)
+
+**Default v1:** RTDS topic **`activity`**, type **`trades`**, subscription **without** `market_slug` / `event_slug` filters (**empty filter** as required by spike if that is the only reliably working mode), then **client-side** keep only rows where **`proxyWallet`** matches **`guru_wallet_address`** (normalized compare per spike).
+
+**Justification:** (1) **Wallet-attributed** detection requires a payload field like `proxyWallet` — MARKET `last_trade_price` cannot do this (§3.1). (2) v1 avoids **market-universe management** and **fragile server-side filters** (§3.2–3.3). (3) Reduces “missed guru entry into new markets” vs slug-filtered subs. **Cost:** higher **ingest volume** before client filter — acceptable for C1 if spike shows rate is operable; if not, **reopen subscription strategy** after data.
+
+**RTDS filter support is untrusted** until Phase 0.5 proves otherwise; do not build v1 logic that **depends** on slug filters.
+
+### 5.3 Diagram
 
 ```
-                    ┌──────────────────────────────────────┐
-                    │ RTDS WebSocket (activity / trades)    │
-                    │ [new Tyrex client]                    │
-                    └─────────────────┬────────────────────┘
-                                      │ bytes / JSON
-                    ┌─────────────────▼────────────────────┐
-                    │ GuruIngestActor (or refactored monitor) │
-                    │ - subscribe / reconnect                 │
-                    │ - filter by guru wallet (+ optional     │
-                    │   market/event filters)                 │
-                    │ - parse → GuruTradeSignal              │
-                    │ - dedup (GuruDedupStore)                │
-                    └─────────────────┬────────────────────┘
-                                      │ msgbus.publish
-                                      │ topic: tyrex_pm.guru.GuruTradeSignal
-                    ┌─────────────────▼────────────────────┐
-                    │ CopyStrategy → entry/exit → sizing     │
-                    │ → RiskPolicy → ExecutionPort            │
-                    └────────────────────────────────────────┘
+  RTDS WS (spike-validated URL/protocol)
+           │
+           ▼
+  GuruStreamActor  ──parse/dedup──►  msgbus.publish(GURU_TRADE_TOPIC, GuruTradeSignal)
+           │                                    │
+           │                                    └──► CopyStrategy → risk → execution
+           │
+  [Primary phase: sole publisher of guru signals from stream path]
 
-Parallel (fallback only): GuruMonitorActor poll → same topic (must not double-fire; dedup by tx-based id).
+  GuruMonitorActor (timer) ──► same topic ONLY when mode = shadow publish,
+                               fallback, or recovery-only (see §9)
 ```
 
----
+### 5.4 Explicit **non-goals**
 
-## 5. Recommended minimum implementation (v1)
-
-### 5.1 In scope
-
-1. **`GuruRtdsClient` (or equivalent)** — connect, subscribe, decode, callback; wire format mirrored from Polymarket’s `real-time-data-client` (subscribe JSON, message envelope).
-2. **`GuruStreamActor`** (cleanest) **or** refactor **`GuruMonitorActor`** behind a `GuruIngestMode` enum (`stream` | `poll`) — publish **only** through shared `_ingest_signal(sig: GuruTradeSignal)` path.
-3. **Parser** `rtds_activity_trade_to_signal(mapping) -> GuruTradeSignal` — align `source_trade_id` strategy with `stable_source_trade_id` (prefer `transactionHash` when present).
-4. **Subscription v1 (minimal):**
-   - Config list: e.g. `guru_rtds_event_slugs:` or derive from recent Data API `/activity` once at startup (same as warmup tokens → resolve slugs via Gamma if needed), **or** single broad filter if ops constraint allows — **trade-off** in §10.
-5. **Instrumentation (mandatory)** — see §8.
-6. **Reconnect** — resubscribe; on gap suspicion, **one-shot** REST `/activity` from `GuruWatermarkStore.last_seen_ts_ms` to fill holes (reuse existing client).
-
-### 5.2 Out of scope (v1)
-
-- C2 sizing / conviction, C3 execution quality beyond existing stack.
-- Sub-10ms co-location optimizations.
-- Feeding guru events through Nautilus `DataEngine` as `TradeTick` (unnecessary if msgbus stays the contract).
-
-### 5.3 Fallback only
-
-- **Polling `GuruMonitorActor`** behind config flag: e.g. `guru_ingest_primary: rtds | poll`; or `rtds_shadow_mode: true` for Phase 2 comparisons.
-
-### 5.4 Day-one instrumentation
-
-- `ts_ws_message_received_ns` (or ms), `ts_signal_published_ms`, correlation id, slug/token; counters: `rtds_reconnects`, `rtds_parse_errors`, `rtds_dedup_skips`, `poll_fallback_activations`.
+Do **not** route guru detection through **Nautilus Polymarket MARKET or USER** websockets (§3.1). Do **not** change **`GuruTradeSignal`** schema or **`GURU_TRADE_TOPIC`** string for C1.
 
 ---
 
-## 6. Concrete code changes
+## 6. Operational concerns (v1 minimum — mandatory)
 
-### 6.1 Likely new files
+| Concern | Requirement |
+|---------|-------------|
+| **Stall with open socket** | Assume **no useful data** despite TCP/WS “connected”. Track **last message time** (per connection and globally for ingest health). |
+| **Heartbeat / ping** | Use **framework/library-appropriate** WS ping if available; if not, rely on **application liveness** (timeouts below). **Exact mechanism = implementation choice** validated against stack during build. |
+| **Liveness timeout** | If **no accepted messages** (or no **post-filter guru hits** when globally quiet — **tune per spike**) exceed **`T_live`**, treat as unhealthy: **force reconnect** or escalate. |
+| **Reconnect policy** | Bounded exponential backoff; **full resubscribe**; increment **`rtds_reconnect_total`**; log reason (error, liveness, parse storm). |
+| **Post-reconnect gap-fill** | **Mandatory:** run **incremental** `GET /activity` from **`GuruWatermarkStore.last_seen_ts_ms`** through existing **`PolymarketDataApiClient`**, merge with **`GuruDedupStore`**, advance watermark — same idempotency as today. |
+| **Dupes / ordering** | **Dedup before publish**; ordering **best-effort**; watermark = **progress marker**, not strict total order proof. |
+| **Fallback polling activation** | **Criteria (configurable thresholds):** e.g. **N** consecutive reconnect failures, or **liveness timeout** fired **M** times within window, or operator flag. Log **`ingest_fallback_poll_active=1`** with reason code. **Exit fallback** when stream health sustained for configured window (separate hysteresis to avoid flapping). |
 
-- `src/tyrex_pm/data/guru_rtds_client.py` — websocket session + subscribe API (or `tyrex_pm/data/rtds/` package if split).
-- `src/tyrex_pm/data/guru_rtds_parse.py` — RTDS trade payload → `GuruTradeSignal`.
-- Optionally `src/tyrex_pm/data/guru_ingest_actor.py` — if splitting from `guru_monitor.py`.
-
-### 6.2 Likely modified files
-
-- `src/tyrex_pm/data/guru_monitor.py` — extract shared dedup+publish; or deprecate primary poll timer when stream mode.
-- `src/tyrex_pm/runtime/guru_compose.py` — construct stream actor vs monitor; pass config.
-- `src/tyrex_pm/config/loaders.py` — `RuntimeSettings` fields: ingest mode, RTDS URL override, subscription lists, reconnect timeouts.
-- `config/runtime/*.yaml` — document new keys; keep poll keys for fallback.
-- `tests/integration/` — mock websocket or recorded frames for parser + dedup.
-
-### 6.3 Interfaces / protocols
-
-- **`GuruIngestPort` (optional Protocol)** — `start()`, `stop()`, internal publish only; allows swapping RTDS vs future source without touching `CopyStrategy`.
-- **Stable output:** unchanged **`GuruTradeSignal`** + **`GURU_TRADE_TOPIC`**.
-
-### 6.4 Composition / wiring
-
-- **`build_guru_trading_node`** — branch on `RuntimeSettings`: register **`GuruStreamActor`** instead of or alongside **`GuruMonitorActor`** (if alongside, **only one** primary publisher to msgbus unless shadow compare).
-
-### 6.5 Config add / deprecate
-
-| Add (proposal) | Purpose |
-|----------------|---------|
-| `guru_ingest_mode` | `rtds` \| `poll` |
-| `guru_rtds_ws_url` | default Polymarket RTDS base if not hardcoded |
-| `guru_rtds_subscriptions` | list of `{topic,type,filters}` |
-| `guru_rtds_reconnect_backoff_*` | caps |
-| `guru_poll_fallback_enabled` | allow poll when RTDS unhealthy |
-
-| Deprecate (soft) | When RTDS primary stable |
-|-------------------|--------------------------|
-| tight coupling to poll interval as **primary** latency knob | keep `guru_poll_interval_seconds` for fallback |
+**Threading / async:** Nautilus `Actor` vs asyncio `WebSocketClient` integration is an **implementation recommendation to validate** against `TradingNode` / actor runtime in-repo — **not** a fixed up-front design from this document. Spike may prototype bridge; tickets must record chosen pattern.
 
 ---
 
-## 7. Operational concerns (minimal)
+## 7. Rollout phases and fallback semantics
 
-- **Reconnect:** exponential backoff + cap; full resubscribe; increment counter.
-- **Heartbeat / liveness:** if RTDS idle, rely on TCP/WS ping or application-level timeout + reconnect (confirm with Polymarket client behavior).
-- **Backfill / recovery:** after reconnect or detect sequence gap, run **incremental** `GET /activity` from watermark → merge with **dedup**; advance watermark.
-- **Duplicates:** `GuruDedupStore` + stable id from `transactionHash` (or composite if missing).
-- **Ordering:** assume **partial order** per market; process idempotently; watermark is “max seen ts” not strict ordering proof.
-- **Idempotency:** same as today — dedup before publish.
-- **Fallback:** if RTDS fails N times or no messages for T seconds with known-active guru, **temporarily** enable poll tick (log `fallback_activation`).
-- **Startup:** establish RTDS, subscribe, then **optional** REST catch-up from watermark; **shutdown:** cancel tasks, close WS cleanly.
+| Phase | Polling (`GuruMonitorActor`) | RTDS (`GuruStreamActor`) |
+|-------|------------------------------|---------------------------|
+| **0** | **Unchanged**; primary publisher | **Off** |
+| **0.5 — Spike (prerequisite)** | Optional: unchanged production baseline | **Standalone script or branch build**: connect, subscribe, measure rate, validate payload + **`proxyWallet`**, filter behavior, burst/reconnect — **no** dependency for merging implementation plan until written spike report |
+| **1 — Shadow** | **Publishes** `GuruTradeSignal` (real behavior) | **Subscribes only**: parse + **log** “would emit”; compare **`source_trade_id` / tx** to poll path — **no** `msgbus.publish` from stream |
+| **2 — Primary** | **Disabled** except **health-failure activation** (§6) and **post-reconnect REST gap-fill** (does **not** need timer if gap-fill is on-demand after reconnect; if timer used, **slow** interval only when stream unhealthy) | **Sole publisher** of guru signals to `GURU_TRADE_TOPIC` |
+| **3 — Steady state** | **Recovery-only or off** by default (gap-fill + optional rare health poll); ops policy decides whether to keep emergency timer disabled in YAML | Primary |
+
+**At most one code path** may **publish** guru signals to the bus in primary mode (stream **or** poll, never both).
 
 ---
 
 ## 8. Observability and validation
 
-### 8.1 Metrics / logs (minimum)
+### 8.1 Technical metrics (minimum)
 
-| Metric / field | Meaning |
-|----------------|---------|
-| `guru_ws_message_ts` | Venue/payload `timestamp` from stream |
-| `guru_ws_received_ts` | Local time message received |
-| `guru_signal_emitted_ts` | Existing `guru_signal_emitted` extended |
-| `follower_submit_ts` | On `live_order_intent` / `NautilusGuruExecutionPort.submit_intent` entry |
-| `latency_detection_to_submit_ms` | `submit_ts - ws_received_ts` (and vs `ts_event_ms`) |
-| `rtds_reconnect_total` | Counter |
-| `rtds_subscription_errors_total` | Counter |
-| `ingest_fallback_poll_active` | Gauge or periodic log |
+`guru_ws_received_ts`, payload `timestamp` → `ts_event_ms`, `guru_signal_emitted_ts`, `follower_submit_ts`, `latency_detection_to_submit_ms`, reconnect/error counters, **`stall_detected`**, **`fallback_activation`** with reason, **`gap_fill_runs`** post-reconnect.
 
-### 8.2 Acceptance criteria (C1)
+### 8.2 Business-facing metric (alpha capture linkage)
 
-- **Median** `guru_ws_received_ts - ts_event_ms` (ingest lag) stable and **<<** previous median `poll_interval/2` under guru-active windows.
-- **Median** `follower_submit_ts - guru_ws_received_ts` not regressing vs polling baseline (strategy/risk unchanged).
-- **No** duplicate live submits for same `transactionHash` (dedup).
-- **Shadow period:** side-by-side correlation — RTDS detects **≥** poll for same trades (allowing API indexing delay).
+At least one:
 
----
+- **Coverage equivalence (shadow):** % of poll-detected guru trades that RTDS **also** observed within **target latency** (e.g. ≤ **L** seconds from `ts_event` or from first poll visibility — define **L** in spike/review), **or**
+- **Opportunity rate:** % of guru trades (by **`transactionHash`**) that become **internal** `GuruTradeSignal` **published** within **L** — trending **up** vs polling baseline while duplicates stay bounded.
 
-## 9. Rollout plan (tailored to repo)
+C1 validation is **not** only transport latency; it must show **fewer missed or materially delayed follow opportunities** under equivalent downstream policy.
 
-| Phase | Action |
-|-------|--------|
-| **0** | **Instrumentation only** on current path: log `ts_event_ms`, add submit-side timestamp; baseline latency histogram from logs. |
-| **1** | Implement RTDS client + parser **without** trading impact: `guru_ingest_mode=poll` + **shadow** RTDS listener logs “would emit” vs poll (`correlation_id` match rate). |
-| **2** | **RTDS primary** + `guru_poll_fallback_enabled=true` (slow poll or on health failure); dedup shared. |
-| **3** | Reduce poll to **recovery-only** (post-reconnect, explicit gap-fill) or disable in production after soak. |
-| **4** | Remove dead poll timer from default configs (keep code path for emergencies). |
+### 8.3 Acceptance (engineering + business)
+
+- Ingest and end-to-end latency metrics improve vs Phase 0 baseline; **no** duplicate **live** submits (dedup).
+- Shadow: **coverage** metric meets agreed floor before primary flip.
+- **`guru_wallet_address`** validated against real **`proxyWallet`** (startup checklist / runbook note).
 
 ---
 
-## 10. Open questions / blockers
+## 9. Concrete code changes (orientation)
 
-1. **Wire protocol:** Exact RTDS URL, subscribe envelope, and error codes — **confirm** against current Polymarket docs / TypeScript reference implementation (version drift risk).
-2. **`proxyWallet` vs `guru_wallet_address`:** Confirm strategy config address matches RTDS `proxyWallet` (case, proxy vs EOA); mismatch = silent no-fires.
-3. **Subscription breadth:** `activity/trades` filters appear **market/event-centric** in public README — multi-market gurus may need **dynamic subscription updates** or **wider filters** (volume / noise trade-off).
-4. **Legal / rate / fair-use:** RTDS connection limits and allowed fan-out — ops confirmation.
-5. **Initial dump:** Whether RTDS sends historical burst on subscribe — must **dedup** and possibly **not** treat as “new alpha” for latency metrics.
-6. **Dependency choice:** Implement WS with stdlib + `asyncio`, `websockets` lib, or Nautilus `WebSocketClient` — evaluate **message loop integration** with Nautilus `Actor` thread model (may need bridge: asyncio thread + callback to msgbus).
+### 9.1 Dedup / `source_trade_id` precedence (frozen for v1)
+
+**`source_trade_id` = `f"{transactionHash}:{asset}"`** when `transactionHash` is a non-empty string (`asset` normalized to string, stripped; empty suffix if missing) so same-tx multi-leg trades on different outcome tokens do not dedupe as one. **Otherwise** a deterministic composite fallback (timestamp + asset + side + size + price, same family as the historical composite). Construction is centralized in **`tyrex_pm.data.guru_parse.ingest_source_trade_id`** (and parsers build `GuruTradeSignal` from that). **Shadow** “would emit” logs and **poll** path must use the **same** precedence so coverage comparisons match.
+
+### 9.2 Proposed runtime config keys (C1 v1)
+
+| Key | Intent |
+|-----|--------|
+| `guru_ingest_mode` | `poll_only` \| `rtds_shadow` \| `rtds_primary` — selects ingestion path behavior |
+| `guru_ingest_phase` | Optional alias / rollout tag (`0`…`3`) for ops; may mirror `guru_ingest_mode` |
+| `guru_rtds_url` | RTDS WebSocket URL (default `wss://ws-live-data.polymarket.com`) |
+| `guru_rtds_liveness_timeout_seconds` | No **any** RTDS message before forced reconnect / fallback escalation |
+| `guru_rtds_reconnect_backoff_initial_seconds` | First backoff after disconnect/error |
+| `guru_rtds_reconnect_backoff_max_seconds` | Backoff cap |
+| `guru_poll_fallback_enabled` | Allow poll path to activate when stream declares fallback |
+| `guru_poll_fallback_interval_seconds` | Poll interval when fallback timer is active (may exceed legacy default) |
+| `guru_gap_fill_enabled` | Run REST `/activity` gap-fill after reconnect |
+| `guru_gap_fill_lookback_seconds` | Lower bound for REST window if watermark stale (TBD tuning) |
+| `guru_proxy_wallet_validation_required` | If true, fail startup unless wallet format check passes (non-empty `0x` address) |
+
+Exact defaults and validation rules live in `load_runtime_settings`; some values stay **TBD** until `spike_C1_rtds_report.md` is filled.
+
+### 9.3 Go / no-go: unfiltered RTDS as production v1 source
+
+Unfiltered **`activity/trades`** + client **`proxyWallet`** filter is **accepted** as v1 **only if** spike + shadow show:
+
+| Criterion | Direction |
+|-----------|-----------|
+| **Message rate** | Sustainable for target host (e.g. sustained msgs/sec below ops-agreed ceiling; no systematic API disconnects). |
+| **CPU / memory** | Overhead bounded; no chronic GC or thread buildup from ingest. |
+| **Stability / liveness** | Reconnect + ping policy recovers from real stalls; false-positive liveness trips within tolerable rate. |
+| **Coverage vs poll (shadow)** | RTDS sees guru trades at least as often as poll baseline for the same wallet (allowing tie-break rules in the spike report). |
+| **Payload → `GuruTradeSignal`** | Required fields mappable without silent drops; **proxy** field matches configured guru address when normalized. |
+
+If **any** criterion **fails** in spike or shadow, **do not** promote unfiltered RTDS to primary — **revisit subscription strategy** (filters, narrower topics, or alternate source) before rollout.
+
+### 9.4 File / module list
+
+| Action | Likely location |
+|--------|-----------------|
+| **New** | `GuruStreamActor`, RTDS client module(s), `*_rtds_parse.py` → `GuruTradeSignal` |
+| **Shared helpers** | Optional `guru_ingest_common.py` (dedup + publish + watermark touch) extracted from `guru_monitor.py` **only** if duplication would otherwise harm review |
+| **Unchanged contract** | `core/types.py` `GuruTradeSignal`; `GURU_TRADE_TOPIC`; `CopyStrategy` subscription |
+| **Compose** | `guru_compose.py`: register stream actor; mode flags for shadow / primary / fallback |
+| **Config** | `RuntimeSettings` + YAML |
+| **Tests** | Parser unit tests; recorded WS fixtures post-spike |
 
 ---
 
-## Recommendation
+## 10. Open questions (post–Phase 0.5)
+
+Exact thresholds (`T_live`, `N`, `M`), global message rate acceptability, field-level parser mapping from RTDS JSON to `GuruTradeSignal`, and **legal/ops** limits on unfiltered **`activity/trades`** — **close in spike report + ops sign-off**, not in this doc.
+
+---
+
+## Validated recommendations (checklist)
+
+| # | Recommendation | Status |
+|---|----------------|--------|
+| 1 | **New `GuruStreamActor` for v1**; keep **`GuruMonitorActor`** for fallback/shadow | **Adopted** (§5.1) |
+| 2 | **Default v1 source:** `activity/trades` **unfiltered** + **client-side `proxyWallet` filter** | **Adopted** (§5.2) |
+| 3 | **RTDS server-side filters untrusted** until spike-verified | **Adopted** (§3.3, §5.2) |
+| 4 | **Polling only** shadow / fallback / recovery | **Adopted** (§7) |
+| 5 | **`GuruTradeSignal` + `GURU_TRADE_TOPIC` unchanged** | **Adopted** (§5.4) |
+| 6 | **Do not** force guru detection through Nautilus Polymarket **MARKET/USER** WS | **Adopted** (§3.1, §5.4) |
+| 7 | **Startup validation** that **`guru_wallet_address`** matches **proxy-wallet field** seen on venue/stream | **Required** (§3.2, §8.3) |
+| 8 | **Liveness + post-reconnect REST gap-fill** mandatory in v1 | **Adopted** (§6) |
+| 9 | **Threading/async bridge** validated against **actual** Tyrex/Nautilus runtime in implementation | **Adopted** (§6 footer) |
+
+---
+
+## Recommendation (executive)
 
 | Question | Answer |
 |----------|--------|
-| **Is full event-driven guru ingestion feasible in the current architecture?** | **Yes**, without moving logic into `CopyStrategy`: keep **`GuruTradeSignal` + `GURU_TRADE_TOPIC`**. **No** to “only reuse existing Nautilus CLOB websockets for guru detection” — **in-repo** MARKET and USER feeds **cannot** attribute trades to the guru wallet. **Feasible path:** add **RTDS (or equivalent Polymarket-documented activity stream)** client in Tyrex + thin Actor. |
-| **Recommended path?** | New **`GuruStreamActor`** (or refactored monitor) using **RTDS `activity`/`trades`**, client-side **wallet filter**, shared **dedup** + **REST watermark backfill** on reconnect; **polling** demoted to **fallback / gap-fill**. |
-| **Minimum viable event-driven implementation?** | RTDS subscribe + parse → `GuruTradeSignal` → existing msgbus; config-driven subscriptions v1; **mandatory** latency logs; **shadow** validation phase before primary. |
-| **Should polling remain as fallback?** | **Yes**, until RTDS soak proves stability. **Role:** reconnect backfill + health watchdog path; **duration:** retire primary poll after metrics in §8.2 hold for agreed soak window (e.g. 1–2 weeks ops-defined). |
+| **Is full event-driven guru ingestion feasible?** | **Yes** at the **architecture** level: **`GuruTradeSignal` + msgbus** already decouple detection from policy. **Feasibility of RTDS as the concrete stream** is **spike-gated** (§3.3). |
+| **Recommended v1 path?** | **`GuruStreamActor`**, RTDS **`activity/trades`** default **unfiltered** + **`proxyWallet`** match, **dedup + watermark-backed REST gap-fill**, **liveness + reconnect**; **`GuruMonitorActor`** for shadow / fallback / recovery per §7. |
+| **What must be spike-validated first?** | **Phase 0.5**: connect, subscribe, **message rate**, **payload fields**, **`proxyWallet` ↔ guru config**, **filter vs empty-filter behavior**, **burst/reconnect**, **stall** observations — **prerequisite** to locking implementation estimates. |
+| **Polling role during rollout and after soak?** | **Shadow:** poll publishes; stream logs compares. **Primary:** poll **off** unless **health/fallback** (§6) or **gap-fill** after reconnect. **Steady:** **recovery-only or disabled** by default per ops. |
 
-**Opinionated summary:** Replace the **source**, not the pipeline. Nautilus Polymarket remains essential for **execution and book state**; guru **intent detection** should **not** be forced through `PolymarketDataClient` trade ticks—those lack guru identity. The smallest honest MVP is **one new streaming integration + parser** and a **compose-time** switch.
+If Phase 0.5 shows **unfiltered** ingest is **unusable** (rate, ToS, or reliability), **revisit subscription strategy** with **spike data** — not speculative optimization in C1 scope.

@@ -1,6 +1,6 @@
 # Strategy: guru + optional token filter + sizing.
 
-guru_wallet_address: "0x204f72f35326db932158cba6adff0b9a1da95e14"
+guru_wallet_address:  "0x2005d16a84ceefa912d4e380cd32e7ff827875ea" #"0x204f72f35326db932158cba6adff0b9a1da95e14"
 
 # Explicit switch: false = follow all guru tokens (risk/execution still apply).
 # true = only allowlisted_token_ids (production-style).
@@ -8,5 +8,16 @@ token_filter:
   enabled: false
   allowlisted_token_ids: []
 
+
 copy_scale: 1.0
+conviction_sizing_enabled: false
+conviction_sizing_cap: 2.0
+conviction_sizing_lookback_trades: 20
+min_follow_notional_usd: 5.0
+# --- C2 capital allocation (optional; defaults = off / pre-C2 behavior) ---
+# conviction_sizing_enabled: false
+# conviction_sizing_cap: 2.0
+# conviction_sizing_lookback_trades: 20
+# min_follow_notional_usd: 0
+
 # strategy_dedup_state_path: "var/guru_dedup_strategy.json"

@@ -13,6 +13,10 @@ class ReasonCode(StrEnum):
     NOT_ALLOWLISTED = "not_allowlisted"
     MISSING_TOKEN_ID = "missing_token_id"
     COPY_SKIP = "copy_skip"
+    #: C2 — estimated ``price_ref * qty`` below ``min_follow_notional_usd`` (policy).
+    MIN_FOLLOW_NOTIONAL = "min_follow_notional"
+    #: C2 — ``min_follow_notional_usd`` enabled but guru ``price_ref`` missing.
+    MIN_FOLLOW_NOTIONAL_PRICE_MISSING = "min_follow_notional_price_missing"
     SHADOW_ORDER_INTENT = "shadow_order_intent"
     UNSUPPORTED_SIDE = "unsupported_side"
     RISK_KILL_SWITCH = "risk_kill_switch"
@@ -22,6 +26,16 @@ class ReasonCode(StrEnum):
     RISK_MISSING_PRICE = "risk_missing_price"
     LIVE_ORDER_SUBMIT = "live_order_submit"
     LIVE_ORDER_ERROR = "live_order_error"
+    #: C3 — execution: market moved worse than ``execution_max_entry_slippage_ticks``.
+    EXEC_ENTRY_GUARD_SKIP = "exec_entry_guard_skip"
+    #: C3 — execution: cannot meet tick/size/min-notional without qty above risk-approved intent.
+    EXEC_VENUE_NORMALIZE_SKIP = "exec_venue_normalize_skip"
+    #: C3 — book required (strict) but unavailable for guard/clip.
+    EXEC_BOOK_UNAVAILABLE_SKIP = "exec_book_unavailable_skip"
+    #: C3 — canceled working limit after ``execution_limit_timeout_seconds`` (unfilled).
+    EXEC_LIMIT_TIMEOUT_CANCEL = "exec_limit_timeout_cancel"
+    #: C3 — logged when depth clip reduced size (diagnostic; submit still proceeds).
+    EXEC_DEPTH_CLIP_APPLIED = "exec_depth_clip_applied"
     #: **Step 5:** Guru token_id has no bootstrap map and dynamic path off or unavailable.
     GURU_INSTRUMENT_UNMAPPED = "guru_instrument_unmapped"
     #: **Step 5:** Bootstrap map present but instrument missing from Cache (no dynamic recovery).

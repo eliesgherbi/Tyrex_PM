@@ -16,7 +16,7 @@
 
 | File | Contents |
 |------|----------|
-| `guru_compose.py` | **`build_guru_trading_node`** — `TradingNode`, readers → risk, execution port branch, actor + strategy; **`GuruTradingAssembly.portfolio_exposure`** (B1) when framework submit; **B5** INFO log (`tyrex_pm phase_b:`). |
+| `guru_compose.py` | **`build_guru_trading_node`** — `TradingNode`, readers → risk, execution port branch, **`GuruMonitorActor`** + optional **`GuruStreamActor`** (when `guru_ingest_mode` is `rtds_shadow` or `rtds_primary`) + strategy; **`GuruTradingAssembly.portfolio_exposure`** (B1) when framework submit; **B5** INFO log (`tyrex_pm phase_b:`); **C1** `guru_rtds_wallet_identity` INFO when RTDS modes enabled. |
 | `phase_b_startup.py` | **B5:** `phase_b_startup_summary_line` — formatted active Phase B settings (informational). |
 | `portfolio_exposure.py` | **Phase B B1:** **`NautilusPortfolioExposureAggregator`** — canonical ``E_pending`` / ``E_filled_net`` / ``E_portfolio`` (§4; read-only). |
 | `state_readers.py` | **`NautilusExecutionStateReader`** (+ **B3** ``count_guru_resting_orders_open``, ``is_guru_resting_order``), **`NautilusAccountSnapshotProvider`**, **`ClobAllowanceStateProvider`**, **`NautilusPositionStateReader`**, `instrument_id_for_outcome_token`. |
@@ -29,12 +29,14 @@
 ## D. Main interactions
 
 - **config:** three settings types.
-- **data:** `GuruMonitorActor`.
+- **data:** `GuruMonitorActor`, `GuruStreamActor` (RTDS), shared dedup/watermark wiring.
 - **strategy / risk / execution:** compose + inject.
 
 ## E. Status
 
-**Operational:** Path A (Nautilus live) + optional **framework submit** + **zero-bootstrap** per runtime YAML. See **`Implementation/step_5_runtime_integration.md`**, **`phase_a_closure.md`**, **`OPERATIONS.md`** § Phase B, and **`Implementation/phase_b_operational_validation.md`** (pre–Phase C live-session checklist).
+**Operational:** Path A (Nautilus live) + optional **framework submit** + **zero-bootstrap** per runtime YAML; **C1** guru ingest modes on runtime YAML (`guru_ingest_mode`). See **`Implementation/step_5_runtime_integration.md`**, **`phase_a_closure.md`**, **`OPERATIONS.md`** § Phase B & § Guru ingestion (C1), **`Implementation/c1_shadow_run_guide.md`**, and **`Implementation/phase_b_operational_validation.md`**.
+
+**Soak reports:** `scripts/guru_shadow_report.py`, `scripts/guru_primary_report.py` (Nautilus log file from `run_guru.py`).
 
 ## F. Extension guidance
 
