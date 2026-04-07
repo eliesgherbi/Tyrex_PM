@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.reporting`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [Fact model reference](../../Implementation/reporting_fact_model.md) · [Parent plan](../../Implementation/plan_reporting_observability.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [Fact model](../../reporting_fact_model.md) · [DEVELOPER.md](DEVELOPER.md)
 
 ## A. Role
 
@@ -37,7 +37,7 @@
 
 ## E. Status
 
-**Operational** for manifest, config snapshot, facts spine, lifecycle/fill/position paths, reconciliation, guru-vs-us summary, **capital facts** (canonical balance, CLOB normalization, venue denial flags). See **`Docs/Implementation/reporting_fact_model.md`** for field-level capital reference.
+**Operational** for manifest, config snapshot, facts spine, lifecycle/fill/position paths, reconciliation, guru-vs-us summary, **capital facts** (canonical balance, CLOB normalization, venue denial flags). See [**reporting_fact_model.md**](../../reporting_fact_model.md).
 
 ## F. Extension guidance
 

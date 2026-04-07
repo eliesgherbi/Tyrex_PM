@@ -1,8 +1,11 @@
-# Tyrex_PM guru-follow: migration roadmap (Nautilus-first)
+# Tyrex_PM — archived migration roadmap (Nautilus-first)
 
-This document is the **authoritative phased plan** for evolving the guru-follow stack. It **supersedes** the earlier “execution control first” framing: richer copy/venue controls should not be built on top of **guessed** exposure and a **bypassed** Nautilus execution path, or the same logic will be implemented twice.
+> **This document is historical context, not the primary description of current behavior.**  
+> For how the system works **today**, read [**Architecture.md**](../Architecture.md), [**Implementation/current_state.md**](current_state.md), and [**OPERATIONS.md**](../OPERATIONS.md). Those use functional language aligned with the codebase.
 
-**Principle:** Maximize use of **NautilusTrader** for live trading state (cache, portfolio, orders, reconciliation). Strategy stays thin; **risk and runtime services** consume framework-visible state, not ad-hoc session counters alone.
+The text below records **original phased planning** (framework state first, then deployment-based risk, then follow/execution refinements). Many items are **already implemented**; treat the snapshot table as a **rough progress marker**, not a spec.
+
+**Principle (still valid):** Maximize **NautilusTrader** for live trading state (cache, portfolio, orders, reconciliation). Strategy stays thin; **risk** and **runtime** consume framework-visible state.
 
 ---
 
@@ -14,17 +17,15 @@ This document is the **authoritative phased plan** for evolving the guru-follow 
 
 ---
 
-## Tyrex implementation snapshot (vs Phase A–C)
+## Implementation snapshot (historical labels vs code)
 
-**Authoritative detail:** [`current_state.md`](current_state.md) · Phase A closure: [`phase_a_closure.md`](phase_a_closure.md).
+**Current detail:** [`current_state.md`](current_state.md).
 
-| Roadmap theme | Status in Tyrex (code) |
-|---------------|-------------------------|
-| **Phase A** — cache/portfolio/account useful for risk | **Largely implemented** with **partial / upstream** caveats: framework guru submit; readers; **deployment-budget** math from **leaves × limit** + **position entry notional**; optional **capital gate** (account + py-clob balance/allowance with TTL). **Order lifecycle events** are **Nautilus + adapter**. Restart: **`load_state=False`** in compose. |
-| **Phase B** — *product* risk rules on framework truth | **Shipped:** per-order / per-token / portfolio **deployment** caps, guru concurrent rests, collateral reserve, Phase B startup visibility. **Not shipped** (backlog): cooldowns, per-cycle follow caps, etc. — see **`Phase_B_planing.md`** §13. |
-| **Phase C** — C1–C3 MVPs | **Shipped** (ingest, C2 sizing, C3 execution-quality on framework path). **Deferred:** broader pacing/suppression/TWAP — see **`Phase_B_planing.md`** §13. |
-
-Copy-policy and venue-normalization work stay **out of scope** until Phase B foundations are accepted operationally.
+| Roadmap theme (historical name) | Status in code (high level) |
+|--------------------------------|-----------------------------|
+| Framework-first live state | **Largely done:** guru orders via **`NautilusGuruExecutionPort`**; readers; deployment-budget math; optional capital gate; lifecycle via Nautilus + adapter. **`load_state=False`** in compose. |
+| Product risk on framework truth | **Done:** deployment caps, concurrent guru rests, reserve, compose startup summary line. **Backlog:** e.g. cooldowns, per-cycle follow caps — not in code unless documented elsewhere. |
+| Ingest + sizing + execution quality | **Done:** RTDS + poll + gap-fill; optional conviction sizing; optional book guard / depth clip / limit timeout on live submit. **Backlog:** broader pacing / TWAP — design-only unless coded. |
 
 ---
 

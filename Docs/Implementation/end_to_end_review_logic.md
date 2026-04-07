@@ -13,7 +13,7 @@ This document is **code-grounded** to the current Tyrex implementation. Paths re
 1. **Ingest:** `GuruMonitorActor` / `GuruStreamActor` (and pipeline) produce a `GuruTradeSignal` and publish it on the Nautilus message bus under topic **`tyrex_pm.guru.GuruTradeSignal`** (`data/guru_monitor.py`: `GURU_TRADE_TOPIC`).
 2. **Strategy:** `CopyStrategy.on_start` subscribes `_on_guru_trade` to that topic (`strategy/copy_strategy.py`). Each message runs **entry** (BUY) or **exit** (SELL) branch handling.
 3. **Risk:** After strategy accepts sizing, `ConfiguredRiskPolicy.evaluate` runs (`risk/configured.py`) — per-order min/max deploy (**deny** vs **clip**/**bump**) then capital / token / portfolio / concurrent gates. On any deny, **`submit_intent` is never called.**
-4. **Execution:** `NautilusGuruExecutionPort.submit_intent` resolves instrument, optional book C3 (guard / depth), mandatory instrument quantize, then `submit_order` (`execution/nautilus_guru_exec.py`).
+4. **Execution:** `NautilusGuruExecutionPort.submit_intent` resolves instrument, optional book hooks (guard / depth / timeout from runtime YAML), mandatory instrument quantize, then `submit_order` (`execution/nautilus_guru_exec.py`).
 5. **Lifecycle & fills:** Nautilus emits `OrderEvent`s; `CopyStrategy.on_order_event` → `emit_order_event_facts` writes **`order_lifecycle`** and **`fill`** facts (`reporting/order_events.py`). Venue denials surface as **`OrderDenied`** → lifecycle **`DENIED`**.
 
 **Shadow mode difference:** compose wires `NoOpExecutionPort` for `execution_mode: shadow` (`runtime/guru_compose.py`). Risk still runs if a real policy is injected; execution does not submit to the venue.
@@ -102,7 +102,7 @@ On full strategy accept (`copy_strategy.py` ~313–321):
 
 ### 3.1 Ordered gate list (exact sequence)
 
-**Phase A — per-order deploy (`_apply_order_deploy_policies`), before caps:**
+**Pass 1 — per-order deploy (`_apply_order_deploy_policies`), before caps:**
 
 | Step | Policy | Typical outcome |
 |------|--------|------------------|
@@ -111,7 +111,7 @@ On full strategy accept (`copy_strategy.py` ~313–321):
 | Under `min_notional_usd_per_order` (BUY, min > 0) | `min_notional_policy: deny` (default) | `RISK_MIN_ORDER_NOTIONAL` — stop |
 | Under min | `min_notional_policy: cap` | Bump qty so deploy ≥ min, if compatible with max — else `RISK_ORDER_DEPLOYMENT_INFEASIBLE` |
 
-**Phase B — `_evaluate_impl`** (uses **adjusted** intent from phase A when approval continues):
+**Pass 2 — `_evaluate_impl`** (uses **adjusted** intent from pass 1 when approval continues):
 
 | # | Gate | Condition (simplified) | Deny reason code | If deny: what never runs |
 |---|------|------------------------|------------------|---------------------------|
@@ -140,7 +140,7 @@ On full strategy accept (`copy_strategy.py` ~313–321):
 1. Require account snapshot provider; refresh if stale (`max_account_snapshot_age_seconds`). Missing / not present → `RISK_ACCOUNT_UNAVAILABLE`.
 2. If any of `min_collateral_balance_usd`, `min_allowance_usd`, or `collateral_reserve_usd > 0` → require **py-clob** allowance snapshot (refresh per `max_allowance_snapshot_age_seconds`). Missing → `RISK_ALLOWANCE_UNAVAILABLE`.
 3. Optional floors: balance → `RISK_INSUFFICIENT_COLLATERAL_BALANCE`; allowance → `RISK_INSUFFICIENT_ALLOWANCE`.
-4. **Reserve (B4, BUY only):** if `collateral_reserve_usd > 0` and BUY: require `balance >= reserve + order_deploy` else `RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE`. Missing notional → ** `RISK_MISSING_PRICE` **.
+4. **Collateral reserve (BUY only):** if `collateral_reserve_usd > 0` and BUY: require `balance >= reserve + order_deploy` else `RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE`. Missing notional → **`RISK_MISSING_PRICE`**.
 
 **Business meaning:** protects **live** collateral reality before submit; can deny trades that strategy still considered “sized correctly” vs guru.
 
@@ -262,7 +262,7 @@ On success after quantize:
 
 ## 6. Key corrections to consider (prioritized for “faithful follow”)
 
-1. **Operator clarity** — **risk** USD deploy policy vs **internal** execution quantize (tick/step/min-q without bump) vs optional **C3** book features — read `execution_outcome.stage` and `risk_decision` deploy metadata.
+1. **Operator clarity** — **risk** USD deploy policy vs **internal** execution quantize (tick/step/min-q without bump) vs optional **book hooks** (`execution_*`) — read `execution_outcome.stage` and `risk_decision` deploy metadata.
 2. **Conviction defaults** — if the primary goal is **strict proportionality**, keep conviction **off** or document conviction as an **alpha overlay** on top of copy fidelity.
 3. **Cap evaluation transparency** — consider emitting which gate **would** bind next on deny (debug/ops only) to offset “first failure wins” obscurity.
 4. **Dynamic resolution failures** — guru may trade a token before follower cache has it; failures look like “we didn’t follow” though guru did—warmup / retry policy is operational debt.

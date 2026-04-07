@@ -1,4 +1,4 @@
-"""Step 5: dynamic guru instrument resolution and cache activation."""
+"""Dynamic guru instrument resolution and cache activation."""
 
 from __future__ import annotations
 

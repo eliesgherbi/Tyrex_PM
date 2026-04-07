@@ -1,4 +1,4 @@
-"""Deduplicate, publish guru signals, advance watermark — shared poll + RTDS (C1)."""
+"""Deduplicate, publish guru signals, advance watermark — shared poll + RTDS paths."""
 
 from __future__ import annotations
 

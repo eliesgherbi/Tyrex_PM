@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.execution`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)**
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)** · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
@@ -18,7 +18,7 @@ Translate approved **`OrderIntent`** into **venue actions** (or deliberate no-op
 |------|----------|
 | `port.py` | `ExecutionPort` protocol, `NoOpExecutionPort`. |
 | `c3_normalize.py`, `c3_entry_guard.py`, `c3_depth.py`, `c3_book_top.py` | Book / grid helpers — **`c3_normalize`** applies mandatory tick/step quantize (not a runtime YAML knob). |
-| `nautilus_guru_exec.py` | **`NautilusGuruExecutionPort`** — resolve instrument, optional book C3, internal quantize, **`submit_order`**; structured **`ReasonCode`** logging; limit timeout via `notify_order_event`. |
+| `nautilus_guru_exec.py` | **`NautilusGuruExecutionPort`** — resolve instrument, optional book hooks (`execution_*` YAML), internal quantize, **`submit_order`**; structured **`ReasonCode`** logging; limit timeout via `notify_order_event`. |
 | `__init__.py` | Exports. |
 
 ## D. Main interactions
@@ -28,7 +28,7 @@ Translate approved **`OrderIntent`** into **venue actions** (or deliberate no-op
 
 ## E. Status
 
-**Single live guru path:** **`NautilusGuruExecutionPort`** — guru orders align with **`Cache`** for risk pending exposure; optional book **C3** flags; always instrument grid quantize before submit.
+**Single live guru path:** **`NautilusGuruExecutionPort`** — guru orders align with **`Cache`** for risk pending exposure; optional book hooks from runtime YAML; always instrument grid quantize before submit.
 
 ## F. Extension guidance
 

@@ -1,6 +1,6 @@
 """
 Guru-follow live execution via **Nautilus framework** ``submit_order`` → ExecEngine →
-``PolymarketExecutionClient`` (**Step 4** + **Step 5** dynamic instruments).
+``PolymarketExecutionClient`` (framework submit path; optional dynamic instrument activation).
 
 **Package-source-confirmed:** same pattern as ``scripts/spike_nautilus_polymarket_exec.py`` /
 ``order_factory.limit`` + ``submit_order(..., client_id=POLYMARKET_CLIENT_ID)``.
@@ -8,7 +8,7 @@ Guru-follow live execution via **Nautilus framework** ``submit_order`` → ExecE
 ``OrderIntent`` is translated here — **not** in
 :class:`~tyrex_pm.strategy.copy_strategy.CopyStrategy` (thin strategy invariant).
 
-**C3:** Optional **book** features (entry guard, depth clip, limit timeout) behind runtime YAML flags.
+**Book-aware execution:** optional entry guard, depth clip, and limit timeout behind runtime YAML flags.
 Limit price/qty are always snapped to instrument tick/size step **without** operator “alignment” policy;
 see ``c3_normalize.quantize_limit_order_for_instrument``.
 """
@@ -214,7 +214,7 @@ class NautilusGuruExecutionPort:
         approved_qty: float,
     ) -> tuple[float, float, bool, str | None]:
         """
-        Apply optional C3 guard / depth clip (book-driven only).
+        Apply optional book guard / depth clip (book-driven only).
 
         Returns ``(qty, price, skip_submitted, skip_reason_code)`` — ``skip_reason_code`` set when
         ``skip_submitted`` is true.
@@ -336,7 +336,7 @@ class NautilusGuruExecutionPort:
         )
 
     def notify_order_event(self, event: Any) -> None:
-        """Cancel C3 limit timer when orders complete (called from ``CopyStrategy``)."""
+        """Cancel limit-timeout timer when orders complete (called from ``CopyStrategy``)."""
         if not self._runtime.execution_limit_timeout_enabled:
             return
         try:

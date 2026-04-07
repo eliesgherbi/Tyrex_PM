@@ -1,5 +1,5 @@
 """
-**Step 5 self-bootstrap:** preload ``Cache`` from recent guru Data API ``/activity`` rows.
+**Startup cache warmup:** preload ``Cache`` from recent guru Data API ``/activity`` rows.
 
 **Repo-confirmed:** uses the same ``asset`` field as guru parse
 (:func:`~tyrex_pm.data.guru_parse.trade_row_to_signal`).

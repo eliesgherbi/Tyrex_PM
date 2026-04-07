@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.strategy`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [developer_guide](../../developer_guide.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [developer_guide](../../developer_guide.md) · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## 1. General purpose of the strategy module
 
@@ -15,7 +15,7 @@
 ## 2. Current example: guru follow (`CopyStrategy`)
 
 **Class:** `src/tyrex_pm/strategy/copy_strategy.py`  
-**Config:** `CopyStrategyConfig` — `token_filter_*`, `execution_mode` (from **runtime** YAML), `copy_scale`, optional **C2** `conviction_sizing_*` (from strategy YAML via `guru_compose`). Per-order notional floors/ceilings are **risk** YAML (`min_*` / `max_*` + policies).  
+**Config:** `CopyStrategyConfig` — `token_filter_*`, `execution_mode` (from **runtime** YAML), `copy_scale`, optional `conviction_sizing_*` (from strategy YAML via `guru_compose`). Per-order notional floors/ceilings are **risk** YAML (`min_*` / `max_*` + policies).  
 **Base:** `BaseComposableStrategy` (`src/tyrex_pm/strategy/base.py`) for shared Nautilus `Strategy` behavior / startup log.
 
 ### What signals it consumes
@@ -29,7 +29,7 @@
 - **`side == "SELL"`** → `GuruMirrorExitPolicy.evaluate`.
 - Other sides → `copy_skip` with `ReasonCode.UNSUPPORTED_SIDE`.
 
-### Sizing & conviction (C2)
+### Sizing & conviction
 
 - **`build_sizing_policy` / `SizingPolicy.size`** (`signal/sizing.py`) — `copy_scale` and optional conviction weighting for **BUY entries**; `record_accepted_entry_size` updates the rolling average after a positive entry size.
 
@@ -41,9 +41,9 @@
 ### Execution
 
 - Calls **`self._execution.submit_intent(intent, mode=self._cfg.execution_mode)`**.
-- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live, **C3** when enabled).
+- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live).
 
-### Order events (C3)
+### Order events (limit timeout)
 
 - **`on_order_event`** calls **`super()`** then, if the port implements **`notify_order_event`**, forwards the event — used by **`NautilusGuruExecutionPort`** for limit-timeout cancellation timers.
 

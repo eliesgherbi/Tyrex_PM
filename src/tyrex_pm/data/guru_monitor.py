@@ -4,7 +4,7 @@ Nautilus `Actor` that polls Polymarket Data API for **recent** guru TRADE activi
 Uses ``GET /activity`` (``type=TRADE``), a persistent **timestamp watermark**, and
 optional dedup as a safety net — **not** full historical ``/trades`` pagination.
 
-**C1:** With ``rtds_primary`` and healthy RTDS, poll timer may idle (no fetch); when
+With ``rtds_primary`` and healthy RTDS, poll timer may idle (no fetch); when
 fallback is active, poll resumes as the publisher. Shared dedup/watermark with
 :class:`~tyrex_pm.data.guru_stream_actor.GuruStreamActor` when passed from compose.
 

@@ -1,24 +1,22 @@
-# Development quick reference
+# Development quick start
 
-**Full developer guide:** [developer_guide.md](developer_guide.md) · **Doc index:** [README.md](README.md) · **Architecture:** [Architecture.md](Architecture.md) · **Modules:** [modules/README.md](modules/README.md) · **Config:** [CONFIG_MODEL.md](CONFIG_MODEL.md)
+**Full contributor guide:** [developer_guide.md](developer_guide.md) · **Architecture:** [Architecture.md](Architecture.md) · **Doc index:** [README.md](README.md)
 
 ## Setup
 
 ```bash
 pip install -e ".[dev]"
-```
-
-Secrets: `.env` only — see `Docs/Runbooks/polymarket_operator_v1_00.md`.
-
-## Tests
-
-```bash
 pytest tests/ -q
-ruff check src tests scripts examples
+ruff check src tests scripts
 ```
 
-Opt-in network test: `set TYREX_NETWORK_TESTS=1` then `pytest tests/test_resolution_network.py -v` (Windows).
+## What to read first
 
-## Where details live
+1. [Architecture.md](Architecture.md) — data flow and module boundaries  
+2. [developer_guide.md](developer_guide.md) — where to add behavior, anti-patterns  
+3. [CONFIG_MODEL.md](CONFIG_MODEL.md) — YAML surfaces  
+4. [modules/README.md](modules/README.md) — links to package-level guides  
 
-Ownership boundaries, shadow vs live, extension points, and debugging order are in **[developer_guide.md](developer_guide.md)** — read that before large changes.
+## Module deep dives
+
+Mature packages have **`DEVELOPER.md`** next to **`README.md`** under `Docs/modules/<package>/` (risk, execution, runtime, reporting, data, signal, strategy).

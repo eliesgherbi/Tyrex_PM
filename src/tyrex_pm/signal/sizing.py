@@ -1,4 +1,4 @@
-"""Guru follow sizing: proportional base scale and optional conviction-weighted scale (C2)."""
+"""Guru follow sizing: proportional base scale and optional conviction-weighted scale."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class ProportionalSizingPolicy:
 
 class ConvictionProportionalSizingPolicy:
     """
-    C2: ``effective_scale = base_scale * min(trade_size / avg, cap)`` on **entry**;
+    ``effective_scale = base_scale * min(trade_size / avg, cap)`` on **entry**;
     **exit** uses ``base_scale`` only. Rolling avg uses **accepted BUY** entries with ``size_raw > 0`` only.
     Cold start: empty buffer ⇒ ratio **1.0** (``effective_scale = base_scale * min(1, cap)``).
     """
@@ -128,7 +128,7 @@ def build_sizing_policy(
     conviction_sizing_cap: float,
     conviction_sizing_lookback_trades: int,
 ) -> ProportionalSizingPolicy | ConvictionProportionalSizingPolicy:
-    """Compose-time helper: conviction off → proportional only (identical to pre-C2)."""
+    """Compose-time helper: conviction off → proportional only."""
     if not conviction_sizing_enabled:
         return ProportionalSizingPolicy(copy_scale)
     return ConvictionProportionalSizingPolicy(

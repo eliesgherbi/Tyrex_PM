@@ -1,4 +1,4 @@
-"""Step 4: Nautilus framework guru submit path."""
+"""Nautilus framework guru submit path."""
 
 from __future__ import annotations
 

@@ -113,10 +113,10 @@ def build_guru_trading_node(
     """
     Build a ``TradingNode`` with ``GuruMonitorActor`` + ``CopyStrategy`` registered.
 
-    **Phase B (B0):** :func:`~tyrex_pm.config.loaders.validate_phase_b_runtime_contract`
+    **Startup contract:** :func:`~tyrex_pm.config.loaders.validate_phase_b_runtime_contract`
     runs first so framework-truth gates and reserve cannot be enabled on unsupported paths.
 
-    **Phase B (B5):** After registering guru + strategy, logs one **INFO** line via
+    **Operator summary:** After registering guru + strategy, logs one **INFO** line via
     :func:`~tyrex_pm.runtime.phase_b_startup.phase_b_startup_summary_line` (active gate
     summary only — see ``Docs/OPERATIONS.md``).
 
@@ -127,7 +127,7 @@ def build_guru_trading_node(
     Returns a :class:`GuruTradingAssembly` with ``node.build()`` / ``node.run()`` still up to the caller.
 
     **Package-source-confirmed:** factories require L2 env vars; :func:`~tyrex_pm.runtime.polymarket_nautilus_env.ensure_polymarket_l2_env_from_pk_if_missing`
-    fills them from ``POLYMARKET_PK`` when needed (same contract as the Step 2 spike).
+    fills them from ``POLYMARKET_PK`` when needed (same contract as the historical exec spike script).
 
     **Nautilus file logging:** When ``nautilus_file_logging`` is set (``run_guru.py``),
     :class:`~nautilus_trader.common.config.LoggingConfig` receives ``log_directory``,

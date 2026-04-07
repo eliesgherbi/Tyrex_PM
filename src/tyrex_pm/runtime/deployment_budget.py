@@ -2,8 +2,7 @@
 **Deployment budget** — single accounting basis for per-order, per-token, and portfolio caps.
 
 **Pending deployment:** sum of ``leaves_quantity × limit_price`` for open Polymarket orders
-(venue-scoped), same gross resting semantics as historical Phase B pending (BUY and SELL rests
-both add positive USD).
+(venue-scoped); BUY and SELL resting orders both add positive USD to pending deployment.
 
 **Filled deployment:** per open position, ``abs(signed_qty) × avg_px_open`` (entry-style
 notional from Nautilus position state — **no** live mark / ``net_exposure`` / cache quote).

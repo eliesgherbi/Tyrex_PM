@@ -98,10 +98,10 @@ Risk checks **your** YAML: per-order **min/max deploy** (`min_notional_usd_per_o
 - **Denied** → `approved = false`, log `risk_denied` with a **reason code** (e.g. per-order deny policy, portfolio cap, insufficient collateral after reserve). **Stop before execution.**
 - **Approved** → may carry a **risk-adjusted** quantity (clipped or bumped); execution uses that intent.
 
-*Example (current risk defaults / small follower):*
+*Example (tuned risk / small follower):*
 
 - `max_notional_usd_per_order = 2`, **`max_notional_policy: deny`**, price × qty would be **$3** → **risk denies**.
-- Same with **`max_notional_policy: cap`** (default) → **risk approves** with qty scaled so deploy ≤ **$2**.
+- With **`max_notional_policy: cap`** (common default in templates) → **risk approves** with qty scaled so deploy ≤ **$2**.
 
 ---
 

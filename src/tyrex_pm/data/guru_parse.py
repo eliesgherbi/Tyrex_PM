@@ -29,7 +29,7 @@ def ingest_source_trade_id(row: Mapping[str, Any]) -> str:
     """
     Canonical dedup / correlation id for guru ingestion (poll + RTDS + gap-fill).
 
-    **C1:** When ``transactionHash`` is non-empty: ``f"{transactionHash}:{asset}"``
+    When ``transactionHash`` is non-empty: ``f"{transactionHash}:{asset}"``
     (``asset`` string stripped; empty if missing) so multi-leg same-tx trades on
     different outcome tokens do not incorrectly dedupe. Otherwise: deterministic
     composite (timestamp / asset / side / size / price). All sources use this

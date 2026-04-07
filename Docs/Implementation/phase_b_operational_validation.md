@@ -1,4 +1,4 @@
-# Phase B — operational validation (deployment budget)
+# Live operational validation (deployment-budget risk)
 
 **Purpose:** Short checklist for **live** runs after config changes, restarts, or before widening size.  
 **Canonical risk model:** [CONFIG_MODEL.md](../CONFIG_MODEL.md) § Risk — **deployment budget** only (pending + filled cost basis).  
@@ -7,7 +7,7 @@
 ## Preconditions
 
 - `execution_mode: live` with valid `.env` (see `scripts/verify_polymarket_auth.py`).
-- Phase B framework gates (finite portfolio cap, concurrency cap, or B4 reserve) are **invalid** in shadow — use live runtime YAML when testing those paths.
+- Framework-only gates (finite portfolio cap, guru concurrent rests cap, or positive collateral reserve) are **invalid** in shadow — use live runtime YAML when testing those paths.
 - Obsolete risk YAML keys (`max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, …) **must not** appear — the loader raises.
 
 ## What to verify

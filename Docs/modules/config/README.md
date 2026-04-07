@@ -16,7 +16,7 @@
 
 | File | Contents |
 |------|----------|
-| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`** (**C2** conviction fields), `RiskSettings` (per-order policies, deployment caps), `RuntimeSettings`; loaders; **C1** ingest; **C3** book `execution_*`; **Phase B B0:** `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. On-disk layout: `Docs/CONFIG_MODEL.md` § Repository layout. |
+| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`** (conviction fields), `RiskSettings` (per-order policies, deployment caps), `RuntimeSettings`; loaders; guru ingest; book `execution_*`; `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. On-disk layout: `Docs/CONFIG_MODEL.md` § Repository layout. |
 | `__init__.py` | Re-exports loaders and types. |
 
 ## D. Main interactions
@@ -33,5 +33,5 @@
 
 - Add new fields as **optional with defaults** when possible; fail loud on invalid combinations.
 - Never read private keys or API secrets in this module.
-- After changing loaders, update [CONFIG_MODEL.md](../../CONFIG_MODEL.md) (**C1** ingest, **C2** strategy, **C3** runtime execution fields) and add/adjust tests in `tests/test_split_config_loaders.py`.
-- **Phase B (B0):** framework-gate and reserve rules live in `loaders.py`; operator-facing **matrix** in [OPERATIONS.md](../../OPERATIONS.md) § Phase B.
+- After changing loaders, update [CONFIG_MODEL.md](../../CONFIG_MODEL.md) and add/adjust tests in `tests/test_split_config_loaders.py`.
+- Framework-gate and reserve rules live in `loaders.py`; operator-facing **matrix** in [OPERATIONS.md](../../OPERATIONS.md) § Deployment-budget risk. **[DEVELOPER.md](DEVELOPER.md)** for extension workflow.

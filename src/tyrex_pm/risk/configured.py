@@ -58,9 +58,9 @@ class ConfiguredRiskPolicy:
 
     **Live:** :class:`~tyrex_pm.runtime.deployment_budget.NautilusDeploymentBudget` reads
     open orders and positions from the same node’s ``Cache`` / ``Portfolio``. **Shadow:**
-    deployment budget is ``None`` (B0 forbids finite portfolio cap there).
+    deployment budget is ``None`` (finite portfolio cap is not valid in shadow; see runtime contract).
 
-    **B3** guru concurrent rests and **B4** collateral reserve unchanged.
+    Guru concurrent resting cap and collateral reserve behave as in :class:`~tyrex_pm.config.loaders.RiskSettings`.
     """
 
     def __init__(
@@ -113,7 +113,7 @@ class ConfiguredRiskPolicy:
         return self._deployment_budget
 
     def framework_open_order_count(self) -> int:
-        """Count of orders Nautilus marks open — for tests / ops; Phase B precursor."""
+        """Count of orders Nautilus marks open — for tests and operator diagnostics."""
         if self._execution_reader is None:
             return 0
         return len(self._execution_reader.list_open_orders())
@@ -625,7 +625,7 @@ class ConfiguredRiskPolicy:
         return seq
 
     def _guru_concurrent_resting_cap_eval(self, intent: OrderIntent) -> tuple[bool, str]:
-        """Phase B B3 — deny when open guru resting orders are already at ``limit`` (§5)."""
+        """Deny when open guru-origin resting orders already at ``max_concurrent_guru_resting_orders``."""
         lim = self._s.max_concurrent_guru_resting_orders
         if lim is None:
             return True, ""

@@ -28,14 +28,14 @@
 ## py-clob vs Nautilus (division of labor)
 
 - **Guru orders:** **only** through Nautilus `submit_order` on live.
-- **py-clob `ClobClient`:** still used for **collateral/allowance** snapshots (`ClobAllowanceStateProvider`), **dynamic instrument resolution** (Gamma + CLOB), and **optional C3 REST order book** when cache L2 is missing — **not** for parallel guru order submit.
+- **py-clob `ClobClient`:** still used for **collateral/allowance** snapshots (`ClobAllowanceStateProvider`), **dynamic instrument resolution** (Gamma + CLOB), and **optional REST order book** snapshots when cache L2 is missing — **not** for parallel guru order submit.
 
 ---
 
 ## Config surface (high level)
 
 - **One runtime switch:** `execution_mode: shadow | live`.
-- **Polymarket:** `polymarket_instrument_ids` (empty on live = zero-bootstrap / dynamic), `polymarket_dynamic_*`, Gamma URLs, **C3** `execution_*` knobs (live only).
+- **Polymarket:** `polymarket_instrument_ids` (empty on live = zero-bootstrap / dynamic), `polymarket_dynamic_*`, Gamma URLs, book-aware **`execution_*`** knobs (live only).
 - **See** [CONFIG_MODEL.md](../CONFIG_MODEL.md) for removed keys and validation rules.
 
 ---

@@ -1,4 +1,4 @@
-"""REST ``/activity`` gap-fill after RTDS reconnect (C1)."""
+"""REST ``/activity`` gap-fill after RTDS reconnect."""
 
 from __future__ import annotations
 

@@ -1,18 +1,22 @@
 # Module documentation index
 
-Each folder mirrors a package under `src/tyrex_pm/`. Start with the [documentation index](../README.md), [**Architecture**](../Architecture.md), [**Implementation/current_state.md**](../Implementation/current_state.md), and [**developer_guide.md**](../developer_guide.md); then open the module you are changing.
+Each folder mirrors a package under `src/tyrex_pm/`.
 
-| Module | Doc |
-|--------|-----|
-| core | [core/README.md](core/README.md) |
-| config | [config/README.md](config/README.md) |
-| data | [data/README.md](data/README.md) |
-| signal | [signal/README.md](signal/README.md) |
-| risk | [risk/README.md](risk/README.md) |
-| execution | [execution/README.md](execution/README.md) |
-| strategy | [strategy/README.md](strategy/README.md) |
-| runtime | [runtime/README.md](runtime/README.md) |
-| reporting | [reporting/README.md](reporting/README.md) |
-| indicator | [indicator/README.md](indicator/README.md) (stub) |
+**Start:** [Documentation index](../README.md) · [**Architecture**](../Architecture.md) · [**Implementation/current_state.md**](../Implementation/current_state.md) · [**developer_guide.md**](../developer_guide.md)
 
-**Also useful:** [CONFIG_MODEL.md](../CONFIG_MODEL.md), [OPERATIONS.md](../OPERATIONS.md) (C1 ingest, Phase B matrix, **C2/C3** knobs), [DEVELOPMENT.md](../DEVELOPMENT.md), [plan_C1_Time-to-Follow.md](../Implementation/plan_C1_Time-to-Follow.md), [c1_shadow_run_guide.md](../Implementation/c1_shadow_run_guide.md), [road_map.md](../Implementation/road_map.md), [documentation_reconciliation_2026-04.md](../Implementation/documentation_reconciliation_2026-04.md).
+## Package docs
+
+| Module | README | Developer guide |
+|--------|--------|-----------------|
+| core | [core/README.md](core/README.md) | — |
+| config | [config/README.md](config/README.md) | [config/DEVELOPER.md](config/DEVELOPER.md) |
+| data | [data/README.md](data/README.md) | [data/DEVELOPER.md](data/DEVELOPER.md) |
+| signal | [signal/README.md](signal/README.md) | [signal/DEVELOPER.md](signal/DEVELOPER.md) |
+| risk | [risk/README.md](risk/README.md) | [risk/DEVELOPER.md](risk/DEVELOPER.md) |
+| execution | [execution/README.md](execution/README.md) | [execution/DEVELOPER.md](execution/DEVELOPER.md) |
+| strategy | [strategy/README.md](strategy/README.md) | [strategy/DEVELOPER.md](strategy/DEVELOPER.md) |
+| runtime | [runtime/README.md](runtime/README.md) | [runtime/DEVELOPER.md](runtime/DEVELOPER.md) |
+| reporting | [reporting/README.md](reporting/README.md) | [reporting/DEVELOPER.md](reporting/DEVELOPER.md) |
+| indicator | [indicator/README.md](indicator/README.md) | — (stub) |
+
+**Also:** [CONFIG_MODEL.md](../CONFIG_MODEL.md), [OPERATIONS.md](../OPERATIONS.md), [reporting_fact_model.md](../reporting_fact_model.md), [Implementation/road_map.md](../Implementation/road_map.md) (archived roadmap).

@@ -1,4 +1,4 @@
-"""Shared rollout / fallback state for poll + RTDS guru ingestion (C1)."""
+"""Shared rollout / fallback state for poll + RTDS guru ingestion."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Step 3: Nautilus-backed state reader contracts (mocked cache / portfolio / clob)."""
+"""Nautilus-backed state reader contracts (mocked cache / portfolio / clob)."""
 
 from __future__ import annotations
 

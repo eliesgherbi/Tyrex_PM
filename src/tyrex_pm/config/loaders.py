@@ -32,7 +32,7 @@ class StrategySettings:
     token_filter: TokenFilterSettings
     copy_scale: float
     strategy_dedup_state_path: str | None = None
-    #: C2 — conviction-weighted sizing (default off = pre-C2 behavior).
+    #: Optional conviction-weighted sizing (default off = proportional ``copy_scale`` only).
     conviction_sizing_enabled: bool = False
     conviction_sizing_cap: float = 2.0
     conviction_sizing_lookback_trades: int = 20
@@ -51,9 +51,9 @@ class RiskSettings:
     **Portfolio:** ``portfolio_deploy + order_deploy`` vs ``max_portfolio_notional_usd_open`` where
     ``portfolio_deploy`` sums the same pending/filled semantics across Polymarket.
 
-    **Phase B (B0+):** Finite ``max_portfolio_notional_usd_open`` and/or
+    **Framework-truth gates:** Finite ``max_portfolio_notional_usd_open`` and/or
     ``max_concurrent_guru_resting_orders`` require **live** ``execution_mode`` (see
-    :func:`validate_phase_b_runtime_contract`). **B3–B4** = concurrent resting / collateral reserve.
+    :func:`validate_phase_b_runtime_contract`). Concurrent guru rests and collateral reserve are separate fields below.
     """
 
     #: Max **order_deploy** (USD) for a single new intent; ``price_ref × quantity``.
@@ -79,9 +79,9 @@ class RiskSettings:
     #: If true and portfolio cap is finite, deny when portfolio deployment sum cannot be computed.
     #: If false, treat unresolvable filled legs as **0** for portfolio total (underestimate).
     fail_on_unresolved_portfolio_deployment: bool = True
-    #: Max concurrent **guru-origin** resting orders (B3). ``None`` = disabled.
+    #: Max concurrent **guru-origin** resting orders. ``None`` = disabled.
     max_concurrent_guru_resting_orders: int | None = None
-    #: **B4:** USDC collateral floor held back from new **BUY** risk after Phase A mins.
+    #: USDC collateral floor held back from new **BUY** risk (after capital mins when gate is on).
     collateral_reserve_usd: float = 0.0
     #: **BUY** only: floor when ``> 0`` — ``deny`` rejects below; ``cap`` bumps qty to meet min.
     min_notional_usd_per_order: float = 0.0
@@ -111,21 +111,21 @@ class RuntimeSettings:
     polymarket_instrument_ids: tuple[str, ...]
     #: Outcome ``token_id`` → full ``InstrumentId`` string (from ``polymarket_instrument_ids``).
     polymarket_token_to_instrument: tuple[tuple[str, str], ...]
-    #: **Step 5:** Gamma+CLOB resolve for unknown guru ``token_id``; activate into ``Cache``.
+    #: Gamma+CLOB resolve for unknown guru ``token_id``; activate into ``Cache``.
     #: **Live** with non-empty ``polymarket_instrument_ids``: opt-in. **Live** with empty ids: implied.
     polymarket_dynamic_instruments: bool
-    #: **Step 5:** Max **new** dynamic cache inserts per process (0 = no new adds).
+    #: Max **new** dynamic cache inserts per process (0 = no new adds).
     polymarket_dynamic_max_activations: int
-    #: **Step 5:** Gamma HTTP API base (Get Markets with ``clob_token_ids``).
+    #: Gamma HTTP API base (Get Markets with ``clob_token_ids``).
     polymarket_gamma_base_url: str
-    #: **Step 5:** Timeout for Gamma HTTP calls (seconds).
+    #: Timeout for Gamma HTTP calls (seconds).
     polymarket_gamma_http_timeout_seconds: float
-    #: **Step 5:** Max guru outcome tokens to pre-resolve at node build from Data API ``/activity``
+    #: Max guru outcome tokens to pre-resolve at node build from Data API ``/activity``
     #: (0 = skip self-bootstrap). Only used when ``polymarket_instrument_ids`` is empty.
     polymarket_startup_token_warmup_max: int
-    #: **C1:** ``poll_only`` | ``rtds_shadow`` | ``rtds_primary``
+    #: ``poll_only`` | ``rtds_shadow`` | ``rtds_primary`` — guru market-data ingest mode.
     guru_ingest_mode: str = "poll_only"
-    #: **C1:** optional rollout label for logs (informational).
+    #: Optional rollout label for logs (informational; pairs with ``guru_ingest_mode``).
     guru_ingest_phase: str = "0"
     guru_rtds_url: str = "wss://ws-live-data.polymarket.com"
     guru_rtds_liveness_timeout_seconds: float = 120.0
@@ -138,7 +138,7 @@ class RuntimeSettings:
     guru_gap_fill_lookback_seconds: float = 60.0
     guru_proxy_wallet_validation_required: bool = False
     guru_stream_queue_drain_interval_ms: int = 50
-    #: ---- C3 execution (framework ``NautilusGuruExecutionPort`` only; default off) ----
+    #: ---- Book-aware execution (framework ``NautilusGuruExecutionPort`` only; default off) ----
     #: Order-size policy is **risk** only. Execution snaps to instrument tick/size step internally
     #: before ``submit_order`` (not operator-configurable).
     execution_entry_guard_enabled: bool = False
@@ -378,20 +378,20 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
 
 
 def phase_b_framework_truth_gates_active(risk: RiskSettings) -> bool:
-    """True if any Phase B gate is configured that requires Nautilus ``Cache`` framework truth."""
+    """True if any configured gate requires Nautilus ``Cache`` framework truth (portfolio cap, concurrent rests)."""
     portfolio_on = not math.isinf(risk.max_portfolio_notional_usd_open)
     conc_on = risk.max_concurrent_guru_resting_orders is not None
     return portfolio_on or conc_on
 
 
 def framework_phase_b_eligible(runtime: RuntimeSettings) -> bool:
-    """True iff runtime can support Phase B framework-truth gates (Phase B plan §7.1)."""
+    """True iff this runtime can run framework-truth gates (currently: ``execution_mode == live``)."""
     return runtime.execution_mode == "live"
 
 
 def validate_phase_b_runtime_contract(risk: RiskSettings, runtime: RuntimeSettings) -> None:
     """
-    Reject unsupported risk/runtime combinations for Phase B (plan §§6–7).
+    Reject unsupported risk/runtime combinations for framework-truth gates and reserve.
 
     Call from :func:`tyrex_pm.runtime.guru_compose.build_guru_trading_node` so
     invalid assemblies fail at startup with explicit :class:`ValueError`.
@@ -407,14 +407,14 @@ def validate_phase_b_runtime_contract(risk: RiskSettings, runtime: RuntimeSettin
             )
         if phase_b_framework_truth_gates_active(risk):
             raise ValueError(
-                "Phase B framework-truth gates are invalid when execution_mode is shadow "
+                "Framework-truth gates are invalid when execution_mode is shadow "
                 "(finite max_portfolio_notional_usd_open and/or "
                 "max_concurrent_guru_resting_orders set)",
             )
 
     if phase_b_framework_truth_gates_active(risk) and not framework_phase_b_eligible(runtime):
         raise ValueError(
-            "Phase B framework-truth gates require execution_mode=live "
+            "Framework-truth gates require execution_mode=live "
             f"(got mode={runtime.execution_mode!r})",
         )
 
@@ -537,7 +537,7 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     ):
         if _obsolete_exec in raw:
             raise ValueError(
-                f"{p}: obsolete key {_obsolete_exec} — removed (P2). "
+                f"{p}: obsolete key {_obsolete_exec} — removed; "
                 "Order-size policy is risk YAML only; execution quantizes to instrument tick/step internally.",
             )
     ex_guard = bool(raw.get("execution_entry_guard_enabled", False))

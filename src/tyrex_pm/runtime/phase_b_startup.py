@@ -1,8 +1,8 @@
 """
-Phase B (B5): informational startup summary for operators.
+Informational startup summary for operators (single INFO line).
 
 **No risk behavior** — format-only helper + log line from :func:`build_guru_trading_node`.
-See ``Docs/OPERATIONS.md`` § Phase B and ``Phase_B_planing.md`` §10 B5.
+See ``Docs/OPERATIONS.md`` (compose log line and gate semantics).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ def phase_b_startup_summary_line(
     deployment_budget_wired: bool,
 ) -> str:
     """
-    Single-line summary of Phase B gate **configuration** and path eligibility.
+    Single-line summary of framework-truth and deployment-budget **configuration** and path eligibility.
 
     ``deployment_budget_wired`` is true when :class:`~tyrex_pm.runtime.deployment_budget.NautilusDeploymentBudget`
     is injected (``execution_mode: live``). Framework-only gates are only valid

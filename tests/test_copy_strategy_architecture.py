@@ -24,7 +24,7 @@ def test_copy_strategy_avoids_direct_order_apis() -> None:
 
 
 def test_copy_strategy_does_not_query_nautilus_cache() -> None:
-    """Step 3: runtime state lives in injected risk readers — strategy stays thin."""
+    """Runtime state lives in injected risk readers — strategy stays thin."""
     text = TARGET.read_text(encoding="utf-8")
     for i, line in enumerate(text.splitlines(), 1):
         if line.strip().startswith("#"):

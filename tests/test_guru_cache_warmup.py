@@ -1,4 +1,4 @@
-"""Step 5: self-bootstrap cache warmup from guru activity."""
+"""Self-bootstrap cache warmup from guru activity."""
 
 from __future__ import annotations
 

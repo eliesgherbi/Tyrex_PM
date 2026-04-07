@@ -1,5 +1,5 @@
 """
-Dynamic guru ``token_id`` → Nautilus ``BinaryOption`` + ``Cache`` activation (**Step 5**).
+Dynamic guru ``token_id`` → Nautilus ``BinaryOption`` + ``Cache`` activation.
 
 **Resolution (public HTTP, Tyrex-owned orchestration):**
   #. Gamma Get Markets with ``clob_token_ids`` → ``conditionId`` (**Docs-confirmed** Gamma API;

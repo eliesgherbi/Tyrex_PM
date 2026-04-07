@@ -1,10 +1,10 @@
 # Module: `tyrex_pm.runtime`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)**
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)** · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
-**Wire** configuration and Tyrex components into a runnable **Nautilus `TradingNode`**: guru actor + copy strategy + risk + execution ports. Provide **canonical Nautilus/py-clob read boundaries** for risk (`state_readers.py`). Build **`ClobClient`** from environment when needed for **dynamic instrument resolution**, **allowance/balance** snapshots, and **optional C3** REST — **not** for parallel guru order submit (live guru orders go through **`NautilusGuruExecutionPort`** only).
+**Wire** configuration and Tyrex components into a runnable **Nautilus `TradingNode`**: guru actor + copy strategy + risk + execution ports. Provide **canonical Nautilus/py-clob read boundaries** for risk (`state_readers.py`). Build **`ClobClient`** from environment when needed for **dynamic instrument resolution**, **allowance/balance** snapshots, and **optional REST** book snapshots for execution hooks — **not** for parallel guru order submit (live guru orders go through **`NautilusGuruExecutionPort`** only).
 
 ## B. Boundaries
 
@@ -16,8 +16,8 @@
 
 | File | Contents |
 |------|----------|
-| `guru_compose.py` | **`build_guru_trading_node`** — `TradingNode`, readers → risk, execution port branch, **`GuruMonitorActor`** + optional **`GuruStreamActor`** (when `guru_ingest_mode` is `rtds_shadow` or `rtds_primary`) + strategy; **`GuruTradingAssembly.deployment_budget`** when **`execution_mode == live`**; **B5** INFO log (`tyrex_pm phase_b:`); **C1** `guru_rtds_wallet_identity` INFO when RTDS modes enabled. |
-| `phase_b_startup.py` | **B5:** `phase_b_startup_summary_line` — formatted active Phase B settings (informational). |
+| `guru_compose.py` | **`build_guru_trading_node`** — `TradingNode`, readers → risk, execution port branch, **`GuruMonitorActor`** + optional **`GuruStreamActor`** (when `guru_ingest_mode` is `rtds_shadow` or `rtds_primary`) + strategy; **`GuruTradingAssembly.deployment_budget`** when **`execution_mode == live`**; INFO log (`tyrex_pm phase_b:` compose summary); `guru_rtds_wallet_identity` INFO when RTDS modes enabled. |
+| `phase_b_startup.py` | `phase_b_startup_summary_line` — formatted gate settings for the compose summary log line. |
 | `deployment_budget.py` | **`NautilusDeploymentBudget`** — pending + filled **USD deployed** per token / portfolio (no mark-based exposure). |
 | `state_readers.py` | **`NautilusExecutionStateReader`** (+ **B3** ``count_guru_resting_orders_open``, ``is_guru_resting_order``), **`NautilusAccountSnapshotProvider`**, **`ClobAllowanceStateProvider`**, **`NautilusPositionStateReader`**, `instrument_id_for_outcome_token`. |
 | `guru_instrument_dynamic.py` | **`GuruInstrumentDynamicController`** — Gamma + CLOB + `Cache` activation. |
@@ -34,7 +34,7 @@
 
 ## E. Status
 
-**Operational:** **`execution_mode: live`** = Polymarket Nautilus data/exec + **`NautilusGuruExecutionPort`** + **zero-bootstrap** per runtime YAML; **C1** guru ingest modes on runtime YAML (`guru_ingest_mode`). See **`Implementation/step_5_runtime_integration.md`**, **`phase_a_closure.md`**, **`OPERATIONS.md`** § Phase B & § Guru ingestion (C1), **`Implementation/c1_shadow_run_guide.md`**, and **`Implementation/phase_b_operational_validation.md`**.
+**Operational:** **`execution_mode: live`** = Polymarket Nautilus data/exec + **`NautilusGuruExecutionPort`** + **zero-bootstrap** per runtime YAML; guru ingest modes on runtime YAML (`guru_ingest_mode`). See **`OPERATIONS.md`** § Deployment-budget risk & § Guru ingestion, **`Implementation/phase_b_operational_validation.md`**, and **[DEVELOPER.md](DEVELOPER.md)**.
 
 **Soak reports:** `scripts/guru_shadow_report.py`, `scripts/guru_primary_report.py` (Nautilus log file from `run_guru.py`).
 

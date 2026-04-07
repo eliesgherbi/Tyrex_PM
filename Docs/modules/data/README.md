@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.data`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
@@ -40,11 +40,11 @@
 
 ## E. Status
 
-**Production-shaped:** **C1** — RTDS primary ingestion + shared dedup/watermark + poll fallback/shadow + gap-fill; incremental poll unchanged for those paths.
+**Production-shaped:** RTDS primary ingestion + shared dedup/watermark + poll fallback/shadow + gap-fill; incremental poll unchanged for those paths.
 
 **Tooling:** resolution / allowlist / book check; `get_trades` remains for non-follower tools; **`scripts/spike_rtds_activity.py`** for wallet validation.
 
-**Docs:** [OPERATIONS.md](../../OPERATIONS.md) § Guru ingestion (C1), [Implementation/plan_C1_Time-to-Follow.md](../../Implementation/plan_C1_Time-to-Follow.md).
+**Docs:** [OPERATIONS.md](../../OPERATIONS.md) § Guru ingestion · [DEVELOPER.md](DEVELOPER.md)
 
 ## F. Extension guidance
 

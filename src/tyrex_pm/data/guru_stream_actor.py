@@ -1,5 +1,5 @@
 """
-C1 RTDS ``activity`` / ``trades`` → ``GuruTradeSignal`` (Nautilus ``Actor``).
+RTDS WebSocket ``activity`` / ``trades`` → ``GuruTradeSignal`` (Nautilus ``Actor``).
 
 Drains a background WebSocket thread via a timer; optional shadow-only logging.
 """

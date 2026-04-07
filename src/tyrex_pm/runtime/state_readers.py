@@ -12,7 +12,7 @@ Do **not** import this module from ``CopyStrategy``; inject readers into risk/ru
 **Deployment budget:** :mod:`tyrex_pm.runtime.deployment_budget` uses this module’s execution reader
 + token resolution for pending/filled USD caps.
 
-**Phase B B3:** Guru-origin resting-order identity for concurrency caps — use
+**Guru concurrent rests:** Guru-origin resting-order identity for ``max_concurrent_guru_resting_orders`` — use
 :func:`is_guru_resting_order` only (risk must not embed raw heuristics). **Active stack (Tyrex
 1.x + Nautilus orders):** **Tier 1** — ``Order.tags`` with prefix ``guru_cid=`` (set in
 ``nautilus_guru_exec`` when the adapter preserves tags on cached orders). **Tier 3 fallback**
@@ -96,11 +96,11 @@ class OrderSnapshot:
     leaves_quantity: str
     price: str | None
     instrument_id: str
-    #: Nautilus ``Order.tags`` (``list[str]``) when surfaced on cache orders; **B3 tier 1**.
+    #: Nautilus ``Order.tags`` (``list[str]``) when surfaced on cache orders; primary guru id tier.
     tags: tuple[str, ...] = ()
 
 
-# --- Phase B B3 guru-order identity (``Phase_B_planing.md`` §5) ----------------
+# --- Guru-order identity (tags + ClientOrderId fallback) -------------------------
 
 # Must match :func:`tyrex_pm.execution.nautilus_guru_exec._guru_tag`.
 GURU_ORDER_TAG_PREFIX = "guru_cid="
@@ -265,7 +265,7 @@ class NautilusExecutionStateReader:
 
     def count_guru_resting_orders_open(self, *, venue: Venue | None = None) -> int:
         """
-        Count **guru-origin** open orders (Phase B B3) using :func:`is_guru_resting_order`.
+        Count **guru-origin** open orders (concurrent-rest cap) using :func:`is_guru_resting_order`.
 
         When ``venue`` is ``None``, counts across all venues returned by ``Cache.orders_open``.
         For Polymarket-only caps, pass ``venue=POLYMARKET_VENUE_ID``.
@@ -293,7 +293,7 @@ class NautilusAccountSnapshotProvider:
         self._venue = venue or POLYMARKET_VENUE_ID
 
     def snapshot(self) -> AccountSnapshot:
-        """Timestamped snapshot; capture time always recorded (Phase A)."""
+        """Timestamped snapshot; capture time always recorded."""
         ts = _utc_now()
         acc = self._portfolio.account(self._venue)
         if acc is None:
@@ -331,7 +331,7 @@ class ClobAllowanceStateProvider:
     fixed point** (see :mod:`tyrex_pm.runtime.clob_collateral_money`). Risk / reporting normalize
     there — this provider still stores the raw dict on :class:`AllowanceSnapshot`.
 
-    Nautilus does not replace this API in Step 3 — centralize here instead of scattering
+    Nautilus does not replace this HTTP surface for collateral — centralize here instead of scattering
     ``get_balance_allowance`` in strategy or ad-hoc execution code (**Repo-confirmed** pattern:
     ``scripts/verify_polymarket_auth.py``).
     """

@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.signal`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
@@ -8,7 +8,7 @@
 
 ## B. Boundaries
 
-**Belongs here:** Entry policy, exit policy, sizing policies (proportional + optional **C2** conviction-weighted), token filter spec, structured `SignalDecision` + reason codes.
+**Belongs here:** Entry policy, exit policy, sizing policies (proportional + optional conviction-weighted), token filter spec, structured `SignalDecision` + reason codes.
 
 **Does not belong here:** Subscribing to the message bus, calling risk, calling execution, or reading YAML.
 
@@ -18,7 +18,7 @@
 |------|----------|
 | `token_filter_spec.py` | **`TokenFilterSpec`** — explicit `enabled` + `allowlisted`; `allows_token()` used by entry/exit. |
 | `entry.py` | `GuruFollowEntryPolicy`, **`GuruMirrorExitPolicy`**, `SignalDecision`. |
-| `sizing.py` | **`SizingPolicy`** protocol + **`build_sizing_policy`**: proportional `copy_scale`, optional **C2** conviction weighting + rolling average + `record_accepted_entry_size` / diagnostics. |
+| `sizing.py` | **`SizingPolicy`** protocol + **`build_sizing_policy`**: proportional `copy_scale`, optional conviction weighting + rolling average + `record_accepted_entry_size` / diagnostics. |
 | `__init__.py` | Public exports for policies. |
 
 ## D. Main interactions
@@ -27,7 +27,7 @@
 
 ## E. Status
 
-**Implemented** for v1 copy follow + mirror exit + proportional sizing + **C2** conviction (optional). See **`Implementation/plan_C2_Capital-Allocation.md`**.
+**Implemented** for v1 copy follow + mirror exit + proportional sizing + optional conviction. See **[DEVELOPER.md](DEVELOPER.md)**.
 
 ## F. Extension guidance
 
