@@ -11,7 +11,6 @@ from typing import Any
 from tyrex_pm.config.loaders import RiskSettings, RuntimeSettings, StrategySettings
 
 _MATERIAL_ENV_KEYS = (
-    "TYREX_MIN_BUY_NOTIONAL_USD",
     "POLYMARKET_SIGNATURE_TYPE",
     "POLYMARKET_FUNDER",
 )

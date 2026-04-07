@@ -16,14 +16,14 @@
 
 | File | Contents |
 |------|----------|
-| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`** (incl. **C2** conviction + min-notional fields), `RiskSettings`, `RuntimeSettings`; loaders; **C1** runtime keys (`guru_ingest_mode`, RTDS URLs/timeouts, gap-fill, fallback); **C3** `execution_*` runtime keys; **Phase B B0:** `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. |
+| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`** (**C2** conviction fields), `RiskSettings` (per-order policies, deployment caps), `RuntimeSettings`; loaders; **C1** ingest; **C3** book `execution_*`; **Phase B B0:** `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. On-disk layout: `Docs/CONFIG_MODEL.md` § Repository layout. |
 | `__init__.py` | Re-exports loaders and types. |
 
 ## D. Main interactions
 
 - **runtime:** `guru_compose.build_guru_trading_node` accepts the three settings objects.
 - **risk:** `ConfiguredRiskPolicy` takes `RiskSettings`.
-- **execution:** `PolymarketExecutionPolicy` / **`NautilusGuruExecutionPort`** use `RuntimeSettings` as composed; secrets from env via `clob_factory` where applicable.
+- **execution:** **`NautilusGuruExecutionPort`** uses `RuntimeSettings` as composed; secrets from env via `clob_factory` where applicable.
 
 ## E. Status
 

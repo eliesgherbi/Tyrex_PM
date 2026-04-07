@@ -66,7 +66,8 @@ def apply_fact_file_heuristics(
     lifecycle_n = types.get("order_lifecycle", 0)
     fill_n = types.get("fill", 0)
 
-    if execution_path == "framework_submit":
+    # ``framework_submit`` was the pre-unification live manifest value; accept for old runs.
+    if execution_path in ("live", "framework_submit"):
         if outcome_submits > 0 and lifecycle_n == 0 and fill_n == 0:
             dq.order_events_sparse = True
 

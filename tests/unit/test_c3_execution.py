@@ -14,7 +14,7 @@ from tyrex_pm.core.types import OrderIntent
 from tyrex_pm.execution.c3_book_top import BookTop
 from tyrex_pm.execution.c3_depth import clip_to_book_depth
 from tyrex_pm.execution.c3_entry_guard import check_entry_guard
-from tyrex_pm.execution.c3_normalize import floor_quantity_to_step, normalize_venue_submit
+from tyrex_pm.execution.c3_normalize import floor_quantity_to_step, quantize_limit_order_for_instrument
 from tyrex_pm.execution.nautilus_guru_exec import NautilusGuruExecutionPort
 
 
@@ -26,32 +26,54 @@ def _inst(*, tick=0.01, step=1.0, min_q=1.0):
     return m
 
 
-def test_normalize_floor_buy_not_increase_above_approved() -> None:
+def test_quantize_floors_qty_and_price_buy() -> None:
     inst = _inst()
-    r = normalize_venue_submit(
+    r = quantize_limit_order_for_instrument(
         inst,
         side="BUY",
         price=0.505,
         quantity=10.7,
-        approved_quantity=10.7,
-        min_buy_notional_usd=0.0,
     )
     assert r.ok
     assert r.quantity <= 10.7 + 1e-9
     assert r.price <= 0.505 + 1e-9
 
 
-def test_normalize_rejects_when_min_notional_requires_bump() -> None:
+def test_quantize_allows_small_buy_notional_when_above_min_q() -> None:
+    """Business min notional is risk; quantize only checks instrument grid."""
     inst = _inst(step=1.0, min_q=1.0)
-    r = normalize_venue_submit(
+    r = quantize_limit_order_for_instrument(
+        inst,
+        side="BUY",
+        price=0.01,
+        quantity=3.0,
+    )
+    assert r.ok
+    assert abs(r.price * r.quantity - 0.03) < 1e-6
+
+
+def test_quantize_fails_below_min_quantity_without_bump() -> None:
+    inst = _inst(step=1.0, min_q=5.0)
+    r = quantize_limit_order_for_instrument(
         inst,
         side="BUY",
         price=0.5,
-        quantity=3.0,
-        approved_quantity=3.0,
-        min_buy_notional_usd=100.0,
+        quantity=4.0,
     )
     assert not r.ok
+    assert "min_quantity" in r.detail
+
+
+def test_quantize_ok_when_min_q_satisfied_after_floor() -> None:
+    inst = _inst(step=1.0, min_q=5.0)
+    r = quantize_limit_order_for_instrument(
+        inst,
+        side="BUY",
+        price=0.5,
+        quantity=7.2,
+    )
+    assert r.ok
+    assert r.quantity == 7.0
 
 
 def test_entry_guard_buy_blocks_when_ask_far() -> None:
@@ -97,15 +119,26 @@ def test_load_runtime_c3_defaults(tmp_path: Path) -> None:
             {
                 "trader_id": "X-Y",
                 "execution_mode": "shadow",
-                "polymarket_nautilus_live": False,
-                "polymarket_framework_submit": False,
             }
         ),
         encoding="utf-8",
     )
     r = load_runtime_settings(p)
-    assert not r.execution_venue_normalize_enabled
     assert not r.execution_limit_timeout_enabled
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    ("venue_size_alignment_mode", "execution_venue_normalize_enabled"),
+)
+def test_load_runtime_rejects_obsolete_venue_alignment_keys(tmp_path: Path, bad_key: str) -> None:
+    raw = {"trader_id": "X-Y", "execution_mode": "shadow", bad_key: "align"}
+    if bad_key == "execution_venue_normalize_enabled":
+        raw[bad_key] = True
+    p = tmp_path / "r.yaml"
+    p.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="obsolete key"):
+        load_runtime_settings(p)
 
 
 def test_load_runtime_guard_requires_ticks(tmp_path: Path) -> None:
@@ -115,8 +148,6 @@ def test_load_runtime_guard_requires_ticks(tmp_path: Path) -> None:
             {
                 "trader_id": "X-Y",
                 "execution_mode": "shadow",
-                "polymarket_nautilus_live": False,
-                "polymarket_framework_submit": False,
                 "execution_entry_guard_enabled": True,
                 "execution_max_entry_slippage_ticks": 0,
             }
@@ -127,7 +158,7 @@ def test_load_runtime_guard_requires_ticks(tmp_path: Path) -> None:
         load_runtime_settings(p)
 
 
-def test_nautilus_port_c3_off_preserves_submit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nautilus_port_c3_off_preserves_submit() -> None:
     from tyrex_pm.config.loaders import RuntimeSettings
 
     rt = RuntimeSettings(
@@ -143,9 +174,7 @@ def test_nautilus_port_c3_off_preserves_submit(monkeypatch: pytest.MonkeyPatch) 
         logging_level="INFO",
         clob_host="https://clob.polymarket.com",
         chain_id=137,
-        polymarket_nautilus_live=True,
         polymarket_instrument_ids=("0xabc-12345.POLYMARKET",),
-        polymarket_framework_submit=True,
         polymarket_token_to_instrument=(("12345", "0xabc-12345.POLYMARKET"),),
         polymarket_dynamic_instruments=False,
         polymarket_dynamic_max_activations=32,
@@ -153,8 +182,6 @@ def test_nautilus_port_c3_off_preserves_submit(monkeypatch: pytest.MonkeyPatch) 
         polymarket_gamma_http_timeout_seconds=15.0,
         polymarket_startup_token_warmup_max=32,
     )
-    monkeypatch.delenv("TYREX_MIN_BUY_NOTIONAL_USD", raising=False)
-
     inst_stub = MagicMock()
     inst_stub.make_qty.return_value = MagicMock()
     inst_stub.make_price.return_value = MagicMock()
@@ -210,9 +237,7 @@ def test_nautilus_port_strict_skips_without_book() -> None:
         logging_level="INFO",
         clob_host="https://clob.polymarket.com",
         chain_id=137,
-        polymarket_nautilus_live=True,
         polymarket_instrument_ids=("0xabc-12345.POLYMARKET",),
-        polymarket_framework_submit=True,
         polymarket_token_to_instrument=(("12345", instr_s),),
         polymarket_dynamic_instruments=False,
         polymarket_dynamic_max_activations=32,
@@ -226,6 +251,9 @@ def test_nautilus_port_strict_skips_without_book() -> None:
     inst_stub = MagicMock()
     inst_stub.make_qty.return_value = MagicMock()
     inst_stub.make_price.return_value = MagicMock()
+    inst_stub.price_increment = 0.01
+    inst_stub.size_increment = 1.0
+    inst_stub.min_quantity = 1.0
 
     strategy = MagicMock()
     strategy.cache = MagicMock()

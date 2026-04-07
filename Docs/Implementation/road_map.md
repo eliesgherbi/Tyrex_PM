@@ -8,7 +8,7 @@ This document is the **authoritative phased plan** for evolving the guru-follow 
 
 ## Historical baseline (reference — pre–Path A default)
 
-This was the **starting picture** for the roadmap: a node could be built with **empty** `data_clients` / `exec_clients`, live guru orders via **`PolymarketExecutionPolicy`** + py-clob, and **`_token_open`** as session exposure. That mode **still exists** when `polymarket_nautilus_live` is false or `polymarket_framework_submit` is false.
+**Historical baseline (removed from the operator platform):** a node with **empty** `data_clients` / `exec_clients` and live guru orders via **py-clob HTTP** beside Nautilus. **Current Tyrex:** **`execution_mode: live`** always registers Polymarket Nautilus clients and submits via **`NautilusGuruExecutionPort`**; obsolete YAML keys `polymarket_nautilus_live` / `polymarket_framework_submit` are rejected at load.
 
 **Operational note:** Many current guru deployments instead enable **Path A** (Polymarket Nautilus data + exec + optional framework submit). Do **not** assume an empty kernel when reading older notes—see **`current_state.md`** for the live matrix.
 
@@ -20,9 +20,9 @@ This was the **starting picture** for the roadmap: a node could be built with **
 
 | Roadmap theme | Status in Tyrex (code) |
 |---------------|-------------------------|
-| **Phase A** — cache/portfolio/account useful for risk | **Largely implemented** with **partial / upstream** caveats: framework guru submit; readers; pending uses **remaining (leaves) quantity**; **filled** exposure via `Portfolio.net_exposure` in risk; optional **capital gate** (account present + py-clob balance/allowance with TTL). **Order lifecycle events** are **not** handled inside Tyrex—they are **Nautilus + adapter**. Restart: **`load_state=False`** in compose. |
-| **Phase B** — richer pending/position/balance *product* rules | **Not** delivered as a full milestone: token cap already combines **filled + pending + new** on the framework path; **reserves, concurrent follow caps, cooldowns** remain **roadmap Phase B**, intentionally after Phase A truth. |
-| **Phase C** — follow policy knobs, venue normalize | **Deferred** (pacing, suppression, burst rules). |
+| **Phase A** — cache/portfolio/account useful for risk | **Largely implemented** with **partial / upstream** caveats: framework guru submit; readers; **deployment-budget** math from **leaves × limit** + **position entry notional**; optional **capital gate** (account + py-clob balance/allowance with TTL). **Order lifecycle events** are **Nautilus + adapter**. Restart: **`load_state=False`** in compose. |
+| **Phase B** — *product* risk rules on framework truth | **Shipped:** per-order / per-token / portfolio **deployment** caps, guru concurrent rests, collateral reserve, Phase B startup visibility. **Not shipped** (backlog): cooldowns, per-cycle follow caps, etc. — see **`Phase_B_planing.md`** §13. |
+| **Phase C** — C1–C3 MVPs | **Shipped** (ingest, C2 sizing, C3 execution-quality on framework path). **Deferred:** broader pacing/suppression/TWAP — see **`Phase_B_planing.md`** §13. |
 
 Copy-policy and venue-normalization work stay **out of scope** until Phase B foundations are accepted operationally.
 
@@ -78,7 +78,7 @@ Copy-policy and venue-normalization work stay **out of scope** until Phase B fou
 
 **Intent:** Evolve **risk** from:
 
-- `price_ref * quantity` estimates and **`_token_open`** session memory
+- `price_ref * quantity` estimates and **session-only** exposure heuristics (historical pre–Path A)
 
 to:
 
@@ -161,7 +161,7 @@ Revisit whether guru activity stays **poll-based** or moves toward **lower-laten
 
 ## What not to do next (explicit)
 
-- **Do not** implement large sets of **copy policy knobs** (per-cycle caps, cooldowns, pending suppression) **solely** on top of today’s `_token_open` + synchronous submit path.
+- **Do not** implement large sets of **copy policy knobs** (per-cycle caps, cooldowns, pending suppression) **without** measured **Cache / Portfolio** exposure from the **Nautilus** path.
 - **Do not** push **allowance/balance/order book-keeping** into **`CopyStrategy`**; keep it in **runtime + risk** with framework-backed sources.
 - **Do not** treat **venue rejects** as the primary risk layer once Phase A is done—**pre-trade** gates should use local truth + fail-closed staleness.
 

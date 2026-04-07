@@ -28,7 +28,6 @@ from tyrex_pm.runtime.state_readers import (
 
 def _risk(**over) -> RiskSettings:
     r = RiskSettings(
-        max_order_quantity=100.0,
         max_notional_usd_per_order=1000.0,
         max_token_notional_usd_open=float("inf"),
         kill_switch=False,
@@ -84,7 +83,7 @@ def test_below_limit_allows() -> None:
         _risk(max_concurrent_guru_resting_orders=3),
         execution_reader=reader,
     )
-    ok, rc = pol.evaluate(_intent())
+    ok, rc, _ = pol.evaluate(_intent())
     assert ok is True
     assert rc == "approved"
     reader.count_guru_resting_orders_open.assert_called_once_with(venue=POLYMARKET_VENUE_ID)
@@ -101,7 +100,7 @@ def test_at_limit_denies(
         execution_reader=reader,
     )
     it = _intent()
-    ok, rc = pol.evaluate(it)
+    ok, rc, _ = pol.evaluate(it)
     assert ok is False
     assert rc == ReasonCode.RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT
     joined = " ".join(r.message for r in caplog.records)
@@ -119,7 +118,7 @@ def test_above_limit_denies() -> None:
         _risk(max_concurrent_guru_resting_orders=2),
         execution_reader=reader,
     )
-    ok, rc = pol.evaluate(_intent())
+    ok, rc, _ = pol.evaluate(_intent())
     assert ok is False
     assert rc == ReasonCode.RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT
 
@@ -129,7 +128,7 @@ def test_no_execution_reader_denies_when_cap_on() -> None:
         _risk(max_concurrent_guru_resting_orders=1),
         execution_reader=None,
     )
-    ok, rc = pol.evaluate(_intent())
+    ok, rc, _ = pol.evaluate(_intent())
     assert ok is False
     assert rc == ReasonCode.RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT
 
@@ -153,21 +152,18 @@ def test_is_guru_tx_wrong_length_not_matched() -> None:
     assert is_guru_resting_order(_snap(client_order_id="TXabc", tags=())) is False
 
 
-def test_b0_rejects_concurrency_without_framework(tmp_path: Path) -> None:
-    risk = _risk(max_concurrent_guru_resting_orders=2)
+def test_b0_obsolete_framework_submit_yaml_rejected(tmp_path: Path) -> None:
     rt_path = tmp_path / "rt.yaml"
     rt_path.write_text(
         yaml.safe_dump(
             {
                 "trader_id": "T-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
-                "polymarket_framework_submit": False,
+                "polymarket_framework_submit": True,
                 "polymarket_instrument_ids": ["0xabc-1.POLYMARKET"],
             },
         ),
         encoding="utf-8",
     )
-    runtime = load_runtime_settings(rt_path)
-    with pytest.raises(ValueError, match="Phase B framework-truth gates require"):
-        validate_phase_b_runtime_contract(risk, runtime)
+    with pytest.raises(ValueError, match="obsolete"):
+        load_runtime_settings(rt_path)

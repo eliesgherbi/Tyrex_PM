@@ -1,4 +1,4 @@
-"""C2 capital allocation: conviction sizing + min-follow-notional gate."""
+"""C2 capital allocation: conviction sizing (strategy YAML)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import yaml
 
 from tyrex_pm.config.loaders import load_strategy_settings
 from tyrex_pm.core.types import GuruTradeSignal
-from tyrex_pm.signal.follow_worthiness import FollowWorthinessGate
 from tyrex_pm.signal.sizing import (
     ConvictionProportionalSizingPolicy,
     ProportionalSizingPolicy,
@@ -68,7 +67,6 @@ def test_conviction_second_trade_uses_avg() -> None:
         lookback_trades=10,
     )
     c.record_accepted_entry_size(_sig(size=10.0))
-    # avg=10, trade=20 -> ratio min(2,2)=2, eff=2, qty=40
     assert c.size(_sig(size=20.0), branch="entry") == 40.0
     m = c.entry_metrics_after_last_size()
     assert m["rolling_avg_guru_size"] == 10.0
@@ -82,7 +80,6 @@ def test_conviction_cap_binds() -> None:
         lookback_trades=10,
     )
     c.record_accepted_entry_size(_sig(size=10.0))
-    # trade 30 vs avg 10 -> raw ratio 3, capped 1.2 -> eff=1.2, qty=36
     assert c.size(_sig(size=30.0), branch="entry") == pytest.approx(36.0)
 
 
@@ -110,25 +107,6 @@ def test_conviction_buffer_only_records_positive_raw() -> None:
     assert c.size(_sig(size=5.0), branch="entry") == 5.0
 
 
-def test_follow_worthiness_disabled_always_ok() -> None:
-    g = FollowWorthinessGate(0.0)
-    assert g.evaluate(price_ref=None, qty=99.0) == (True, None)
-
-
-def test_follow_worthiness_missing_price() -> None:
-    g = FollowWorthinessGate(1.0)
-    ok, rc = g.evaluate(price_ref=None, qty=10.0)
-    assert ok is False
-    assert rc == "min_follow_notional_price_missing"
-
-
-def test_follow_worthiness_below_min() -> None:
-    g = FollowWorthinessGate(10.0)
-    ok, rc = g.evaluate(price_ref=0.1, qty=50.0)
-    assert ok is False
-    assert rc == "min_follow_notional"
-
-
 def test_load_strategy_c2_defaults(tmp_path: Path) -> None:
     p = tmp_path / "s.yaml"
     p.write_text(
@@ -143,7 +121,6 @@ def test_load_strategy_c2_defaults(tmp_path: Path) -> None:
     )
     s = load_strategy_settings(p)
     assert not s.conviction_sizing_enabled
-    assert s.min_follow_notional_usd == 0.0
 
 
 def test_load_strategy_c2_conviction_validation(tmp_path: Path) -> None:
@@ -159,13 +136,13 @@ def test_load_strategy_c2_conviction_validation(tmp_path: Path) -> None:
         load_strategy_settings(p)
 
 
-def test_load_strategy_rejects_negative_min_follow(tmp_path: Path) -> None:
+def test_load_strategy_rejects_obsolete_min_follow(tmp_path: Path) -> None:
     p = tmp_path / "s.yaml"
     doc = {
         "guru_wallet_address": "0x1234567890123456789012345678901234567890",
         "token_filter": {"enabled": False, "allowlisted_token_ids": []},
-        "min_follow_notional_usd": -1,
+        "min_follow_notional_usd": 1.0,
     }
     p.write_text(yaml.safe_dump(doc), encoding="utf-8")
-    with pytest.raises(ValueError, match="min_follow"):
+    with pytest.raises(ValueError, match="obsolete key min_follow_notional_usd"):
         load_strategy_settings(p)

@@ -7,21 +7,22 @@ Copy strategy: guru bus → signal policies → sizing → execution port (shado
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from nautilus_trader.model.events.order import OrderEvent
+from nautilus_trader.model.events.order import OrderDenied, OrderEvent
 from nautilus_trader.trading.config import StrategyConfig
 
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import GuruTradeSignal, OrderIntent
 from tyrex_pm.data.guru_monitor import GURU_TRADE_TOPIC
 from tyrex_pm.execution.port import ExecutionPort, NoOpExecutionPort
-from tyrex_pm.risk.policy import RiskPolicy, ShadowAllPassRisk
-from tyrex_pm.signal.entry import GuruFollowEntryPolicy, GuruMirrorExitPolicy, SignalDecision
-from tyrex_pm.signal.follow_worthiness import FollowWorthinessGate
-from tyrex_pm.signal.sizing import SizingPolicy, build_sizing_policy
 from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
 from tyrex_pm.reporting.order_events import emit_order_event_facts
+from tyrex_pm.reporting.position_sample import emit_position_snapshot
+from tyrex_pm.risk.policy import RiskPolicy, ShadowAllPassRisk
+from tyrex_pm.signal.entry import GuruFollowEntryPolicy, GuruMirrorExitPolicy, SignalDecision
+from tyrex_pm.signal.sizing import SizingPolicy, build_sizing_policy
 from tyrex_pm.signal.token_filter_spec import TokenFilterSpec
 from tyrex_pm.strategy.base import BaseComposableStrategy
 
@@ -41,7 +42,6 @@ class CopyStrategyConfig(StrategyConfig, frozen=True, kw_only=True):
     conviction_sizing_enabled: bool = False
     conviction_sizing_cap: float = 2.0
     conviction_sizing_lookback_trades: int = 20
-    min_follow_notional_usd: float = 0.0
 
 
 class CopyStrategy(BaseComposableStrategy):
@@ -64,12 +64,12 @@ class CopyStrategy(BaseComposableStrategy):
             conviction_sizing_lookback_trades=config.conviction_sizing_lookback_trades,
             conviction_sizing_cap=config.conviction_sizing_cap,
         )
-        self._worthiness = FollowWorthinessGate(config.min_follow_notional_usd)
         self._risk: RiskPolicy = ShadowAllPassRisk()
         self._execution: ExecutionPort = NoOpExecutionPort()
         self._reporting_emit: FactEmitFn | None = None
         self._order_registry: OrderCorrelationRegistry | None = None
         self._reporting_run_id: str | None = None
+        self._position_reader: Any | None = None
 
     def set_risk_policy(self, policy: RiskPolicy) -> None:
         """Inject real `RiskPolicy` in v1.06+ tests or runtime."""
@@ -87,6 +87,10 @@ class CopyStrategy(BaseComposableStrategy):
 
     def set_reporting_run_id(self, run_id: str | None) -> None:
         self._reporting_run_id = run_id
+
+    def set_position_reporting_reader(self, reader: Any | None) -> None:
+        """Optional position reader for ``position`` facts (framework path)."""
+        self._position_reader = reader
 
     def on_start(self) -> None:
         super().on_start()
@@ -108,6 +112,54 @@ class CopyStrategy(BaseComposableStrategy):
                 correlation_lookup=_lookup,
                 emit=re,
             )
+            if isinstance(event, OrderDenied):
+                coid_ev = getattr(event, "client_order_id", None)
+                coid_s = str(
+                    getattr(coid_ev, "value", coid_ev) if coid_ev is not None else "",
+                )
+                corr_d = reg.correlation_for(coid_s) if reg is not None and coid_s else None
+                emit_cap = getattr(self._risk, "emit_capital_observation", None)
+                if callable(emit_cap):
+                    emit_cap("order_denied", correlation_id=corr_d, intent=None)
+        pr = self._position_reader
+        if re is not None and pr is not None and rid is not None:
+            ins = getattr(event, "instrument_id", None)
+            inst_s = str(ins) if ins is not None else ""
+            if inst_s:
+                coid_ev = getattr(event, "client_order_id", None)
+                coid_s = str(coid_ev) if coid_ev is not None else ""
+                corr = reg.correlation_for(coid_s) if reg is not None and coid_s else None
+                token_id: str | None = None
+                mark: float | None = None
+                try:
+                    from nautilus_trader.adapters.polymarket.common.symbol import (
+                        get_polymarket_token_id,
+                    )
+                    from nautilus_trader.model.enums import PriceType
+                    from nautilus_trader.model.identifiers import InstrumentId
+
+                    iid = InstrumentId.from_str(inst_s)
+                    token_id = str(get_polymarket_token_id(iid))
+                    px = self.cache.price(iid, price_type=PriceType.LAST)
+                    if px is not None:
+                        if hasattr(px, "as_double"):
+                            mark = float(px.as_double())
+                        elif hasattr(px, "as_decimal"):
+                            mark = float(px.as_decimal())  # type: ignore[arg-type]
+                        else:
+                            mark = float(px)
+                except Exception:  # noqa: BLE001
+                    token_id = None
+                    mark = None
+                emit_position_snapshot(
+                    pr,
+                    instrument_id_str=inst_s,
+                    token_id=token_id,
+                    mark_price=mark,
+                    correlation_id=corr,
+                    trigger="order_event",
+                    emit=re,
+                )
         notify = getattr(self._execution, "notify_order_event", None)
         if callable(notify):
             notify(event)
@@ -191,32 +243,6 @@ class CopyStrategy(BaseComposableStrategy):
             return
 
         m = self._sizing.entry_metrics_after_last_size()
-        ok_w, w_rc = self._worthiness.evaluate(price_ref=sig.price_raw, qty=qty)
-        if not ok_w:
-            est = (
-                float(sig.price_raw) * float(qty)
-                if sig.price_raw is not None
-                else None
-            )
-            self.log.info(
-                "event=copy_skip component=copy_strategy "
-                f"correlation_id={sig.source_trade_id} reason_code={w_rc} "
-                f"base_scale={m.get('base_scale')} effective_scale={m.get('effective_scale')} "
-                f"guru_size_raw={m.get('guru_size_raw')} "
-                f"rolling_avg_guru_size={m.get('rolling_avg_guru_size')} "
-                f"estimated_notional_usd={est}"
-            )
-            if em is not None:
-                em(
-                    "strategy_decision",
-                    {
-                        "correlation_id": cid,
-                        "branch": kind,
-                        "decision": "skip",
-                        "reason_code": str(w_rc),
-                    },
-                )
-            return
 
         if kind == "entry" and self._cfg.conviction_sizing_enabled:
             self.log.debug(
@@ -264,8 +290,8 @@ class CopyStrategy(BaseComposableStrategy):
             reason_code=str(decision.reason_code),
             price_ref=sig.price_raw,
         )
-        approved, risk_rc = self._risk.evaluate(intent)
-        if not approved:
+        approved, risk_rc, intent_risk = self._risk.evaluate(intent)
+        if not approved or intent_risk is None:
             self.log.info(
                 "event=copy_skip "
                 "component=copy_strategy "
@@ -282,14 +308,18 @@ class CopyStrategy(BaseComposableStrategy):
                     "correlation_id": cid,
                     "token_id": str(sig.token_id),
                     "side": sig.side,
-                    "quantity": float(qty),
+                    "quantity": float(intent_risk.quantity),
+                    "quantity_strategy_sized": float(qty),
                     "signal_kind": kind,
                     "price_ref": sig.price_raw,
                     "ts_risk_approved_ms": ts_risk_ms,
                 },
             )
 
-        self._execution.submit_intent(intent, mode=self._cfg.execution_mode)
+        self._execution.submit_intent(intent_risk, mode=self._cfg.execution_mode)
+        emit_cap = getattr(self._risk, "emit_capital_observation", None)
+        if em is not None and callable(emit_cap):
+            emit_cap("submit", correlation_id=cid, intent=intent_risk)
         ts_submit_ms = int(time.time() * 1000)
         det_to_submit = ts_submit_ms - sig.ts_event_ms
         sig_to_submit = ts_submit_ms - ts_signal_ms
@@ -304,7 +334,7 @@ class CopyStrategy(BaseComposableStrategy):
                 "component=copy_strategy "
                 f"correlation_id={sig.source_trade_id} "
                 f"reason_code={ReasonCode.SHADOW_ORDER_INTENT} "
-                f"signal_kind={kind} side={sig.side} qty={qty}"
+                f"signal_kind={kind} side={sig.side} qty={intent_risk.quantity} strategy_qty={qty}"
                 f"{latency_kv}"
             )
         else:
@@ -312,6 +342,6 @@ class CopyStrategy(BaseComposableStrategy):
                 "event=live_order_intent "
                 "component=copy_strategy "
                 f"correlation_id={sig.source_trade_id} "
-                f"signal_kind={kind} side={sig.side} qty={qty}"
+                f"signal_kind={kind} side={sig.side} qty={intent_risk.quantity} strategy_qty={qty}"
                 f"{latency_kv}"
             )

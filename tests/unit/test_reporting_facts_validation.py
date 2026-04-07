@@ -87,15 +87,22 @@ def _p(ft: str) -> dict:
     if ft == "fill":
         return {"client_order_id": "TX" + "a" * 26, "fill_event_id": "f1"}
     if ft == "account_snapshot":
-        return {"account_snapshot_seq": 1, "account_present": True}
-    if ft == "exposure":
+        return {
+            "account_snapshot_seq": 1,
+            "account_present": True,
+            "snapshot_trigger": "risk_eval",
+            "captured_at_utc": _ISO,
+        }
+    if ft == "deployment_budget":
         return {
             "correlation_id": "c1",
-            "b1_complete": True,
-            "pending_notional_usd": 0.0,
-            "filled_net_exposure_usd": 0.0,
-            "e_portfolio": 0.0,
-            "b1_error": "",
+            "order_deploy_usd": 1.0,
+            "token_pending_usd": 0.0,
+            "token_filled_usd": 0.0,
+            "token_deploy_usd": 0.0,
+            "portfolio_pending_usd": 0.0,
+            "portfolio_filled_usd": 0.0,
+            "portfolio_deploy_usd": 0.0,
         }
     if ft == "position":
         return {"instrument_id": "i1"}
@@ -104,7 +111,7 @@ def _p(ft: str) -> dict:
     if ft == "report_pipeline_health":
         return {"flush_ok": True}
     if ft == "reconciliation":
-        return {"check_type": "cache_qty", "outcome": "match"}
+        return {"check_type": "submit_vs_cache", "outcome": "match"}
     raise AssertionError(f"add golden payload for {ft}")
 
 

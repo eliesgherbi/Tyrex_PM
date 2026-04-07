@@ -16,13 +16,13 @@ def phase_b_startup_summary_line(
     risk: RiskSettings,
     runtime: RuntimeSettings,
     *,
-    b1_aggregator_wired: bool,
+    deployment_budget_wired: bool,
 ) -> str:
     """
     Single-line summary of Phase B gate **configuration** and path eligibility.
 
-    ``b1_aggregator_wired`` is true when ``NautilusPortfolioExposureAggregator`` is injected
-    (live + Nautilus live + framework submit). Framework-only gates (B2/B3) are only valid
+    ``deployment_budget_wired`` is true when :class:`~tyrex_pm.runtime.deployment_budget.NautilusDeploymentBudget`
+    is injected (``execution_mode: live``). Framework-only gates are only valid
     when :func:`~tyrex_pm.config.loaders.framework_phase_b_eligible` is true — this string
     is emitted **after** :func:`~tyrex_pm.config.loaders.validate_phase_b_runtime_contract`.
     """
@@ -33,9 +33,10 @@ def phase_b_startup_summary_line(
     conc_s = "off" if conc is None else str(conc)
     return (
         "tyrex_pm phase_b: "
-        f"framework_truth_eligible={fw} b1_aggregator_wired={b1_aggregator_wired} "
-        f"portfolio_notional_cap_usd={cap_s} max_concurrent_guru_resting_orders={conc_s} "
-        f"fail_on_unresolved_portfolio_exposure={risk.fail_on_unresolved_portfolio_exposure} "
+        f"framework_truth_eligible={fw} deployment_budget_wired={deployment_budget_wired} "
+        f"portfolio_deployment_cap_usd={cap_s} max_concurrent_guru_resting_orders={conc_s} "
+        f"fail_on_unresolved_portfolio_deployment={risk.fail_on_unresolved_portfolio_deployment} "
+        f"fail_on_unresolved_token_deployment={risk.fail_on_unresolved_token_deployment} "
         f"collateral_reserve_usd={risk.collateral_reserve_usd} "
         f"capital_gate_enabled={risk.capital_gate_enabled}"
     )

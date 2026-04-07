@@ -9,7 +9,9 @@ Usage:
     --live-conf config/runtime/live_polymarket.yaml
 
 Tyrex and Nautilus logs are written to separate files under ``logs/<mode>/`` by default
-(see ``--log-name``). Console output is unchanged.
+(see ``--log-name``). When structured reporting is on, the run folder defaults to a random
+UUID under ``var/reporting/runs/``; use ``--reporting-run-id`` for a readable name.
+Console output is unchanged.
 
 Secrets: repo root ``.env`` (or ``TYREX_PM_DOTENV``), never YAML.
 """
@@ -60,6 +62,16 @@ def main() -> int:
             "Only letters, digits, and ._- between segments; max 100 chars."
         ),
     )
+    parser.add_argument(
+        "--reporting-run-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "When runtime reporting_enabled is true, folder name under reporting_base_dir "
+            "(e.g. var/reporting/runs/current-validation-01). Same character rules as --log-name. "
+            "Default: random UUID. Reusing the same id overwrites that run directory."
+        ),
+    )
     args = parser.parse_args()
 
     _merge_dotenv()
@@ -83,6 +95,7 @@ def main() -> int:
         attach_tyrex_pm_file_handler,
         ensure_guru_run_log_dir,
         resolve_guru_source_log_path,
+        sanitize_log_name,
     )
 
     try:
@@ -103,6 +116,13 @@ def main() -> int:
     except ValueError as exc:
         print(f"ERROR: invalid --log-name: {exc}", file=sys.stderr)
         return 1
+    reporting_run_id: str | None = None
+    if args.reporting_run_id is not None:
+        try:
+            reporting_run_id = sanitize_log_name(args.reporting_run_id)
+        except ValueError as exc:
+            print(f"ERROR: invalid --reporting-run-id: {exc}", file=sys.stderr)
+            return 1
     ensure_guru_run_log_dir(nautilus_log_path)
     attach_tyrex_pm_file_handler(tyrex_log_path)
     announce_guru_run_log_destinations(tyrex_log_path, nautilus_log_path)
@@ -118,14 +138,9 @@ def main() -> int:
         f"trader_id={runtime.trader_id} | guru={strat.guru_wallet_address[:10]}… | "
         f"{tf_desc}"
     )
-    if (
-        runtime.execution_mode == "live"
-        and runtime.polymarket_nautilus_live
-        and runtime.polymarket_framework_submit
-    ):
+    if runtime.execution_mode == "live":
         print(
-            "phase_a: pending=Cache open orders (leaves qty); "
-            f"filled cap=Portfolio net_exposure; capital_gate="
+            "phase_a: deployment budget: pending=leaves×limit; filled=|qty|×avg_px_open; capital_gate="
             f"{'on' if risk.capital_gate_enabled else 'off'}. "
             "Restart: Nautilus load/save state disabled — "
             "see Docs/Implementation/phase_a_closure.md",
@@ -133,7 +148,7 @@ def main() -> int:
 
     run_context = None
     if runtime.reporting_enabled:
-        run_id = str(uuid.uuid4())
+        run_id = reporting_run_id if reporting_run_id is not None else str(uuid.uuid4())
         run_context = create_run_context(
             repo_root=REPO_ROOT,
             run_id=run_id,

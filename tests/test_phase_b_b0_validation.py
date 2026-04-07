@@ -1,4 +1,4 @@
-"""Phase B milestone B0: Phase B contract fields + validation (no B1–B4 risk math)."""
+"""Phase B milestone B0: compose/runtime contract validation (no live deployment-budget exercise here)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from tyrex_pm.runtime.guru_compose import build_guru_trading_node
 
 def _risk_yaml(tmp_path: Path, **risk: object) -> Path:
     base = {
-        "max_order_quantity": 10.0,
         "max_notional_usd_per_order": 5.0,
         "max_token_notional_usd_open": 20.0,
     }
@@ -46,7 +45,7 @@ def test_load_risk_defaults_phase_b_fields(tmp_path: Path) -> None:
     p = _risk_yaml(tmp_path)
     r = load_risk_settings(p)
     assert r.max_portfolio_notional_usd_open == float("inf")
-    assert r.fail_on_unresolved_portfolio_exposure is True
+    assert r.fail_on_unresolved_portfolio_deployment is True
     assert r.max_concurrent_guru_resting_orders is None
     assert r.collateral_reserve_usd == 0.0
     assert not phase_b_framework_truth_gates_active(r)
@@ -113,20 +112,15 @@ def test_validate_rejects_shadow_plus_reserve(tmp_path: Path) -> None:
         validate_phase_b_runtime_contract(r, run)
 
 
-def test_validate_rejects_live_legacy_without_framework_submit(tmp_path: Path) -> None:
-    r = load_risk_settings(_risk_yaml(tmp_path, max_portfolio_notional_usd_open=500.0))
-    run = load_runtime_settings(
-        _runtime_yaml(
-            tmp_path,
-            execution_mode="live",
-            polymarket_nautilus_live=True,
-            polymarket_framework_submit=False,
-            polymarket_instrument_ids=["0xabc-1.POLYMARKET"],
-        ),
+def test_load_rejects_obsolete_polymarket_framework_submit_key(tmp_path: Path) -> None:
+    p = _runtime_yaml(
+        tmp_path,
+        execution_mode="live",
+        polymarket_framework_submit=False,
+        polymarket_instrument_ids=["0xabc-1.POLYMARKET"],
     )
-    assert not framework_phase_b_eligible(run)
-    with pytest.raises(ValueError, match="Phase B framework-truth gates require"):
-        validate_phase_b_runtime_contract(r, run)
+    with pytest.raises(ValueError, match="obsolete"):
+        load_runtime_settings(p)
 
 
 def test_validate_accepts_live_framework_triple(tmp_path: Path) -> None:
@@ -141,8 +135,6 @@ def test_validate_accepts_live_framework_triple(tmp_path: Path) -> None:
         _runtime_yaml(
             tmp_path,
             execution_mode="live",
-            polymarket_nautilus_live=True,
-            polymarket_framework_submit=True,
             polymarket_instrument_ids=["0xabc-1.POLYMARKET"],
         ),
     )

@@ -1,23 +1,37 @@
-# Strategy: guru + optional token filter + sizing.
+# =============================================================================
+# Strategy — guru target, token universe, copy sizing, optional conviction (C2).
+# Flat keys except token_filter (required nested block per loader).
+# =============================================================================
 
-guru_wallet_address:  "0x2005d16a84ceefa912d4e380cd32e7ff827875ea" #"0x204f72f35326db932158cba6adff0b9a1da95e14"
+# -----------------------------------------------------------------------------
+# Guru target
+# -----------------------------------------------------------------------------
+# Wallet to follow: 0x + 40 hex. Replace with your guru.
+guru_wallet_address: "0x1234567890123456789012345678901234567890"
 
-# Explicit switch: false = follow all guru tokens (risk/execution still apply).
-# true = only allowlisted_token_ids (production-style).
+# -----------------------------------------------------------------------------
+# Token universe (filter)
+# -----------------------------------------------------------------------------
+# enabled=true → only allowlisted_token_ids (non-empty). false → all guru tokens.
 token_filter:
   enabled: false
   allowlisted_token_ids: []
 
-
+# -----------------------------------------------------------------------------
+# Copy sizing
+# -----------------------------------------------------------------------------
+# Multiplier on guru-sized quantity before risk (1.0 = match guru at strategy layer).
 copy_scale: 1.0
+
+# -----------------------------------------------------------------------------
+# Conviction overlay (C2) — optional entry sizing vs rolling guru size
+# -----------------------------------------------------------------------------
 conviction_sizing_enabled: false
 conviction_sizing_cap: 2.0
 conviction_sizing_lookback_trades: 20
-min_follow_notional_usd: 5.0
-# --- C2 capital allocation (optional; defaults = off / pre-C2 behavior) ---
-# conviction_sizing_enabled: false
-# conviction_sizing_cap: 2.0
-# conviction_sizing_lookback_trades: 20
-# min_follow_notional_usd: 0
 
-# strategy_dedup_state_path: "var/guru_dedup_strategy.json"
+# -----------------------------------------------------------------------------
+# Strategy-local paths
+# -----------------------------------------------------------------------------
+# null → use runtime guru_dedup_state_path for strategy dedup
+strategy_dedup_state_path: null

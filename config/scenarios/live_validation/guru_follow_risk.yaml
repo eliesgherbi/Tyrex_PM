@@ -1,0 +1,41 @@
+# =============================================================================
+# Risk — live validation smoke (small per-order cap; pair with live runtime only)
+# For B2/B3 / deployment-budget drills use config/risk/guru_follow_risk_phaseb_b2_b3_validate.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Kill switch & price truth
+# -----------------------------------------------------------------------------
+kill_switch: false
+fail_on_missing_price_for_notional: true
+
+# -----------------------------------------------------------------------------
+# Per-order deployment
+# -----------------------------------------------------------------------------
+max_notional_usd_per_order: 2.0
+max_notional_policy: cap
+min_notional_usd_per_order: 0.0
+min_notional_policy: deny
+
+# -----------------------------------------------------------------------------
+# Per-token deployment
+# -----------------------------------------------------------------------------
+max_token_notional_usd_open: null
+
+# -----------------------------------------------------------------------------
+# Portfolio & resting limits (off — same as shadow validation bundle)
+# -----------------------------------------------------------------------------
+max_portfolio_notional_usd_open: null
+fail_on_unresolved_portfolio_deployment: true
+max_concurrent_guru_resting_orders: null
+fail_on_unresolved_token_deployment: false
+
+# -----------------------------------------------------------------------------
+# Capital gate & reserve
+# -----------------------------------------------------------------------------
+capital_gate_enabled: false
+max_account_snapshot_age_seconds: 30.0
+max_allowance_snapshot_age_seconds: 120.0
+min_collateral_balance_usd: null
+min_allowance_usd: null
+collateral_reserve_usd: 0.0

@@ -21,4 +21,4 @@ Opt-in network test: `set TYREX_NETWORK_TESTS=1` then `pytest tests/test_resolut
 
 ## Where details live
 
-Ownership boundaries, path matrix (framework vs legacy), extension points, and debugging order are in **[developer_guide.md](developer_guide.md)** — read that before large changes.
+Ownership boundaries, shadow vs live, extension points, and debugging order are in **[developer_guide.md](developer_guide.md)** — read that before large changes.

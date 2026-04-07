@@ -19,8 +19,10 @@
 
 | Document | Purpose |
 |----------|---------|
-| [Architecture.md](Architecture.md) | End-to-end flow, module map, shadow vs live, framework vs legacy submit, **Phase A/B/C at a glance**. |
+| [Architecture.md](Architecture.md) | End-to-end flow, module map, shadow vs live (Nautilus guru submit), **Phase A/B/C at a glance**. |
 | [Implementation/current_state.md](Implementation/current_state.md) | **Maintainer hub:** what the codebase does today, live path matrix, failure classes, restart reality. |
+| [Implementation/reporting_fact_model.md](Implementation/reporting_fact_model.md) | **Reporting v1:** `facts.jsonl` types, capital / canonical balance semantics, CLI `summarize`, joins. |
+| [Implementation/plan_reporting_observability.md](Implementation/plan_reporting_observability.md) | Full observability roadmap (rolling gaps vs §C vs fact model). |
 
 ---
 
@@ -32,7 +34,8 @@
 | [CONFIG_MODEL.md](CONFIG_MODEL.md) | Authoritative YAML field reference. |
 | [log_validation_playbook.md](log_validation_playbook.md) | Validation procedure; use with `OPERATIONS.md`. |
 | [logging_system_guide.md](logging_system_guide.md) | Where logs go (`run_tyrex.log` vs `run_nautilus.log`). |
-| [Runbooks/](Runbooks/) | Polymarket operator / order lifecycle notes (when linked from OPERATIONS). |
+| [Runbooks/deployment_budget_live_validation.md](Runbooks/deployment_budget_live_validation.md) | **CLI:** one fresh live run + logs + `summarize` to verify deployment-budget risk. Uses `config/scenarios/shadow_validation/` (strategy) + `config/risk/*_phaseb_*` + `config/runtime/live_polymarket.yaml` or `config/scenarios/live_validation/`. |
+| [Runbooks/](Runbooks/) | Other Polymarket / order lifecycle notes. |
 
 **Scripts (repo root):** `scripts/run_guru.py` (main entry), `scripts/guru_shadow_report.py`, `scripts/guru_primary_report.py`, `scripts/spike_rtds_activity.py`.
 
@@ -69,7 +72,7 @@
 | [Implementation/road_map.md](Implementation/road_map.md) | Strategic phases; cross-check **`current_state.md`** for what shipped. |
 | [Implementation/Phase_B_planing.md](Implementation/Phase_B_planing.md) | Phase B normative design (B0–B5); **implemented**; §13 “Phase C” lists extra ideas beyond C1–C3 MVP. |
 | [Implementation/phase_a_closure.md](Implementation/phase_a_closure.md) | Phase A / framework-truth checklist. |
-| [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) | Pre–narrow-live B validation. |
+| [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) | Phase B live checklist (deployment budget); links full CLI runbook. |
 
 **Migrations & audits (do not treat as current runbooks unless updated):**
 
@@ -85,7 +88,8 @@ When you change **behavior** or **config loaders**, update in order:
 2. `CONFIG_MODEL.md` (if YAML surface changed)  
 3. `OPERATIONS.md` (if operators need new grep lines or procedures)  
 4. `Architecture.md` or `Implementation/current_state.md` (if the mental model shifts)  
-5. Relevant `modules/*/README.md`
+5. `Implementation/reporting_fact_model.md` + `modules/reporting/README.md` (if fact types or capital semantics change)  
+6. Relevant other `modules/*/README.md`
 
 ---
 

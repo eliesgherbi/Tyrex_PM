@@ -42,7 +42,7 @@ def test_compose_shadow_builds(tmp_path: Path) -> None:
     assert assembly.account_snapshots is not None
     assert assembly.allowance is None  # shadow: no CLOB allowance reads
     assert assembly.position_state is None
-    assert assembly.portfolio_exposure is None
+    assert assembly.deployment_budget is None
     assembly.node.build()
     assert assembly.node.is_built
 
@@ -62,7 +62,6 @@ def test_compose_live_nautilus_registers_factories(
             {
                 "trader_id": "TEST-NAU-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
                 "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
             }
         ),
@@ -95,7 +94,7 @@ def test_compose_live_nautilus_registers_factories(
 
 
 @patch("tyrex_pm.runtime.guru_compose.TradingNode")
-def test_compose_live_framework_submit_wires_nautilus_port(
+def test_compose_live_wires_nautilus_port(
     mock_node_cls: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -108,8 +107,6 @@ def test_compose_live_framework_submit_wires_nautilus_port(
             {
                 "trader_id": "TEST-FW-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
-                "polymarket_framework_submit": True,
                 "polymarket_instrument_ids": ["0xabc-99999.POLYMARKET"],
             }
         ),
@@ -129,13 +126,12 @@ def test_compose_live_framework_submit_wires_nautilus_port(
         ):
             assembly = build_guru_trading_node(strat, risk, runtime)
 
-    assert assembly.risk_policy.token_open_authoritative_for_pending is False
     assert assembly.position_state is not None
     add_strategy_calls = mock_instance.trader.add_strategy.call_args_list
     assert add_strategy_calls
     copy_strat = add_strategy_calls[0].args[0]
     assert isinstance(copy_strat._execution, NautilusGuruExecutionPort)
-    assert assembly.portfolio_exposure is not None
+    assert assembly.deployment_budget is not None
 
 
 @patch("tyrex_pm.runtime.guru_compose.TradingNode")
@@ -152,8 +148,6 @@ def test_compose_zero_bootstrap_wires_dynamic_and_warmup(
             {
                 "trader_id": "TEST-ZB-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
-                "polymarket_framework_submit": True,
                 "polymarket_instrument_ids": [],
                 "polymarket_startup_token_warmup_max": 3,
             }
@@ -205,7 +199,6 @@ def test_compose_nautilus_file_logging_config_when_requested(
             {
                 "trader_id": "TEST-LOG-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
                 "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
                 "logging_level": "INFO",
             }

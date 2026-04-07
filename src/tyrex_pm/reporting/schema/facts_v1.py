@@ -71,15 +71,24 @@ _REQUIRED: dict[str, frozenset[str]] = {
     "order_correlation_map": frozenset({"correlation_id", "client_order_id", "instrument_id"}),
     "order_lifecycle": frozenset({"client_order_id", "status"}),
     "fill": frozenset({"client_order_id", "fill_event_id"}),
-    "account_snapshot": frozenset({"account_snapshot_seq", "account_present"}),
-    "exposure": frozenset(
+    "account_snapshot": frozenset(
+        {
+            "account_snapshot_seq",
+            "account_present",
+            "snapshot_trigger",
+            "captured_at_utc",
+        },
+    ),
+    "deployment_budget": frozenset(
         {
             "correlation_id",
-            "b1_complete",
-            "pending_notional_usd",
-            "filled_net_exposure_usd",
-            "e_portfolio",
-            "b1_error",
+            "order_deploy_usd",
+            "token_pending_usd",
+            "token_filled_usd",
+            "token_deploy_usd",
+            "portfolio_pending_usd",
+            "portfolio_filled_usd",
+            "portfolio_deploy_usd",
         },
     ),
     "position": frozenset({"instrument_id"}),

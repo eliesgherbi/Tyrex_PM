@@ -40,7 +40,7 @@ This is **not** a trading-logic spec; risk and execution semantics live in code 
 | Source | What it is for | Typical content |
 |--------|----------------|----------------|
 | **`print`** | **Operator context** at the boundary of the process: import/dotenv failures, **human-readable** boot summary (mode, trader id, guru prefix, token filter), optional Phase A one-liner, interrupt message | Not grep-structured; high value for “what run is this?” when watching a terminal |
-| **`tyrex_pm.*`** | **Tyrex-owned semantics and diagnostics**: compose/Phase B summary, **risk policy** operational lines (`event=tyrex_risk_ops`, gate reasons), cache warmup, data API backoff warnings, legacy py-clob execution policy messages | Single `Logger` tree; good for **policy decisions** and **B1/B2/B3/B4**-adjacent explanations that are not emitted through Nautilus `self.log` |
+| **`tyrex_pm.*`** | **Tyrex-owned semantics and diagnostics**: compose/Phase B summary, **risk policy** operational lines (`event=tyrex_risk_ops`, gate reasons), cache warmup, data API backoff warnings | Single `Logger` tree; good for **policy decisions** and **Phase B (B2–B4)** explanations that are not emitted through Nautilus `self.log` |
 | **Nautilus-native** | **Runtime workflow** inside the trading node: guru poll ticks, **`event=guru_signal_emitted`**, **`event=copy_skip`**, **`reason_code=` / `risk_detail=`**, `live_order_intent`, engine READY noise, adapter chatter | Same **family** as `TYREX-GURU-001.ComponentName` lines on the console |
 | **HTTP / root loggers** | Library diagnostics (`HTTP Request: …`) | **Noise** for most Phase A/B questions; kept off `run_tyrex.log` intentionally; use console or future optional HTTP artifact if needed |
 
@@ -81,7 +81,7 @@ Use this **rule of thumb** to keep behavior predictable:
 
 ### Prefer `tyrex_pm.*` (`logging.getLogger(__name__)`) when:
 
-- The message describes **Tyrex policy**, **configuration contract**, or **risk/diagnostic** detail that should survive without the full Nautilus stack (e.g. B1 aggregate flags, `tyrex_risk_ops` denials, data-client backoff).
+- The message describes **Tyrex policy**, **configuration contract**, or **risk/diagnostic** detail that should survive without the full Nautilus stack (e.g. deployment-cap context on `tyrex_risk_ops` denials, data-client backoff).
 - You want the line in **`run_tyrex.log`** for **operator grep** alongside Phase B startup text.
 - The code path is **not** inside a Nautilus `Strategy`/`Actor` where `self.log` is the established pattern for user-visible flow.
 
@@ -97,7 +97,7 @@ Use this **rule of thumb** to keep behavior predictable:
 
 ### High-signal operator diagnostics
 
-- **Tyrex:** `event=tyrex_risk_ops`, `reason=RISK_*`, `gate=portfolio*`, `tyrex_pm phase_b:`, explicit **`WARNING`** on underestimate/partial marks paths.
+- **Tyrex:** `event=tyrex_risk_ops`, `reason=RISK_*`, `gate=portfolio*`, `tyrex_pm phase_b:`, explicit **`WARNING`** when lenient deployment flags underestimate exposure.
 - **Nautilus:** `event=copy_skip`, `reason_code=risk_denied`, `risk_detail=…`, `event=guru_signal_emitted`, `live_order_intent`, execution ERROR lines tied to `correlation_id`.
 
 ### Avoid
@@ -113,10 +113,10 @@ Use this **rule of thumb** to keep behavior predictable:
 | Goal | Open first | Why |
 |------|------------|-----|
 | **Trace guru → strategy → skip/submit** | **`run_nautilus.log`** | `GuruMonitorActor`, `CopyStrategy`, correlation ids |
-| **Risk gates / B2 portfolio / tyrex_risk_ops** | **`run_tyrex.log`** | `tyrex_risk_ops`, Phase B startup, risk warnings |
+| **Risk gates / deployment caps / tyrex_risk_ops** | **`run_tyrex.log`** | `tyrex_risk_ops`, Phase B startup, risk warnings |
 | **Correlate both** | Use **`correlation_id=`** (Nautilus) with **`tyrex_risk_ops`** lines (Tyrex) for the same intent when both fire |
 
-**Reading order:** Many incidents start in **`run_nautilus.log`** (what happened to the signal), then **`run_tyrex.log`** (why policy said no, or B1/B2 detail).
+**Reading order:** Many incidents start in **`run_nautilus.log`** (what happened to the signal), then **`run_tyrex.log`** (why policy said no, or deployment-cap detail).
 
 **Console:** Still authoritative for **`HTTP Request`** and any **`print`**-only lines.
 

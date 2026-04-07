@@ -80,12 +80,12 @@ python scripts/run_guru.py \
 
 ---
 
-### 2.4 Phase B log-validation risk profiles
+### 2.4 Alternate risk profiles (log-focused runs)
 
-Dedicated risk YAMLs (comments inside each file) isolate **B2+B3** vs **B4** without editing the starter `guru_follow_risk.yaml`. Use **`--log-name`** and a **live** runtime with **`polymarket_nautilus_live: true`** and **`polymarket_framework_submit: true`** (e.g. `config/runtime/live_polymarket.yaml` or `config/runtime/live_polymarket_phaseb_validate.yaml`).
+Two optional risk YAMLs exercise different gate combinations without editing the starter `guru_follow_risk.yaml`. Use **`--log-name`** and a **live** runtime YAML (e.g. `config/runtime/live_polymarket.yaml` or `config/runtime/live_polymarket_phaseb_validate.yaml`). **`execution_mode: live`** uses Nautilus Polymarket data and execution and `submit_order` for guru orders.
 
-- **B2 + B3:** `config/risk/guru_follow_risk_phaseb_b2_b3_validate.yaml`
-- **B4 + capital gate:** `config/risk/guru_follow_risk_phaseb_b4_validate.yaml`
+- **Portfolio cap + concurrent resting limit:** `config/risk/guru_follow_risk_phaseb_b2_b3_validate.yaml`
+- **Collateral reserve + capital gate:** `config/risk/guru_follow_risk_phaseb_b4_validate.yaml`
 
 ---
 
@@ -114,7 +114,7 @@ python scripts/run_guru.py \
 | File | Best for |
 |------|----------|
 | **`run_nautilus.log`** | End-to-end **workflow**: guru poll, **`guru_signal_emitted`**, **`copy_skip`**, **`risk_denied`** / **`risk_detail=`**, **`live_order_intent`**, engine/adapter context |
-| **`run_tyrex.log`** | Tyrex **policy** and **B1/B2 plumbing**: **`tyrex_pm phase_b:`**, **`event=tyrex_risk_ops`**, portfolio gate snippets (`gate=portfolio`, `gate=portfolio_unresolved`), capital/B4-style ops lines, warmup / data API backoff |
+| **`run_tyrex.log`** | Tyrex **policy** and **Phase B plumbing**: **`tyrex_pm phase_b:`**, **`event=tyrex_risk_ops`**, deployment-cap snippets (`gate=portfolio_cap`, `gate=portfolio_unresolved`), capital/B4-style ops lines, warmup / data API backoff |
 
 **Correlation:** Prefer **`correlation_id=`** (present in both worlds when an intent is evaluated) to match a Nautilus **`copy_skip`** line with a Tyrex **`tyrex_risk_ops`** line for the same decision.
 
@@ -142,45 +142,45 @@ For each question: **evidence per file**, **patterns**, **good vs bad**, **limit
 
 ---
 
-### Q2) Quote / mark coverage good enough for B2
+### Q2) Price reference + deployment data good enough for risk
 
-**Question:** Are prices/marks **available enough** that portfolio / notional logic is not **permanently** blind?
+**Question:** Is **`price_ref`** usually present for notional checks, and is **position/order** state sane enough that deployment caps are not **permanently** blind?
 
 | Log | `.nautilus.log` | `.tyrex.log` |
 |-----|------------------|--------------|
-| **Look for** | **`reason_code=risk_denied`** with **`risk_detail=`** including **`risk_missing_price`** or position/unmapped instrument codes; **`guru_dynamic_*`** / activation failures | **`event=tyrex_risk_ops`** with portfolio gate; **`WARNING`** from risk about **partial marks** / omitted instruments (`portfolio cap: filled leg used partial marks…`) |
-| **Good** | Occasional skips; most intents either pass risk or fail for **cap/concurrency**, not perpetual missing price | Warnings rare; if present, documented understimate path only when **`fail_on_unresolved_portfolio_exposure`** allows |
-| **Bad** | **Sustained** **`risk_missing_price`** or unresolved instrument paths for active guru tokens | Frequent **`tyrex_risk_ops`** **`gate=portfolio_unresolved`** (see Q3) |
+| **Look for** | **`reason_code=risk_denied`** with **`risk_detail=`** including **`risk_missing_price`** or instrument/Dynamic-resolve codes; **`guru_dynamic_*`** failures | **`event=tyrex_risk_ops`** with **`gate=portfolio_unresolved`** or token deployment unresolved |
+| **Good** | Occasional skips; most denials are **cap/concurrency**, not perpetual missing price | Rare **`portfolio_deploy`/`token_deploy` unresolved** when strict flags on; if **`fail_on_unresolved_*_deployment`** is false, expect possible underestimate instead of deny |
+| **Bad** | **Sustained** **`risk_missing_price`** for active guru tokens | Frequent **`RISK_PORTFOLIO_DEPLOYMENT_UNRESOLVED`** / **`RISK_TOKEN_DEPLOYMENT_UNRESOLVED`** (see Q3) |
 
-**Direct vs inferential:** **Mixed** — missing-price skips are **direct** evidence of quote gaps; full “every instrument marked” needs deeper state inspection.
+**Direct vs inferential:** Missing-price skips are **direct**; full book reconciliation needs `Portfolio` / `Cache` inspection beyond logs.
 
 ---
 
-### Q3) `RISK_PORTFOLIO_EXPOSURE_UNRESOLVED` manageable or too frequent
+### Q3) `RISK_PORTFOLIO_DEPLOYMENT_UNRESOLVED` manageable or too frequent
 
-**Question:** Is B1/B2 fail-closed behavior **explainable** (sparse) vs **dominating** runs?
+**Question:** When strict deployment flags are on, is fail-closed behavior **explainable** (sparse) vs **dominating** runs?
 
 | Log | `.nautilus.log` | `.tyrex.log` |
 |-----|------------------|--------------|
-| **Look for** | **`event=copy_skip`**, **`reason_code=risk_denied`**, **`risk_detail=risk_portfolio_exposure_unresolved`** (enum value in telemetry) | **`event=tyrex_risk_ops`**, **`reason=RISK_PORTFOLIO_EXPOSURE_UNRESOLVED`** (or same token), **`gate=portfolio_unresolved`** with **`b1_complete=`**, **`e_portfolio_present=`**, **`b1_error=`** |
-| **Good** | Rare denials; clustered only at startup or after known data gaps | Tyrex lines show **transient** incomplete B1; errors empty or short |
-| **Bad** | **High rate** of exposure-unresolved skips for long stretches | **`b1_complete=False`** or **`e_portfolio_present=False`** repeatedly; large **`b1_error`** snippets |
+| **Look for** | **`event=copy_skip`**, **`reason_code=risk_denied`**, **`risk_detail=risk_portfolio_deployment_unresolved`** / **`risk_token_deployment_unresolved`** (or **legacy** `risk_portfolio_exposure_unresolved` in **old** runs) | **`event=tyrex_risk_ops`**, **`gate=portfolio_unresolved`**, deployment facts on **`risk_decision`** / ops snippet |
+| **Good** | Rare denials; clustered at startup or after known reconciliation gaps | Transient unparseable positions; clears as `Portfolio` fills in |
+| **Bad** | **High rate** of deployment-unresolved skips | Persistent unresolved with no adapter/`Portfolio` progress |
 
 **Direct vs inferential:** **Direct** — reason strings and Tyrex ops fields are authoritative for **why** the gate fired.
 
 ---
 
-### Q4) Exposure scalar behaves sensibly
+### Q4) Deployment totals behave sensibly
 
-**Question:** When B2 **approves**, does **`e_portfolio`** / cap math look **consistent** with expectations (no absurd jumps without explanation)?
+**Question:** When B2 **approves**, do **`portfolio_deploy` / `token_deploy`** (pending + filled cost basis) look **consistent** with the book (no absurd jumps without explanation)?
 
 | Log | `.nautilus.log` | `.tyrex.log` |
 |-----|------------------|--------------|
-| **Look for** | **`copy_skip`** with **`risk_detail=risk_portfolio_notional_cap_exceeded`** vs approvals | **`event=tyrex_risk_ops`**, **`gate=portfolio_cap`**, **`e_portfolio=`**, **`intent_notional=`**, **`cap=`**, **`sum=`** on deny lines |
-| **Good** | Denials when **`sum > cap`**; approvals when under cap given your book | Numeric fields **parseable**; denies align with configured cap |
-| **Bad** | Cap denies with **zero** or nonsense components when book is flat (investigate marks/readers) | **Missing** cap lines but Nautilus shows notional cap skip (inconsistent — investigate) |
+| **Look for** | **`copy_skip`** with **`risk_portfolio_deployment_exceeded`** / legacy **`risk_portfolio_notional_cap_exceeded`** vs approvals | **`event=tyrex_risk_ops`**, **`gate=portfolio_cap`**, cap / deploy fields on deny lines; **`risk_decision`** facts in reporting |
+| **Good** | Denials when **`portfolio_deploy + order_deploy > cap`**; approvals when under cap | Numeric fields **parseable**; denies align with configured cap |
+| **Bad** | Cap denies with **zero** deploy but flat book (investigate readers); or cap never fires when book is huge | **Missing** ops detail but Nautilus shows cap skip (inconsistent — investigate) |
 
-**Direct vs inferential:** **Direct** on **deny** path (Tyrex logs publish scalars). **Approvals** often have **less** scalar detail in logs — **inferential** without extra instrumentation.
+**Direct vs inferential:** **Direct** on **deny** path when ops/logging includes scalars. **Approvals** may show less detail — use structured reporting if enabled.
 
 ---
 
@@ -225,14 +225,14 @@ rg "guru_cache_warmup|poller_backoff" logs/live/run_tyrex.log
 
 - **No full transcript:** `print` and `httpx` may be **console-only**.
 - **Nautilus file format** is framework-defined; not guaranteed to match every ANSI console decoration.
-- **“Good restart”** and **complete marks** are **not** fully provable from logs alone — use operational runbooks and optional metrics.
+- **“Good restart”** and full **deployment** reconciliation are **not** fully provable from logs alone — use operational runbooks and optional reporting summaries.
 - **Silent success** on approve paths may leave **fewer** numeric breadcrumbs than deny paths.
 
 ---
 
 ## 7. Recommended next checks after log review
 
-1. [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) — live checklist, restart reality, mark requirements.
+1. [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) — live checklist; [Runbooks/deployment_budget_live_validation.md](Runbooks/deployment_budget_live_validation.md) — exact CLI + report fields.
 2. [Implementation/phase_a_closure.md](Implementation/phase_a_closure.md) — pending leaves, capital gate, reader sources.
 3. [OPERATIONS.md](OPERATIONS.md) — reason-code cheat sheet, execution paths.
 4. Re-run with **`--log-name`** when filing an issue so artifacts are not overwritten.

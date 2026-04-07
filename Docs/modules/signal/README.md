@@ -4,11 +4,11 @@
 
 ## A. Role
 
-**Pure decision and sizing** helpers: given a `GuruTradeSignal`, answer “take or skip?” and “what quantity?” without Nautilus, HTTP, or venue calls.
+**Pure decision and sizing** helpers: given a `GuruTradeSignal`, answer “take or skip?” and “what quantity?” without Nautilus, HTTP, or venue calls. **Per-order** minimum/maximum **USD deploy** (too small / too big / clip / bump) is **`risk/`**, not `signal/`.
 
 ## B. Boundaries
 
-**Belongs here:** Entry policy, exit policy, sizing policies (proportional + optional **C2** conviction-weighted), follow-worthiness gate (min follow notional), structured `SignalDecision` + reason codes.
+**Belongs here:** Entry policy, exit policy, sizing policies (proportional + optional **C2** conviction-weighted), token filter spec, structured `SignalDecision` + reason codes.
 
 **Does not belong here:** Subscribing to the message bus, calling risk, calling execution, or reading YAML.
 
@@ -19,17 +19,15 @@
 | `token_filter_spec.py` | **`TokenFilterSpec`** — explicit `enabled` + `allowlisted`; `allows_token()` used by entry/exit. |
 | `entry.py` | `GuruFollowEntryPolicy`, **`GuruMirrorExitPolicy`**, `SignalDecision`. |
 | `sizing.py` | **`SizingPolicy`** protocol + **`build_sizing_policy`**: proportional `copy_scale`, optional **C2** conviction weighting + rolling average + `record_accepted_entry_size` / diagnostics. |
-| `follow_worthiness.py` | **`FollowWorthinessGate`** — **C2** min-follow-notional check (policy, pre–risk). |
 | `__init__.py` | Public exports for policies. |
 
 ## D. Main interactions
 
-- **strategy:** `CopyStrategy` constructs policies and calls `evaluate` → `size` → `record_accepted_entry_size` (entries) → **`FollowWorthinessGate.evaluate`** → `OrderIntent`.
-- **core:** responses reference `ReasonCode`; inputs are `GuruTradeSignal`.
+- **strategy:** `CopyStrategy` constructs policies and calls `evaluate` → `size` → `record_accepted_entry_size` (entries) → **`OrderIntent`** → **`RiskPolicy.evaluate`** (may adjust qty).
 
 ## E. Status
 
-**Implemented** for v1 copy follow + mirror exit + proportional sizing + **C2** (feature-flagged conviction sizing + min-follow-notional gate). See **`Implementation/plan_C2_Capital-Allocation.md`**.
+**Implemented** for v1 copy follow + mirror exit + proportional sizing + **C2** conviction (optional). See **`Implementation/plan_C2_Capital-Allocation.md`**.
 
 ## F. Extension guidance
 

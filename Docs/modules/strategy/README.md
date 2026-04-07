@@ -15,7 +15,7 @@
 ## 2. Current example: guru follow (`CopyStrategy`)
 
 **Class:** `src/tyrex_pm/strategy/copy_strategy.py`  
-**Config:** `CopyStrategyConfig` — `token_filter_*`, `execution_mode` (from **runtime** YAML), `copy_scale`, optional **C2** `conviction_sizing_*` and `min_follow_notional_usd` (from strategy YAML via `guru_compose`).  
+**Config:** `CopyStrategyConfig` — `token_filter_*`, `execution_mode` (from **runtime** YAML), `copy_scale`, optional **C2** `conviction_sizing_*` (from strategy YAML via `guru_compose`). Per-order notional floors/ceilings are **risk** YAML (`min_*` / `max_*` + policies).  
 **Base:** `BaseComposableStrategy` (`src/tyrex_pm/strategy/base.py`) for shared Nautilus `Strategy` behavior / startup log.
 
 ### What signals it consumes
@@ -29,20 +29,19 @@
 - **`side == "SELL"`** → `GuruMirrorExitPolicy.evaluate`.
 - Other sides → `copy_skip` with `ReasonCode.UNSUPPORTED_SIDE`.
 
-### Sizing & worthiness (C2)
+### Sizing & conviction (C2)
 
 - **`build_sizing_policy` / `SizingPolicy.size`** (`signal/sizing.py`) — `copy_scale` and optional conviction weighting for **BUY entries**; `record_accepted_entry_size` updates the rolling average after a positive entry size.
-- **`FollowWorthinessGate`** (`signal/follow_worthiness.py`) — optional min estimated notional **before** risk.
 
 ### Risk
 
 - Builds **`OrderIntent`** (correlation id, token, side, qty, `price_ref` from guru, reason from signal decision).
-- Calls **`self._risk.evaluate(intent)`**. If rejected → `copy_skip` with `reason_code=risk_denied` and policy reason.
+- Calls **`self._risk.evaluate(intent)`**. Risk may **clip** or **bump** quantity per `max_notional_policy` / `min_notional_policy`; the returned intent is what flows to execution when approved. If rejected → `copy_skip` with `reason_code=risk_denied` and policy reason.
 
 ### Execution
 
 - Calls **`self._execution.submit_intent(intent, mode=self._cfg.execution_mode)`**.
-- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live + framework submit, **C3** when enabled); **`PolymarketExecutionPolicy`** (live legacy py-clob).
+- Injected ports from **`guru_compose`**: **`NoOpExecutionPort`** (shadow); **`NautilusGuruExecutionPort`** (live, **C3** when enabled).
 
 ### Order events (C3)
 
@@ -53,8 +52,8 @@
 | Step | Shadow | Live |
 |------|--------|------|
 | Policies + sizing | Same | Same |
-| Risk | `ConfiguredRiskPolicy` | Same (readers injected; behavior varies by submit path — see **Architecture** / **current_state**) |
-| Execution port | `NoOpExecutionPort` | **`NautilusGuruExecutionPort`** or **`PolymarketExecutionPolicy`** |
+| Risk | `ConfiguredRiskPolicy` | Same (readers injected) |
+| Execution port | `NoOpExecutionPort` | **`NautilusGuruExecutionPort`** |
 | Log after submit | `event=shadow_order_intent` | `event=live_order_intent` |
 
 ---
@@ -96,8 +95,8 @@ Shadow is steps 1–7 in the BUY flow with **`execution_mode: shadow`** — exec
 ### Live intent submission
 
 1. Same through risk approve.
-2. **`execution_mode: live`** → **`submit_intent`** on **`NautilusGuruExecutionPort`** or **`PolymarketExecutionPolicy`** (per runtime flags).
-3. Strategy logs **`live_order_intent`**; execution logs framework **`LIVE_ORDER_SUBMIT`** / **`LIVE_ORDER_ERROR`** or legacy py-clob messages (see [OPERATIONS.md](../../OPERATIONS.md)).
+2. **`execution_mode: live`** → **`submit_intent`** on **`NautilusGuruExecutionPort`**.
+3. Strategy logs **`live_order_intent`**; execution logs **`LIVE_ORDER_SUBMIT`** / **`LIVE_ORDER_ERROR`** (see [OPERATIONS.md](../../OPERATIONS.md)).
 
 ---
 

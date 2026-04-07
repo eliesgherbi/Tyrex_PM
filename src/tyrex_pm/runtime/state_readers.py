@@ -9,8 +9,8 @@ first-class Nautilus field for Polymarket — it is read via py-clob in
 
 Do **not** import this module from ``CopyStrategy``; inject readers into risk/runtime only.
 
-**Phase B B1:** Multi-instrument **portfolio** scalars live in :mod:`tyrex_pm.runtime.portfolio_exposure`
-(`NautilusPortfolioExposureAggregator` uses this module’s execution reader + token resolution).
+**Deployment budget:** :mod:`tyrex_pm.runtime.deployment_budget` uses this module’s execution reader
++ token resolution for pending/filled USD caps.
 
 **Phase B B3:** Guru-origin resting-order identity for concurrency caps — use
 :func:`is_guru_resting_order` only (risk must not embed raw heuristics). **Active stack (Tyrex
@@ -327,6 +327,10 @@ class ClobAllowanceStateProvider:
     """
     **Tyrex-owned** allowance/balance read for Polymarket **collateral** via py-clob.
 
+    The HTTP API returns string ``balance`` / ``allowance``; integer strings use **6-decimal USDC
+    fixed point** (see :mod:`tyrex_pm.runtime.clob_collateral_money`). Risk / reporting normalize
+    there — this provider still stores the raw dict on :class:`AllowanceSnapshot`.
+
     Nautilus does not replace this API in Step 3 — centralize here instead of scattering
     ``get_balance_allowance`` in strategy or ad-hoc execution code (**Repo-confirmed** pattern:
     ``scripts/verify_polymarket_auth.py``).
@@ -361,14 +365,13 @@ class ClobAllowanceStateProvider:
 
 class NautilusPositionStateReader:
     """
-    Framework-backed **filled** exposure via ``Portfolio.net_exposure``.
+    Best-effort **marked** USD exposure via ``Portfolio.net_exposure`` (given an explicit mark).
 
-    Polymarket outcomes use ``BinaryOption`` instruments;
-    ``net_exposure(instrument_id, price=...)`` aggregates open positions using the venue price
-    supplied (Tyrex uses the guru signal / order reference price as mark when gating).
+    Used for **reporting** / diagnostics (e.g. ``position`` facts). **Not** used for pre-trade
+    deployment caps — those use :class:`~tyrex_pm.runtime.deployment_budget.NautilusDeploymentBudget`
+    (``abs(qty) × avg_px_open`` cost basis, no live mark).
 
-    **Blocked / adapter-dependent:** correctness requires the Polymarket adapter to emit position
-    events so ``Portfolio`` stays aligned with venue holdings — Tyrex only reads.
+    **Adapter-dependent:** position events must keep ``Portfolio`` aligned with venue holdings.
     """
 
     __slots__ = ("_portfolio", "_cache", "_static")

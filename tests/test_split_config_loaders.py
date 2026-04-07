@@ -114,7 +114,6 @@ def test_load_risk_and_runtime(tmp_path: Path) -> None:
     r.write_text(
         yaml.safe_dump(
             {
-                "max_order_quantity": 10,
                 "max_notional_usd_per_order": 5,
                 "max_token_notional_usd_open": 20,
             }
@@ -122,10 +121,45 @@ def test_load_risk_and_runtime(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     rs = load_risk_settings(r)
-    assert rs.max_order_quantity == 10.0
     assert rs.kill_switch is False
     assert rs.capital_gate_enabled is False
     assert rs.max_account_snapshot_age_seconds == 30.0
+    assert rs.fail_on_unresolved_portfolio_deployment is True
+    assert rs.max_notional_policy == "cap"
+    assert rs.min_notional_policy == "deny"
+
+    bad_pol = tmp_path / "risk_bad_pol.yaml"
+    bad_pol.write_text(
+        yaml.safe_dump(
+            {
+                "max_notional_usd_per_order": 1,
+                "max_token_notional_usd_open": 20,
+                "max_notional_policy": "nope",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="max_notional_policy"):
+        load_risk_settings(bad_pol)
+
+    for bad_key, bad_val, needle in (
+        ("max_order_quantity", 1, "max_order_quantity"),
+        ("portfolio_sizing_mode", "fancy", "portfolio_sizing_mode"),
+        ("fail_on_unresolved_portfolio_exposure", True, "fail_on_unresolved_portfolio_exposure"),
+    ):
+        bad = tmp_path / f"risk_bad_{bad_key}.yaml"
+        bad.write_text(
+            yaml.safe_dump(
+                {
+                    bad_key: bad_val,
+                    "max_notional_usd_per_order": 1,
+                    "max_token_notional_usd_open": 20,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=needle):
+            load_risk_settings(bad)
 
     rt = tmp_path / "live.yaml"
     rt.write_text(
@@ -156,7 +190,7 @@ def test_runtime_rejects_bad_mode(tmp_path: Path) -> None:
         load_runtime_settings(p)
 
 
-def test_runtime_nautilus_empty_ids_requires_framework_submit(tmp_path: Path) -> None:
+def test_runtime_rejects_obsolete_polymarket_nautilus_live_key(tmp_path: Path) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(
         yaml.safe_dump(
@@ -169,7 +203,7 @@ def test_runtime_nautilus_empty_ids_requires_framework_submit(tmp_path: Path) ->
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="polymarket_framework_submit"):
+    with pytest.raises(ValueError, match="obsolete"):
         load_runtime_settings(p)
 
 
@@ -180,8 +214,6 @@ def test_runtime_zero_bootstrap_guru_framework_implies_dynamic(tmp_path: Path) -
             {
                 "trader_id": "A-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
-                "polymarket_framework_submit": True,
                 "polymarket_instrument_ids": [],
                 "polymarket_startup_token_warmup_max": 0,
             }
@@ -195,35 +227,17 @@ def test_runtime_zero_bootstrap_guru_framework_implies_dynamic(tmp_path: Path) -
     assert r.polymarket_startup_token_warmup_max == 0
 
 
-def test_runtime_defaults_framework_submit_and_token_map(tmp_path: Path) -> None:
+def test_runtime_defaults_live_implies_dynamic_when_empty_instruments(tmp_path: Path) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(
         yaml.safe_dump({"trader_id": "A-001", "execution_mode": "live"}),
         encoding="utf-8",
     )
     r = load_runtime_settings(p)
-    assert r.polymarket_framework_submit is False
     assert r.polymarket_token_to_instrument == ()
-    assert r.polymarket_dynamic_instruments is False
+    assert r.polymarket_dynamic_instruments is True
     assert r.polymarket_dynamic_max_activations == 32
     assert r.polymarket_startup_token_warmup_max == 32
-
-
-def test_runtime_framework_submit_requires_nautilus(tmp_path: Path) -> None:
-    p = tmp_path / "x.yaml"
-    p.write_text(
-        yaml.safe_dump(
-            {
-                "trader_id": "A-001",
-                "execution_mode": "live",
-                "polymarket_nautilus_live": False,
-                "polymarket_framework_submit": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="polymarket_framework_submit requires"):
-        load_runtime_settings(p)
 
 
 def test_runtime_token_map_derived_from_instruments(tmp_path: Path) -> None:
@@ -233,45 +247,41 @@ def test_runtime_token_map_derived_from_instruments(tmp_path: Path) -> None:
             {
                 "trader_id": "A-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
                 "polymarket_instrument_ids": ["0xabc-12345.POLYMARKET"],
-                "polymarket_framework_submit": True,
             }
         ),
         encoding="utf-8",
     )
     r = load_runtime_settings(p)
+    assert r.polymarket_dynamic_instruments is False
     assert ("12345", "0xabc-12345.POLYMARKET") in r.polymarket_token_to_instrument
 
 
-def test_runtime_dynamic_instruments_requires_framework_submit(tmp_path: Path) -> None:
+def test_runtime_dynamic_instruments_opt_in_with_nonempty_ids(tmp_path: Path) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(
         yaml.safe_dump(
             {
                 "trader_id": "A-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
                 "polymarket_instrument_ids": ["0xabc-12345.POLYMARKET"],
                 "polymarket_dynamic_instruments": True,
             }
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="polymarket_dynamic_instruments requires"):
-        load_runtime_settings(p)
+    r = load_runtime_settings(p)
+    assert r.polymarket_dynamic_instruments is True
 
 
-def test_runtime_dynamic_instruments_ok_with_framework(tmp_path: Path) -> None:
+def test_runtime_dynamic_instruments_max_activations(tmp_path: Path) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(
         yaml.safe_dump(
             {
                 "trader_id": "A-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
                 "polymarket_instrument_ids": ["0xabc-12345.POLYMARKET"],
-                "polymarket_framework_submit": True,
                 "polymarket_dynamic_instruments": True,
                 "polymarket_dynamic_max_activations": 8,
             }
@@ -283,19 +293,33 @@ def test_runtime_dynamic_instruments_ok_with_framework(tmp_path: Path) -> None:
     assert r.polymarket_dynamic_max_activations == 8
 
 
-def test_runtime_polymarket_nautilus_ok_when_live_with_ids(tmp_path: Path) -> None:
+def test_runtime_live_with_explicit_instrument_ids(tmp_path: Path) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(
         yaml.safe_dump(
             {
                 "trader_id": "A-001",
                 "execution_mode": "live",
-                "polymarket_nautilus_live": True,
                 "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
             }
         ),
         encoding="utf-8",
     )
     r = load_runtime_settings(p)
-    assert r.polymarket_nautilus_live is True
     assert r.polymarket_instrument_ids == ("0xabc-0xdef.POLYMARKET",)
+
+
+def test_runtime_dynamic_instruments_invalid_in_shadow(tmp_path: Path) -> None:
+    p = tmp_path / "x.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "shadow",
+                "polymarket_dynamic_instruments": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="polymarket_dynamic_instruments"):
+        load_runtime_settings(p)

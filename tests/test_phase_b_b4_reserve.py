@@ -25,9 +25,8 @@ from tyrex_pm.runtime.state_readers import AccountSnapshot, AllowanceSnapshot
 
 def _risk(**over: object) -> RiskSettings:
     base: dict[str, object] = {
-        "max_order_quantity": 100.0,
         "max_notional_usd_per_order": 10_000.0,
-        "max_token_notional_usd_open": 10_000.0,
+        "max_token_notional_usd_open": float("inf"),
         "kill_switch": False,
         "fail_on_missing_price_for_notional": True,
         "capital_gate_enabled": True,
@@ -35,9 +34,9 @@ def _risk(**over: object) -> RiskSettings:
         "max_allowance_snapshot_age_seconds": 120.0,
         "min_collateral_balance_usd": None,
         "min_allowance_usd": None,
-        "fail_on_unresolved_position_for_token_cap": False,
+        "fail_on_unresolved_token_deployment": False,
         "max_portfolio_notional_usd_open": float("inf"),
-        "fail_on_unresolved_portfolio_exposure": True,
+        "fail_on_unresolved_portfolio_deployment": True,
         "max_concurrent_guru_resting_orders": None,
         "collateral_reserve_usd": 0.0,
     }
@@ -97,7 +96,7 @@ def test_reserve_zero_no_reserve_deny() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=_allow_raw("0.01"),
     )
-    ok, rc = pol.evaluate(_intent_buy(qty=10.0, price=0.5))  # n=5
+    ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=0.5))  # n=5
     assert ok is True
     assert rc == "approved"
 
@@ -108,7 +107,7 @@ def test_reserve_allows_when_balance_above_reserve_plus_n() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=_allow_raw("150.0"),
     )
-    ok, rc = pol.evaluate(_intent_buy(qty=10.0, price=5.0))  # n=50, need bal >= 100
+    ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=5.0))  # n=50, need bal >= 100
     assert ok is True
     assert rc == "approved"
 
@@ -119,7 +118,7 @@ def test_reserve_allows_when_balance_exactly_reserve_plus_n() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=_allow_raw("100.0"),
     )
-    ok, rc = pol.evaluate(_intent_buy(qty=10.0, price=5.0))  # n=50, reserve+n=100
+    ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=5.0))  # n=50, reserve+n=100
     assert ok is True
     assert rc == "approved"
 
@@ -131,7 +130,7 @@ def test_reserve_denies_when_balance_below_reserve_plus_n() -> None:
         allowance_provider=_allow_raw("99.99"),
     )
     # n = 10 * 5.0 = 50; reserve + n = 100 > 99.99
-    ok, rc = pol.evaluate(_intent_buy(qty=10.0, price=5.0))
+    ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=5.0))
     assert ok is False
     assert rc == ReasonCode.RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE
 
@@ -146,7 +145,7 @@ def test_reserve_deny_emits_ops_log(
         allowance_provider=_allow_raw("99.99"),
     )
     it = _intent_buy(qty=10.0, price=5.0)
-    ok, rc = pol.evaluate(it)
+    ok, rc, _ = pol.evaluate(it)
     assert ok is False
     assert rc == ReasonCode.RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE
     joined = " ".join(r.message for r in caplog.records)
@@ -164,7 +163,7 @@ def test_reserve_fail_closed_no_allowance_provider() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=None,
     )
-    ok, rc = pol.evaluate(_intent_buy())
+    ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
     assert rc == ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
 
@@ -177,7 +176,7 @@ def test_reserve_fail_closed_snapshot_none() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=prov,
     )
-    ok, rc = pol.evaluate(_intent_buy())
+    ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
     assert rc == ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
 
@@ -188,7 +187,7 @@ def test_reserve_fail_closed_unparsable_balance() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=_allow_raw("not-a-float"),
     )
-    ok, rc = pol.evaluate(_intent_buy())
+    ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
     assert rc == ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
 
@@ -204,7 +203,7 @@ def test_reserve_missing_price_buy_same_as_portfolio_cap_contract() -> None:
         allowance_provider=_allow_raw("1000.0"),
     )
     intent = replace(_intent_buy(), price_ref=None)
-    ok, rc = pol.evaluate(intent)
+    ok, rc, _ = pol.evaluate(intent)
     assert ok is False
     assert rc == ReasonCode.RISK_MISSING_PRICE
 
@@ -215,7 +214,7 @@ def test_reserve_sell_not_subject_to_free_after_reserve_math() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=_allow_raw("5.0"),
     )
-    ok, rc = pol.evaluate(_intent_sell(qty=1.0, price=0.5))
+    ok, rc, _ = pol.evaluate(_intent_sell(qty=1.0, price=0.5))
     assert ok is True
     assert rc == "approved"
 
@@ -228,14 +227,13 @@ def test_misconfigured_reserve_without_capital_gate_fail_closed() -> None:
         account_snapshot=_acct_present(),
         allowance_provider=_allow_raw("999.0"),
     )
-    ok, rc = pol.evaluate(_intent_buy())
+    ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
     assert rc == ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
 
 
 def _risk_yaml(tmp_path: Path, **risk: object) -> Path:
     base = {
-        "max_order_quantity": 10.0,
         "max_notional_usd_per_order": 5.0,
         "max_token_notional_usd_open": 20.0,
     }

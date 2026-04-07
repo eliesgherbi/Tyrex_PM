@@ -1,29 +1,49 @@
-# Risk guards (fail-closed). Tune before live.
+# =============================================================================
+# Risk — pre-trade deployment budget, capital gate, Phase B caps (live only).
+# Flat keys. Portfolio / concurrent caps require execution_mode: live.
+# See Docs/OPERATIONS.md, Docs/CONFIG_MODEL.md for invalid combinations.
+# =============================================================================
 
-max_order_quantity: 100.0
-max_notional_usd_per_order: 25.0
-max_token_notional_usd_open: 100.0
-
+# -----------------------------------------------------------------------------
+# Kill switch & price truth
+# -----------------------------------------------------------------------------
 kill_switch: false
 fail_on_missing_price_for_notional: true
 
-# --- Phase A capital gate (optional; live ops) ---
-# When capital_gate_enabled is true:
-#   - Requires Portfolio.account present (refreshed at most every max_account_snapshot_age_seconds).
-#   - min_collateral_balance_usd / min_allowance_usd compare to py-clob get_balance_allowance
-#     (same snapshot; refreshed at most every max_allowance_snapshot_age_seconds when any min is set
-#     or collateral_reserve_usd > 0).
-# capital_gate_enabled: false
-# max_account_snapshot_age_seconds: 30
-# max_allowance_snapshot_age_seconds: 120
-# min_collateral_balance_usd: 10
-# min_allowance_usd: null
-# fail_on_unresolved_position_for_token_cap: false
+# -----------------------------------------------------------------------------
+# Per-order deployment (USD: price_ref × quantity)
+# -----------------------------------------------------------------------------
+max_notional_usd_per_order: 25.0
+max_notional_policy: cap # deny | cap
+min_notional_usd_per_order: 0.0
+min_notional_policy: deny # deny | cap
 
-# --- Phase B (B0–B5); operator matrix + reason codes: Docs/OPERATIONS.md § Phase B ---
-# Portfolio / concurrency gates require live + polymarket_nautilus_live + polymarket_framework_submit.
-# collateral_reserve_usd > 0 requires capital_gate_enabled: true; invalid with execution_mode: shadow.
-# max_portfolio_notional_usd_open: null   # unlimited (default); finite => framework-only portfolio cap (B2)
-# fail_on_unresolved_portfolio_exposure: true   # default; B2 fail-closed on unresolved marks unless opted out
-# max_concurrent_guru_resting_orders: null   # B3: off; integer >= 1 = deny when guru open rests >= limit (framework path; see state_readers.is_guru_resting_order)
-# collateral_reserve_usd: 0   # B4: BUY requires py-clob balance >= reserve + n (after mins); same snapshot TTL as Phase A
+# -----------------------------------------------------------------------------
+# Per-token deployment cap
+# -----------------------------------------------------------------------------
+# null = unlimited (pending rests + filled cost basis on that token)
+max_token_notional_usd_open: null
+
+# -----------------------------------------------------------------------------
+# Portfolio & resting limits (Phase B — live + framework truth only)
+# -----------------------------------------------------------------------------
+# null / omitted = off
+max_portfolio_notional_usd_open: null
+max_concurrent_guru_resting_orders: null
+# Strict vs lenient when parsing filled deployment for caps
+fail_on_unresolved_portfolio_deployment: true
+fail_on_unresolved_token_deployment: false
+
+# -----------------------------------------------------------------------------
+# Capital gate (Phase A — live; py-clob snapshots)
+# -----------------------------------------------------------------------------
+capital_gate_enabled: false
+max_account_snapshot_age_seconds: 30.0
+max_allowance_snapshot_age_seconds: 120.0
+min_collateral_balance_usd: null
+min_allowance_usd: null
+
+# -----------------------------------------------------------------------------
+# Collateral reserve (Phase B4 — BUY; requires capital_gate_enabled)
+# -----------------------------------------------------------------------------
+collateral_reserve_usd: 0.0

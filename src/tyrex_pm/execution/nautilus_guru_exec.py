@@ -8,14 +8,14 @@ Guru-follow live execution via **Nautilus framework** ``submit_order`` → ExecE
 ``OrderIntent`` is translated here — **not** in
 :class:`~tyrex_pm.strategy.copy_strategy.CopyStrategy` (thin strategy invariant).
 
-**C3:** Optional execution-quality path (normalization, entry guard, depth clip, limit timeout)
-behind **runtime YAML flags** — framework path only; see ``Docs/Implementation/plan_C3_Execution-Quality.md``.
+**C3:** Optional **book** features (entry guard, depth clip, limit timeout) behind runtime YAML flags.
+Limit price/qty are always snapped to instrument tick/size step **without** operator “alignment” policy;
+see ``c3_normalize.quantize_limit_order_for_instrument``.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from datetime import timedelta
 from decimal import Decimal
@@ -32,7 +32,7 @@ from tyrex_pm.core.types import OrderIntent
 from tyrex_pm.execution.c3_book_top import resolve_book_top
 from tyrex_pm.execution.c3_depth import clip_to_book_depth
 from tyrex_pm.execution.c3_entry_guard import check_entry_guard
-from tyrex_pm.execution.c3_normalize import floor_quantity_to_step, normalize_venue_submit
+from tyrex_pm.execution.c3_normalize import floor_quantity_to_step, quantize_limit_order_for_instrument
 from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
 from tyrex_pm.runtime.clob_factory import build_clob_client_from_env
 
@@ -110,6 +110,98 @@ class NautilusGuruExecutionPort:
         if fe is not None:
             fe(fact_type, payload)
 
+    def _reconcile_submit_vs_cache(
+        self,
+        *,
+        intent: OrderIntent,
+        coid: ClientOrderId,
+        coid_s: str,
+        expected_qty: float,
+        expected_price: float,
+    ) -> None:
+        """INT-RC-01: compare immediately post-submit ``Cache.order`` to submitted qty/price."""
+        if self._fact_emit is None:
+            return
+        cached = self._strategy.cache.order(coid)
+        if cached is None:
+            self._emit(
+                "reconciliation",
+                {
+                    "check_type": "submit_vs_cache",
+                    "outcome": "order_missing",
+                    "correlation_id": intent.correlation_id,
+                    "client_order_id": coid_s,
+                    "detail": "cache.order None after submit_order",
+                },
+            )
+            return
+        try:
+            q_obj = getattr(cached, "quantity", None)
+            if q_obj is None:
+                raise ValueError("no quantity")
+            if hasattr(q_obj, "as_decimal"):
+                cq = float(q_obj.as_decimal())
+            else:
+                cq = float(q_obj)
+            p_obj = getattr(cached, "price", None)
+            if p_obj is None:
+                self._emit(
+                    "reconciliation",
+                    {
+                        "check_type": "submit_vs_cache",
+                        "outcome": "mismatch_price",
+                        "correlation_id": intent.correlation_id,
+                        "client_order_id": coid_s,
+                        "detail": "cached order has no price",
+                        "expected_qty": expected_qty,
+                        "cache_qty": cq,
+                        "expected_price": expected_price,
+                    },
+                )
+                return
+            if hasattr(p_obj, "as_decimal"):
+                cp = float(p_obj.as_decimal())
+            else:
+                cp = float(p_obj)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            self._emit(
+                "reconciliation",
+                {
+                    "check_type": "submit_vs_cache",
+                    "outcome": "parse_error",
+                    "correlation_id": intent.correlation_id,
+                    "client_order_id": coid_s,
+                    "detail": str(exc),
+                },
+            )
+            return
+
+        tol_q = max(1e-9, abs(expected_qty) * 1e-9)
+        tol_p = max(1e-9, abs(expected_price) * 1e-9)
+        qty_ok = abs(cq - expected_qty) <= tol_q
+        price_ok = abs(cp - expected_price) <= tol_p
+        if qty_ok and price_ok:
+            out = "match"
+        elif not qty_ok and not price_ok:
+            out = "mismatch_qty_price"
+        elif not qty_ok:
+            out = "mismatch_qty"
+        else:
+            out = "mismatch_price"
+        self._emit(
+            "reconciliation",
+            {
+                "check_type": "submit_vs_cache",
+                "outcome": out,
+                "correlation_id": intent.correlation_id,
+                "client_order_id": coid_s,
+                "expected_qty": expected_qty,
+                "cache_qty": cq,
+                "expected_price": expected_price,
+                "cache_price": cp,
+            },
+        )
+
     def _c3_shape_prepare(
         self,
         intent: OrderIntent,
@@ -122,7 +214,7 @@ class NautilusGuruExecutionPort:
         approved_qty: float,
     ) -> tuple[float, float, bool, str | None]:
         """
-        Apply C3 guard / depth / normalize.
+        Apply optional C3 guard / depth clip (book-driven only).
 
         Returns ``(qty, price, skip_submitted, skip_reason_code)`` — ``skip_reason_code`` set when
         ``skip_submitted`` is true.
@@ -201,44 +293,14 @@ class NautilusGuruExecutionPort:
                 f"correlation_id={intent.correlation_id}",
             )
 
-        if r.execution_venue_normalize_enabled:
-            min_buy = (
-                float(os.environ.get("TYREX_MIN_BUY_NOTIONAL_USD", "1"))
-                if side_u == "BUY"
-                else 0.0
-            )
-            nr = normalize_venue_submit(
-                inst,
-                side=side_u,
-                price=price,
-                quantity=qty,
-                approved_quantity=approved_qty,
-                min_buy_notional_usd=min_buy,
-            )
-            if not nr.ok:
-                self._strategy.log.info(
-                    f"event={ReasonCode.EXEC_VENUE_NORMALIZE_SKIP} component=nautilus_guru_exec "
-                    f"correlation_id={intent.correlation_id} detail={nr.detail}",
-                )
-                return qty, price, True, str(ReasonCode.EXEC_VENUE_NORMALIZE_SKIP)
-            qty, price = nr.quantity, nr.price
-        elif depth_applied:
+        if depth_applied:
             qty = floor_quantity_to_step(inst, qty, approved_qty)
             if qty <= 0:
                 self._strategy.log.info(
-                    f"event={ReasonCode.EXEC_VENUE_NORMALIZE_SKIP} component=nautilus_guru_exec "
-                    f"correlation_id={intent.correlation_id} detail=qty_rounded_to_zero",
+                    f"event={ReasonCode.EXEC_INSTRUMENT_QUANTIZE_SKIP} component=nautilus_guru_exec "
+                    f"correlation_id={intent.correlation_id} detail=qty_rounded_to_zero_after_depth",
                 )
-                return qty, price, True, str(ReasonCode.EXEC_VENUE_NORMALIZE_SKIP)
-            if side_u == "BUY":
-                min_n = float(os.environ.get("TYREX_MIN_BUY_NOTIONAL_USD", "1"))
-                if min_n > 0 and price * qty + 1e-9 < min_n:
-                    self._strategy.log.info(
-                        f"event={ReasonCode.EXEC_VENUE_NORMALIZE_SKIP} component=nautilus_guru_exec "
-                        f"correlation_id={intent.correlation_id} detail=min_buy_notional_after_clip",
-                    )
-                    return qty, price, True, str(ReasonCode.EXEC_VENUE_NORMALIZE_SKIP)
-
+                return qty, price, True, str(ReasonCode.EXEC_INSTRUMENT_QUANTIZE_SKIP)
         return qty, price, False, None
 
     def _schedule_limit_cancel(self, client_order_id: ClientOrderId, correlation_id: str) -> None:
@@ -393,11 +455,7 @@ class NautilusGuruExecutionPort:
         assert instrument_id is not None and inst is not None
 
         r = self._runtime
-        c3_shape = (
-            r.execution_venue_normalize_enabled
-            or r.execution_entry_guard_enabled
-            or r.execution_book_depth_clip_enabled
-        )
+        c3_shape = r.execution_entry_guard_enabled or r.execution_book_depth_clip_enabled
         if c3_shape:
             qty, price, skip, skip_rc = self._c3_shape_prepare(
                 intent,
@@ -414,6 +472,7 @@ class NautilusGuruExecutionPort:
                     {
                         "correlation_id": intent.correlation_id,
                         "outcome": "skip",
+                        "stage": "pre_submit_book",
                         "reason_code": skip_rc or "c3_skip",
                         "instrument_id": str(instrument_id),
                         "submitted_qty": float(qty),
@@ -433,26 +492,50 @@ class NautilusGuruExecutionPort:
                     },
                 )
                 return
-        else:
-            if side_u == "BUY":
-                min_n = float(os.environ.get("TYREX_MIN_BUY_NOTIONAL_USD", "1"))
-                if min_n > 0 and price * qty + 1e-9 < min_n:
-                    self._strategy.log.warning(
-                        f"event={ReasonCode.LIVE_ORDER_ERROR} correlation_id={intent.correlation_id} "
-                        f"est={price * qty} min={min_n} component=nautilus_guru_exec",
-                    )
-                    self._emit(
-                        "execution_outcome",
-                        {
-                            "correlation_id": intent.correlation_id,
-                            "outcome": "error",
-                            "reason_code": str(ReasonCode.LIVE_ORDER_ERROR),
-                            "instrument_id": str(instrument_id),
-                            "submitted_qty": 0.0,
-                            "submitted_price": 0.0,
-                        },
-                    )
-                    return
+
+        pre_quant_q = float(qty)
+        pre_quant_p = float(price)
+        qres = quantize_limit_order_for_instrument(
+            inst,
+            side=side_u,
+            price=pre_quant_p,
+            quantity=pre_quant_q,
+        )
+        if not qres.ok:
+            self._strategy.log.info(
+                f"event={ReasonCode.EXEC_INSTRUMENT_QUANTIZE_SKIP} component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id} detail={qres.detail}",
+            )
+            self._emit(
+                "execution_outcome",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "outcome": "skip",
+                    "stage": "instrument_quantize",
+                    "reason_code": str(ReasonCode.EXEC_INSTRUMENT_QUANTIZE_SKIP),
+                    "instrument_id": str(instrument_id),
+                    "submitted_qty": float(qres.quantity),
+                    "submitted_price": float(qres.price),
+                    "quantize_detail": qres.detail,
+                },
+            )
+            self._emit(
+                "normalization",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "skipped_submit": True,
+                    "reason_code": str(ReasonCode.EXEC_INSTRUMENT_QUANTIZE_SKIP),
+                    "pre_qty": pre_quant_q,
+                    "post_qty": float(qres.quantity),
+                    "pre_price": pre_quant_p,
+                    "post_price": float(qres.price),
+                    "quantize_detail": qres.detail,
+                },
+            )
+            return
+
+        qty, price = qres.quantity, qres.price
+        quant_changed = abs(qty - pre_quant_q) > 1e-9 or abs(price - pre_quant_p) > 1e-9
 
         side = OrderSide.BUY if side_u == "BUY" else OrderSide.SELL
         coid = _client_order_id_from_guru_correlation(intent.correlation_id)
@@ -489,27 +572,38 @@ class NautilusGuruExecutionPort:
             {
                 "correlation_id": intent.correlation_id,
                 "outcome": "submit",
+                "stage": "framework_submit",
                 "reason_code": str(ReasonCode.LIVE_ORDER_SUBMIT),
                 "client_order_id": coid_s,
                 "instrument_id": str(instrument_id),
                 "submitted_qty": float(qty),
                 "submitted_price": float(price),
                 "approved_qty": float(approved_qty),
+                "risk_approved_not_success": True,
             },
         )
-        if c3_shape:
+        if quant_changed:
             self._emit(
                 "normalization",
                 {
                     "correlation_id": intent.correlation_id,
                     "skipped_submit": False,
+                    "kind": "instrument_quantize",
                     "reason_code": "",
-                    "pre_qty": float(approved_qty),
+                    "pre_qty": pre_quant_q,
                     "post_qty": float(qty),
-                    "pre_price": float(intent.price_ref or 0.0),
+                    "pre_price": pre_quant_p,
                     "post_price": float(price),
                 },
             )
+
+        self._reconcile_submit_vs_cache(
+            intent=intent,
+            coid=order.client_order_id,
+            coid_s=coid_s,
+            expected_qty=float(qty),
+            expected_price=float(price),
+        )
 
         if r.execution_limit_timeout_enabled and r.execution_limit_timeout_seconds > 0:
             self._schedule_limit_cancel(order.client_order_id, intent.correlation_id)

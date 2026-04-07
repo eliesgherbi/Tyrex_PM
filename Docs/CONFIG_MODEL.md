@@ -4,6 +4,18 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 
 **Navigation:** [README.md](README.md) · **Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
 
+## Repository layout (files on disk)
+
+| Location | Purpose |
+|----------|---------|
+| `config/strategy/` | Default **strategy** template (`guru_follow.yaml`) — semantic sections in-file. |
+| `config/risk/` | Default **risk** (`guru_follow_risk.yaml`) plus optional **validation profiles** (`guru_follow_risk_phaseb_*.yaml`). |
+| `config/runtime/` | **Runtime** templates — `live_polymarket.yaml`, `rtds_shadow.yaml`, `live_polymarket_phaseb_validate.yaml`. |
+| `config/scenarios/shadow_validation/` | Bundled strategy + risk + **shadow** runtime for smoke runs and report checks; see `README.md` there. |
+| `config/scenarios/live_validation/` | Bundled strategy + risk + **live** runtime for controlled live checks; see `README.md` there. |
+
+YAML is **flat** at the top level (except `token_filter`): grouping is by **comments and key order** only. Loaders: `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings`.
+
 ## Strategy (`StrategySettings` → `load_strategy_settings`)
 
 | Field | Required | Default | Notes |
@@ -14,7 +26,6 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 | **`conviction_sizing_enabled`** | no | **`false`** | **C2:** When **true**, follow **entry** quantity uses conviction-weighted `effective_scale` (see `Implementation/plan_C2_Capital-Allocation.md` §4.1). **false** = identical to pre-C2 proportional sizing. |
 | **`conviction_sizing_cap`** | no | `2.0` | **C2:** Upper bound on `trade_size / rolling_avg` multiplier; must be **`> 0`** when conviction enabled. |
 | **`conviction_sizing_lookback_trades`** | no | `20` | **C2:** Rolling window length (guru **BUY** sizes that passed entry policy only). Must be **`>= 1`** when conviction enabled. |
-| **`min_follow_notional_usd`** | no | `0` | **C2:** Policy floor on estimated `price_ref × qty` (USD). **`0`** disables. If **`> 0`** and price missing → policy skip (`min_follow_notional_price_missing`); not Phase B risk. |
 | `strategy_dedup_state_path` | no | `null` | If set, overrides runtime dedup path for `GuruMonitorActor` only |
 
 ### `token_filter` (required block)
@@ -28,31 +39,37 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 
 ## Risk (`RiskSettings` → `load_risk_settings`)
 
+**Deployment budget (one model):** Caps compare **USD deployed**, not marked-to-market portfolio value. **Per-order:** `order_deploy = price_ref × quantity` vs `max_notional_usd_per_order`. **Per-token:** `token_deploy` (pending + filled on that token) + `order_deploy` vs `max_token_notional_usd_open`. **Portfolio:** sum of pending + filled across Polymarket + `order_deploy` vs `max_portfolio_notional_usd_open`. **Pending** = resting `leaves_quantity × limit price` (venue-scoped). **Filled** = `abs(signed_qty) × avg_px_open` from open positions (cost basis). Implementation: `risk/configured.py`, `runtime/deployment_budget.py`.
+
 | Field | Required | Default | Notes |
-|-------|----------|---------|--------|
-| `max_order_quantity` | yes | — | Reject if `intent.quantity` exceeds |
-| `max_notional_usd_per_order` | yes | — | Reject if `price_ref * qty` exceeds |
-| `max_token_notional_usd_open` | no | unlimited (`null`) | Session exposure per token; see `ConfiguredRiskPolicy` |
+|-------|----------|---------|-------|
+| `max_notional_usd_per_order` | yes | — | Per-order deploy cap vs **order_deploy** (`price_ref × qty`). Behavior: see **`max_notional_policy`**. |
+| **`max_notional_policy`** | no | **`cap`** | **`deny`** \| **`cap`**. **`deny`:** reject when **order_deploy** &gt; cap (legacy hard deny). **`cap`:** clip quantity down so deploy ≤ cap (when feasible). |
+| **`min_notional_usd_per_order`** | no | **`0`** | **BUY** only: compares **order_deploy** to this USD floor. **`0`** disables the check. Operator policy — **not** venue `min_quantity` (execution snaps to tick/step internally; size USD is risk). Behavior: see **`min_notional_policy`**. |
+| **`min_notional_policy`** | no | **`deny`** | **`deny`** \| **`cap`**. **`deny`:** reject when **order_deploy** &lt; min (and min &gt; 0). **`cap`:** bump quantity up so deploy ≥ min (still subject to max/token/portfolio; infeasible bump → `RISK_ORDER_DEPLOYMENT_INFEASIBLE`). |
+| `max_token_notional_usd_open` | no | unlimited (`null`) | Reject if **token_deploy** + order would exceed |
 | `kill_switch` | no | `false` | If true, all intents rejected |
-| `fail_on_missing_price_for_notional` | no | `true` | Fail closed when `price_ref` missing |
+| `fail_on_missing_price_for_notional` | no | `true` | Fail closed when `price_ref` missing for notional math |
 | `capital_gate_enabled` | no | `false` | If **true**, risk requires account snapshot + optional py-clob balance/allowance checks (live). |
 | `max_account_snapshot_age_seconds` | no | `30` | Refresh account snapshot when older than this (seconds). |
 | `max_allowance_snapshot_age_seconds` | no | `120` | Refresh allowance snapshot when older (used when Phase A mins and/or **B4** ``collateral_reserve_usd > 0``). |
-| `min_collateral_balance_usd` | no | `null` | If set, compare to py-clob **`balance`** (requires live + capital gate + allowance provider). |
-| `min_allowance_usd` | no | `null` | If set, compare to py-clob **`allowance`**. |
-| `fail_on_unresolved_position_for_token_cap` | no | `false` | If **true** and per-token cap finite, deny when **`net_exposure`** cannot be computed for the token. |
-| `max_portfolio_notional_usd_open` | no | unlimited (`null`/omitted) | **Phase B B2:** Deny when `E_portfolio + n > C` via **B1** aggregator only. **Framework-only** (B0 compose validation). |
-| `fail_on_unresolved_portfolio_exposure` | no | `true` | **B2:** Incomplete aggregate (`complete=false` / no `e_portfolio`) → always `RISK_PORTFOLIO_EXPOSURE_UNRESOLVED`. `false` → B1 may omit some marks; if aggregate still **complete**, cap uses returned `e_portfolio` + **warning** (underestimate); never approves on broken/incomplete B1 output. |
+| `min_collateral_balance_usd` | no | `null` | If set, compare to py-clob **`balance`** (requires live + capital gate + allowance provider). Values are normalized in **`runtime/clob_collateral_money.py`**: integer strings = **USDC 1e-6 atoms**; strings with a decimal point = human USD. |
+| `min_allowance_usd` | no | `null` | If set, compare to py-clob **`allowance`** (same normalization as `balance`). |
+| `fail_on_unresolved_token_deployment` | no | `false` | If **true** and per-token cap finite, deny when token **filled** deployment cannot be parsed; if **false**, treat missing leg as **0** (underestimate). |
+| `max_portfolio_notional_usd_open` | no | unlimited (`null`/omitted) | **Phase B B2:** Reject if **portfolio_deploy** + order would exceed. **Framework-only** with live mode (B0 compose validation). |
+| `fail_on_unresolved_portfolio_deployment` | no | `true` | If **true** and portfolio cap finite, deny when total deployment cannot be summed cleanly; if **false**, unresolvable filled legs count as **0** in the sum. |
 | `max_concurrent_guru_resting_orders` | no | `null` (off) | **Phase B B3:** Deny when open guru-origin rests (Polymarket) are already at ``>=`` this limit. Identity: ``state_readers.is_guru_resting_order`` (tags ``guru_cid=``, else ``TX``+26 hex). **Framework-only** (B0). |
 | `collateral_reserve_usd` | no | `0` | **Phase B B4:** After Phase A mins, **BUY** intents require py-clob **`balance` ≥ reserve + n** (same snapshot as ``min_*``). Breach: ``RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE``. Missing snapshot/unparsable balance: fail-closed (``RISK_ALLOWANCE_UNAVAILABLE``). Requires **`capital_gate_enabled: true`**. Invalid when **`execution_mode: shadow`** (compose). |
 
-**Phase B startup rules (B0):** See `Phase_B_planing.md` §7. Unsupported combinations raise **`ValueError`** at YAML load (reserve vs capital gate) or at **`build_guru_trading_node`** (shadow / legacy vs framework-truth gates).
+**Obsolete YAML (loader raises):** `max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, `fail_on_unresolved_position_for_token_cap` — removed with the marked-exposure / quantity-cap model; do not use in new configs.
 
-**Phase B operator matrix (B5):** Which gates apply in shadow vs live legacy vs live framework-submit — see **`OPERATIONS.md`** § *Phase B — product gates*. **Reason code cheat sheet** for portfolio / guru concurrent / reserve denials — same section.
+**Obsolete YAML (strategy — loader raises):** `min_follow_notional_usd` — order-size floors/ceilings are enforced only in **risk** (`min_notional_*`, `max_notional_*`, policies above).
 
-**Pre–Phase C (live validation):** Restart/mark/denial-rate checklist — **`Implementation/phase_b_operational_validation.md`**.
+**Phase B startup rules (B0):** See `Phase_B_planing.md` §7. Unsupported combinations raise **`ValueError`** at YAML load (reserve vs capital gate) or at **`build_guru_trading_node`** (shadow vs live framework-truth gates).
 
-**Per-token open notional:** On **legacy live** (`polymarket_framework_submit: false`), **`note_fill_assumption`** bumps **`_token_open`** after a **successful** py-clob submit. On **framework submit** (`true`), `note_fill_assumption` is a **no-op** for pending; the cap uses **`Cache` open orders** (**remaining / leaves quantity × price**) plus **filled** exposure from **`Portfolio.net_exposure`** (when the position reader is injected — see `phase_a_closure.md`).
+**Phase B operator matrix (B5):** Shadow vs live — see **`OPERATIONS.md`** § *Phase B — product gates*. **Reason code cheat sheet** for portfolio / guru concurrent / reserve denials — same section.
+
+**Pre–Phase C (live validation):** Restart/denial-rate checklist — **`Implementation/phase_b_operational_validation.md`**.
 
 ## Runtime (`RuntimeSettings` → `load_runtime_settings`)
 
@@ -83,27 +100,36 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | `logging_level` | no | `INFO` | Nautilus `LoggingConfig.log_level` |
 | `clob_host` | no | `https://clob.polymarket.com` | Used for live `ClobClient` when composing |
 | `chain_id` | no | `137` | Polygon mainnet default |
-| `polymarket_nautilus_live` | no | `false` | If **true** and `execution_mode: live`, register **Polymarket live DATA + EXEC** factories on `TradingNode`. |
-| `polymarket_instrument_ids` | no | `[]` | Nautilus `InstrumentId` strings for `load_ids`. **Empty** allowed only with **live + Nautilus live + `polymarket_framework_submit`** (zero-bootstrap / implicit dynamic). |
-| `polymarket_framework_submit` | no | `false` | If **true** (live), guru uses **`NautilusGuruExecutionPort`** (`submit_order`). Requires **`polymarket_nautilus_live`**. |
-| `polymarket_dynamic_instruments` | no | `false` | Explicit dynamic resolve; **coerced true** when instrument list empty and framework submit on live. |
+| `polymarket_instrument_ids` | no | `[]` | Nautilus `InstrumentId` strings for `load_ids`. **Live:** **empty** ⇒ zero-bootstrap (implicit `polymarket_dynamic_instruments`). |
+| `polymarket_dynamic_instruments` | no | `false` | Opt-in when id list non-empty; **shadow** must not set **true**. **Live** + empty ids ⇒ coerced **true**. |
 | `polymarket_dynamic_max_activations` | no | `32` | Cap on **new** dynamic `Cache` inserts per process. |
 | `polymarket_gamma_base_url` | no | `https://gamma-api.polymarket.com` | Gamma HTTP API for condition lookup. |
 | `polymarket_gamma_http_timeout_seconds` | no | `15` | Gamma client timeout. |
 | `polymarket_startup_token_warmup_max` | no | `32` | Max guru activity tokens to pre-resolve at compose when list empty (`0` = off). |
-| **`execution_venue_normalize_enabled`** | no | **`false`** | **C3:** Tick / size-step / min-notional feasibility **without** raising qty above risk-approved intent. |
-| **`execution_entry_guard_enabled`** | no | **`false`** | **C3:** Skip if top-of-book moved worse than slippage ticks vs guru reference (**framework path**). |
+| **`execution_entry_guard_enabled`** | no | **`false`** | **C3:** Skip if top-of-book moved worse than slippage ticks vs guru reference (**live**). |
 | **`execution_max_entry_slippage_ticks`** | no | `0` | Max **ticks** (`instrument.price_increment`) against reference; **required &gt; 0** when guard enabled. |
 | **`execution_book_depth_clip_enabled`** | no | **`false`** | **C3:** Clip qty to `cap ×` best bid/ask size (single-level MVP). |
 | **`execution_book_depth_utilization_cap`** | no | `1.0` | **(0, 1]** when depth clip enabled. |
 | **`execution_book_rest_snapshot_enabled`** | no | **`false`** | If no `Cache` L2, allow one **REST** `get_order_book` snapshot for guard/clip. |
 | **`execution_book_strict`** | no | **`false`** | If **true**, missing book when guard/clip need it → **skip** (`exec_book_unavailable_skip`). |
-| **`execution_limit_timeout_enabled`** | no | **`false`** | **C3:** `clock` timer + `cancel_order` after timeout (**framework** only). |
+| **`execution_limit_timeout_enabled`** | no | **`false`** | **C3:** `clock` timer + `cancel_order` after timeout (**live**). |
 | **`execution_limit_timeout_seconds`** | no | `30` | Must be **&gt; 0** when timeout enabled. |
+| **`reporting_enabled`** | no | **`false`** | When **true**, compose opens `var/reporting/runs/<run_id>/` and emits structured facts (see **`Implementation/reporting_fact_model.md`**). |
+| **`reporting_base_dir`** | no | `var/reporting/runs` | Root for per-run directories (no `..`). |
+| **`reporting_sink_max_queue`** | no | `50000` | Bounded queue for fact writer. |
+| **`reporting_sink_batch_size`** | no | `128` | JSONL batch size. |
+| **`reporting_capital_observability_enabled`** | no | **`true`** | When **true** with reporting on, record **wallet/CLOB** snapshots and capital fields on `risk_decision` even if **`capital_gate_enabled: false`**. |
+| **`reporting_capital_snapshot_period_seconds`** | no | **`300`** | Minimum interval (seconds) for extra `account_snapshot` rows with `snapshot_trigger=periodic` (checked around risk evaluations). **`0`** disables periodic-only snapshots. |
 
 **Derived (not YAML):** `polymarket_token_to_instrument` — built from non-empty `polymarket_instrument_ids`.
 
-**C3 scope:** `src/tyrex_pm/execution/nautilus_guru_exec.py` only; **`PolymarketExecutionPolicy`** (legacy py-clob) unchanged. See **`Implementation/plan_C3_Execution-Quality.md`**.
+**Live submit:** `src/tyrex_pm/execution/nautilus_guru_exec.py` — resolves instrument, optionally runs **book** C3 (guard / depth clip / limit timeout from YAML), then always applies **internal** price/qty grid fit (`c3_normalize.quantize_limit_order_for_instrument`, not configurable). See **`Implementation/plan_C3_Execution-Quality.md`** for book features.
+
+**Obsolete YAML (runtime — loader raises):** `venue_size_alignment_mode`, `execution_venue_normalize_enabled` — removed (P2); no operator-facing venue alignment.
+
+**Removed keys (runtime YAML):** `polymarket_nautilus_live`, `polymarket_framework_submit` — **`live`** always uses Nautilus data/exec + framework submit; loader errors if these appear in YAML.
+
+**Removed keys (risk YAML):** `max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, `fail_on_unresolved_position_for_token_cap` — replaced by the deployment-budget model (`CONFIG_MODEL.md` § Risk, `load_risk_settings` raises if present).
 
 ## `.env` (secrets only)
 
@@ -114,9 +140,9 @@ See `Docs/Runbooks/polymarket_operator_v1_00.md`:
 - `POLYMARKET_SIGNATURE_TYPE`
 - `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_PASSPHRASE` (L2 trio or derive)
 
-Optional: `TYREX_MIN_BUY_NOTIONAL_USD` — minimum BUY notional in **both** legacy policy and **`NautilusGuruExecutionPort`** (default `1`).
-
 Optional: `TYREX_PM_DOTENV` — path to alternate env file for `scripts/run_guru.py`.
+
+Minimum **BUY** trade size in USD for Tyrex is **`min_notional_usd_per_order`** in **risk** YAML (`0` = off), not an env var on the execution path.
 
 ## Example files
 

@@ -8,8 +8,8 @@ from tyrex_pm.core.types import OrderIntent
 
 
 class RiskPolicy(Protocol):
-    def evaluate(self, intent: OrderIntent) -> tuple[bool, str]:
-        """Return (approved, reason_code)."""
+    def evaluate(self, intent: OrderIntent) -> tuple[bool, str, OrderIntent | None]:
+        """Return (approved, reason_code, intent_to_submit). ``intent_to_submit`` is set when approved."""
 
 
 class ShadowAllPassRisk:
@@ -19,6 +19,5 @@ class ShadowAllPassRisk:
     Replace with a real `RiskPolicy` before any live execution path.
     """
 
-    def evaluate(self, intent: OrderIntent) -> tuple[bool, str]:
-        _ = intent
-        return True, "shadow_all_pass"
+    def evaluate(self, intent: OrderIntent) -> tuple[bool, str, OrderIntent | None]:
+        return True, "shadow_all_pass", intent

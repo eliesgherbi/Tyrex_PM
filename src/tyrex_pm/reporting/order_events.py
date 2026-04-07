@@ -15,6 +15,8 @@ from nautilus_trader.model.events.order import (
     OrderSubmitted,
 )
 
+from tyrex_pm.reporting.capital_observability import venue_denial_insufficient_balance_likely
+
 EmitFn = Callable[[str, dict[str, Any]], None]
 
 
@@ -104,9 +106,15 @@ def emit_order_event_facts(
             {"reason": str(_gc_attr(event, "reason", ""))},
         )
     elif isinstance(event, OrderDenied):
+        reason_s = str(_gc_attr(event, "reason", ""))
         _lifecycle(
             "DENIED",
-            {"reason": str(_gc_attr(event, "reason", ""))},
+            {
+                "reason": reason_s,
+                "venue_insufficient_balance_likely": venue_denial_insufficient_balance_likely(
+                    reason_s,
+                ),
+            },
         )
     elif isinstance(event, OrderCanceled):
         _lifecycle("CANCELED")

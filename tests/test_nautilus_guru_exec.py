@@ -30,9 +30,7 @@ def _runtime_live_nautilus(*, token_map: tuple[tuple[str, str], ...]) -> Runtime
         logging_level="INFO",
         clob_host="https://clob.polymarket.com",
         chain_id=137,
-        polymarket_nautilus_live=True,
         polymarket_instrument_ids=("0xabc-12345.POLYMARKET",),
-        polymarket_framework_submit=True,
         polymarket_token_to_instrument=token_map,
         polymarket_dynamic_instruments=False,
         polymarket_dynamic_max_activations=32,
@@ -58,6 +56,9 @@ def test_nautilus_guru_port_calls_submit_order() -> None:
     inst_stub = MagicMock()
     inst_stub.make_qty.return_value = MagicMock()
     inst_stub.make_price.return_value = MagicMock()
+    inst_stub.price_increment = 0.01
+    inst_stub.size_increment = 1.0
+    inst_stub.min_quantity = 1.0
 
     order_sent = MagicMock()
     order_sent.client_order_id = "TXplaceholder"
@@ -129,6 +130,9 @@ def test_nautilus_guru_port_dynamic_submits_when_bootstrap_missing() -> None:
     inst_stub.id = InstrumentId.from_str(instr_s)
     inst_stub.make_qty.return_value = MagicMock()
     inst_stub.make_price.return_value = MagicMock()
+    inst_stub.price_increment = 0.01
+    inst_stub.size_increment = 1.0
+    inst_stub.min_quantity = 1.0
 
     dynamic = MagicMock()
     dynamic.resolve_and_activate.return_value = (inst_stub, "")
@@ -196,6 +200,9 @@ def test_nautilus_guru_static_overlay_when_dynamic_fails() -> None:
     inst_stub = MagicMock()
     inst_stub.make_qty.return_value = MagicMock()
     inst_stub.make_price.return_value = MagicMock()
+    inst_stub.price_increment = 0.01
+    inst_stub.size_increment = 1.0
+    inst_stub.min_quantity = 1.0
 
     dynamic = MagicMock()
     dynamic.resolve_and_activate.return_value = (None, "resolve_failed")

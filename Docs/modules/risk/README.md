@@ -17,21 +17,21 @@
 | File | Contents |
 |------|----------|
 | `policy.py` | `RiskPolicy` `Protocol`, `ShadowAllPassRisk`. |
-| `configured.py` | **`ConfiguredRiskPolicy`** — `RiskSettings`; optional readers + **B2** portfolio aggregator + **B3** `ExecutionStateReader.count_guru_resting_orders_open`; **B4** reserve in `_capital_gate_eval`; **capital gate**; per-token cap; **`note_fill_assumption`** legacy py-clob. |
+| `configured.py` | **`ConfiguredRiskPolicy`** — `RiskSettings`; optional readers + **`NautilusDeploymentBudget`** (B2 deployment caps) + **B3** `ExecutionStateReader.count_guru_resting_orders_open`; **B4** reserve in `_capital_gate_eval`; **capital gate** (CLOB `balance` / `allowance`); per-order / per-token / portfolio deployment caps; **reporting:** `_capital_metrics_for_facts`, **`account_snapshot`** + enriched **`risk_decision`** when run sink is active. |
 | `__init__.py` | Exports. |
 
 ## D. Main interactions
 
 - **strategy:** `CopyStrategy` calls `evaluate(intent)` before execution.
 - **config:** `RiskSettings` from YAML (**includes Phase A capital fields**).
-- **runtime:** injects reader implementations; legacy **`PolymarketExecutionPolicy`** may call `note_fill_assumption`.
+- **runtime:** injects reader implementations from **`guru_compose`**.
 
 ## E. Status
 
-**Operational:** Framework path uses **measured pending** (open orders, leaves) + **measured filled** (`net_exposure` when reader wired) + optional **capital gate** + **B4** reserve when configured. Operator **matrix / reason codes:** `Docs/OPERATIONS.md` § Phase B. **Partial / upstream:** position and account truth depend on **Nautilus + Polymarket adapter** updating `Portfolio` / account state.
+**Operational:** Framework path uses **deployment budget** — pending (`leaves ×` limit) + filled (`abs(qty) × avg_px_open`) — plus optional **capital gate** + **B4** reserve. **Capital vs logs:** with **`reporting_enabled`**, `_capital_metrics_for_facts` records **canonical USD balance** (Nautilus cash preferred), raw CLOB strings, and trust/disagreement flags — see **`Docs/Implementation/reporting_fact_model.md`**. Operator **matrix / reason codes:** `Docs/OPERATIONS.md` § Phase B. **Upstream:** order and position snapshots depend on **Nautilus + Polymarket adapter** updating `Cache` / `Portfolio`.
 
 ## F. Extension guidance
 
 - Implement `RiskPolicy` with the same `evaluate` signature; inject via `CopyStrategy.set_risk_policy`.
 - Prefer **`ReasonCode`** / explicit strings over silent drops.
-- **B4** (reserve) extends this module **without** moving logic into strategy or duplicating B1 aggregation; **B3** guru-ID logic stays in ``state_readers``. **B5** is documentation + compose startup summary only.
+- **B4** (reserve) extends this module **without** moving logic into strategy or duplicating deployment aggregation; **B3** guru-ID logic stays in ``state_readers``. **B5** is documentation + compose startup summary only.

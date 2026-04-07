@@ -49,9 +49,10 @@ See `Docs/dependency_lock.md` for versions used in development.
 - **Roadmap (strategic):** [Docs/Implementation/road_map.md](Docs/Implementation/road_map.md) — Phase A–C intent + **implementation snapshot** cross-reference.
 - **Phase A closure:** [Docs/Implementation/phase_a_closure.md](Docs/Implementation/phase_a_closure.md) — pending leaves, positions, capital gate, restart.
 - **Phase B plan:** [Docs/Implementation/Phase_B_planing.md](Docs/Implementation/Phase_B_planing.md) — B0–B5 **implemented**; operator matrix in [Docs/OPERATIONS.md](Docs/OPERATIONS.md) § Phase B.
-- **Phase B operational validation (pre–Phase C):** [Docs/Implementation/phase_b_operational_validation.md](Docs/Implementation/phase_b_operational_validation.md) — restarts, marks, denial semantics, live checklist.
+- **Phase B operational validation:** [Docs/Implementation/phase_b_operational_validation.md](Docs/Implementation/phase_b_operational_validation.md) — restart, deployment-cap denials, checklist.
+- **Deployment-budget live run (CLI):** [Docs/Runbooks/deployment_budget_live_validation.md](Docs/Runbooks/deployment_budget_live_validation.md) — exact commands, logs, reporting fields.
 - **Phase A+B test vs live matrix:** [Docs/Implementation/phase_ab_test_validation_matrix.md](Docs/Implementation/phase_ab_test_validation_matrix.md) — what pytest proves, what docs cover, what needs `run_guru` / live.
-- **Architecture:** [Docs/Architecture.md](Docs/Architecture.md) — system layout, diagrams, shadow vs live vs framework path.
+- **Architecture:** [Docs/Architecture.md](Docs/Architecture.md) — system layout, diagrams, shadow vs live (Nautilus guru submit).
 - **Per-module:** [Docs/modules/README.md](Docs/modules/README.md).
 - **Developers:** [Docs/DEVELOPMENT.md](Docs/DEVELOPMENT.md) — tests, conventions, compose.
 - **Config fields:** [Docs/CONFIG_MODEL.md](Docs/CONFIG_MODEL.md).

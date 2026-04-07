@@ -45,7 +45,7 @@ class RunContext:
     tyrex_log_path: str | None = None
     nautilus_log_path: str | None = None
     data_quality: RunDataQuality = field(default_factory=RunDataQuality)
-    execution_path: str = "unknown"  # framework_submit | legacy_http | shadow
+    execution_path: str = "unknown"  # live | shadow (aligned with execution_mode)
 
     def emit(self, fact_type: str, payload: dict[str, Any]) -> None:
         self.sink.emit_fact(fact_type, payload)

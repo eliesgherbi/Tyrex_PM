@@ -14,9 +14,9 @@ from tyrex_pm.strategy.copy_strategy import CopyStrategy, CopyStrategyConfig
 
 
 class DenyAllRisk:
-    def evaluate(self, intent: OrderIntent) -> tuple[bool, str]:
+    def evaluate(self, intent: OrderIntent) -> tuple[bool, str, OrderIntent | None]:
         _ = intent
-        return False, "test_deny"
+        return False, "test_deny", None
 
 
 def _register(strat: CopyStrategy) -> MessageBus:
@@ -157,58 +157,6 @@ def test_unfiltered_accepts_any_token_buy() -> None:
     assert len(port.records) == 1
     intent, _ = port.records[0]
     assert intent.token_id == "999999999"
-
-
-def test_min_follow_notional_skips_small_intent() -> None:
-    cfg = CopyStrategyConfig(
-        token_filter_enabled=True,
-        allowlisted_token_ids=("99",),
-        execution_mode="shadow",
-        min_follow_notional_usd=100.0,
-    )
-    strat = CopyStrategy(cfg)
-    port = NoOpExecutionPort()
-    strat.set_execution_port(port)
-    msgbus = _register(strat)
-    strat.on_start()
-
-    sig = GuruTradeSignal(
-        source_trade_id="small",
-        ts_event_ms=1,
-        side="BUY",
-        token_id="99",
-        size_raw=10.0,
-        price_raw=0.01,
-        raw_payload_ref=None,
-    )
-    msgbus.publish(GURU_TRADE_TOPIC, sig)
-    assert port.records == []
-
-
-def test_min_follow_notional_missing_price_skips_when_enabled() -> None:
-    cfg = CopyStrategyConfig(
-        token_filter_enabled=True,
-        allowlisted_token_ids=("99",),
-        execution_mode="shadow",
-        min_follow_notional_usd=1.0,
-    )
-    strat = CopyStrategy(cfg)
-    port = NoOpExecutionPort()
-    strat.set_execution_port(port)
-    msgbus = _register(strat)
-    strat.on_start()
-
-    sig = GuruTradeSignal(
-        source_trade_id="nop",
-        ts_event_ms=1,
-        side="BUY",
-        token_id="99",
-        size_raw=10.0,
-        price_raw=None,
-        raw_payload_ref=None,
-    )
-    msgbus.publish(GURU_TRADE_TOPIC, sig)
-    assert port.records == []
 
 
 def test_conviction_rejected_buy_does_not_seed_rolling_buffer() -> None:

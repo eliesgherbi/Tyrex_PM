@@ -6,6 +6,8 @@ from tyrex_pm.core.reason_codes import ReasonCode
 
 # Stable strings for guru-vs-us / lost-notional grouping.
 DELTA_REASON_UNKNOWN = "unknown"
+# Risk policy allow path (string from ``ConfiguredRiskPolicy``, not ``ReasonCode``).
+DELTA_REASON_RISK_PASSED = "risk_passed"
 
 
 _REASON_TO_DELTA: dict[str, str] = {
@@ -17,11 +19,16 @@ _REASON_TO_DELTA: dict[str, str] = {
     ReasonCode.UNSUPPORTED_SIDE: "entry_exit_policy",
     ReasonCode.RISK_KILL_SWITCH: "operator_config",
     ReasonCode.RISK_ORDER_QTY_LIMIT: "operator_config",
-    ReasonCode.RISK_NOTIONAL_PER_ORDER: "operator_config",
-    ReasonCode.RISK_TOKEN_NOTIONAL_OPEN: "token_notional_cap",
+    ReasonCode.RISK_NOTIONAL_PER_ORDER: "order_deployment_cap",
+    ReasonCode.RISK_ORDER_DEPLOYMENT_EXCEEDED: "order_deployment_cap",
+    ReasonCode.RISK_MIN_ORDER_NOTIONAL: "min_order_notional",
+    ReasonCode.RISK_ORDER_DEPLOYMENT_INFEASIBLE: "order_deployment_infeasible",
+    ReasonCode.RISK_TOKEN_NOTIONAL_OPEN: "token_deployment_cap",
+    ReasonCode.RISK_TOKEN_DEPLOYMENT_EXCEEDED: "token_deployment_cap",
     ReasonCode.RISK_MISSING_PRICE: "entry_exit_policy",
     ReasonCode.EXEC_ENTRY_GUARD_SKIP: "entry_guard_slippage",
     ReasonCode.EXEC_VENUE_NORMALIZE_SKIP: "normalization_min_size",
+    ReasonCode.EXEC_INSTRUMENT_QUANTIZE_SKIP: "instrument_quantize_skip",
     ReasonCode.EXEC_BOOK_UNAVAILABLE_SKIP: "book_unavailable",
     ReasonCode.EXEC_LIMIT_TIMEOUT_CANCEL: "limit_timeout_cancel",
     ReasonCode.EXEC_DEPTH_CLIP_APPLIED: "depth_clip",
@@ -33,9 +40,12 @@ _REASON_TO_DELTA: dict[str, str] = {
     ReasonCode.RISK_ALLOWANCE_UNAVAILABLE: "stale_balance",
     ReasonCode.RISK_INSUFFICIENT_COLLATERAL_BALANCE: "operator_config",
     ReasonCode.RISK_INSUFFICIENT_ALLOWANCE: "operator_config",
-    ReasonCode.RISK_POSITION_EXPOSURE_UNRESOLVED: "pending_exposure",
-    ReasonCode.RISK_PORTFOLIO_NOTIONAL_CAP_EXCEEDED: "portfolio_cap",
-    ReasonCode.RISK_PORTFOLIO_EXPOSURE_UNRESOLVED: "portfolio_exposure_unresolved",
+    ReasonCode.RISK_POSITION_EXPOSURE_UNRESOLVED: "token_deployment_unresolved",
+    ReasonCode.RISK_TOKEN_DEPLOYMENT_UNRESOLVED: "token_deployment_unresolved",
+    ReasonCode.RISK_PORTFOLIO_NOTIONAL_CAP_EXCEEDED: "portfolio_deployment_cap",
+    ReasonCode.RISK_PORTFOLIO_DEPLOYMENT_EXCEEDED: "portfolio_deployment_cap",
+    ReasonCode.RISK_PORTFOLIO_EXPOSURE_UNRESOLVED: "portfolio_deployment_unresolved",
+    ReasonCode.RISK_PORTFOLIO_DEPLOYMENT_UNRESOLVED: "portfolio_deployment_unresolved",
     ReasonCode.RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT: "concurrent_cap",
     ReasonCode.RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE: "collateral_reserve",
     ReasonCode.LIVE_ORDER_ERROR: "venue_error",
@@ -43,9 +53,10 @@ _REASON_TO_DELTA: dict[str, str] = {
 
 
 _GATE_TO_DELTA: dict[str, str] = {
-    "portfolio": "portfolio_exposure_unresolved",
-    "portfolio_unresolved": "portfolio_exposure_unresolved",
-    "portfolio_cap": "portfolio_cap",
+    "portfolio": "portfolio_deployment_unresolved",
+    "portfolio_unresolved": "portfolio_deployment_unresolved",
+    "portfolio_cap": "portfolio_deployment_cap",
+    "portfolio_deploy": "portfolio_deployment_cap",
     "guru_concurrent": "concurrent_cap",
     "reserve": "collateral_reserve",
     "min_collateral": "operator_config",
@@ -60,8 +71,42 @@ def to_delta_reason(reason_code: str, gate: str | None = None) -> str:
         for prefix, delta in _GATE_TO_DELTA.items():
             if g.startswith(prefix):
                 return delta
-    rc = str(reason_code)
+    rc = str(reason_code).strip()
+    if rc.lower() == "approved":
+        return DELTA_REASON_RISK_PASSED
     return _REASON_TO_DELTA.get(rc, DELTA_REASON_UNKNOWN)
+
+
+def guru_row_delta_reason(
+    *,
+    risk_allowed: bool | None,
+    risk_reason_code: str,
+    strategy_reason_code: str,
+    gate: str | None,
+    last_execution_outcome: str | None,
+    last_execution_reason_code: str | None,
+) -> str:
+    """
+    Rollup delta label for guru-vs-us rows.
+
+    Risk deny / strategy skip use pre-trade reasons. When risk allows but execution errors or
+    skips, surface the execution ``reason_code`` so rows are not stuck at ``risk_passed``.
+    """
+    gate_s = str(gate) if gate else None
+    if risk_allowed is False:
+        return to_delta_reason(risk_reason_code or strategy_reason_code, gate_s)
+    if risk_allowed is None:
+        return to_delta_reason(strategy_reason_code or risk_reason_code, gate_s)
+
+    base = to_delta_reason(risk_reason_code or strategy_reason_code, gate_s)
+    if last_execution_outcome in ("error", "skip"):
+        erc = str(last_execution_reason_code or "")
+        ex = to_delta_reason(erc, None)
+        if ex != DELTA_REASON_UNKNOWN:
+            return ex
+        if last_execution_outcome == "error":
+            return "venue_error"
+    return base
 
 
 # Success-path / telemetry codes not used for delta_reason (skipped in strict lint).

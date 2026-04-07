@@ -14,7 +14,6 @@ from tyrex_pm.runtime.phase_b_startup import phase_b_startup_summary_line
 
 def _minimal_risk(**kw: object) -> RiskSettings:
     base = {
-        "max_order_quantity": 100.0,
         "max_notional_usd_per_order": 1000.0,
         "max_token_notional_usd_open": float("inf"),
         "kill_switch": False,
@@ -32,7 +31,7 @@ def test_phase_b_startup_summary_includes_flags() -> None:
         max_concurrent_guru_resting_orders=4,
         collateral_reserve_usd=100.0,
         capital_gate_enabled=True,
-        fail_on_unresolved_portfolio_exposure=False,
+        fail_on_unresolved_portfolio_deployment=False,
     )
     runtime = RuntimeSettings(  # type: ignore[call-arg]
         trader_id="T-1",
@@ -47,9 +46,7 @@ def test_phase_b_startup_summary_includes_flags() -> None:
         logging_level="INFO",
         clob_host="https://clob.polymarket.com",
         chain_id=137,
-        polymarket_nautilus_live=True,
         polymarket_instrument_ids=(),
-        polymarket_framework_submit=True,
         polymarket_token_to_instrument=(),
         polymarket_dynamic_instruments=False,
         polymarket_dynamic_max_activations=32,
@@ -57,12 +54,12 @@ def test_phase_b_startup_summary_includes_flags() -> None:
         polymarket_gamma_http_timeout_seconds=15.0,
         polymarket_startup_token_warmup_max=0,
     )
-    line = phase_b_startup_summary_line(risk, runtime, b1_aggregator_wired=True)
+    line = phase_b_startup_summary_line(risk, runtime, deployment_budget_wired=True)
     assert "framework_truth_eligible=True" in line
-    assert "b1_aggregator_wired=True" in line
-    assert "portfolio_notional_cap_usd=500000.0" in line
+    assert "deployment_budget_wired=True" in line
+    assert "portfolio_deployment_cap_usd=500000.0" in line
     assert "max_concurrent_guru_resting_orders=4" in line
-    assert "fail_on_unresolved_portfolio_exposure=False" in line
+    assert "fail_on_unresolved_portfolio_deployment=False" in line
     assert "collateral_reserve_usd=100.0" in line
     assert "capital_gate_enabled=True" in line
 

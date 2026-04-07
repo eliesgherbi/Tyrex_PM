@@ -36,26 +36,27 @@ class StrategySettings:
     conviction_sizing_enabled: bool = False
     conviction_sizing_cap: float = 2.0
     conviction_sizing_lookback_trades: int = 20
-    #: C2 — skip when ``price_ref * qty`` below this USD floor (0 = disabled).
-    min_follow_notional_usd: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class RiskSettings:
     """
-    Pre-trade risk parameters.
+    Pre-trade risk parameters — **deployment-budget** model.
 
-    **Phase B contract (B0+):** Framework-truth-dependent gates —
-    finite ``max_portfolio_notional_usd_open``, non-null
-    ``max_concurrent_guru_resting_orders`` — require **live** runtime with
-    ``polymarket_nautilus_live`` and ``polymarket_framework_submit`` (see
-    :func:`validate_phase_b_runtime_contract`). Semantics for measured portfolio
-    exposure are normative in ``Docs/Implementation/Phase_B_planing.md`` §§4–7;
-    **B0** validation; **B1** aggregation; **B2** portfolio-wide cap in ``ConfiguredRiskPolicy``;
-    **B3–B4** concurrency / reserve (separate).
+    **Per-order:** ``order_deploy = price_ref × quantity`` bounded by ``max_notional_*`` / ``min_notional_*``
+    policies (``deny`` | ``cap``). **BUY-only** minimum when ``min_notional_usd_per_order > 0``.
+    **Per-token:** ``token_deploy + order_deploy`` vs ``max_token_notional_usd_open`` where
+    ``token_deploy`` is pending (resting ``leaves ×`` limit) + filled
+    (``abs(signed_qty) × avg_px_open``) on that token.
+    **Portfolio:** ``portfolio_deploy + order_deploy`` vs ``max_portfolio_notional_usd_open`` where
+    ``portfolio_deploy`` sums the same pending/filled semantics across Polymarket.
+
+    **Phase B (B0+):** Finite ``max_portfolio_notional_usd_open`` and/or
+    ``max_concurrent_guru_resting_orders`` require **live** ``execution_mode`` (see
+    :func:`validate_phase_b_runtime_contract`). **B3–B4** = concurrent resting / collateral reserve.
     """
 
-    max_order_quantity: float
+    #: Max **order_deploy** (USD) for a single new intent; ``price_ref × quantity``.
     max_notional_usd_per_order: float
     max_token_notional_usd_open: float
     kill_switch: bool
@@ -70,24 +71,24 @@ class RiskSettings:
     min_collateral_balance_usd: float | None = None
     #: Optional minimum allowance (USDC) from py-clob ``allowance`` field.
     min_allowance_usd: float | None = None
-    #: If true and ``max_token_notional_usd_open`` is finite, deny when position exposure cannot
-    #: be resolved (instrument not in cache / ``net_exposure`` unavailable).
-    fail_on_unresolved_position_for_token_cap: bool = False
-    #: **Phase B:** Portfolio-wide open notional cap vs ``E_portfolio + n`` (B2). ``inf``/omitted =
-    #: disabled. **Framework-only:** requires Nautilus live + framework submit (validated at compose).
-    #: Scope: Polymarket venue, this node’s ``Cache``/``Portfolio`` only (see Phase B plan §4.1).
+    #: If true and per-token cap is finite, deny when token deployment (pending+filled) cannot be
+    #: computed cleanly; if false, missing filled leg is treated as **0** (underestimate).
+    fail_on_unresolved_token_deployment: bool = False
+    #: Portfolio-wide deployment cap vs ``portfolio_deploy + order_deploy``. ``inf`` = off.
     max_portfolio_notional_usd_open: float = float("inf")
-    #: **Phase B:** When B2 is implemented, default **true** = fail-closed if a portfolio mark cannot
-    #: be resolved for an instrument in scope (Phase B plan §4.6). Inert until B2 unless portfolio cap finite.
-    fail_on_unresolved_portfolio_exposure: bool = True
-    #: **Phase B:** Max concurrent **guru-origin** resting orders (B3). ``None`` = disabled.
-    #: **Framework-only** — legacy py-clob submit has no ``Cache``-visible guru order truth.
+    #: If true and portfolio cap is finite, deny when portfolio deployment sum cannot be computed.
+    #: If false, treat unresolvable filled legs as **0** for portfolio total (underestimate).
+    fail_on_unresolved_portfolio_deployment: bool = True
+    #: Max concurrent **guru-origin** resting orders (B3). ``None`` = disabled.
     max_concurrent_guru_resting_orders: int | None = None
-    #: **Phase B B4:** USDC collateral floor held back from new **BUY** risk after Phase A mins.
-    #: **Requires** ``capital_gate_enabled`` (same py-clob ``balance`` snapshot as Phase A).
-    #: **Invalid** with shadow runtime (validated at compose). Denies when
-    #: ``balance < collateral_reserve_usd + n`` (``RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE``).
+    #: **B4:** USDC collateral floor held back from new **BUY** risk after Phase A mins.
     collateral_reserve_usd: float = 0.0
+    #: **BUY** only: floor when ``> 0`` — ``deny`` rejects below; ``cap`` bumps qty to meet min.
+    min_notional_usd_per_order: float = 0.0
+    #: ``deny`` | ``cap`` — below minimum: reject or bump quantity (BUY only; ignored if min is 0).
+    min_notional_policy: str = "deny"
+    #: ``deny`` | ``cap`` — above maximum: reject or clip quantity down to cap.
+    max_notional_policy: str = "cap"
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,20 +105,14 @@ class RuntimeSettings:
     logging_level: str
     clob_host: str
     chain_id: int
-    #: When true **and** ``execution_mode == "live"``, register Polymarket Nautilus data+exec
-    #: factories (Path A). Empty ``polymarket_instrument_ids`` is allowed only with
-    #: ``polymarket_framework_submit`` (guru dynamic universe — **Repo-confirmed** Tyrex).
-    polymarket_nautilus_live: bool
     #: Full ``InstrumentId`` strings (``condition_id-token_id.POLYMARKET``); shared
-    #: ``load_ids`` for data + exec clients.
+    #: ``load_ids`` for data + exec clients. **Live:** empty list enables zero-bootstrap
+    #: (dynamic instrument resolution).
     polymarket_instrument_ids: tuple[str, ...]
-    #: **Step 4:** With live + ``polymarket_nautilus_live``, guru submit uses Nautilus
-    #: ``submit_order`` (not py-clob).
-    polymarket_framework_submit: bool
     #: Outcome ``token_id`` → full ``InstrumentId`` string (from ``polymarket_instrument_ids``).
     polymarket_token_to_instrument: tuple[tuple[str, str], ...]
-    #: **Step 5:** Gamma+CLOB resolve for unknown guru ``token_id``; activate into ``Cache``
-    #: (requires framework submit).
+    #: **Step 5:** Gamma+CLOB resolve for unknown guru ``token_id``; activate into ``Cache``.
+    #: **Live** with non-empty ``polymarket_instrument_ids``: opt-in. **Live** with empty ids: implied.
     polymarket_dynamic_instruments: bool
     #: **Step 5:** Max **new** dynamic cache inserts per process (0 = no new adds).
     polymarket_dynamic_max_activations: int
@@ -143,8 +138,9 @@ class RuntimeSettings:
     guru_gap_fill_lookback_seconds: float = 60.0
     guru_proxy_wallet_validation_required: bool = False
     guru_stream_queue_drain_interval_ms: int = 50
-    #: ---- C3 execution quality (framework ``NautilusGuruExecutionPort`` only; default off) ----
-    execution_venue_normalize_enabled: bool = False
+    #: ---- C3 execution (framework ``NautilusGuruExecutionPort`` only; default off) ----
+    #: Order-size policy is **risk** only. Execution snaps to instrument tick/size step internally
+    #: before ``submit_order`` (not operator-configurable).
     execution_entry_guard_enabled: bool = False
     #: Max ticks market may move against follower vs guru reference (0 = treat guard as off).
     execution_max_entry_slippage_ticks: int = 0
@@ -160,6 +156,12 @@ class RuntimeSettings:
     reporting_base_dir: str = "var/reporting/runs"
     reporting_sink_max_queue: int = 50_000
     reporting_sink_batch_size: int = 128
+    #: When ``reporting_enabled``, pull wallet / collateral snapshots for facts even if
+    #: ``capital_gate_enabled`` is false (best-effort; does not block trading).
+    reporting_capital_observability_enabled: bool = True
+    #: Extra ``account_snapshot`` facts with ``snapshot_trigger=periodic`` at most this often
+    #: (wall clock, seconds). ``0`` disables periodic-only snapshots (risk/submit/deny still record).
+    reporting_capital_snapshot_period_seconds: float = 300.0
 
 
 def _polymarket_token_instrument_map(
@@ -199,6 +201,11 @@ def _normalize_token_list(raw_list: list[Any], *, path: Path, ctx: str) -> tuple
 def load_strategy_settings(path: str | Path) -> StrategySettings:
     p = Path(path)
     raw = _root(yaml.safe_load(p.read_text(encoding="utf-8")), p)
+    if "min_follow_notional_usd" in raw:
+        raise ValueError(
+            f"{p}: obsolete key min_follow_notional_usd — removed; use risk YAML "
+            "min_notional_usd_per_order and min_notional_policy",
+        )
     if "guru_wallet_address" not in raw:
         raise ValueError(f"{p}: missing required key: guru_wallet_address")
     gw = str(raw["guru_wallet_address"]).strip()
@@ -241,10 +248,7 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
     conv_en = bool(raw.get("conviction_sizing_enabled", False))
     conv_cap = float(raw.get("conviction_sizing_cap", 2.0))
     lookback = int(raw.get("conviction_sizing_lookback_trades", 20))
-    min_follow = float(raw.get("min_follow_notional_usd", 0.0))
 
-    if min_follow < 0:
-        raise ValueError(f"{p}: min_follow_notional_usd must be >= 0")
     if conv_en:
         if lookback < 1:
             raise ValueError(f"{p}: conviction_sizing_lookback_trades must be >= 1 when enabled")
@@ -259,19 +263,25 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
         conviction_sizing_enabled=conv_en,
         conviction_sizing_cap=conv_cap,
         conviction_sizing_lookback_trades=lookback,
-        min_follow_notional_usd=min_follow,
     )
 
 
 def load_risk_settings(path: str | Path) -> RiskSettings:
     p = Path(path)
     raw = _root(yaml.safe_load(p.read_text(encoding="utf-8")), p)
-    mqty = raw.get("max_order_quantity")
-    if mqty is None:
-        raise ValueError(f"{p}: max_order_quantity is required")
-    max_order_quantity = float(mqty)
-    if max_order_quantity <= 0:
-        raise ValueError(f"{p}: max_order_quantity must be positive")
+    for obsolete in (
+        "max_order_quantity",
+        "fail_on_unresolved_portfolio_exposure",
+        "portfolio_sizing_mode",
+        "fail_on_unresolved_position_for_token_cap",
+    ):
+        if obsolete in raw:
+            raise ValueError(
+                f"{p}: obsolete risk key {obsolete!r} — removed in deployment-budget model; "
+                "see Docs/CONFIG_MODEL.md (use max_notional_usd_per_order / "
+                "fail_on_unresolved_token_deployment / fail_on_unresolved_portfolio_deployment; "
+                "remove portfolio_sizing_mode and marked-exposure keys)",
+            )
 
     mn = raw.get("max_notional_usd_per_order")
     if mn is None:
@@ -304,7 +314,7 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
     ma_raw = raw.get("min_allowance_usd")
     min_allow = None if ma_raw is None else float(ma_raw)
 
-    fail_unresolved = bool(raw.get("fail_on_unresolved_position_for_token_cap", False))
+    fail_unresolved_token = bool(raw.get("fail_on_unresolved_token_deployment", False))
 
     mp_raw = raw.get("max_portfolio_notional_usd_open")
     max_portfolio = float("inf") if mp_raw is None else float(mp_raw)
@@ -313,7 +323,7 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
             f"{p}: max_portfolio_notional_usd_open must be positive or null/omitted (unlimited)",
         )
 
-    fail_portfolio_mark = bool(raw.get("fail_on_unresolved_portfolio_exposure", True))
+    fail_portfolio_dep = bool(raw.get("fail_on_unresolved_portfolio_deployment", True))
 
     mc_raw = raw.get("max_concurrent_guru_resting_orders")
     max_conc: int | None
@@ -335,8 +345,18 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
             f"{p}: collateral_reserve_usd > 0 requires capital_gate_enabled: true",
         )
 
+    min_order = float(raw.get("min_notional_usd_per_order", 0.0))
+    if min_order < 0:
+        raise ValueError(f"{p}: min_notional_usd_per_order must be >= 0")
+
+    min_pol = str(raw.get("min_notional_policy", "deny")).strip().lower()
+    max_pol = str(raw.get("max_notional_policy", "cap")).strip().lower()
+    if min_pol not in ("deny", "cap"):
+        raise ValueError(f"{p}: min_notional_policy must be deny or cap (got {min_pol!r})")
+    if max_pol not in ("deny", "cap"):
+        raise ValueError(f"{p}: max_notional_policy must be deny or cap (got {max_pol!r})")
+
     return RiskSettings(
-        max_order_quantity=max_order_quantity,
         max_notional_usd_per_order=max_notional_usd_per_order,
         max_token_notional_usd_open=max_token,
         kill_switch=kill_switch,
@@ -346,11 +366,14 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
         max_allowance_snapshot_age_seconds=allow_age,
         min_collateral_balance_usd=min_collateral,
         min_allowance_usd=min_allow,
-        fail_on_unresolved_position_for_token_cap=fail_unresolved,
+        fail_on_unresolved_token_deployment=fail_unresolved_token,
         max_portfolio_notional_usd_open=max_portfolio,
-        fail_on_unresolved_portfolio_exposure=fail_portfolio_mark,
+        fail_on_unresolved_portfolio_deployment=fail_portfolio_dep,
         max_concurrent_guru_resting_orders=max_conc,
         collateral_reserve_usd=collateral_reserve,
+        min_notional_usd_per_order=min_order,
+        min_notional_policy=min_pol,
+        max_notional_policy=max_pol,
     )
 
 
@@ -363,11 +386,7 @@ def phase_b_framework_truth_gates_active(risk: RiskSettings) -> bool:
 
 def framework_phase_b_eligible(runtime: RuntimeSettings) -> bool:
     """True iff runtime can support Phase B framework-truth gates (Phase B plan §7.1)."""
-    return (
-        runtime.execution_mode == "live"
-        and runtime.polymarket_nautilus_live
-        and runtime.polymarket_framework_submit
-    )
+    return runtime.execution_mode == "live"
 
 
 def validate_phase_b_runtime_contract(risk: RiskSettings, runtime: RuntimeSettings) -> None:
@@ -395,11 +414,8 @@ def validate_phase_b_runtime_contract(risk: RiskSettings, runtime: RuntimeSettin
 
     if phase_b_framework_truth_gates_active(risk) and not framework_phase_b_eligible(runtime):
         raise ValueError(
-            "Phase B framework-truth gates require execution_mode=live, "
-            "polymarket_nautilus_live=true, polymarket_framework_submit=true "
-            f"(got mode={runtime.execution_mode!r}, "
-            f"polymarket_nautilus_live={runtime.polymarket_nautilus_live}, "
-            f"polymarket_framework_submit={runtime.polymarket_framework_submit})",
+            "Phase B framework-truth gates require execution_mode=live "
+            f"(got mode={runtime.execution_mode!r})",
         )
 
 
@@ -441,8 +457,13 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     clob = str(raw.get("clob_host", "https://clob.polymarket.com")).rstrip("/")
     chain_id = int(raw.get("chain_id", 137))
 
-    pnl = bool(raw.get("polymarket_nautilus_live", False))
-    pfs = bool(raw.get("polymarket_framework_submit", False))
+    for obsolete_key in ("polymarket_nautilus_live", "polymarket_framework_submit"):
+        if obsolete_key in raw:
+            raise ValueError(
+                f"{p}: obsolete key {obsolete_key!r} — execution_mode: live always uses "
+                "Nautilus Trader with framework order submit; remove this key from runtime YAML",
+            )
+
     pdi = bool(raw.get("polymarket_dynamic_instruments", False))
 
     inst_raw = raw.get("polymarket_instrument_ids")
@@ -453,35 +474,14 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     poly_ids = tuple(str(x).strip() for x in inst_raw if str(x).strip())
 
     # **Package-source-confirmed:** ``PolymarketInstrumentProvider.load_ids_async`` no-ops when
-    # ``instrument_ids`` is empty (logs "No instrument IDs given for loading"). Base
-    # ``InstrumentProvider.initialize`` then warns and returns without loading — true
-    # zero-bootstrap for ``load_ids``.
-    if pnl and mode == "live" and not poly_ids:
-        if not pfs:
-            raise ValueError(
-                f"{p}: polymarket_nautilus_live with empty polymarket_instrument_ids requires "
-                "polymarket_framework_submit when execution_mode is live",
-            )
-        pdi = True  # **Repo-confirmed:** guru framework-submit + empty YAML ⇒ dynamic universe
+    # ``instrument_ids`` is empty. Live + empty ids ⇒ implicit dynamic instrument universe.
+    if mode == "live" and not poly_ids:
+        pdi = True
 
-    if pfs and mode == "live":
-        if not pnl:
-            raise ValueError(
-                f"{p}: polymarket_framework_submit requires polymarket_nautilus_live "
-                "when execution_mode is live",
-            )
-
-    if pdi and mode == "live":
-        if not pnl:
-            raise ValueError(
-                f"{p}: polymarket_dynamic_instruments requires polymarket_nautilus_live "
-                "when execution_mode is live",
-            )
-        if not pfs:
-            raise ValueError(
-                f"{p}: polymarket_dynamic_instruments requires polymarket_framework_submit "
-                "when execution_mode is live",
-            )
+    if pdi and mode != "live":
+        raise ValueError(
+            f"{p}: polymarket_dynamic_instruments is only meaningful when execution_mode is live",
+        )
 
     dyn_max = int(raw.get("polymarket_dynamic_max_activations", 32))
     if dyn_max < 0:
@@ -531,7 +531,15 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     if drain_ms < 10:
         raise ValueError(f"{p}: guru_stream_queue_drain_interval_ms must be >= 10")
 
-    ex_norm = bool(raw.get("execution_venue_normalize_enabled", False))
+    for _obsolete_exec in (
+        "venue_size_alignment_mode",
+        "execution_venue_normalize_enabled",
+    ):
+        if _obsolete_exec in raw:
+            raise ValueError(
+                f"{p}: obsolete key {_obsolete_exec} — removed (P2). "
+                "Order-size policy is risk YAML only; execution quantizes to instrument tick/step internally.",
+            )
     ex_guard = bool(raw.get("execution_entry_guard_enabled", False))
     ex_slip_ticks = int(raw.get("execution_max_entry_slippage_ticks", 0))
     ex_depth = bool(raw.get("execution_book_depth_clip_enabled", False))
@@ -567,6 +575,11 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     if r_batch < 1:
         raise ValueError(f"{p}: reporting_sink_batch_size must be >= 1")
 
+    r_cap_obs = bool(raw.get("reporting_capital_observability_enabled", True))
+    r_cap_period = float(raw.get("reporting_capital_snapshot_period_seconds", 300.0))
+    if r_cap_period < 0:
+        raise ValueError(f"{p}: reporting_capital_snapshot_period_seconds must be >= 0")
+
     return RuntimeSettings(
         trader_id=tid,
         execution_mode=mode,
@@ -580,9 +593,7 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         logging_level=log_level,
         clob_host=clob,
         chain_id=chain_id,
-        polymarket_nautilus_live=pnl,
         polymarket_instrument_ids=poly_ids,
-        polymarket_framework_submit=pfs,
         polymarket_token_to_instrument=token_map,
         polymarket_dynamic_instruments=pdi,
         polymarket_dynamic_max_activations=dyn_max,
@@ -602,7 +613,6 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         guru_gap_fill_lookback_seconds=gap_lb,
         guru_proxy_wallet_validation_required=proxy_val,
         guru_stream_queue_drain_interval_ms=drain_ms,
-        execution_venue_normalize_enabled=ex_norm,
         execution_entry_guard_enabled=ex_guard,
         execution_max_entry_slippage_ticks=ex_slip_ticks,
         execution_book_depth_clip_enabled=ex_depth,
@@ -615,4 +625,6 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         reporting_base_dir=reporting_base,
         reporting_sink_max_queue=r_max_q,
         reporting_sink_batch_size=r_batch,
+        reporting_capital_observability_enabled=r_cap_obs,
+        reporting_capital_snapshot_period_seconds=r_cap_period,
     )

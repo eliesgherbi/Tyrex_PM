@@ -35,7 +35,6 @@ from tyrex_pm.data.guru_monitor import GuruMonitorActor, GuruMonitorActorConfig
 from tyrex_pm.data.guru_stream_actor import GuruStreamActor, GuruStreamActorConfig
 from tyrex_pm.data.guru_watermark import GuruWatermarkStore
 from tyrex_pm.execution.nautilus_guru_exec import NautilusGuruExecutionPort
-from tyrex_pm.execution.polymarket_policy import PolymarketExecutionPolicy
 from tyrex_pm.execution.port import NoOpExecutionPort
 from tyrex_pm.risk.configured import ConfiguredRiskPolicy
 from tyrex_pm.runtime.clob_factory import build_clob_client_from_env
@@ -43,7 +42,7 @@ from tyrex_pm.runtime.guru_cache_warmup import warm_polymarket_cache_from_guru_a
 from tyrex_pm.runtime.guru_instrument_dynamic import GuruInstrumentDynamicController
 from tyrex_pm.runtime.phase_b_startup import phase_b_startup_summary_line
 from tyrex_pm.runtime.polymarket_nautilus_env import ensure_polymarket_l2_env_from_pk_if_missing
-from tyrex_pm.runtime.portfolio_exposure import NautilusPortfolioExposureAggregator
+from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
 from tyrex_pm.runtime.state_readers import (
     ClobAllowanceStateProvider,
     NautilusAccountSnapshotProvider,
@@ -84,11 +83,10 @@ class GuruTradingAssembly:
     execution_state: NautilusExecutionStateReader
     account_snapshots: NautilusAccountSnapshotProvider
     allowance: ClobAllowanceStateProvider | None
-    #: Set for Nautilus live + framework submit; uses ``Portfolio.net_exposure``.
+    #: Live-only instrument/position reader for **reporting** (``position`` facts); not used by risk caps.
     position_state: NautilusPositionStateReader | None
-    #: **Phase B B1:** Portfolio exposure aggregation (``E_pending``, ``E_filled_net``,
-    #: ``E_portfolio``); ``None`` when not on framework-submit path.
-    portfolio_exposure: NautilusPortfolioExposureAggregator | None
+    #: **Deployment budget** (pending + filled entry notional); ``None`` in shadow mode.
+    deployment_budget: NautilusDeploymentBudget | None
     #: Optional structured reporting context (``reporting_enabled`` runtime).
     run_context: RunContext | None = None
     order_correlation_registry: OrderCorrelationRegistry | None = None
@@ -122,9 +120,9 @@ def build_guru_trading_node(
     :func:`~tyrex_pm.runtime.phase_b_startup.phase_b_startup_summary_line` (active gate
     summary only — see ``Docs/OPERATIONS.md``).
 
-    When ``runtime.polymarket_nautilus_live`` is true and ``execution_mode`` is ``live``,
-    registers **Polymarket data + exec** client factories with shared ``InstrumentProviderConfig``
-    (**Spike-observed** / **Docs-confirmed**). Otherwise keeps empty client maps (legacy side-channel submit).
+    ``execution_mode: live`` always registers **Polymarket data + exec** factories and wires
+    :class:`~tyrex_pm.execution.nautilus_guru_exec.NautilusGuruExecutionPort` (framework
+    ``submit_order``). Shadow mode keeps empty client maps and :class:`~tyrex_pm.execution.port.NoOpExecutionPort`.
 
     Returns a :class:`GuruTradingAssembly` with ``node.build()`` / ``node.run()`` still up to the caller.
 
@@ -147,14 +145,7 @@ def build_guru_trading_node(
                 "is not 0x + 40 hex chars",
             )
 
-    use_nautilus = (
-        runtime.polymarket_nautilus_live and runtime.execution_mode == "live"
-    )
-    use_framework_submit = (
-        use_nautilus
-        and runtime.polymarket_framework_submit
-        and runtime.execution_mode == "live"
-    )
+    live = runtime.execution_mode == "live"
     data_key, exec_key = _tyrex_polymarket_client_ids()
 
     emit = run_context.emit if run_context is not None else None
@@ -162,14 +153,7 @@ def build_guru_trading_node(
         OrderCorrelationRegistry() if run_context is not None else None
     )
     if run_context is not None:
-        if use_framework_submit:
-            run_context.execution_path = "framework_submit"
-        elif runtime.execution_mode == "live":
-            run_context.execution_path = "legacy_http"
-        else:
-            run_context.execution_path = "shadow"
-        if run_context.execution_path == "legacy_http":
-            run_context.data_quality.legacy_execution_truth_partial = True
+        run_context.execution_path = "live" if live else "shadow"
         run_context.update_manifest_fields(
             execution_path=run_context.execution_path,
             data_quality=run_context.data_quality.to_dict(),
@@ -202,7 +186,7 @@ def build_guru_trading_node(
             },
         )
 
-    if use_nautilus:
+    if live:
         ensure_polymarket_l2_env_from_pk_if_missing()
         instrument_provider_cfg = InstrumentProviderConfig(
             load_ids=_instrument_load_ids(runtime),
@@ -245,7 +229,7 @@ def build_guru_trading_node(
 
     node = TradingNode(config=cfg)
 
-    if use_nautilus:
+    if live:
         node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
         node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
 
@@ -256,33 +240,43 @@ def build_guru_trading_node(
         allowance_provider = ClobAllowanceStateProvider.from_runtime(runtime)
 
     position_reader: NautilusPositionStateReader | None = None
-    portfolio_agg: NautilusPortfolioExposureAggregator | None = None
-    if use_nautilus:
+    deployment_agg: NautilusDeploymentBudget | None = None
+    if live:
         position_reader = NautilusPositionStateReader(
             node.portfolio,
             node.cache,
             dict(runtime.polymarket_token_to_instrument),
         )
-
-    if use_nautilus and use_framework_submit:
-        portfolio_agg = NautilusPortfolioExposureAggregator(
+        deployment_agg = NautilusDeploymentBudget(
             node.portfolio,
             node.cache,
             exec_reader,
             dict(runtime.polymarket_token_to_instrument),
         )
 
+    _cap_obs = (
+        bool(emit)
+        and runtime.reporting_enabled
+        and runtime.reporting_capital_observability_enabled
+    )
     risk_pol = ConfiguredRiskPolicy(
         risk,
         execution_reader=exec_reader,
         account_snapshot=account_provider,
         allowance_provider=allowance_provider,
-        position_reader=position_reader
-        if (use_nautilus and use_framework_submit)
-        else None,
-        portfolio_exposure=portfolio_agg,
-        token_open_authoritative_for_pending=not use_framework_submit,
+        deployment_budget=deployment_agg,
         fact_emit=emit,
+        reporting_capital_observability_enabled=_cap_obs,
+        reporting_capital_snapshot_period_seconds=(
+            runtime.reporting_capital_snapshot_period_seconds
+            if _cap_obs
+            else 0.0
+        ),
+        allowance_observability_enabled=(
+            _cap_obs
+            and allowance_provider is not None
+            and runtime.execution_mode == "live"
+        ),
     )
     dedup_path = strategy.strategy_dedup_state_path or runtime.guru_dedup_state_path
 
@@ -361,7 +355,6 @@ def build_guru_trading_node(
         conviction_sizing_enabled=strategy.conviction_sizing_enabled,
         conviction_sizing_cap=strategy.conviction_sizing_cap,
         conviction_sizing_lookback_trades=strategy.conviction_sizing_lookback_trades,
-        min_follow_notional_usd=strategy.min_follow_notional_usd,
     )
     strat = CopyStrategy(copy_cfg)
     strat.set_risk_policy(risk_pol)
@@ -369,48 +362,38 @@ def build_guru_trading_node(
         strat.set_reporting_emit(emit)
         strat.set_order_correlation_registry(order_registry)
         strat.set_reporting_run_id(run_context.run_id)
+        if position_reader is not None:
+            strat.set_position_reporting_reader(position_reader)
 
     if runtime.execution_mode == "shadow":
         strat.set_execution_port(NoOpExecutionPort())
     elif runtime.execution_mode == "live":
-        if use_framework_submit:
-            need_dynamic = runtime.polymarket_dynamic_instruments or not bool(
-                runtime.polymarket_instrument_ids,
+        need_dynamic = runtime.polymarket_dynamic_instruments or not bool(
+            runtime.polymarket_instrument_ids,
+        )
+        dynamic_ctrl: GuruInstrumentDynamicController | None = None
+        if need_dynamic:
+            clob_dynamic = build_clob_client_from_env(runtime)
+            dynamic_ctrl = GuruInstrumentDynamicController(
+                node.cache,
+                clob_dynamic,
+                runtime,
             )
-            dynamic_ctrl: GuruInstrumentDynamicController | None = None
-            if need_dynamic:
-                clob_dynamic = build_clob_client_from_env(runtime)
-                dynamic_ctrl = GuruInstrumentDynamicController(
-                    node.cache,
-                    clob_dynamic,
-                    runtime,
+            if not runtime.polymarket_instrument_ids:
+                warm_polymarket_cache_from_guru_activity(
+                    dynamic_ctrl,
+                    guru_wallet_address=strategy.guru_wallet_address,
+                    runtime=runtime,
                 )
-                if not runtime.polymarket_instrument_ids:
-                    warm_polymarket_cache_from_guru_activity(
-                        dynamic_ctrl,
-                        guru_wallet_address=strategy.guru_wallet_address,
-                        runtime=runtime,
-                    )
-            strat.set_execution_port(
-                NautilusGuruExecutionPort(
-                    strat,
-                    runtime,
-                    dynamic=dynamic_ctrl,
-                    fact_emit=emit,
-                    order_registry=order_registry,
-                ),
-            )
-        else:
-            client = build_clob_client_from_env(runtime)
-            strat.set_execution_port(
-                PolymarketExecutionPolicy(
-                    client,
-                    runtime,
-                    on_submit_ok=risk_pol.note_fill_assumption,
-                    fact_emit=emit,
-                    order_registry=order_registry,
-                ),
-            )
+        strat.set_execution_port(
+            NautilusGuruExecutionPort(
+                strat,
+                runtime,
+                dynamic=dynamic_ctrl,
+                fact_emit=emit,
+                order_registry=order_registry,
+            ),
+        )
     else:
         raise RuntimeError(f"Unknown execution_mode: {runtime.execution_mode}")
 
@@ -429,7 +412,7 @@ def build_guru_trading_node(
         phase_b_startup_summary_line(
             risk,
             runtime,
-            b1_aggregator_wired=portfolio_agg is not None,
+            deployment_budget_wired=deployment_agg is not None,
         ),
     )
 
@@ -439,10 +422,8 @@ def build_guru_trading_node(
         execution_state=exec_reader,
         account_snapshots=account_provider,
         allowance=allowance_provider,
-        position_state=position_reader
-        if (use_nautilus and use_framework_submit)
-        else None,
-        portfolio_exposure=portfolio_agg,
+        position_state=position_reader if live else None,
+        deployment_budget=deployment_agg,
         run_context=run_context,
         order_correlation_registry=order_registry,
     )
