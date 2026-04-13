@@ -49,6 +49,21 @@ _REASON_TO_DELTA: dict[str, str] = {
     ReasonCode.RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT: "concurrent_cap",
     ReasonCode.RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE: "collateral_reserve",
     ReasonCode.LIVE_ORDER_ERROR: "venue_error",
+    ReasonCode.BOT_SELL_VALIDATE: "validation_harness",
+    ReasonCode.RISK_SELL_WITHOUT_FILLED_INVENTORY: "sell_inventory_gate",
+    ReasonCode.RISK_SELL_EXCEEDS_FILLED_INVENTORY: "sell_inventory_gate",
+    ReasonCode.RISK_SELL_INVENTORY_UNVERIFIED: "sell_inventory_gate",
+    ReasonCode.LAYER_A_STATIC_AMOUNT_PRICE_MISSING: "layer_a_notional",
+    ReasonCode.LAYER_A_STATIC_AMOUNT_SIZE_MISSING: "layer_a_notional",
+    ReasonCode.LAYER_A_STATIC_AMOUNT_INVALID_PRICE: "layer_a_notional",
+    ReasonCode.LAYER_A_STATIC_AMOUNT_INVALID_SIZE: "layer_a_notional",
+    ReasonCode.LAYER_A_DENY_STATIC_AMOUNT_BELOW_THRESHOLD: "layer_a_static_threshold",
+    ReasonCode.LAYER_A_SIGNIFICANCE_NOTIONAL_MISSING: "layer_a_notional",
+    ReasonCode.LAYER_A_DENY_SIGNIFICANCE_MEDIAN: "layer_a_significance_median",
+    ReasonCode.LAYER_A_EXIT_FULL_DENIED_INVALID_TOKEN: "layer_a_exit_full",
+    ReasonCode.LAYER_A_EXIT_FULL_DENIED_UNRESOLVED: "layer_a_exit_full",
+    ReasonCode.LAYER_A_EXIT_FULL_DENIED_UNREADABLE: "layer_a_exit_full",
+    ReasonCode.LAYER_A_EXIT_FULL_DENIED_NO_POSITION: "layer_a_exit_full",
 }
 
 
@@ -116,6 +131,11 @@ _DELTA_EXCLUDED: frozenset[str] = frozenset(
         ReasonCode.GURU_EXIT_MIRROR,
         ReasonCode.SHADOW_ORDER_INTENT,
         ReasonCode.LIVE_ORDER_SUBMIT,
+        ReasonCode.LAYER_A_TOKEN_ALLOWLIST_OK,
+        ReasonCode.LAYER_A_STATIC_AMOUNT_OK,
+        ReasonCode.LAYER_A_SIGNIFICANCE_OK,
+        ReasonCode.LAYER_A_EXIT_INTERPRETATION_OK,
+        ReasonCode.LAYER_A_EXIT_MIRROR_OK,
     },
 )
 

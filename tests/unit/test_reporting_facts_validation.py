@@ -45,6 +45,16 @@ def _p(ft: str) -> dict:
         }
     if ft == "health_anomaly":
         return {"component": "guru_monitor", "event_type": "poll_error"}
+    if ft == "layer_a_filter":
+        return {
+            "correlation_id": "c1",
+            "filter_name": "token_allowlist",
+            "branch": "entry",
+            "accept": True,
+            "reason_code": "layer_a_token_allowlist_ok",
+            "detail": "",
+            "metadata": {},
+        }
     if ft == "strategy_decision":
         return {"correlation_id": "c1", "branch": "entry", "decision": "skip", "reason_code": "x"}
     if ft == "sizing":
@@ -112,6 +122,8 @@ def _p(ft: str) -> dict:
         return {"flush_ok": True}
     if ft == "reconciliation":
         return {"check_type": "submit_vs_cache", "outcome": "match"}
+    if ft == "bot_sell_validate":
+        return {"kind": "scheduled"}
     raise AssertionError(f"add golden payload for {ft}")
 
 

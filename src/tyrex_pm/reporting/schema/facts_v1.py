@@ -43,6 +43,17 @@ _REQUIRED: dict[str, frozenset[str]] = {
     ),
     "health_anomaly": frozenset({"component", "event_type"}),
     "strategy_decision": frozenset({"correlation_id", "branch", "decision", "reason_code"}),
+    "layer_a_filter": frozenset(
+        {
+            "correlation_id",
+            "filter_name",
+            "branch",
+            "accept",
+            "reason_code",
+            "detail",
+            "metadata",
+        },
+    ),
     "sizing": frozenset({"correlation_id", "target_qty", "signal_branch"}),
     "risk_decision": frozenset({"correlation_id", "allowed", "reason_code"}),
     "execution_intent": frozenset({"correlation_id", "token_id", "side", "quantity", "signal_kind"}),
@@ -95,6 +106,8 @@ _REQUIRED: dict[str, frozenset[str]] = {
     "component_status": frozenset({"component", "status"}),
     "report_pipeline_health": frozenset({"flush_ok"}),
     "reconciliation": frozenset({"check_type", "outcome"}),
+    # Harness diagnostics: rows share ``kind``; other keys vary by event (flattened into row).
+    "bot_sell_validate": frozenset({"kind"}),
 }
 
 

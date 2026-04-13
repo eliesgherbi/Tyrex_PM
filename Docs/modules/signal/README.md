@@ -8,7 +8,7 @@
 
 ## B. Boundaries
 
-**Belongs here:** Entry policy, exit policy, sizing policies (proportional + optional conviction-weighted), token filter spec, structured `SignalDecision` + reason codes.
+**Belongs here:** **`layer_a/`** — composable guru signal filters (gating + exit interpretation); sizing policies (proportional + optional conviction-weighted); token filter spec; legacy **`entry.py`** policies (`SignalDecision`) for reuse/tests.
 
 **Does not belong here:** Subscribing to the message bus, calling risk, calling execution, or reading YAML.
 
@@ -17,13 +17,14 @@
 | File | Contents |
 |------|----------|
 | `token_filter_spec.py` | **`TokenFilterSpec`** — explicit `enabled` + `allowlisted`; `allows_token()` used by entry/exit. |
+| `layer_a/` | **`LayerAOrchestrator`**, gating + **`ExitInterpretationFilter`**; wired from strategy YAML **`filters:`** (see `CONFIG_MODEL.md`). |
 | `entry.py` | `GuruFollowEntryPolicy`, **`GuruMirrorExitPolicy`**, `SignalDecision`. |
 | `sizing.py` | **`SizingPolicy`** protocol + **`build_sizing_policy`**: proportional `copy_scale`, optional conviction weighting + rolling average + `record_accepted_entry_size` / diagnostics. |
 | `__init__.py` | Public exports for policies. |
 
 ## D. Main interactions
 
-- **strategy:** `CopyStrategy` constructs policies and calls `evaluate` → `size` → `record_accepted_entry_size` (entries) → **`OrderIntent`** → **`RiskPolicy.evaluate`** (may adjust qty).
+- **strategy:** `CopyStrategy` runs **`LayerAOrchestrator`** (token + optional static/median + exit interpretation), then `size` → `record_accepted_entry_size` (entries) → **`OrderIntent`** → **`RiskPolicy.evaluate`** (may adjust qty).
 
 ## E. Status
 

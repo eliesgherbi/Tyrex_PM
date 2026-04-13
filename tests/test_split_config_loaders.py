@@ -12,6 +12,7 @@ from tyrex_pm.config.loaders import (
     load_runtime_settings,
     load_strategy_settings,
 )
+from tyrex_pm.strategy.validation_constants import DEFAULT_VALIDATION_SELL_INVENTORY_HAIRCUT_BPS
 
 
 def _strategy_doc(**kwargs) -> dict:
@@ -92,6 +93,126 @@ def test_strategy_rejects_bad_wallet(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="guru_wallet_address"):
+        load_strategy_settings(p)
+
+
+def test_strategy_layer_a_filters_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            _strategy_doc(
+                filters={
+                    "exit_filter": {"enabled": True, "exit_method": "full_exit"},
+                    "significance_filter": {
+                        "static_amount": {"enabled": True, "amount_usd": 700.0},
+                        "significance_conviction": {
+                            "enabled": True,
+                            "lookback_trades": 15,
+                            "threshold_method": "median",
+                        },
+                    },
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    s = load_strategy_settings(p)
+    assert s.layer_a.exit_filter.enabled
+    assert s.layer_a.exit_filter.exit_method == "full_exit"
+    assert s.layer_a.significance_filter.static_amount.amount_usd == 700.0
+    assert s.layer_a.significance_filter.significance_conviction.lookback_trades == 15
+
+
+def test_strategy_bot_sell_validate_defaults_when_absent(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(_strategy_doc()), encoding="utf-8")
+    s = load_strategy_settings(p)
+    assert s.bot_sell_validate is None
+    assert not s.layer_a.exit_filter.enabled
+
+
+def test_strategy_bot_sell_validate_parsed(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            _strategy_doc(
+                bot_sell_validate={
+                    "sell_delay_seconds": 12.5,
+                    "max_cycles": 2,
+                    "validation_sell_inventory_haircut_bps": 25.0,
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    s = load_strategy_settings(p)
+    assert s.bot_sell_validate is not None
+    assert s.bot_sell_validate.sell_delay_seconds == pytest.approx(12.5)
+    assert s.bot_sell_validate.max_cycles == 2
+    assert s.bot_sell_validate.validation_aggressive_limits is True
+    assert s.bot_sell_validate.validation_buy_aggression_ticks == 2
+    assert s.bot_sell_validate.validation_sell_inventory_haircut_bps == pytest.approx(25.0)
+
+
+def test_strategy_bot_sell_validate_inventory_haircut_defaults_when_key_omitted(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            _strategy_doc(
+                bot_sell_validate={
+                    "sell_delay_seconds": 1.0,
+                    "max_cycles": 1,
+                },
+            ),
+        ),
+        encoding="utf-8",
+    )
+    s = load_strategy_settings(p)
+    assert s.bot_sell_validate is not None
+    assert s.bot_sell_validate.validation_sell_inventory_haircut_bps == pytest.approx(
+        DEFAULT_VALIDATION_SELL_INVENTORY_HAIRCUT_BPS,
+    )
+
+
+def test_strategy_bot_sell_validate_rejects_bad_inventory_haircut_bps(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            _strategy_doc(
+                bot_sell_validate={"validation_sell_inventory_haircut_bps": 10_001.0},
+            )
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="validation_sell_inventory_haircut_bps"):
+        load_strategy_settings(p)
+
+
+def test_strategy_bot_sell_validate_rejects_bad_slippage(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            _strategy_doc(
+                bot_sell_validate={"validation_max_slippage_fraction": 1.5},
+            )
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="validation_max_slippage_fraction"):
+        load_strategy_settings(p)
+
+
+def test_strategy_bot_sell_validate_rejects_bad_max_cycles(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            _strategy_doc(bot_sell_validate={"max_cycles": 0}),
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="max_cycles"):
         load_strategy_settings(p)
 
 

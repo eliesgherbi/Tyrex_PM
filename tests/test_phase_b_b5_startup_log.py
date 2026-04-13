@@ -53,6 +53,9 @@ def test_phase_b_startup_summary_includes_flags() -> None:
         polymarket_gamma_base_url="https://gamma-api.polymarket.com",
         polymarket_gamma_http_timeout_seconds=15.0,
         polymarket_startup_token_warmup_max=0,
+        exec_position_check_interval_secs=None,
+        exec_open_check_interval_secs=None,
+        polymarket_wallet_position_warmup_max=0,
     )
     line = phase_b_startup_summary_line(risk, runtime, deployment_budget_wired=True)
     assert "framework_truth_eligible=True" in line
@@ -62,6 +65,9 @@ def test_phase_b_startup_summary_includes_flags() -> None:
     assert "fail_on_unresolved_portfolio_deployment=False" in line
     assert "collateral_reserve_usd=100.0" in line
     assert "capital_gate_enabled=True" in line
+    assert "exec_position_check_interval_secs=off" in line
+    assert "exec_open_check_interval_secs=off" in line
+    assert "polymarket_wallet_position_warmup_max=0" in line
 
 
 def test_build_guru_trading_node_logs_phase_b_line(
@@ -99,3 +105,4 @@ def test_build_guru_trading_node_logs_phase_b_line(
     ]
     assert len(matches) == 1
     assert "framework_truth_eligible=" in matches[0]
+    assert "exec_open_check_interval_secs=off" in matches[0]

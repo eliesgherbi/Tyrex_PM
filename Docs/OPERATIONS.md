@@ -2,12 +2,48 @@
 
 **Doc index:** [README.md](README.md) · **Architecture:** [Architecture.md](Architecture.md) · **Current state:** [Implementation/current_state.md](Implementation/current_state.md) · **Live deployment-budget checklist:** [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) · **CLI: deployment-budget live run:** [Runbooks/deployment_budget_live_validation.md](Runbooks/deployment_budget_live_validation.md) · **Strategy module:** [modules/strategy/README.md](modules/strategy/README.md)
 
+## Current status & operating model
+
+This section is the **operator-facing** summary of what the stack assumes after reconciliation / validation work. Detailed evidence lives under **[Docs/Implementation/](Implementation/)** — see the validation index in **[README.md](README.md)**.
+
+### What works reliably today
+
+- **Deployment-budget caps** (`max_portfolio_notional_usd_open`, token caps, pending rests) use **Nautilus framework readers**: **`Cache`** open orders (resting `leaves ×` limit) and **`Portfolio`** open positions (filled leg: cost-basis deployment). This is **intentional**: caps measure **economic deployment in the trading framework**, not “free cash” in your wallet.
+- **Startup** wallet position hydration (`polymarket_wallet_position_warmup_max`) plus dynamic instruments is **production-grade** for guru follow: open holdings are seeded into `Cache` so risk and reconciliation have instruments to attach to. Validation: **[validate_startup_instrument_hydration.md](Implementation/validate_startup_instrument_hydration.md)**.
+- **Runtime reconciliation prerequisites** (live **`exec_position_check_interval_seconds`** / **`exec_open_check_interval_seconds`**) are **wired from Tyrex** and visible in compose + Nautilus startup logs. Validation: **[validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md)**.
+- **Scenario A (bot-originated sell)** — optional **`bot_sell_validate`** harness — proves **bot-owned** BUY → SELL on the **same** Nautilus order lifecycle; suitable for “did we free deployment after our own exit?” drills. See **[validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md)**.
+
+### Wallet cash vs deployment (why they diverge)
+
+- **Wallet USDC** (py-clob balance / allowance when capital gate is on) answers **“can we pay margin / fees?”** It does **not** tell you **`portfolio_deploy`** — the sum of **pending + filled** deployment across outcomes.
+- **After you sell**, USDC may rise while **`portfolio_deploy`** still reflects **open** positions until Nautilus **positions / orders** match the venue. **Do not** infer “cap headroom” from cash alone.
+- **`tyrex_risk_ops`** lines with **`portfolio_deploy=…`** and **`cap=…`** reference **deployment math**, not wallet cash — the log hint **`portfolio_uses_nautilus_positions_not_wallet_cash`** is literal.
+
+### Reconciliation: simple mental model
+
+- **At cold start**, Tyrex can **warm** open positions from the Data API into `Cache` — reconciliation often **looks good early** because holdings are explicit.
+- **Mid-run**, trades **outside** the bot (UI, another process) require the **Nautilus Polymarket adapter** + periodic **position / open-order** checks to **import** venue truth. Convergence is **bounded by intervals and adapter behavior** — see **[validate_runtime_reconciliation_behavior.md](Implementation/validate_runtime_reconciliation_behavior.md)** and **[review_nautilus_polymarket_reconciliation_model.md](Implementation/review_nautilus_polymarket_reconciliation_model.md)**.
+- **Bot-submitted SELL** (Scenario A or normal copy exit) stays on the **same** order lifecycle Tyrex already tracks — that path is **more predictable** than manual UI sells on a busy wallet.
+
+### What is not fully solved (honest limits)
+
+- **Shared wallet / multi-actor** operation (manual sells, second bot, mixed strategies) is **not** a guaranteed-first-class mode: framework state may **lag** or **disagree** with what you see in the UI until reconciliation runs; edge cases remain. Guidance: **[validate_manual_sell_reconciliation.md](Implementation/validate_manual_sell_reconciliation.md)**.
+- **Prediction markets:** while a position remains **open** on the venue (not settled/closed in framework terms), it **consumes** deployment / cap budget. **Winning or losing** only “frees” the budget in Tyrex terms once the framework reflects **exit / resolution** — don’t assume UI “profit” alone released cap.
+- **Future:** broader automatic repair of **all** external-wallet drift is **not** claimed here; keep **`one bot = one dedicated wallet`** until product requirements change.
+
+### Recommended operating rules (today)
+
+1. **One Tyrex live node ↔ one dedicated Polymarket wallet** (signer/funder pair you configure).
+2. **Avoid** routine **manual / UI** trades on that same wallet while the bot runs; if you must, budget **time** for reconciliation and accept possible **`portfolio_deployment_cap`** denials until `portfolio_deploy` catches up.
+3. Use **reporting** (`risk_decision`, `deployment_budget` facts) to compare **`portfolio_deploy_at_eval`** before vs after your own bot exits — see Scenario A validation doc for an example drill.
+4. For go-live checklists (restart, caps, logs), keep using **[phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md)**.
+
 ## Config files
 
 | File | Use |
 |------|-----|
 | `.env` | **Secrets only:** `POLYMARKET_PK`, `POLYMARKET_FUNDER`, `POLYMARKET_SIGNATURE_TYPE`, L2 API trio. Never commit. |
-| `config/strategy/*.yaml` | Guru wallet, **`token_filter`** block (`enabled` + `allowlisted_token_ids`), `copy_scale`, optional strategy dedup path. |
+| `config/strategy/*.yaml` | Guru wallet, **`token_filter`** (required), **`filters:`** optional Layer A (`exit_filter`, `significance_filter`), `copy_scale`, optional strategy dedup path. |
 | `config/risk/*.yaml` | Limits, kill switch, notional rules, optional **capital gate** (`capital_gate_enabled`, mins, snapshot ages). |
 | `config/runtime/*.yaml` | `trader_id`, **`execution_mode`**, guru polling, logging, CLOB host/chain, **Polymarket / Nautilus flags**, optional **`reporting_enabled`** and **capital observability** keys (`reporting_capital_*` — see `CONFIG_MODEL.md`). |
 
@@ -77,6 +113,40 @@ python scripts/run_guru.py ^
 (Unix: line continuation with `\`.)
 
 Optional: `TYREX_PM_DOTENV=/path/to/.env` to load a non-default env file.
+
+### Live position reconciliation (framework deployment / `portfolio_deploy`)
+
+Portfolio and token **deployment caps** read **Nautilus `Cache` positions and open orders**, not py-clob **cash**. After you **sell or buy on the Polymarket UI** (outside Tyrex), the trading node must **reconcile** venue position state into the framework or risk can stay stale vs your wallet.
+
+- **`exec_position_check_interval_seconds`** (runtime YAML): live default **45** — Nautilus `LiveExecEngineConfig.position_check_interval_secs` (periodic **position** venue vs cache). Set to **`null`** only if you intentionally disable periodic position checks.
+- **`exec_open_check_interval_seconds`** (runtime YAML): live default **20** — `open_check_interval_secs` (periodic **open-order** reconciliation vs venue). **`null`** disables that task (Nautilus default before Tyrex set this live default). **Shadow** mode keeps **`null`** in `RuntimeSettings`; the shadow node does not use a live exec engine config. Open checks add venue polling — tune up if you hit rate limits, or down if you need faster order-state catch-up (recommended: same order of magnitude as the position interval, often ≤ position interval).
+- **`polymarket_wallet_position_warmup_max`** (runtime YAML): live default **128** — at compose, Tyrex loads **current** Data API **`GET /positions`** outcome tokens into **`Cache`** (bypassing the guru dynamic activation cap) so reconciliation and fill reports can resolve **instruments** that are not yet loaded from guru activity alone. **Scope:** open holdings returned for **`positions_user`** at compose time — **not** full trade history. Nautilus may still log **`instrument … not found`** on **historical** trades for tokens that were never in **`Cache`**; that is **orthogonal** to whether today’s open positions hydrated.
+
+**Which address is `positions_user`?** Same rule as Nautilus Polymarket **`user_address`**: env **`POLYMARKET_FUNDER`** when set (proxy / signature types where the **funder holds** conditional positions), otherwise the **signer** address from `ClobClient.get_address()`. The Tyrex line **`positions_user=`** on warmup logs must match Nautilus **`ExecClient-POLYMARKET: user_address=…`**.
+
+**Success vs empty vs failure (read `warmup_outcome=` on `wallet_position_warmup_done`):**
+
+| `warmup_outcome` | Meaning |
+|------------------|---------|
+| **`empty_positions_api`** | **`rows=0`**: API returned **`[]`** — **success** for an empty wallet; not a resolver bug. |
+| **`no_eligible_rows`** | **`rows>0`** but every row was flat or malformed before token extraction — check **`row_skip`** reasons. |
+| **`success`** | At least one distinct token **warmed** with **no** resolution failures. |
+| **`partial`** | Some tokens warmed, some **`row_failed`** — inspect **`failure_details=`** and per-row logs. |
+| **`failure_all_resolvable`** | Non-flat rows with tokens were seen but **`warmed=0`** — every resolve failed; inspect **`detail=`** / **`hint=`** on **`wallet_position_warmup_row_failed`**. |
+| **`unknown`** | Should be rare — report if seen with a repro. |
+
+**Wallet warmup logs (Tyrex):**
+
+- **`event=wallet_position_warmup_data_api_empty`** — `rows=0` after HTTP 200; includes **`warmup_outcome=empty_positions_api`**.
+- **`event=wallet_position_warmup_done`** — summary: **`warmup_outcome`**, **`distinct`**, **`warmed`**, **`cap`**, **`rows`**, **`flat_skipped`**, **`malformed_skipped`**, **`resolution_failures`**, **`failure_details=`** (aggregated counts, e.g. `gamma_empty:2`), **`truncated_by_cap=`**, **`positions_user=`**.
+- **`event=wallet_position_warmup_row_failed`** — one line per distinct token that did not enter `Cache`: **`detail=`** (machine code), **`msg=`** (short exception text), **`hint=`** (operator context). Codes include `gamma_empty`, `gamma_no_condition`, `clob_token_missing`, `clob_error_string`, `parse_failed`, `http_error`, etc.
+- **`event=wallet_position_warmup_row_skip`** — row skipped before resolution: `invalid_row_type`, `invalid_size`, **`missing_size_key`**, **`null_size`**, `flat_size`, **`missing_outcome_token_field`**, …
+- **`event=wallet_position_fetch`** with **`detail=positions_response_not_list`** — Data API JSON was not a list (schema drift); fetch stops with **no** rows.
+- Guru activity self-bootstrap: **`event=guru_cache_warmup_resolve_skip`** includes **`detail=`** and a short **`hint=`**.
+
+**Verify after deploy:** In `logs/live/<name>_tyrex.log`, the **`tyrex_pm phase_b:`** line lists both **`exec_position_check_interval_secs`** and **`exec_open_check_interval_secs`** (or `off` if disabled). In `logs/live/<name>_nautilus.log`, startup should show both **`open_check_interval_secs`** and **`position_check_interval_secs`** set (not `None`) when using live defaults. Expect Tyrex `event=wallet_position_warmup_done` when wallet warmup runs. After out-of-band trades, convergence is **faster on average** when both intervals are active, but Nautilus may still **defer** some fills until order prerequisites exist — this wiring does not guarantee zero-delay recovery — see **[validate_runtime_reconciliation_behavior.md](Implementation/validate_runtime_reconciliation_behavior.md)** and **[validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md)**.
+
+Further field reference: [`Docs/CONFIG_MODEL.md`](CONFIG_MODEL.md) § Runtime (keys above).
 
 ### Guru run log files (default)
 

@@ -16,6 +16,7 @@ from tyrex_pm.runtime.guru_instrument_dynamic import (
     GuruInstrumentResolveError,
     _fetch_gamma_market_row,
     resolve_binary_option_for_clob_token,
+    resolve_binary_option_for_wallet_warmup,
 )
 
 
@@ -111,6 +112,88 @@ def test_resolve_binary_option_gamma_empty_raises() -> None:
             )
 
 
+def test_resolve_and_activate_returns_classified_detail_not_opaque_failed() -> None:
+    cache = Cache()
+    rt = _runtime_dynamic(polymarket_dynamic_max_activations=4)
+    clob = MagicMock()
+
+    with patch("tyrex_pm.runtime.guru_instrument_dynamic.httpx.Client") as mock_client_cls:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        ctrl = GuruInstrumentDynamicController(cache, clob, rt)
+        out, err = ctrl.resolve_and_activate("nope")
+
+    assert out is None
+    assert err == "gamma_empty"
+    clob.get_market.assert_not_called()
+
+
+def test_wallet_warmup_resolve_falls_back_to_row_condition_when_gamma_empty() -> None:
+    token_id = "777701"
+    mi = _sample_market_info(token_id=token_id)
+    clob = MagicMock()
+    clob.get_market.return_value = mi
+
+    with patch("tyrex_pm.runtime.guru_instrument_dynamic.httpx.Client") as mock_client_cls:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        inst = resolve_binary_option_for_wallet_warmup(
+            token_id,
+            clob,
+            gamma_base_url="https://gamma-api.polymarket.com",
+            http_timeout=10.0,
+            row_condition_id=mi["condition_id"],
+        )
+
+    assert str(inst.id).startswith("0xcondstep5")
+    clob.get_market.assert_called_once_with("0xcondstep5")
+
+
+def test_wallet_warmup_no_fallback_when_parse_fails() -> None:
+    token_id = "777701"
+    mi = _sample_market_info(token_id=token_id)
+    clob = MagicMock()
+    clob.get_market.return_value = mi
+
+    with patch("tyrex_pm.runtime.guru_instrument_dynamic.httpx.Client") as mock_client_cls:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        with patch(
+            "tyrex_pm.runtime.guru_instrument_dynamic.parse_polymarket_instrument",
+            side_effect=ValueError("unsupported"),
+        ):
+            with pytest.raises(GuruInstrumentResolveError) as excinfo:
+                resolve_binary_option_for_wallet_warmup(
+                    token_id,
+                    clob,
+                    gamma_base_url="https://gamma-api.polymarket.com",
+                    http_timeout=10.0,
+                    row_condition_id="0xcondstep5",
+                )
+            assert excinfo.value.detail == "parse_failed"
+
+
 def test_fetch_gamma_http_error_wraps() -> None:
     with patch("tyrex_pm.runtime.guru_instrument_dynamic.httpx.Client") as mock_client_cls:
         mock_client = MagicMock()
@@ -152,6 +235,46 @@ def test_cache_activator_already_cached_no_budget_use() -> None:
     activator = CacheInstrumentActivator(cache, max_new_activations=0)
     ok, r = activator.try_add_instrument(inst)
     assert ok and r == "already_cached"
+
+
+def test_cache_activator_force_add_bypasses_cap() -> None:
+    cache = Cache()
+    activator = CacheInstrumentActivator(cache, max_new_activations=0)
+    mi = _sample_market_info(token_id="force1")
+    inst = parse_polymarket_instrument(mi, "force1", "Yes", ts_init=1)
+    ok, r = activator.force_add_instrument(inst)
+    assert ok and r == "activated"
+    assert cache.instrument(inst.id) is not None
+
+
+def test_resolve_wallet_position_bypasses_dynamic_cap() -> None:
+    cache = Cache()
+    rt = _runtime_dynamic(polymarket_dynamic_max_activations=0)
+    clob = MagicMock()
+    mi = _sample_market_info(token_id="w901")
+    clob.get_market.return_value = mi
+
+    with patch("tyrex_pm.runtime.guru_instrument_dynamic.httpx.Client") as mock_client_cls:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"conditionId": mi["condition_id"]}]
+        mock_resp.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        ctrl = GuruInstrumentDynamicController(cache, clob, rt)
+        _out_g, err_g = ctrl.resolve_and_activate("w901")
+        assert err_g == "activation_cap"
+
+        out_w = ctrl.resolve_and_activate_wallet_position(
+            "w901",
+            row_condition_id=None,
+        )
+        assert out_w.detail == ""
+        assert out_w.instrument is not None
+        assert cache.instrument(out_w.instrument.id) is not None
 
 
 def test_resolve_and_activate_uses_cache_scan_before_http() -> None:

@@ -60,6 +60,10 @@ class ConfiguredRiskPolicy:
     open orders and positions from the same node’s ``Cache`` / ``Portfolio``. **Shadow:**
     deployment budget is ``None`` (finite portfolio cap is not valid in shadow; see runtime contract).
 
+    **SELL:** exit inventory is verified against ``filled_usd_for_token`` before the additive
+    token/portfolio open-cap formulas apply; eligible exits may skip only those formulas
+    (see :meth:`_sell_exit_inventory_gate`).
+
     Guru concurrent resting cap and collateral reserve behave as in :class:`~tyrex_pm.config.loaders.RiskSettings`.
     """
 
@@ -187,7 +191,20 @@ class ConfiguredRiskPolicy:
         if not ok_cap:
             return False, str(rc_cap), intent
 
-        if not math.isinf(self._s.max_token_notional_usd_open):
+        side_u = intent.side.upper()
+        # SELL: verify reducible long on token before any open-cap bypass; blocks naked sells.
+        # Then bypass only the **additive** token/portfolio open-cap checks (not kill_switch,
+        # per-order limits, capital gate, guru concurrent cap, etc.).
+        sell_bypass_additive_open_caps = False
+        if side_u == "SELL":
+            deny_rc = self._sell_exit_inventory_gate(intent, order_deploy)
+            if deny_rc is not None:
+                return False, deny_rc, intent
+            sell_bypass_additive_open_caps = self._sell_additive_open_cap_bypass_enabled()
+
+        # Token/portfolio *open* caps: additive model matches BUY accumulation. For eligible SELL
+        # exits, that sum double-counts resting sells vs inventory — bypass **only** those checks.
+        if not math.isinf(self._s.max_token_notional_usd_open) and not sell_bypass_additive_open_caps:
             if order_deploy is None:
                 if self._s.fail_on_missing_price_for_notional:
                     return False, str(ReasonCode.RISK_MISSING_PRICE), intent
@@ -196,7 +213,7 @@ class ConfiguredRiskPolicy:
                 if not ok_t:
                     return False, str(rc_t), intent
 
-        if not math.isinf(self._s.max_portfolio_notional_usd_open):
+        if not math.isinf(self._s.max_portfolio_notional_usd_open) and not sell_bypass_additive_open_caps:
             ok_p, rc_p = self._portfolio_deployment_cap_eval(intent, order_deploy)
             if not ok_p:
                 return False, str(rc_p), intent
@@ -207,6 +224,69 @@ class ConfiguredRiskPolicy:
                 return False, str(rc_cg), intent
 
         return True, "approved", intent
+
+    def _sell_additive_open_cap_bypass_enabled(self) -> bool:
+        """True when SELL may skip only the additive token/portfolio *open* cap formulas."""
+        return not math.isinf(self._s.max_token_notional_usd_open) or not math.isinf(
+            self._s.max_portfolio_notional_usd_open,
+        )
+
+    def _sell_exit_inventory_gate(
+        self,
+        intent: OrderIntent,
+        order_deploy: float | None,
+    ) -> str | None:
+        """
+        SELL-only: require resolved positive ``filled_usd_for_token`` (deployment_budget basis)
+        and ``order_deploy <=`` that inventory (prevents naked / oversized exit intents). When
+        ``deployment_budget`` is missing but finite open caps need the exit bypass path,
+        fail closed.
+        """
+        db = self._deployment_budget
+        if db is None:
+            if self._sell_additive_open_cap_bypass_enabled():
+                _LOG.info(
+                    "event=%s gate=sell_inventory reason=%s correlation_id=%s detail=no_deployment_budget",
+                    _TYREX_RISK_OPS_EVENT,
+                    ReasonCode.RISK_SELL_INVENTORY_UNVERIFIED,
+                    intent.correlation_id,
+                )
+                return str(ReasonCode.RISK_SELL_INVENTORY_UNVERIFIED)
+            return None
+
+        filled, f_ok = db.filled_usd_for_token(intent.token_id)
+        if not f_ok:
+            _LOG.info(
+                "event=%s gate=sell_inventory reason=%s correlation_id=%s detail=filled_unresolved",
+                _TYREX_RISK_OPS_EVENT,
+                ReasonCode.RISK_TOKEN_DEPLOYMENT_UNRESOLVED,
+                intent.correlation_id,
+            )
+            return str(ReasonCode.RISK_TOKEN_DEPLOYMENT_UNRESOLVED)
+        if filled <= 1e-12:
+            _LOG.info(
+                "event=%s gate=sell_inventory reason=%s correlation_id=%s filled_usd=%.6g",
+                _TYREX_RISK_OPS_EVENT,
+                ReasonCode.RISK_SELL_WITHOUT_FILLED_INVENTORY,
+                intent.correlation_id,
+                float(filled),
+            )
+            return str(ReasonCode.RISK_SELL_WITHOUT_FILLED_INVENTORY)
+        if order_deploy is None:
+            return str(ReasonCode.RISK_MISSING_PRICE)
+        tol = max(1e-9, abs(float(filled)) * 1e-9)
+        if float(order_deploy) > float(filled) + tol:
+            _LOG.info(
+                "event=%s gate=sell_inventory reason=%s correlation_id=%s "
+                "order_deploy=%.6g filled_usd=%.6g",
+                _TYREX_RISK_OPS_EVENT,
+                ReasonCode.RISK_SELL_EXCEEDS_FILLED_INVENTORY,
+                intent.correlation_id,
+                float(order_deploy),
+                float(filled),
+            )
+            return str(ReasonCode.RISK_SELL_EXCEEDS_FILLED_INVENTORY)
+        return None
 
     def _apply_order_deploy_policies(
         self,
@@ -358,7 +438,8 @@ class ConfiguredRiskPolicy:
         if pf + order_deploy > cap:
             _LOG.info(
                 "event=%s gate=portfolio_deployment_cap reason=%s correlation_id=%s "
-                "portfolio_deploy=%.6g order_deploy=%.6g cap=%.6g",
+                "portfolio_deploy=%.6g order_deploy=%.6g cap=%.6g "
+                "hint=portfolio_uses_nautilus_positions_not_wallet_cash",
                 _TYREX_RISK_OPS_EVENT,
                 ReasonCode.RISK_PORTFOLIO_DEPLOYMENT_EXCEEDED,
                 intent.correlation_id,

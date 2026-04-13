@@ -13,6 +13,7 @@ from typing import Any
 from nautilus_trader.model.events.order import OrderDenied, OrderEvent
 from nautilus_trader.trading.config import StrategyConfig
 
+from tyrex_pm.config.loaders import LayerAFiltersSettings, _default_layer_a_filters
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import GuruTradeSignal, OrderIntent
 from tyrex_pm.data.guru_monitor import GURU_TRADE_TOPIC
@@ -21,7 +22,9 @@ from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
 from tyrex_pm.reporting.order_events import emit_order_event_facts
 from tyrex_pm.reporting.position_sample import emit_position_snapshot
 from tyrex_pm.risk.policy import RiskPolicy, ShadowAllPassRisk
-from tyrex_pm.signal.entry import GuruFollowEntryPolicy, GuruMirrorExitPolicy, SignalDecision
+from tyrex_pm.signal.layer_a import build_layer_a_orchestrator
+from tyrex_pm.signal.layer_a.orchestrator import LayerAOrchestrator
+from tyrex_pm.signal.layer_a.types import LayerAContext, LayerAOutcome, LayerAStepRecord
 from tyrex_pm.signal.sizing import SizingPolicy, build_sizing_policy
 from tyrex_pm.signal.token_filter_spec import TokenFilterSpec
 from tyrex_pm.strategy.base import BaseComposableStrategy
@@ -42,6 +45,8 @@ class CopyStrategyConfig(StrategyConfig, frozen=True, kw_only=True):
     conviction_sizing_enabled: bool = False
     conviction_sizing_cap: float = 2.0
     conviction_sizing_lookback_trades: int = 20
+    #: Optional Layer A filters; ``None`` → defaults (all off).
+    layer_a: LayerAFiltersSettings | None = None
 
 
 class CopyStrategy(BaseComposableStrategy):
@@ -56,8 +61,9 @@ class CopyStrategy(BaseComposableStrategy):
             enabled=config.token_filter_enabled,
             allowlisted=frozenset(config.allowlisted_token_ids),
         )
-        self._entry = GuruFollowEntryPolicy(tokens)
-        self._exit = GuruMirrorExitPolicy(tokens)
+        layer_a_cfg = config.layer_a if config.layer_a is not None else _default_layer_a_filters()
+        self._orchestrator: LayerAOrchestrator = build_layer_a_orchestrator(layer_a_cfg, tokens)
+        self._layer_a_ctx: LayerAContext | None = None
         self._sizing: SizingPolicy = build_sizing_policy(
             copy_scale=config.copy_scale,
             conviction_sizing_enabled=config.conviction_sizing_enabled,
@@ -91,6 +97,10 @@ class CopyStrategy(BaseComposableStrategy):
     def set_position_reporting_reader(self, reader: Any | None) -> None:
         """Optional position reader for ``position`` facts (framework path)."""
         self._position_reader = reader
+
+    def set_layer_a_context(self, ctx: LayerAContext | None) -> None:
+        """Inject runtime follower-position reader for ``full_exit`` (live/shadow Nautilus)."""
+        self._layer_a_ctx = ctx
 
     def on_start(self) -> None:
         super().on_start()
@@ -170,57 +180,105 @@ class CopyStrategy(BaseComposableStrategy):
 
         ts_signal_ms = int(time.time() * 1000)
         if msg.side == "BUY":
-            self._handle_branch(
-                msg,
-                self._entry.evaluate(msg),
-                "entry",
-                ts_signal_ms=ts_signal_ms,
-            )
+            branch = "entry"
         elif msg.side == "SELL":
-            self._handle_branch(
-                msg,
-                self._exit.evaluate(msg),
-                "exit",
-                ts_signal_ms=ts_signal_ms,
-            )
+            branch = "exit"
         else:
             self.log.warning(
                 "event=copy_skip "
                 f"component=copy_strategy correlation_id={msg.source_trade_id} "
                 f"reason_code={ReasonCode.UNSUPPORTED_SIDE} side={msg.side}"
             )
+            return
+
+        outcome, steps = self._orchestrator.run(
+            msg,
+            branch=branch,
+            ctx=self._layer_a_ctx,
+        )
+        self._emit_layer_a_filter_facts(msg.source_trade_id, steps)
+        if not outcome.accept:
+            self._log_layer_a_skip(msg.source_trade_id, outcome)
+            self._emit_strategy_decision_skip(msg.source_trade_id, branch, outcome.reason_code)
+            return
+
+        self._handle_branch(
+            msg,
+            outcome,
+            branch,
+            ts_signal_ms=ts_signal_ms,
+        )
+
+    def _adjust_intent_before_risk(
+        self,
+        intent: OrderIntent,
+        *,
+        signal: GuruTradeSignal,
+        branch: str,
+    ) -> OrderIntent:
+        """
+        Hook for subclasses (e.g. Scenario A harness) to adjust ``price_ref`` before risk.
+        Default: no change — production behavior unchanged.
+        """
+        _ = signal
+        _ = branch
+        return intent
+
+    def _emit_layer_a_filter_facts(
+        self,
+        correlation_id: str,
+        steps: list[LayerAStepRecord],
+    ) -> None:
+        em = self._reporting_emit
+        if em is None:
+            return
+        for s in steps:
+            em("layer_a_filter", s.as_fact_payload(correlation_id))
+
+    def _log_layer_a_skip(self, correlation_id: str, outcome: LayerAOutcome) -> None:
+        self.log.info(
+            "event=copy_skip "
+            "component=copy_strategy "
+            f"correlation_id={correlation_id} "
+            f"reason_code={outcome.reason_code} "
+            f"detail={outcome.detail or ''}",
+        )
+
+    def _emit_strategy_decision_skip(
+        self,
+        correlation_id: str,
+        branch: str,
+        reason_code: str,
+    ) -> None:
+        em = self._reporting_emit
+        if em is not None:
+            em(
+                "strategy_decision",
+                {
+                    "correlation_id": correlation_id,
+                    "branch": branch,
+                    "decision": "skip",
+                    "reason_code": str(reason_code),
+                },
+            )
 
     def _handle_branch(
         self,
         sig: GuruTradeSignal,
-        decision: SignalDecision,
+        outcome: LayerAOutcome,
         kind: str,
         *,
         ts_signal_ms: int,
     ) -> None:
         em = self._reporting_emit
         cid = sig.source_trade_id
-        if not decision.accept:
-            self.log.info(
-                "event=copy_skip "
-                "component=copy_strategy "
-                f"correlation_id={sig.source_trade_id} "
-                f"reason_code={decision.reason_code} "
-                f"detail={decision.detail or ''}"
-            )
-            if em is not None:
-                em(
-                    "strategy_decision",
-                    {
-                        "correlation_id": cid,
-                        "branch": kind,
-                        "decision": "skip",
-                        "reason_code": str(decision.reason_code),
-                    },
-                )
-            return
+        decision_reason = outcome.reason_code
 
-        qty = self._sizing.size(sig, branch=kind)
+        exit_mode = str(outcome.metadata.get("exit_qty_mode", "mirror_guru"))
+        if kind == "exit" and exit_mode == "full_position":
+            qty = float(outcome.metadata["follower_position_qty"])
+        else:
+            qty = self._sizing.size(sig, branch=kind)
         if kind == "entry":
             self._sizing.record_accepted_entry_size(sig)
         if qty <= 0:
@@ -261,7 +319,7 @@ class CopyStrategy(BaseComposableStrategy):
                     "correlation_id": cid,
                     "branch": kind,
                     "decision": "accept",
-                    "reason_code": str(decision.reason_code),
+                    "reason_code": str(decision_reason),
                 },
             )
             em(
@@ -287,9 +345,10 @@ class CopyStrategy(BaseComposableStrategy):
             side=sig.side,
             quantity=qty,
             signal_kind=kind,
-            reason_code=str(decision.reason_code),
+            reason_code=str(decision_reason),
             price_ref=sig.price_raw,
         )
+        intent = self._adjust_intent_before_risk(intent, signal=sig, branch=kind)
         approved, risk_rc, intent_risk = self._risk.evaluate(intent)
         if not approved or intent_risk is None:
             self.log.info(
@@ -311,7 +370,7 @@ class CopyStrategy(BaseComposableStrategy):
                     "quantity": float(intent_risk.quantity),
                     "quantity_strategy_sized": float(qty),
                     "signal_kind": kind,
-                    "price_ref": sig.price_raw,
+                    "price_ref": intent_risk.price_ref,
                     "ts_risk_approved_ms": ts_risk_ms,
                 },
             )

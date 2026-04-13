@@ -31,6 +31,11 @@ def phase_b_startup_summary_line(
     cap_s = "off" if math.isinf(cap) else str(cap)
     conc = risk.max_concurrent_guru_resting_orders
     conc_s = "off" if conc is None else str(conc)
+    pos_chk = runtime.exec_position_check_interval_secs
+    pos_chk_s = "off" if pos_chk is None else str(pos_chk)
+    open_chk = runtime.exec_open_check_interval_secs
+    open_chk_s = "off" if open_chk is None else str(open_chk)
+    wp_warm = runtime.polymarket_wallet_position_warmup_max
     return (
         "tyrex_pm phase_b: "
         f"framework_truth_eligible={fw} deployment_budget_wired={deployment_budget_wired} "
@@ -38,5 +43,8 @@ def phase_b_startup_summary_line(
         f"fail_on_unresolved_portfolio_deployment={risk.fail_on_unresolved_portfolio_deployment} "
         f"fail_on_unresolved_token_deployment={risk.fail_on_unresolved_token_deployment} "
         f"collateral_reserve_usd={risk.collateral_reserve_usd} "
-        f"capital_gate_enabled={risk.capital_gate_enabled}"
+        f"capital_gate_enabled={risk.capital_gate_enabled} "
+        f"exec_position_check_interval_secs={pos_chk_s} "
+        f"exec_open_check_interval_secs={open_chk_s} "
+        f"polymarket_wallet_position_warmup_max={wp_warm}"
     )

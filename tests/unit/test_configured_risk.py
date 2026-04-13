@@ -26,6 +26,18 @@ def _intent(qty: float = 1.0, price: float | None = 0.5, token: str = "tok") -> 
     )
 
 
+def _sell_intent(qty: float = 1.0, price: float | None = 0.5, token: str = "tok") -> OrderIntent:
+    return OrderIntent(
+        correlation_id="c-sell",
+        token_id=token,
+        side="SELL",
+        quantity=qty,
+        signal_kind="exit",
+        reason_code="ok",
+        price_ref=price,
+    )
+
+
 def _budget_for_reader(reader: MagicMock) -> NautilusDeploymentBudget:
     poly = MagicMock()
     poly.is_flat.return_value = True
@@ -163,6 +175,72 @@ def test_max_notional_policy_cap_clips_qty() -> None:
     assert out is not None
     assert out.quantity == pytest.approx(50.0)
     assert out.quantity * 0.1 <= 5.0 + 1e-6
+
+
+def test_sell_skips_open_deployment_caps_when_buy_would_breach() -> None:
+    """SELL bypasses only additive open caps when inventory gate passes (Scenario A closes)."""
+    s = RiskSettings(
+        max_notional_usd_per_order=1000.0,
+        max_token_notional_usd_open=5.0,
+        max_portfolio_notional_usd_open=5.0,
+        kill_switch=False,
+        fail_on_missing_price_for_notional=True,
+    )
+    db = MagicMock()
+    db.filled_usd_for_token.return_value = (3.0, True)
+    db.token_deployment_usd_with_policy.return_value = (5.0, True, None)
+    db.portfolio_deployment_usd_with_policy.return_value = (5.0, True, None)
+    reader = MagicMock()
+    reader.list_open_orders.return_value = ()
+    reader.count_guru_resting_orders_open = MagicMock(return_value=0)
+    pol = ConfiguredRiskPolicy(s, execution_reader=reader, deployment_budget=db)
+
+    ok_buy, rc_buy, _o = pol.evaluate(_intent(qty=2.0, price=0.6))
+    assert ok_buy is False
+    assert rc_buy == ReasonCode.RISK_TOKEN_DEPLOYMENT_EXCEEDED
+
+    ok_sell, rc_sell, out_s = pol.evaluate(_sell_intent(qty=2.0, price=0.6))
+    assert ok_sell is True
+    assert rc_sell == "approved"
+    assert out_s is not None
+
+
+def test_sell_denied_without_filled_inventory() -> None:
+    s = RiskSettings(
+        max_notional_usd_per_order=1000.0,
+        max_token_notional_usd_open=5.0,
+        max_portfolio_notional_usd_open=5.0,
+        kill_switch=False,
+        fail_on_missing_price_for_notional=True,
+    )
+    db = MagicMock()
+    db.filled_usd_for_token.return_value = (0.0, True)
+    reader = MagicMock()
+    reader.list_open_orders.return_value = ()
+    reader.count_guru_resting_orders_open = MagicMock(return_value=0)
+    pol = ConfiguredRiskPolicy(s, execution_reader=reader, deployment_budget=db)
+    ok, rc, _ = pol.evaluate(_sell_intent(qty=1.0, price=0.5))
+    assert ok is False
+    assert rc == ReasonCode.RISK_SELL_WITHOUT_FILLED_INVENTORY
+
+
+def test_sell_denied_when_order_deploy_exceeds_filled_usd() -> None:
+    s = RiskSettings(
+        max_notional_usd_per_order=1000.0,
+        max_token_notional_usd_open=5.0,
+        max_portfolio_notional_usd_open=5.0,
+        kill_switch=False,
+        fail_on_missing_price_for_notional=True,
+    )
+    db = MagicMock()
+    db.filled_usd_for_token.return_value = (1.0, True)
+    reader = MagicMock()
+    reader.list_open_orders.return_value = ()
+    reader.count_guru_resting_orders_open = MagicMock(return_value=0)
+    pol = ConfiguredRiskPolicy(s, execution_reader=reader, deployment_budget=db)
+    ok, rc, _ = pol.evaluate(_sell_intent(qty=10.0, price=0.5))
+    assert ok is False
+    assert rc == ReasonCode.RISK_SELL_EXCEEDS_FILLED_INVENTORY
 
 
 def test_min_notional_policy_cap_bumps_qty() -> None:

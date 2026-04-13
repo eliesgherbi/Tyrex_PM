@@ -61,6 +61,33 @@ def book_top_from_cache(cache: Any, instrument_id: InstrumentId) -> BookTop | No
     )
 
 
+def _float_from_rest_field(x: Any) -> float | None:
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        try:
+            return float(str(x))
+        except (TypeError, ValueError):
+            return None
+
+
+def _parse_rest_book_level(level: Any) -> tuple[float | None, float | None]:
+    """
+    py-clob may return dict rows or typed rows (e.g. ``OrderSummary`` with ``.price`` / ``.size``).
+    """
+    if level is None:
+        return None, None
+    if isinstance(level, dict):
+        p = level.get("price")
+        s = level.get("size")
+    else:
+        p = getattr(level, "price", None)
+        s = getattr(level, "size", None)
+    return _float_from_rest_field(p), _float_from_rest_field(s)
+
+
 def book_top_from_rest(*, token_id: str, clob: Any) -> BookTop | None:
     """``clob`` is ``ClobClient`` with ``get_order_book``."""
     try:
@@ -69,10 +96,12 @@ def book_top_from_rest(*, token_id: str, clob: Any) -> BookTop | None:
         return None
     bids = getattr(raw, "bids", None) or []
     asks = getattr(raw, "asks", None) or []
-    best_bid = float(bids[0]["price"]) if bids else None
-    best_ask = float(asks[0]["price"]) if asks else None
-    best_bid_sz = float(bids[0]["size"]) if bids else None
-    best_ask_sz = float(asks[0]["size"]) if asks else None
+    best_bid = best_bid_sz = None
+    if bids:
+        best_bid, best_bid_sz = _parse_rest_book_level(bids[0])
+    best_ask = best_ask_sz = None
+    if asks:
+        best_ask, best_ask_sz = _parse_rest_book_level(asks[0])
     if best_bid is None and best_ask is None:
         return BookTop(None, None, None, None, "none")
     return BookTop(

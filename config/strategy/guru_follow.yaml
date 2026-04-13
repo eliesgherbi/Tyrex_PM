@@ -1,6 +1,7 @@
 # =============================================================================
-# Strategy — guru target, token universe, copy sizing, optional conviction (C2).
-# Flat keys except token_filter (required nested block per loader).
+# Strategy — guru target, token universe, copy sizing, optional conviction (C2),
+# optional Layer A filters (``filters:`` — see Docs/CONFIG_MODEL.md).
+# Top-level ``token_filter`` remains required and canonical.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -29,6 +30,22 @@ copy_scale: 1.0
 conviction_sizing_enabled: false
 conviction_sizing_cap: 2.0
 conviction_sizing_lookback_trades: 20
+
+# -----------------------------------------------------------------------------
+# Layer A — signal gating + exit interpretation (optional; all off = legacy behavior)
+# -----------------------------------------------------------------------------
+filters:
+  exit_filter:
+    enabled: false
+    exit_method: mirror_guru
+  significance_filter:
+    static_amount:
+      enabled: false
+      amount_usd: 700.0
+    significance_conviction:
+      enabled: false
+      lookback_trades: 20
+      threshold_method: median
 
 # -----------------------------------------------------------------------------
 # Strategy-local paths

@@ -11,7 +11,7 @@ import yaml
 from tyrex_pm.config.loaders import load_runtime_settings
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import OrderIntent
-from tyrex_pm.execution.c3_book_top import BookTop
+from tyrex_pm.execution.c3_book_top import BookTop, book_top_from_rest
 from tyrex_pm.execution.c3_depth import clip_to_book_depth
 from tyrex_pm.execution.c3_entry_guard import check_entry_guard
 from tyrex_pm.execution.c3_normalize import floor_quantity_to_step, quantize_limit_order_for_instrument
@@ -24,6 +24,33 @@ def _inst(*, tick=0.01, step=1.0, min_q=1.0):
     m.size_increment = step
     m.min_quantity = min_q
     return m
+
+
+def test_book_top_from_rest_accepts_dict_levels() -> None:
+    clob = MagicMock()
+    clob.get_order_book.return_value = MagicMock(
+        bids=[{"price": "0.41", "size": "10"}],
+        asks=[{"price": "0.43", "size": "5"}],
+    )
+    b = book_top_from_rest(token_id="t1", clob=clob)
+    assert b is not None
+    assert b.source == "rest"
+    assert b.best_bid == pytest.approx(0.41)
+    assert b.best_ask == pytest.approx(0.43)
+    assert b.best_bid_size == pytest.approx(10.0)
+    assert b.best_ask_size == pytest.approx(5.0)
+
+
+def test_book_top_from_rest_accepts_order_summary_like_objects() -> None:
+    """py-clob often returns typed rows (e.g. OrderSummary), not dicts."""
+    clob = MagicMock()
+    bid = MagicMock(price="0.505", size="100")
+    ask = MagicMock(price="0.515", size="200")
+    clob.get_order_book.return_value = MagicMock(bids=[bid], asks=[ask])
+    b = book_top_from_rest(token_id="t1", clob=clob)
+    assert b is not None
+    assert b.best_bid == pytest.approx(0.505)
+    assert b.best_ask == pytest.approx(0.515)
 
 
 def test_quantize_floors_qty_and_price_buy() -> None:

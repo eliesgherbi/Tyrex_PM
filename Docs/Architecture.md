@@ -36,6 +36,8 @@ Grounded in the current codebase (`src/tyrex_pm/`). **Documentation hub:** [READ
 
 **Maintainer hub:** [`Implementation/current_state.md`](Implementation/current_state.md) · **End-to-end trace:** [`Implementation/end_to_end_review_logic.md`](Implementation/end_to_end_review_logic.md).
 
+**Operators — supported model:** Nautilus **framework truth** drives deployment caps; wallet cash is separate. **One bot, one wallet**; external/manual/shared-wallet reconciliation is **bounded**, not guaranteed instant. See **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model* and **[README.md](README.md)** § *Validation & evidence*.
+
 ---
 
 ## B. Architectural principles
@@ -125,7 +127,7 @@ flowchart TB
   Copy -->|submit_intent| XNau
 ```
 
-**Live:** Shadow uses `NoOpExecutionPort`. **Live** uses `NautilusGuruExecutionPort` → `submit_order`; pending cap uses **`Cache` open orders** (leaves qty); token cap adds **filled** exposure from `Portfolio.net_exposure` via the position reader.
+**Live:** Shadow uses `NoOpExecutionPort`. **Live** uses `NautilusGuruExecutionPort` → `submit_order`; pending cap uses **`Cache` open orders** (leaves qty); token/portfolio **filled** deployment uses **open positions** via **`state_readers`** / **`NautilusDeploymentBudget`** (cost-basis style: `abs(qty) × avg_px_open` — not mark-to-market).
 
 **ASCII (same idea):**
 
@@ -183,6 +185,7 @@ flowchart TB
 | **Execution** | **Live:** Nautilus `submit_order` via **`NautilusGuruExecutionPort`**; book hooks optional | Limit lifecycle / timeout implemented on the guru Nautilus path. |
 | **Restart** | **`load_state=False`** in `guru_compose` | Post-restart truth = **venue + adapter** + optional Tyrex warmup. |
 | **Follow extras** | Pacing, TWAP, richer suppression | **Not** shipped unless implemented in code — see **`Implementation/road_map.md`** (archived backlog). |
+| **Multi-actor / shared wallet** | **Manual UI**, second bot, or mixed strategies on **same** keys | Framework may **lag** venue; **not** recommended as primary ops mode. See **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model* and **[Implementation/validate_manual_sell_reconciliation.md](Implementation/validate_manual_sell_reconciliation.md)**. |
 | **New strategies** | `CopyStrategy` | Reuse injected `RiskPolicy` / `ExecutionPort` pattern. |
 
 ---

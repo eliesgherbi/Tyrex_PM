@@ -19,6 +19,8 @@ class ReasonCode(StrEnum):
     MIN_FOLLOW_NOTIONAL_PRICE_MISSING = "min_follow_notional_price_missing"
     SHADOW_ORDER_INTENT = "shadow_order_intent"
     UNSUPPORTED_SIDE = "unsupported_side"
+    #: Validation / test harness — bot-originated exit after guru entry (Scenario A drill).
+    BOT_SELL_VALIDATE = "bot_sell_validate"
     RISK_KILL_SWITCH = "risk_kill_switch"
     #: **Legacy** (pre deployment-budget): emitted only when reading old facts / summaries.
     RISK_ORDER_QTY_LIMIT = "risk_order_qty_limit"
@@ -79,3 +81,26 @@ class ReasonCode(StrEnum):
     RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT = "risk_guru_concurrent_resting_orders_limit"
     #: py-clob collateral ``balance`` below ``collateral_reserve_usd + n`` on BUY.
     RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE = "risk_insufficient_free_collateral_after_reserve"
+    #: SELL: no resolved long inventory on token (exit-only gate — blocks naked size).
+    RISK_SELL_WITHOUT_FILLED_INVENTORY = "risk_sell_without_filled_inventory"
+    #: SELL: ``order_deploy`` exceeds resolved filled inventory USD on token (same basis as deployment_budget).
+    RISK_SELL_EXCEEDS_FILLED_INVENTORY = "risk_sell_exceeds_filled_inventory"
+    #: SELL: deployment_budget missing but finite open caps require inventory proof for exit bypass.
+    RISK_SELL_INVENTORY_UNVERIFIED = "risk_sell_inventory_unverified"
+    # --- Layer A (signal filters) ---
+    LAYER_A_TOKEN_ALLOWLIST_OK = "layer_a_token_allowlist_ok"
+    LAYER_A_STATIC_AMOUNT_PRICE_MISSING = "layer_a_static_amount_price_missing"
+    LAYER_A_STATIC_AMOUNT_SIZE_MISSING = "layer_a_static_amount_size_missing"
+    LAYER_A_STATIC_AMOUNT_INVALID_PRICE = "layer_a_static_amount_invalid_price"
+    LAYER_A_STATIC_AMOUNT_INVALID_SIZE = "layer_a_static_amount_invalid_size"
+    LAYER_A_DENY_STATIC_AMOUNT_BELOW_THRESHOLD = "layer_a_deny_static_amount_below_threshold"
+    LAYER_A_STATIC_AMOUNT_OK = "layer_a_static_amount_ok"
+    LAYER_A_SIGNIFICANCE_NOTIONAL_MISSING = "layer_a_significance_notional_missing"
+    LAYER_A_DENY_SIGNIFICANCE_MEDIAN = "layer_a_deny_significance_median"
+    LAYER_A_SIGNIFICANCE_OK = "layer_a_significance_ok"
+    LAYER_A_EXIT_FULL_DENIED_INVALID_TOKEN = "layer_a_exit_full_denied_invalid_token"
+    LAYER_A_EXIT_FULL_DENIED_UNRESOLVED = "layer_a_exit_full_denied_unresolved"
+    LAYER_A_EXIT_FULL_DENIED_UNREADABLE = "layer_a_exit_full_denied_unreadable"
+    LAYER_A_EXIT_FULL_DENIED_NO_POSITION = "layer_a_exit_full_denied_no_position"
+    LAYER_A_EXIT_INTERPRETATION_OK = "layer_a_exit_interpretation_ok"
+    LAYER_A_EXIT_MIRROR_OK = "layer_a_exit_mirror_ok"

@@ -7,6 +7,7 @@
 | `guru_signal` | `run_id`, `correlation_id` |
 | `guru_shadow_compare` | `run_id`, `correlation_id` |
 | `health_anomaly` | `run_id`, optional `correlation_id` |
+| `layer_a_filter` | `run_id`, `correlation_id` |
 | `strategy_decision` | `run_id`, `correlation_id` |
 | `sizing` | `run_id`, `correlation_id` |
 | `risk_decision` | `run_id`, `correlation_id`, optional `account_snapshot_seq` (same-run link to `account_snapshot`) |

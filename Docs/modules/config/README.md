@@ -16,7 +16,7 @@
 
 | File | Contents |
 |------|----------|
-| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`** (conviction fields), `RiskSettings` (per-order policies, deployment caps), `RuntimeSettings`; loaders; guru ingest; book `execution_*`; `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. On-disk layout: `Docs/CONFIG_MODEL.md` § Repository layout. |
+| `loaders.py` | `StrategySettings`, **`TokenFilterSettings`**, optional **`LayerAFiltersSettings`** (`filters:` YAML: exit + significance), conviction fields, `RiskSettings`, `RuntimeSettings`; loaders; guru ingest; book `execution_*`; `validate_phase_b_runtime_contract`, `phase_b_framework_truth_gates_active`. On-disk layout: `Docs/CONFIG_MODEL.md` § Repository layout. |
 | `__init__.py` | Re-exports loaders and types. |
 
 ## D. Main interactions

@@ -16,6 +16,7 @@ ruff check src tests scripts
 2. [developer_guide.md](developer_guide.md) — where to add behavior, anti-patterns  
 3. [CONFIG_MODEL.md](CONFIG_MODEL.md) — YAML surfaces  
 4. [modules/README.md](modules/README.md) — links to package-level guides  
+5. [OPERATIONS.md](OPERATIONS.md) § *Current status & operating model* — framework vs wallet truth, reconciliation limits, validation links (read before changing live risk or ingest)  
 
 ## Module deep dives
 

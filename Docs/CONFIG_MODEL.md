@@ -4,6 +4,8 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 
 **Navigation:** [README.md](README.md) · **Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
 
+**Framework truth vs wallet (read once):** **Token / portfolio deployment caps** compare **`portfolio_deploy` / `token_deploy`** built from **Nautilus `Cache` + `Portfolio`** (pending orders + open positions, cost-basis filled leg). **`capital_gate_enabled`** and **`min_collateral_balance_usd` / `min_allowance_usd` / `collateral_reserve_usd`** use **py-clob** balance/allowance where configured — that is **collateral readiness**, **not** a second source of deployment truth. Operators: **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*.
+
 ## Repository layout (files on disk)
 
 | Location | Purpose |
@@ -13,8 +15,10 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 | `config/runtime/` | **Runtime** templates — `live_polymarket.yaml`, `rtds_shadow.yaml`, `live_polymarket_phaseb_validate.yaml`. |
 | `config/scenarios/shadow_validation/` | Bundled strategy + risk + **shadow** runtime for smoke runs and report checks; see `README.md` there. |
 | `config/scenarios/live_validation/` | Bundled strategy + risk + **live** runtime for controlled live checks; see `README.md` there. |
+| `config/scenarios/bot_sell_validate/` | **Scenario A** — guru follow + `bot_sell_validate` block for bot-originated sell validation (isolated state paths); see [Implementation/validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md). |
+| `config/scenarios/layer_a_follow/` | **Layer A demo** — `filters:` with significance gates on (see folder `README.md`); isolated `var/scenarios/layer_a_follow/` state. |
 
-YAML is **flat** at the top level (except `token_filter`): grouping is by **comments and key order** only. Loaders: `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings`.
+YAML is **flat** at the top level (except `token_filter` and optional nested `filters`): grouping is by **comments and key order** only. Loaders: `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings`.
 
 ## Strategy (`StrategySettings` → `load_strategy_settings`)
 
@@ -27,6 +31,19 @@ YAML is **flat** at the top level (except `token_filter`): grouping is by **comm
 | **`conviction_sizing_cap`** | no | `2.0` | Upper bound on `trade_size / rolling_avg` multiplier; must be **`> 0`** when conviction enabled. |
 | **`conviction_sizing_lookback_trades`** | no | `20` | Rolling window length (guru **BUY** sizes that passed entry policy only). Must be **`>= 1`** when conviction enabled. |
 | `strategy_dedup_state_path` | no | `null` | If set, overrides runtime dedup path for `GuruMonitorActor` only |
+| **`filters`** | no | *(all off)* | Optional **Layer A** rules — see below. Omitted = legacy behavior (mirror exit, no significance gates). **`token_filter` stays top-level** (not moved under `filters`). |
+
+### `filters` (optional Layer A)
+
+Parsed into `StrategySettings.layer_a`. Implementation: `src/tyrex_pm/signal/layer_a/`.
+
+| Block | Purpose |
+|-------|---------|
+| `exit_filter` | `enabled`, `exit_method` (`mirror_guru` \| `full_exit`). **`full_exit`** uses Nautilus `Portfolio` via `runtime/layer_a_context.py` (fail-closed if no position / unresolved). |
+| `significance_filter.static_amount` | Entry USD floor: `enabled`, `amount_usd` (`> 0` when enabled). |
+| `significance_filter.significance_conviction` | Entry median gate on prior **BUY** notionals: `enabled`, `lookback_trades` (≥ 1), `threshold_method` (**`median`** only in v1). |
+
+Significance conviction history is **in-memory** only (restart clears). Reporting: `layer_a_filter` facts + `strategy_decision`. See `Docs/Implementation/LayerA_Filters/`.
 
 ### `token_filter` (required block)
 
@@ -104,6 +121,9 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | `polymarket_gamma_base_url` | no | `https://gamma-api.polymarket.com` | Gamma HTTP API for condition lookup. |
 | `polymarket_gamma_http_timeout_seconds` | no | `15` | Gamma client timeout. |
 | `polymarket_startup_token_warmup_max` | no | `32` | Max guru activity tokens to pre-resolve at compose when list empty (`0` = off). |
+| **`exec_position_check_interval_seconds`** | no | **`45`** (live) / omitted (shadow) | Nautilus **live** execution engine: interval in seconds for **position reconciliation** (venue vs cache). Polymarket runs with `use_data_api: false` still only emit position reports for instruments **already in Cache** — pair with **`polymarket_wallet_position_warmup_max`**. `null` disables periodic position checks (Nautilus default). |
+| **`exec_open_check_interval_seconds`** | no | **`20`** (live) / omitted (shadow) | Same engine: **open-order / venue order** reconciliation interval (Nautilus `open_check_interval_secs`). **`null`** disables (Nautilus default: no periodic open check). **Shadow** does not run a live exec engine; the loader keeps this **`null`** so it does not imply shadow behavior. Conservative default trades a little extra venue traffic for faster order-cache catch-up (see **`OPERATIONS.md`**). |
+| **`polymarket_wallet_position_warmup_max`** | no | **`128`** (live) / **`0`** (shadow) | At compose, fetch Data API **`/positions`** (**current** holdings only) for **`positions_user`** ( **`POLYMARKET_FUNDER`** if set, else signer address — same as Nautilus `user_address`) and resolve up to this many distinct outcome **token** rows into **`Cache`**, **without** counting against `polymarket_dynamic_max_activations`. Row shape: **`conditionId`** + **`asset`** + **`size`** (aliases **`tokenId`**, **`clobTokenId`**, **`condition_id`**). Summary log **`warmup_outcome=`** classifies empty wallet vs success vs failure (**`OPERATIONS.md`**). If Gamma lookup by token fails but the row includes **`conditionId`**, Tyrex retries the same **CLOB `get_market` + `parse_polymarket_instrument`** path (no alternate `InstrumentId` scheme). `0` = off. |
 | **`execution_entry_guard_enabled`** | no | **`false`** | Skip if top-of-book moved worse than slippage ticks vs guru reference (**live**). |
 | **`execution_max_entry_slippage_ticks`** | no | `0` | Max **ticks** (`instrument.price_increment`) against reference; **required &gt; 0** when guard enabled. |
 | **`execution_book_depth_clip_enabled`** | no | **`false`** | Clip qty to `cap ×` best bid/ask size (single-level MVP). |

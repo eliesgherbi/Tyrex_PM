@@ -18,7 +18,7 @@ from nautilus_trader.adapters.polymarket import (
 )
 from nautilus_trader.common import Environment
 from nautilus_trader.common.config import InstrumentProviderConfig, LoggingConfig
-from nautilus_trader.config import RoutingConfig, TradingNodeConfig
+from nautilus_trader.config import LiveExecEngineConfig, RoutingConfig, TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId, TraderId
 
@@ -38,11 +38,15 @@ from tyrex_pm.execution.nautilus_guru_exec import NautilusGuruExecutionPort
 from tyrex_pm.execution.port import NoOpExecutionPort
 from tyrex_pm.risk.configured import ConfiguredRiskPolicy
 from tyrex_pm.runtime.clob_factory import build_clob_client_from_env
-from tyrex_pm.runtime.guru_cache_warmup import warm_polymarket_cache_from_guru_activity
+from tyrex_pm.runtime.guru_cache_warmup import (
+    warm_polymarket_cache_from_guru_activity,
+    warm_polymarket_cache_from_wallet_positions,
+)
 from tyrex_pm.runtime.guru_instrument_dynamic import GuruInstrumentDynamicController
 from tyrex_pm.runtime.phase_b_startup import phase_b_startup_summary_line
 from tyrex_pm.runtime.polymarket_nautilus_env import ensure_polymarket_l2_env_from_pk_if_missing
 from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
+from tyrex_pm.runtime.layer_a_context import NautilusLayerAContext
 from tyrex_pm.runtime.state_readers import (
     ClobAllowanceStateProvider,
     NautilusAccountSnapshotProvider,
@@ -53,9 +57,35 @@ from tyrex_pm.runtime.guru_run_logging import GuruNautilusFileLogging
 from tyrex_pm.reporting.config_capture import build_config_snapshot
 from tyrex_pm.reporting.context import RunContext
 from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
+from tyrex_pm.strategy.bot_sell_validate_strategy import (
+    BotSellValidateStrategy,
+    BotSellValidateStrategyConfig,
+)
 from tyrex_pm.strategy.copy_strategy import CopyStrategy, CopyStrategyConfig
 
 _LOG = logging.getLogger(__name__)
+
+
+def _live_exec_engine_config(runtime: RuntimeSettings) -> LiveExecEngineConfig:
+    """
+    Map Tyrex runtime reconciliation intervals to Nautilus :class:`LiveExecEngineConfig`.
+
+    **Single constructor call** with only the overrides we intend: all other fields keep
+    Nautilus class defaults. ``None`` for an interval → omit kwarg (engine default; typically
+    no periodic task for that dimension).
+    """
+    kwargs: dict[str, float] = {}
+    if runtime.exec_position_check_interval_secs is not None:
+        kwargs["position_check_interval_secs"] = float(
+            runtime.exec_position_check_interval_secs,
+        )
+    if runtime.exec_open_check_interval_secs is not None:
+        kwargs["open_check_interval_secs"] = float(
+            runtime.exec_open_check_interval_secs,
+        )
+    if not kwargs:
+        return LiveExecEngineConfig()
+    return LiveExecEngineConfig(**kwargs)
 
 
 def _trading_node_logging_config(
@@ -111,7 +141,8 @@ def build_guru_trading_node(
     run_context: RunContext | None = None,
 ) -> GuruTradingAssembly:
     """
-    Build a ``TradingNode`` with ``GuruMonitorActor`` + ``CopyStrategy`` registered.
+    Build a ``TradingNode`` with ``GuruMonitorActor`` + copy strategy registered
+    (``CopyStrategy``, or ``BotSellValidateStrategy`` when strategy YAML sets ``bot_sell_validate``).
 
     **Startup contract:** :func:`~tyrex_pm.config.loaders.validate_phase_b_runtime_contract`
     runs first so framework-truth gates and reserve cannot be enabled on unsupported paths.
@@ -207,11 +238,13 @@ def build_guru_trading_node(
             instrument_provider=instrument_provider_cfg,
             routing=routing,
         )
+        exec_engine = _live_exec_engine_config(runtime)
         cfg = TradingNodeConfig(
             trader_id=TraderId(runtime.trader_id),
             environment=Environment.LIVE,
             data_clients={data_key: data_cfg},
             exec_clients={exec_key: exec_cfg},
+            exec_engine=exec_engine,
             logging=_trading_node_logging_config(runtime, nautilus_file_logging),
             load_state=False,
             save_state=False,
@@ -347,17 +380,50 @@ def build_guru_trading_node(
             emit_fact=emit,
         )
 
-    copy_cfg = CopyStrategyConfig(
-        token_filter_enabled=strategy.token_filter.enabled,
-        allowlisted_token_ids=strategy.token_filter.allowlisted_token_ids,
-        execution_mode=runtime.execution_mode,
-        copy_scale=strategy.copy_scale,
-        conviction_sizing_enabled=strategy.conviction_sizing_enabled,
-        conviction_sizing_cap=strategy.conviction_sizing_cap,
-        conviction_sizing_lookback_trades=strategy.conviction_sizing_lookback_trades,
-    )
-    strat = CopyStrategy(copy_cfg)
+    if strategy.bot_sell_validate is not None:
+        bsv = strategy.bot_sell_validate
+        copy_cfg = BotSellValidateStrategyConfig(
+            token_filter_enabled=strategy.token_filter.enabled,
+            allowlisted_token_ids=strategy.token_filter.allowlisted_token_ids,
+            execution_mode=runtime.execution_mode,
+            copy_scale=strategy.copy_scale,
+            conviction_sizing_enabled=strategy.conviction_sizing_enabled,
+            conviction_sizing_cap=strategy.conviction_sizing_cap,
+            conviction_sizing_lookback_trades=strategy.conviction_sizing_lookback_trades,
+            layer_a=strategy.layer_a,
+            sell_delay_seconds=float(bsv.sell_delay_seconds),
+            max_cycles=int(bsv.max_cycles),
+            validation_aggressive_limits=bool(bsv.validation_aggressive_limits),
+            validation_buy_aggression_ticks=int(bsv.validation_buy_aggression_ticks),
+            validation_sell_aggression_ticks=int(bsv.validation_sell_aggression_ticks),
+            validation_max_slippage_fraction=float(bsv.validation_max_slippage_fraction),
+            validation_rest_book_for_pricing=bool(bsv.validation_rest_book_for_pricing),
+            validation_sell_inventory_haircut_bps=float(bsv.validation_sell_inventory_haircut_bps),
+        )
+        strat = BotSellValidateStrategy(copy_cfg)
+    else:
+        copy_cfg = CopyStrategyConfig(
+            token_filter_enabled=strategy.token_filter.enabled,
+            allowlisted_token_ids=strategy.token_filter.allowlisted_token_ids,
+            execution_mode=runtime.execution_mode,
+            copy_scale=strategy.copy_scale,
+            conviction_sizing_enabled=strategy.conviction_sizing_enabled,
+            conviction_sizing_cap=strategy.conviction_sizing_cap,
+            conviction_sizing_lookback_trades=strategy.conviction_sizing_lookback_trades,
+            layer_a=strategy.layer_a,
+        )
+        strat = CopyStrategy(copy_cfg)
     strat.set_risk_policy(risk_pol)
+    strat.set_layer_a_context(
+        NautilusLayerAContext(
+            node.portfolio,
+            node.cache,
+            dict(runtime.polymarket_token_to_instrument),
+        ),
+    )
+    if strategy.bot_sell_validate is not None:
+        assert isinstance(strat, BotSellValidateStrategy)
+        strat.set_pricing_runtime(runtime)
     if run_context is not None:
         strat.set_reporting_emit(emit)
         strat.set_order_correlation_registry(order_registry)
@@ -372,14 +438,20 @@ def build_guru_trading_node(
             runtime.polymarket_instrument_ids,
         )
         dynamic_ctrl: GuruInstrumentDynamicController | None = None
-        if need_dynamic:
+        want_wallet_warm = int(runtime.polymarket_wallet_position_warmup_max) > 0
+        if need_dynamic or want_wallet_warm:
             clob_dynamic = build_clob_client_from_env(runtime)
             dynamic_ctrl = GuruInstrumentDynamicController(
                 node.cache,
                 clob_dynamic,
                 runtime,
             )
-            if not runtime.polymarket_instrument_ids:
+            if want_wallet_warm:
+                warm_polymarket_cache_from_wallet_positions(
+                    dynamic_ctrl,
+                    runtime=runtime,
+                )
+            if need_dynamic and not runtime.polymarket_instrument_ids:
                 warm_polymarket_cache_from_guru_activity(
                     dynamic_ctrl,
                     guru_wallet_address=strategy.guru_wallet_address,

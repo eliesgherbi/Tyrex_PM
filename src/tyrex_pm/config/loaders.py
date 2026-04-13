@@ -11,6 +11,8 @@ import yaml
 from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_token_id
 from nautilus_trader.model.identifiers import InstrumentId
 
+from tyrex_pm.strategy.validation_constants import DEFAULT_VALIDATION_SELL_INVENTORY_HAIRCUT_BPS
+
 
 def _root(data: Any, path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
@@ -27,6 +29,77 @@ class TokenFilterSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ExitFilterSettings:
+    """Strategy YAML ``filters.exit_filter`` (optional block)."""
+
+    enabled: bool = False
+    #: ``mirror_guru`` | ``full_exit`` — ``full_exit`` only when ``enabled``.
+    exit_method: str = "mirror_guru"
+
+
+@dataclass(frozen=True, slots=True)
+class StaticAmountSettings:
+    """``filters.significance_filter.static_amount``."""
+
+    enabled: bool = False
+    amount_usd: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class SignificanceConvictionSettings:
+    """``filters.significance_filter.significance_conviction``."""
+
+    enabled: bool = False
+    lookback_trades: int = 20
+    #: v1: ``median`` only.
+    threshold_method: str = "median"
+
+
+@dataclass(frozen=True, slots=True)
+class SignificanceFilterSettings:
+    static_amount: StaticAmountSettings
+    significance_conviction: SignificanceConvictionSettings
+
+
+@dataclass(frozen=True, slots=True)
+class LayerAFiltersSettings:
+    """Optional strategy YAML ``filters`` root — omit for legacy behavior."""
+
+    exit_filter: ExitFilterSettings
+    significance_filter: SignificanceFilterSettings
+
+
+def _default_layer_a_filters() -> LayerAFiltersSettings:
+    return LayerAFiltersSettings(
+        exit_filter=ExitFilterSettings(False, "mirror_guru"),
+        significance_filter=SignificanceFilterSettings(
+            static_amount=StaticAmountSettings(False, 0.0),
+            significance_conviction=SignificanceConvictionSettings(False, 20, "median"),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BotSellValidateSettings:
+    """Optional strategy YAML ``bot_sell_validate`` block (isolated Scenario A harness)."""
+
+    sell_delay_seconds: float
+    max_cycles: int
+    #: Use marketable limits (top-of-book + tick bump + slippage cap) — validation only.
+    validation_aggressive_limits: bool = True
+    #: Extra whole-tick steps through the book beyond the anchor (BUY: up).
+    validation_buy_aggression_ticks: int = 2
+    #: Extra whole-tick steps beyond anchor (SELL: down).
+    validation_sell_aggression_ticks: int = 2
+    #: Max relative move vs guru/reference price bound (0–1).
+    validation_max_slippage_fraction: float = 0.08
+    #: When runtime enables REST book, allow CLOB snapshot for pricing (see live YAML).
+    validation_rest_book_for_pricing: bool = True
+    #: Scenario A validation SELL only: shave ``bps/10_000`` off long ``net_position`` before cap vs BUY fill.
+    validation_sell_inventory_haircut_bps: float = DEFAULT_VALIDATION_SELL_INVENTORY_HAIRCUT_BPS
+
+
+@dataclass(frozen=True, slots=True)
 class StrategySettings:
     guru_wallet_address: str
     token_filter: TokenFilterSettings
@@ -36,6 +109,12 @@ class StrategySettings:
     conviction_sizing_enabled: bool = False
     conviction_sizing_cap: float = 2.0
     conviction_sizing_lookback_trades: int = 20
+    #: When set, :func:`build_guru_trading_node` wires
+    #: :class:`~tyrex_pm.strategy.bot_sell_validate_strategy.BotSellValidateStrategy`
+    #: instead of :class:`~tyrex_pm.strategy.copy_strategy.CopyStrategy`.
+    bot_sell_validate: BotSellValidateSettings | None = None
+    #: Optional Layer A filters (``filters:`` in strategy YAML). Omitted YAML → defaults (all off).
+    layer_a: LayerAFiltersSettings = _default_layer_a_filters()
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +126,12 @@ class RiskSettings:
     policies (``deny`` | ``cap``). **BUY-only** minimum when ``min_notional_usd_per_order > 0``.
     **Per-token:** ``token_deploy + order_deploy`` vs ``max_token_notional_usd_open`` where
     ``token_deploy`` is pending (resting ``leaves ×`` limit) + filled
-    (``abs(signed_qty) × avg_px_open``) on that token.
+    (``abs(signed_qty) × avg_px_open``) on that token. **SELL:** the additive open-cap check is
+    skipped only after ``filled_usd_for_token >= order_deploy`` (exit inventory gate — no naked
+    oversell); see ``ConfiguredRiskPolicy._sell_exit_inventory_gate``.
     **Portfolio:** ``portfolio_deploy + order_deploy`` vs ``max_portfolio_notional_usd_open`` where
-    ``portfolio_deploy`` sums the same pending/filled semantics across Polymarket.
+    ``portfolio_deploy`` sums the same pending/filled semantics across Polymarket. **SELL:** same
+    bypass rule as per-token when the inventory gate passes.
 
     **Framework-truth gates:** Finite ``max_portfolio_notional_usd_open`` and/or
     ``max_concurrent_guru_resting_orders`` require **live** ``execution_mode`` (see
@@ -123,6 +205,19 @@ class RuntimeSettings:
     #: Max guru outcome tokens to pre-resolve at node build from Data API ``/activity``
     #: (0 = skip self-bootstrap). Only used when ``polymarket_instrument_ids`` is empty.
     polymarket_startup_token_warmup_max: int
+    #: Nautilus :class:`~nautilus_trader.live.config.LiveExecEngineConfig`
+    #: ``position_check_interval_secs`` — periodic venue-vs-cache position reconciliation (**live**).
+    #: ``None`` disables (Nautilus default). Loader sets **45** for live when YAML omits the key.
+    exec_position_check_interval_secs: float | None = None
+    #: Same Nautilus config: ``open_check_interval_secs`` — periodic open-order / venue order
+    #: reconciliation (**live**). ``None`` disables (Nautilus default: no open-check task).
+    #: Loader sets **20** for live when YAML omits the key; **shadow** keeps ``None`` (no
+    #: ``TradingNode`` exec engine on the shadow path).
+    exec_open_check_interval_secs: float | None = None
+    #: At compose, preload follower positions into ``Cache`` (Data API ``/positions``),
+    #: bypassing ``polymarket_dynamic_max_activations`` so startup/periodic reconciliation can resolve
+    #: every held outcome. ``0`` = off. Loader sets **128** for live when YAML omits the key.
+    polymarket_wallet_position_warmup_max: int = 0
     #: ``poll_only`` | ``rtds_shadow`` | ``rtds_primary`` — guru market-data ingest mode.
     guru_ingest_mode: str = "poll_only"
     #: Optional rollout label for logs (informational; pairs with ``guru_ingest_mode``).
@@ -198,6 +293,80 @@ def _normalize_token_list(raw_list: list[Any], *, path: Path, ctx: str) -> tuple
     return norm
 
 
+def _parse_layer_a_filters(p: Path, raw: Any) -> LayerAFiltersSettings:
+    if raw is None:
+        return _default_layer_a_filters()
+    if not isinstance(raw, dict):
+        raise ValueError(f"{p}: filters must be a mapping when present")
+    ex_raw = raw.get("exit_filter")
+    if ex_raw is None:
+        ex_raw = {}
+    if not isinstance(ex_raw, dict):
+        raise ValueError(f"{p}: filters.exit_filter must be a mapping when present")
+    ex_en = bool(ex_raw.get("enabled", False))
+    ex_method = str(ex_raw.get("exit_method", "mirror_guru")).strip()
+    if ex_en and ex_method not in ("mirror_guru", "full_exit"):
+        raise ValueError(
+            f"{p}: filters.exit_filter.exit_method must be mirror_guru or full_exit "
+            f"when enabled (got {ex_method!r})",
+        )
+    if not ex_en:
+        ex_method = "mirror_guru"
+    exit_filter = ExitFilterSettings(enabled=ex_en, exit_method=ex_method)
+
+    sig_root = raw.get("significance_filter")
+    if sig_root is None:
+        sig_root = {}
+    if not isinstance(sig_root, dict):
+        raise ValueError(f"{p}: filters.significance_filter must be a mapping when present")
+
+    st_raw = sig_root.get("static_amount")
+    if st_raw is None:
+        st_raw = {}
+    if not isinstance(st_raw, dict):
+        raise ValueError(f"{p}: filters.significance_filter.static_amount must be a mapping when present")
+    st_en = bool(st_raw.get("enabled", False))
+    st_amt = float(st_raw.get("amount_usd", 0.0))
+    if st_en:
+        if st_amt <= 0:
+            raise ValueError(
+                f"{p}: filters.significance_filter.static_amount.amount_usd must be > 0 when enabled",
+            )
+    static_amount = StaticAmountSettings(enabled=st_en, amount_usd=st_amt)
+
+    cv_raw = sig_root.get("significance_conviction")
+    if cv_raw is None:
+        cv_raw = {}
+    if not isinstance(cv_raw, dict):
+        raise ValueError(
+            f"{p}: filters.significance_filter.significance_conviction must be a mapping when present",
+        )
+    cv_en = bool(cv_raw.get("enabled", False))
+    lookback = int(cv_raw.get("lookback_trades", 20))
+    method = str(cv_raw.get("threshold_method", "median")).strip()
+    if cv_en:
+        if lookback < 1:
+            raise ValueError(
+                f"{p}: filters.significance_filter.significance_conviction.lookback_trades "
+                "must be >= 1 when enabled",
+            )
+        if method != "median":
+            raise ValueError(
+                f"{p}: filters.significance_filter.significance_conviction.threshold_method "
+                f"must be median in v1 (got {method!r})",
+            )
+    significance_conviction = SignificanceConvictionSettings(
+        enabled=cv_en,
+        lookback_trades=lookback,
+        threshold_method=method,
+    )
+    significance_filter = SignificanceFilterSettings(
+        static_amount=static_amount,
+        significance_conviction=significance_conviction,
+    )
+    return LayerAFiltersSettings(exit_filter=exit_filter, significance_filter=significance_filter)
+
+
 def load_strategy_settings(path: str | Path) -> StrategySettings:
     p = Path(path)
     raw = _root(yaml.safe_load(p.read_text(encoding="utf-8")), p)
@@ -255,6 +424,53 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
         if conv_cap <= 0:
             raise ValueError(f"{p}: conviction_sizing_cap must be > 0 when conviction_sizing_enabled")
 
+    bsv_raw = raw.get("bot_sell_validate")
+    bsv: BotSellValidateSettings | None = None
+    if bsv_raw is not None:
+        if not isinstance(bsv_raw, dict):
+            raise ValueError(f"{p}: bot_sell_validate must be a mapping when present")
+        delay = float(bsv_raw.get("sell_delay_seconds", 5.0))
+        if delay < 0.0:
+            raise ValueError(f"{p}: bot_sell_validate.sell_delay_seconds must be >= 0")
+        mc = int(bsv_raw.get("max_cycles", 1))
+        if mc < 1:
+            raise ValueError(f"{p}: bot_sell_validate.max_cycles must be >= 1")
+        agg = bool(bsv_raw.get("validation_aggressive_limits", True))
+        b_ticks = int(bsv_raw.get("validation_buy_aggression_ticks", 2))
+        s_ticks = int(bsv_raw.get("validation_sell_aggression_ticks", 2))
+        if b_ticks < 0 or s_ticks < 0:
+            raise ValueError(
+                f"{p}: validation_*_aggression_ticks must be >= 0",
+            )
+        msf = float(bsv_raw.get("validation_max_slippage_fraction", 0.08))
+        if msf < 0.0 or msf > 1.0:
+            raise ValueError(
+                f"{p}: bot_sell_validate.validation_max_slippage_fraction must be in [0, 1]",
+            )
+        rest_book = bool(bsv_raw.get("validation_rest_book_for_pricing", True))
+        hcut = float(
+            bsv_raw.get(
+                "validation_sell_inventory_haircut_bps",
+                DEFAULT_VALIDATION_SELL_INVENTORY_HAIRCUT_BPS,
+            ),
+        )
+        if hcut < 0.0 or hcut > 10_000.0:
+            raise ValueError(
+                f"{p}: bot_sell_validate.validation_sell_inventory_haircut_bps must be in [0, 10000]",
+            )
+        bsv = BotSellValidateSettings(
+            sell_delay_seconds=delay,
+            max_cycles=mc,
+            validation_aggressive_limits=agg,
+            validation_buy_aggression_ticks=b_ticks,
+            validation_sell_aggression_ticks=s_ticks,
+            validation_max_slippage_fraction=msf,
+            validation_rest_book_for_pricing=rest_book,
+            validation_sell_inventory_haircut_bps=hcut,
+        )
+
+    layer_a = _parse_layer_a_filters(p, raw.get("filters"))
+
     return StrategySettings(
         guru_wallet_address=gw,
         token_filter=token_filter,
@@ -263,6 +479,8 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
         conviction_sizing_enabled=conv_en,
         conviction_sizing_cap=conv_cap,
         conviction_sizing_lookback_trades=lookback,
+        bot_sell_validate=bsv,
+        layer_a=layer_a,
     )
 
 
@@ -498,6 +716,43 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     if warmup_max < 0:
         raise ValueError(f"{p}: polymarket_startup_token_warmup_max must be >= 0")
 
+    if "exec_position_check_interval_seconds" not in raw:
+        exec_pos_check: float | None = 45.0 if mode == "live" else None
+    else:
+        ep_raw = raw["exec_position_check_interval_seconds"]
+        if ep_raw is None:
+            exec_pos_check = None
+        else:
+            exec_pos_check = float(ep_raw)
+            if exec_pos_check <= 0:
+                raise ValueError(
+                    f"{p}: exec_position_check_interval_seconds must be positive or null (off)",
+                )
+
+    if "exec_open_check_interval_seconds" not in raw:
+        exec_open_check: float | None = 20.0 if mode == "live" else None
+    else:
+        eo_raw = raw["exec_open_check_interval_seconds"]
+        if eo_raw is None:
+            exec_open_check = None
+        else:
+            exec_open_check = float(eo_raw)
+            if exec_open_check <= 0:
+                raise ValueError(
+                    f"{p}: exec_open_check_interval_seconds must be positive or null (off)",
+                )
+
+    if "polymarket_wallet_position_warmup_max" not in raw:
+        wallet_pos_warmup = 128 if mode == "live" else 0
+    else:
+        wallet_pos_warmup = int(raw["polymarket_wallet_position_warmup_max"])
+        if wallet_pos_warmup < 0:
+            raise ValueError(f"{p}: polymarket_wallet_position_warmup_max must be >= 0")
+        if wallet_pos_warmup > 0 and mode != "live":
+            raise ValueError(
+                f"{p}: polymarket_wallet_position_warmup_max is only valid when execution_mode is live",
+            )
+
     token_map = _polymarket_token_instrument_map(poly_ids, path=p) if poly_ids else ()
 
     ingest_mode = str(raw.get("guru_ingest_mode", "poll_only")).lower().strip()
@@ -600,6 +855,9 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         polymarket_gamma_base_url=gamma_url,
         polymarket_gamma_http_timeout_seconds=gamma_timeout,
         polymarket_startup_token_warmup_max=warmup_max,
+        exec_position_check_interval_secs=exec_pos_check,
+        exec_open_check_interval_secs=exec_open_check,
+        polymarket_wallet_position_warmup_max=wallet_pos_warmup,
         guru_ingest_mode=ingest_mode,
         guru_ingest_phase=ingest_phase,
         guru_rtds_url=rtds_url,

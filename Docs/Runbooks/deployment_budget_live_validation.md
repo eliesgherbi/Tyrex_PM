@@ -2,6 +2,8 @@
 
 One controlled **live** session to confirm caps use **deployment** (pending `leaves ×` limit + filled `abs(qty) × avg_px_open`), not the removed marked-portfolio path.
 
+**Operating model:** Caps reflect **Nautilus `Cache` + `Portfolio`**, not wallet cash. Use **one bot per wallet**; see [OPERATIONS.md](../OPERATIONS.md) § *Current status & operating model* and [README.md](../README.md) § *Validation & evidence*.
+
 ## 0. Pre-checks
 
 ```powershell

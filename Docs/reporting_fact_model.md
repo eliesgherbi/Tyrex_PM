@@ -14,6 +14,7 @@ Structured run observability when **`reporting_enabled: true`** in runtime YAML.
 | `config_snapshot` | `run_id` |
 | `guru_signal` | `run_id`, `correlation_id` |
 | `strategy_decision` | `run_id`, `correlation_id` |
+| `layer_a_filter` | `run_id`, `correlation_id` |
 | `sizing` | `run_id`, `correlation_id` |
 | `risk_decision` | `run_id`, `correlation_id`, optional `account_snapshot_seq` |
 | `execution_intent` | `run_id`, `correlation_id` |
