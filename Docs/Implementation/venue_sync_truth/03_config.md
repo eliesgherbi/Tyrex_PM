@@ -2,10 +2,12 @@
 
 ## New YAML keys (runtime YAML)
 
-| Key | Type | Default (live) | Default (shadow) | Description |
-|-----|------|----------------|-------------------|-------------|
-| `wallet_sync_enabled` | `bool` | `true` | `false` | Enable continuous wallet instrument discovery. Shadow mode cannot use it (no exec client). |
-| `wallet_sync_poll_interval_seconds` | `float` | `15.0` | — | Interval between wallet sync poll cycles. Lower values give faster discovery but more API calls. Floor: 5.0. |
+| Key | Type | Default (live) | Default (shadow) | Validation | Description |
+|-----|------|----------------|-------------------|------------|-------------|
+| `wallet_sync_enabled` | `bool` | `true` | `false` | Requires `execution_mode=live` | Enable continuous wallet instrument discovery. Shadow mode cannot use it (no exec client). |
+| `wallet_sync_poll_interval_seconds` | `float` | `15.0` | — | `>= 5.0` | Interval between wallet sync poll cycles. Lower values give faster discovery but more API calls. |
+| `wallet_sync_startup_deadline_seconds` | `float` | `120.0` | — | `>= 30.0` | Max seconds after `on_start` before startup is considered timed out. Readiness gate distinguishes `"startup_wallet_sync_pending"` from `"startup_wallet_sync_timeout"`. |
+| `wallet_sync_per_instrument_max_retries` | `int` | `3` | — | `>= 1` | Max cycles a single `condition_id` may fail resolution before being marked terminally unresolvable and excluded from the completeness check. |
 
 ## Changed defaults (runtime YAML)
 
@@ -50,6 +52,8 @@ execution_mode: live
 # Wallet sync (new)
 wallet_sync_enabled: true
 wallet_sync_poll_interval_seconds: 15.0
+wallet_sync_startup_deadline_seconds: 120.0
+wallet_sync_per_instrument_max_retries: 3
 
 # Adapter flags (defaults change with wallet_sync_enabled)
 polymarket_use_data_api_for_positions: true

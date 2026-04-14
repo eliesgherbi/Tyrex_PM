@@ -143,6 +143,8 @@ class GuruTradingAssembly:
     deployment_budget: NautilusDeploymentBudget | None
     #: Registered Nautilus strategy instance (``node.trader.add_strategy``) — shutdown drain §7.
     guru_strategy: CopyStrategy | BotSellValidateStrategy
+    #: Venue Sync Truth — continuous wallet sync actor (live only, ``wallet_sync_enabled``).
+    wallet_sync: Any | None = None
     #: Optional structured reporting context (``reporting_enabled`` runtime).
     run_context: RunContext | None = None
     order_correlation_registry: OrderCorrelationRegistry | None = None
@@ -273,14 +275,15 @@ def build_guru_trading_node(
             instrument_provider=instrument_provider_cfg,
             routing=routing,
         )
-        # Phase 5 trace: ``TradingNodeConfig.exec_clients`` → factory builds
-        # ``PolymarketExecClientConfig`` with the kwargs below (``use_data_api`` is adapter position source).
+        _use_data_api = bool(runtime.polymarket_use_data_api_for_positions)
+        if runtime.wallet_sync_enabled and not runtime.polymarket_use_data_api_for_positions:
+            _use_data_api = True
         exec_cfg = PolymarketExecClientConfig(
             signature_type=sig_type,
             funder=funder,
             instrument_provider=instrument_provider_cfg,
             routing=routing,
-            use_data_api=bool(runtime.polymarket_use_data_api_for_positions),
+            use_data_api=_use_data_api,
         )
         exec_engine = _live_exec_engine_config(runtime)
         cfg = TradingNodeConfig(
@@ -346,13 +349,39 @@ def build_guru_trading_node(
         allowance_provider,
         observability_include_clob=_obs_clob,
     )
+    # Venue Sync Truth — wallet sync actor (live only, wallet_sync_enabled).
+    wallet_sync_actor = None
+    if live and runtime.wallet_sync_enabled:
+        from tyrex_pm.runtime.wallet_sync import WalletSyncActor, WalletSyncConfig
+
+        _ws_clob = build_clob_client_from_env(runtime)
+        _ws_ctrl = GuruInstrumentDynamicController(node.cache, _ws_clob, runtime)
+        ws_config = WalletSyncConfig(
+            poll_interval_seconds=runtime.wallet_sync_poll_interval_seconds,
+            startup_deadline_seconds=runtime.wallet_sync_startup_deadline_seconds,
+            per_instrument_max_retries=runtime.wallet_sync_per_instrument_max_retries,
+            data_api_base_url=runtime.data_api_base_url,
+            gamma_base_url=runtime.polymarket_gamma_base_url,
+            gamma_http_timeout_seconds=runtime.polymarket_gamma_http_timeout_seconds,
+            clob_host=runtime.clob_host,
+        )
+        wallet_sync_actor = WalletSyncActor(
+            config=ws_config,
+            clob_client=_ws_clob,
+            dynamic_controller=_ws_ctrl,
+            fact_emit=emit,
+        )
+
     # WP2 — ``NautilusLiveExecutionHealthSource``: ``LiveExecutionEngine`` startup reconciliation
     # latch (``_startup_reconciliation_event``); see ``tradable_state/nautilus_live_health.py``.
     tradable_state_health: TradableStateHealthSource | None = None
     if risk.tradable_state_health_gate_enabled:
         _ee = node.kernel.exec_engine
         try:
-            tradable_state_health = NautilusLiveExecutionHealthSource(_ee)
+            tradable_state_health = NautilusLiveExecutionHealthSource(
+                _ee,
+                wallet_sync_status=wallet_sync_actor,
+            )
         except TypeError as exc:
             raise RuntimeError(
                 "tradable_state_health_gate_enabled requires Nautilus "
@@ -380,6 +409,16 @@ def build_guru_trading_node(
         health_source=readiness_health_source,
         cache=node.cache,
         exec_connected=exec_pred,
+        wallet_sync_ready=(
+            (lambda: wallet_sync_actor.first_sync_complete)
+            if wallet_sync_actor is not None
+            else None
+        ),
+        wallet_sync_deadline_exceeded=(
+            (lambda: wallet_sync_actor.startup_deadline_exceeded)
+            if wallet_sync_actor is not None
+            else None
+        ),
     )
     risk_pol = ConfiguredRiskPolicy(
         risk,
@@ -559,6 +598,8 @@ def build_guru_trading_node(
     if stream is not None:
         node.trader.add_actor(stream)
     node.trader.add_actor(guru)
+    if wallet_sync_actor is not None:
+        node.trader.add_actor(wallet_sync_actor)
     node.trader.add_strategy(strat)
 
     _LOG.info(
@@ -588,6 +629,7 @@ def build_guru_trading_node(
         position_state=position_reader if live else None,
         deployment_budget=deployment_agg,
         guru_strategy=strat,
+        wallet_sync=wallet_sync_actor,
         run_context=run_context,
         order_correlation_registry=order_registry,
     )

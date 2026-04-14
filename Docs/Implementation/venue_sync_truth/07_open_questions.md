@@ -78,16 +78,18 @@ async def _maintain_active_market(self, instrument_id: InstrumentId) -> None:
 
 ## OQ-5: Thread safety of `Cache.add_instrument` from Actor context
 
-**Question:** Is it safe to call `self.cache.add_instrument(instrument)` from within an Actor's async task?
+**Question:** Is it safe to call `self.cache.add_instrument(instrument)` from within `WalletSyncActor._sync_cycle` which runs in an executor thread via `self.run_in_executor`?
+
+**Corrected model (implementation-verified):** `Actor` does not have `create_task` — that method is on `LiveExecutionClient` only (`live/execution_client.py:157`). The `WalletSyncActor` dispatches its synchronous `_sync_cycle` method to an executor thread via `self.run_in_executor` (`actor.pxd:143`), which uses `asyncio.to_thread` internally. This means `Cache.add_instrument` is called from an **executor thread**, not the event loop thread.
 
 **Evidence it is safe:**
-1. `CacheInstrumentActivator` already calls `self._cache.add_instrument(instrument)` and `self._cache.add_currency(instrument.quote_currency)` with a `threading.Lock` (`guru_instrument_dynamic.py:249–268`).
-2. The existing warmup calls this from the compose thread (before the event loop starts), and dynamic resolution calls it from `NautilusGuruExecutionPort` (within the event loop context).
-3. The Actor's `create_task` runs on the Nautilus event loop, so `Cache.add_instrument` is called from the same thread as all other Nautilus operations.
+1. `CacheInstrumentActivator.force_add_instrument` (used by `resolve_and_activate_by_condition_and_token`) acquires a `threading.Lock` (`guru_instrument_dynamic.py:249,278`) before calling `self._cache.add_currency(instrument.quote_currency)` and `self._cache.add_instrument(instrument)`.
+2. The existing compose-time warmup calls this from the compose thread (before the event loop starts), demonstrating that `Cache.add_instrument` is used from non-event-loop threads in the existing codebase.
+3. The lock serializes all cache mutations regardless of which thread initiates them.
 
-**Conclusion:** Safe. The `CacheInstrumentActivator`'s threading lock is a belt-and-suspenders measure for the compose-time case. During runtime, all calls happen on the event loop thread.
+**Conclusion:** Safe. The `CacheInstrumentActivator`'s `threading.Lock` is the correctness mechanism that makes executor-thread calls safe. This is not belt-and-suspenders — the lock is load-bearing for the `run_in_executor` path.
 
-**Status:** Resolved — not an open question, but documented for reviewer confidence.
+**Status:** Resolved — verified during implementation. The original claim about `create_task` running on the event loop was incorrect; the lock-based safety is what actually protects the call path.
 
 ---
 

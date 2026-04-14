@@ -474,3 +474,111 @@ def test_runtime_dynamic_instruments_invalid_in_shadow(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="polymarket_dynamic_instruments"):
         load_runtime_settings(p)
+
+
+# ---------------------------------------------------------------------------
+# Wallet sync config keys (Step 4)
+# ---------------------------------------------------------------------------
+
+
+def test_wallet_sync_defaults_live(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump({"trader_id": "A-001", "execution_mode": "live"}),
+        encoding="utf-8",
+    )
+    r = load_runtime_settings(p)
+    assert r.wallet_sync_enabled is True
+    assert r.wallet_sync_poll_interval_seconds == 15.0
+    assert r.wallet_sync_startup_deadline_seconds == 120.0
+    assert r.wallet_sync_per_instrument_max_retries == 3
+
+
+def test_wallet_sync_defaults_shadow(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump({"trader_id": "A-001", "execution_mode": "shadow"}),
+        encoding="utf-8",
+    )
+    r = load_runtime_settings(p)
+    assert r.wallet_sync_enabled is False
+
+
+def test_wallet_sync_enabled_requires_live(tmp_path: Path) -> None:
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "shadow",
+                "wallet_sync_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="wallet_sync_enabled"):
+        load_runtime_settings(p)
+
+
+def test_wallet_sync_poll_interval_floor(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "wallet_sync_poll_interval_seconds": 3.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="wallet_sync_poll_interval_seconds"):
+        load_runtime_settings(p)
+
+
+def test_wallet_sync_poll_interval_accepted(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "wallet_sync_poll_interval_seconds": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    r = load_runtime_settings(p)
+    assert r.wallet_sync_poll_interval_seconds == 30.0
+
+
+def test_wallet_sync_startup_deadline_floor(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "wallet_sync_startup_deadline_seconds": 10.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="wallet_sync_startup_deadline_seconds"):
+        load_runtime_settings(p)
+
+
+def test_wallet_sync_per_instrument_retries_floor(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "wallet_sync_per_instrument_max_retries": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="wallet_sync_per_instrument_max_retries"):
+        load_runtime_settings(p)

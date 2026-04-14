@@ -160,3 +160,155 @@ def test_tradable_state_health_fact_emitted_when_reporting() -> None:
     assert h["correlation_id"] == "h1"
     assert "observed_at_utc" in h
     assert h["risk_allowed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Step 7: NautilusLiveExecutionHealthSource wallet sync awareness (06_tests.md §4)
+# ---------------------------------------------------------------------------
+
+import asyncio
+from datetime import timedelta
+from unittest.mock import MagicMock
+
+from tyrex_pm.runtime.tradable_state import NautilusLiveExecutionHealthSource
+
+
+def _mock_exec_engine(reconciliation_done: bool = True) -> MagicMock:
+    ee = MagicMock()
+    ev = asyncio.Event()
+    if reconciliation_done:
+        ev.set()
+    ee._startup_reconciliation_event = ev
+    return ee
+
+
+def _mock_wallet_sync(
+    *,
+    first_sync_complete: bool = True,
+    startup_deadline_exceeded: bool = False,
+    last_successful_utc: datetime | None = None,
+    consecutive_failure_count: int = 0,
+    terminally_unresolvable_count: int = 0,
+    poll_interval_seconds: float = 15.0,
+) -> MagicMock:
+    ws = MagicMock()
+    ws.first_sync_complete = first_sync_complete
+    ws.startup_deadline_exceeded = startup_deadline_exceeded
+    ws.last_successful_cycle_utc = last_successful_utc
+    ws.consecutive_failure_count = consecutive_failure_count
+    ws.terminally_unresolvable_count = terminally_unresolvable_count
+    ws.poll_interval_seconds = poll_interval_seconds
+    return ws
+
+
+class TestHealthSourceWalletSync:
+    def test_reconciliation_done_no_wallet_sync(self) -> None:
+        src = NautilusLiveExecutionHealthSource(_mock_exec_engine(True))
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.HEALTHY
+        assert snap.reason_code == "nautilus_exec_startup_reconciliation_complete"
+
+    def test_reconciliation_not_done_wallet_sync_true(self) -> None:
+        """Engine check comes first — if engine not reconciled, UNKNOWN_BOOTSTRAP."""
+        ws = _mock_wallet_sync(first_sync_complete=True)
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(False), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.UNKNOWN_BOOTSTRAP
+        assert snap.reason_code == "nautilus_exec_startup_reconciliation_pending"
+
+    def test_wallet_sync_pending_no_timeout(self) -> None:
+        ws = _mock_wallet_sync(
+            first_sync_complete=False, startup_deadline_exceeded=False,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.UNKNOWN_BOOTSTRAP
+        assert snap.reason_code == "wallet_sync_pending"
+
+    def test_wallet_sync_startup_timeout(self) -> None:
+        ws = _mock_wallet_sync(
+            first_sync_complete=False, startup_deadline_exceeded=True,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.DEGRADED_OMS
+        assert snap.reason_code == "wallet_sync_startup_timeout"
+
+    def test_healthy_when_sync_complete_no_issues(self) -> None:
+        now = datetime.now(tz=UTC)
+        ws = _mock_wallet_sync(
+            first_sync_complete=True,
+            last_successful_utc=now,
+            consecutive_failure_count=0,
+            terminally_unresolvable_count=0,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.HEALTHY
+
+    def test_stale_cycle(self) -> None:
+        stale = datetime.now(tz=UTC) - timedelta(seconds=60)
+        ws = _mock_wallet_sync(
+            first_sync_complete=True,
+            last_successful_utc=stale,
+            poll_interval_seconds=15.0,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.DEGRADED_OMS
+        assert snap.reason_code == "wallet_sync_stale"
+
+    def test_consecutive_failures(self) -> None:
+        now = datetime.now(tz=UTC)
+        ws = _mock_wallet_sync(
+            first_sync_complete=True,
+            last_successful_utc=now,
+            consecutive_failure_count=3,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.DEGRADED_OMS
+        assert snap.reason_code == "wallet_sync_stale"
+
+    def test_unresolvable_instruments(self) -> None:
+        now = datetime.now(tz=UTC)
+        ws = _mock_wallet_sync(
+            first_sync_complete=True,
+            last_successful_utc=now,
+            terminally_unresolvable_count=2,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.DEGRADED_OMS
+        assert snap.reason_code == "wallet_sync_unresolvable_instruments"
+
+    def test_stale_and_unresolvable_prefers_stale(self) -> None:
+        """Rule 6: when both apply, stale is the more urgent signal."""
+        stale = datetime.now(tz=UTC) - timedelta(seconds=60)
+        ws = _mock_wallet_sync(
+            first_sync_complete=True,
+            last_successful_utc=stale,
+            terminally_unresolvable_count=1,
+            poll_interval_seconds=15.0,
+        )
+        src = NautilusLiveExecutionHealthSource(
+            _mock_exec_engine(True), wallet_sync_status=ws,
+        )
+        snap = src.snapshot()
+        assert snap.level == TradableStateHealth.DEGRADED_OMS
+        assert snap.reason_code == "wallet_sync_stale"
+        assert "unresolvable" in (snap.framework_detail or "").lower()

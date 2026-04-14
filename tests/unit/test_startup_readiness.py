@@ -500,3 +500,82 @@ def test_static_instrument_must_be_in_cache() -> None:
     cache.instrument.return_value = object()
     ok2, _ = static_instruments_in_cache(cache, (iid,))
     assert ok2
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Wallet sync clause (06_tests.md §3)
+# ---------------------------------------------------------------------------
+
+
+class TestGateWalletSync:
+    def test_wallet_sync_ready_none_no_change(self) -> None:
+        """When wallet_sync_ready is None, gate does not add wallet sync checks."""
+        gate = StartupReadinessGate(
+            runtime=_runtime_live(),
+            risk=_risk_cap_on(capital_gate_enabled=False),
+            capital_provider=None,
+            health_source=_h(TradableStateHealth.HEALTHY),
+            cache=MagicMock(),
+            exec_connected=lambda: True,
+            wallet_sync_ready=None,
+        )
+        r = gate.evaluate()
+        assert r.status == LifecycleReadiness.READY
+
+    def test_wallet_sync_pending(self) -> None:
+        gate = StartupReadinessGate(
+            runtime=_runtime_live(),
+            risk=_risk_cap_on(capital_gate_enabled=False),
+            capital_provider=None,
+            health_source=_h(TradableStateHealth.HEALTHY),
+            cache=MagicMock(),
+            exec_connected=lambda: True,
+            wallet_sync_ready=lambda: False,
+            wallet_sync_deadline_exceeded=lambda: False,
+        )
+        r = gate.evaluate()
+        assert r.status == LifecycleReadiness.NOT_READY
+        assert "startup_wallet_sync_pending" in r.reasons
+
+    def test_wallet_sync_timeout(self) -> None:
+        gate = StartupReadinessGate(
+            runtime=_runtime_live(),
+            risk=_risk_cap_on(capital_gate_enabled=False),
+            capital_provider=None,
+            health_source=_h(TradableStateHealth.HEALTHY),
+            cache=MagicMock(),
+            exec_connected=lambda: True,
+            wallet_sync_ready=lambda: False,
+            wallet_sync_deadline_exceeded=lambda: True,
+        )
+        r = gate.evaluate()
+        assert r.status == LifecycleReadiness.NOT_READY
+        assert "startup_wallet_sync_timeout" in r.reasons
+
+    def test_wallet_sync_ready_passes_through(self) -> None:
+        gate = StartupReadinessGate(
+            runtime=_runtime_live(),
+            risk=_risk_cap_on(capital_gate_enabled=False),
+            capital_provider=None,
+            health_source=_h(TradableStateHealth.HEALTHY),
+            cache=MagicMock(),
+            exec_connected=lambda: True,
+            wallet_sync_ready=lambda: True,
+        )
+        r = gate.evaluate()
+        assert r.status == LifecycleReadiness.READY
+
+    def test_wallet_sync_ready_but_capital_fails(self) -> None:
+        """Wallet sync pass does not short-circuit other checks."""
+        gate = StartupReadinessGate(
+            runtime=_runtime_live(),
+            risk=_risk_cap_on(capital_gate_enabled=True),
+            capital_provider=None,
+            health_source=_h(TradableStateHealth.HEALTHY),
+            cache=MagicMock(),
+            exec_connected=lambda: True,
+            wallet_sync_ready=lambda: True,
+        )
+        r = gate.evaluate()
+        assert r.status == LifecycleReadiness.NOT_READY
+        assert "startup_capital_provider_missing" in r.reasons

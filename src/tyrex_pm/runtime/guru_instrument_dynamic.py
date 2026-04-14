@@ -355,6 +355,60 @@ class GuruInstrumentDynamicController:
             return None, "cache_inconsistent"
         return cached, ""
 
+    def resolve_and_activate_by_condition_and_token(
+        self,
+        condition_id: str,
+        token_id: str,
+    ) -> WalletPositionResolveOutcome:
+        """
+        Resolve using ``condition_id`` + ``token_id`` directly (CLOB + parse,
+        no Gamma lookup). Used by :class:`WalletSyncActor` when both IDs are
+        already known from the wallet positions/orders API response.
+
+        Uses :meth:`CacheInstrumentActivator.force_add_instrument` (bypasses
+        ``polymarket_dynamic_max_activations``).
+        """
+        cid, tid = str(condition_id), str(token_id)
+        for cached in self._cache.instruments(venue=Venue(POLYMARKET)):
+            if str(get_polymarket_token_id(cached.id)) == tid:
+                return WalletPositionResolveOutcome(cached, "", None)
+
+        try:
+            inst = resolve_binary_option_for_condition_and_token(cid, tid, self._clob)
+        except GuruInstrumentResolveError as exc:
+            d = exc.detail or "resolve_unspecified"
+            msg = str(exc)
+            if len(msg) > 240:
+                msg = msg[:237] + "..."
+            _LOG.debug(
+                "event=guru_instrument_resolve_fail component=guru_instrument_dynamic "
+                "context=wallet_sync condition_id=%s token_id=%s detail=%s msg=%s",
+                cid[:24], tid[:24], d, msg,
+            )
+            return WalletPositionResolveOutcome(None, d, msg)
+        except httpx.HTTPError:
+            _LOG.warning(
+                "event=guru_instrument_resolve_fail component=guru_instrument_dynamic "
+                "context=wallet_sync condition_id=%s token_id=%s detail=http_error",
+                cid[:24], tid[:24], exc_info=True,
+            )
+            return WalletPositionResolveOutcome(None, "http_error", None)
+        except (OSError, ValueError, TypeError, KeyError):
+            _LOG.warning(
+                "event=guru_instrument_resolve_fail component=guru_instrument_dynamic "
+                "context=wallet_sync condition_id=%s token_id=%s detail=unexpected_error",
+                cid[:24], tid[:24], exc_info=True,
+            )
+            return WalletPositionResolveOutcome(None, "unexpected_error", None)
+
+        ok, reason = self._activator.force_add_instrument(inst)
+        if not ok:
+            return WalletPositionResolveOutcome(None, reason, None)
+        cached = self._cache.instrument(inst.id)
+        if cached is None:
+            return WalletPositionResolveOutcome(None, "cache_inconsistent", None)
+        return WalletPositionResolveOutcome(cached, "", None)
+
     def resolve_and_activate_wallet_position(
         self,
         token_id: str,

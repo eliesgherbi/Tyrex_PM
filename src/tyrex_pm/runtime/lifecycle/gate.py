@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,6 +39,8 @@ class StartupReadinessGate:
         health_source: TradableStateHealthSource | None,
         cache: Any,
         exec_connected: ExecClientsConnected,
+        wallet_sync_ready: Callable[[], bool] | None = None,
+        wallet_sync_deadline_exceeded: Callable[[], bool] | None = None,
     ) -> None:
         self._runtime = runtime
         self._risk = risk
@@ -45,6 +48,8 @@ class StartupReadinessGate:
         self._health_source = health_source
         self._cache = cache
         self._exec_connected = exec_connected
+        self._wallet_sync_ready = wallet_sync_ready
+        self._wallet_sync_deadline_exceeded = wallet_sync_deadline_exceeded
 
     def evaluate(self) -> StartupReadinessResult:
         now = _utc_now()
@@ -63,6 +68,20 @@ class StartupReadinessGate:
 
         if not self._exec_connected():
             reasons.append("startup_exec_clients_not_connected")
+            return StartupReadinessResult(
+                status=LifecycleReadiness.NOT_READY,
+                reasons=tuple(reasons),
+                evaluated_at_utc=now,
+            )
+
+        if self._wallet_sync_ready is not None and not self._wallet_sync_ready():
+            if (
+                self._wallet_sync_deadline_exceeded is not None
+                and self._wallet_sync_deadline_exceeded()
+            ):
+                reasons.append("startup_wallet_sync_timeout")
+            else:
+                reasons.append("startup_wallet_sync_pending")
             return StartupReadinessResult(
                 status=LifecycleReadiness.NOT_READY,
                 reasons=tuple(reasons),

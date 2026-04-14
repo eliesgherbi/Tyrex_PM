@@ -140,7 +140,7 @@ def test_compose_live_nautilus_registers_factories(
     assert cfg.exec_engine.open_check_interval_secs == 20.0
     assert cfg.exec_engine.open_check_open_only is True
     ec = next(iter(cfg.exec_clients.values()))
-    assert ec.use_data_api is False
+    assert ec.use_data_api is True  # wallet_sync_enabled defaults to True for live
     mock_instance.add_data_client_factory.assert_called_once()
     mock_instance.add_exec_client_factory.assert_called_once()
     assert isinstance(

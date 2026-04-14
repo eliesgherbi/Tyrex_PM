@@ -281,6 +281,14 @@ class RuntimeSettings:
     polymarket_use_data_api_for_positions: bool = False
     #: Phase 5 — ``LiveExecEngineConfig.open_check_open_only``; ``None`` = omit kwarg (Nautilus default).
     live_exec_open_check_open_only: bool | None = None
+    #: Venue Sync Truth — continuous wallet instrument discovery (live only).
+    wallet_sync_enabled: bool = False
+    #: Interval between wallet sync poll cycles (seconds). Floor: 5.0.
+    wallet_sync_poll_interval_seconds: float = 15.0
+    #: Max seconds after on_start before startup is considered timed out. Floor: 30.0.
+    wallet_sync_startup_deadline_seconds: float = 120.0
+    #: Max cycles a single condition_id may fail resolution before terminal. Floor: 1.
+    wallet_sync_per_instrument_max_retries: int = 3
 
 
 def _polymarket_token_instrument_map(
@@ -895,6 +903,32 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     else:
         live_oc_open_only = None
 
+    # -- Wallet sync -------------------------------------------------------
+    ws_enabled_raw = raw.get("wallet_sync_enabled")
+    if ws_enabled_raw is None:
+        ws_enabled = mode == "live"
+    else:
+        ws_enabled = bool(ws_enabled_raw)
+    if ws_enabled and mode != "live":
+        raise ValueError(
+            f"{p}: wallet_sync_enabled requires execution_mode=live",
+        )
+    ws_poll = float(raw.get("wallet_sync_poll_interval_seconds", 15.0))
+    if ws_poll < 5.0:
+        raise ValueError(
+            f"{p}: wallet_sync_poll_interval_seconds must be >= 5.0",
+        )
+    ws_deadline = float(raw.get("wallet_sync_startup_deadline_seconds", 120.0))
+    if ws_deadline < 30.0:
+        raise ValueError(
+            f"{p}: wallet_sync_startup_deadline_seconds must be >= 30.0",
+        )
+    ws_retries = int(raw.get("wallet_sync_per_instrument_max_retries", 3))
+    if ws_retries < 1:
+        raise ValueError(
+            f"{p}: wallet_sync_per_instrument_max_retries must be >= 1",
+        )
+
     return RuntimeSettings(
         trader_id=tid,
         execution_mode=mode,
@@ -954,4 +988,8 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         shutdown_drain_override=sd_override,
         polymarket_use_data_api_for_positions=use_data_api_pos,
         live_exec_open_check_open_only=live_oc_open_only,
+        wallet_sync_enabled=ws_enabled,
+        wallet_sync_poll_interval_seconds=ws_poll,
+        wallet_sync_startup_deadline_seconds=ws_deadline,
+        wallet_sync_per_instrument_max_retries=ws_retries,
     )
