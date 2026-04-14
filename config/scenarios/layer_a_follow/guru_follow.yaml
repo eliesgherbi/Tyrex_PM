@@ -23,7 +23,7 @@ filters:
   significance_filter:
     static_amount:
       enabled: true
-      amount_usd: 50.0
+      amount_usd: 500.0
     significance_conviction:
       enabled: true
       lookback_trades: 20

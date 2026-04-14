@@ -5,7 +5,8 @@ and portfolio account state.
 **Package-source-confirmed** (installed Nautilus): open orders via ``Cache.orders_open`` /
 ``Cache.order``; account via ``Portfolio.account(venue)``. Allowance is **not** a
 first-class Nautilus field for Polymarket — it is read via py-clob in
-:class:`ClobAllowanceStateProvider` (Tyrex-owned boundary).
+:class:`ClobAllowanceStateProvider` (**implementation detail** of
+:class:`tyrex_pm.runtime.capital.DefaultCapitalStateProvider`; do not wire into risk directly).
 
 Do **not** import this module from ``CopyStrategy``; inject readers into risk/runtime only.
 
@@ -33,7 +34,7 @@ from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
 from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_token_id
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.model.enums import OrderSide, OrderStatus
-from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, Venue
+from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, StrategyId, Venue
 from nautilus_trader.portfolio.portfolio import Portfolio
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
@@ -249,6 +250,18 @@ class NautilusExecutionStateReader:
         )
         return tuple(_order_to_snapshot(o) for o in orders)
 
+    def list_open_orders_for_strategy(
+        self,
+        *,
+        strategy_id: StrategyId,
+        venue: Venue | None = None,
+    ) -> tuple[OrderSnapshot, ...]:
+        """
+        **Package-source-confirmed:** ``Cache.orders_open(..., strategy_id=...)`` — shutdown drain §7.
+        """
+        orders = self._cache.orders_open(venue=venue, strategy_id=strategy_id)
+        return tuple(_order_to_snapshot(o) for o in orders)
+
     def get_order(self, client_order_id: ClientOrderId | str) -> OrderSnapshot | None:
         """
         **Package-source-confirmed:** ``Cache.order(client_order_id)``.
@@ -326,6 +339,10 @@ class NautilusAccountSnapshotProvider:
 class ClobAllowanceStateProvider:
     """
     **Tyrex-owned** allowance/balance read for Polymarket **collateral** via py-clob.
+
+    .. deprecated::
+        Do not inject this into :class:`~tyrex_pm.risk.configured.ConfiguredRiskPolicy`.
+        Use :class:`~tyrex_pm.runtime.capital.DefaultCapitalStateProvider` (single capital path).
 
     The HTTP API returns string ``balance`` / ``allowance``; integer strings use **6-decimal USDC
     fixed point** (see :mod:`tyrex_pm.runtime.clob_collateral_money`). Risk / reporting normalize

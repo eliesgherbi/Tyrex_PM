@@ -174,19 +174,73 @@ def main() -> int:
     )
     node = assembly.node
     node.build()
+
+    import time
+
+    from tyrex_pm.runtime.lifecycle import StartupReadinessCoordinator
+    from tyrex_pm.runtime.lifecycle.node_stop_gate import NodeStopGate
+
+    node_stop_gate = NodeStopGate()
+    run_log = logging.getLogger("tyrex_pm.run_guru")
+
+    t0_mono = time.monotonic()
+    run_log.info(
+        "event=startup_readiness_t0 startup_readiness_t0_mono=%s",
+        t0_mono,
+    )
+    deadline_mono = t0_mono + float(runtime.startup_readiness_timeout_seconds)
+    coord = StartupReadinessCoordinator(
+        node=node,
+        gate=assembly.startup_readiness_gate,
+        lifecycle=assembly.execution_lifecycle,
+        runtime=runtime,
+        risk=risk,
+        fact_emit=run_context.emit if run_context is not None else None,
+        run_context=run_context,
+        node_stop_gate=node_stop_gate,
+    )
+    if runtime.execution_mode == "shadow" and not runtime.startup_strict_shadow:
+        coord.apply_shadow_immediate_ready(t0_mono=t0_mono, deadline_mono=deadline_mono)
+    else:
+        coord.start_background(t0_mono=t0_mono, deadline_mono=deadline_mono)
+
     clean = False
+    exit_code = 0
+    drain_manifest_clean = True
     try:
         try:
             node.run(raise_exception=True)
             clean = True
         except KeyboardInterrupt:
             print("\nStopping…")
-            node.stop()
     finally:
+        from tyrex_pm.runtime.guru_shutdown import drain_before_node_stop
+
+        # WP1: join startup readiness worker before drain so it cannot emit lifecycle updates
+        # during ``SHUTDOWN_DRAIN`` (see ``ExecutionLifecycleStatus.apply_startup_resolution``).
+        coord.stop()
+        try:
+            drain_res = drain_before_node_stop(assembly, runtime, run_context)
+        except Exception as exc:  # noqa: BLE001 — WP1: drain bug must not skip node.stop / manifest finalize
+            run_log.warning(
+                "event=shutdown_drain_unhandled_exception msg=teardown_continues error=%s",
+                exc,
+                exc_info=True,
+            )
+            drain_manifest_clean = False
+        else:
+            if not drain_res.manifest_clean():
+                drain_manifest_clean = False
+        node_stop_gate.stop_node(node, log=run_log)
+        if not drain_manifest_clean:
+            clean = False
+        if assembly.execution_lifecycle.nonzero_exit_requested:
+            clean = False
+            exit_code = 1
         if run_context is not None:
             run_context.finalize_manifest(run_ended_cleanly=clean)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(int(main()))

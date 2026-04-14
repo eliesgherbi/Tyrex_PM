@@ -4,7 +4,7 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 
 **Navigation:** [README.md](README.md) · **Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
 
-**Framework truth vs wallet (read once):** **Token / portfolio deployment caps** compare **`portfolio_deploy` / `token_deploy`** built from **Nautilus `Cache` + `Portfolio`** (pending orders + open positions, cost-basis filled leg). **`capital_gate_enabled`** and **`min_collateral_balance_usd` / `min_allowance_usd` / `collateral_reserve_usd`** use **py-clob** balance/allowance where configured — that is **collateral readiness**, **not** a second source of deployment truth. Operators: **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*.
+**Framework truth vs wallet (read once):** **Token / portfolio deployment caps** compare **`portfolio_deploy` / `token_deploy`** built from **Nautilus `Cache` + `Portfolio`** (pending orders + open positions, cost-basis filled leg). **`capital_gate_enabled`** and **`min_collateral_balance_usd` / `min_allowance_usd` / `collateral_reserve_usd`** use a single **`runtime/capital/DefaultCapitalStateProvider`**: **Nautilus `Portfolio.account`** first; **py-clob** `get_balance_allowance` only **inside** that provider when mins/reserve/observability require it — **not** a second ad hoc HTTP path from risk. Operators: **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*.
 
 ## Repository layout (files on disk)
 
@@ -67,16 +67,18 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | `max_token_notional_usd_open` | no | unlimited (`null`) | Reject if **token_deploy** + order would exceed |
 | `kill_switch` | no | `false` | If true, all intents rejected |
 | `fail_on_missing_price_for_notional` | no | `true` | Fail closed when `price_ref` missing for notional math |
-| `capital_gate_enabled` | no | `false` | If **true**, risk requires account snapshot + optional py-clob balance/allowance checks (live). |
-| `max_account_snapshot_age_seconds` | no | `30` | Refresh account snapshot when older than this (seconds). |
-| `max_allowance_snapshot_age_seconds` | no | `120` | Refresh allowance snapshot when older (used when min collateral/allowance set and/or ``collateral_reserve_usd > 0``). |
-| `min_collateral_balance_usd` | no | `null` | If set, compare to py-clob **`balance`** (requires live + capital gate + allowance provider). Values are normalized in **`runtime/clob_collateral_money.py`**: integer strings = **USDC 1e-6 atoms**; strings with a decimal point = human USD. |
-| `min_allowance_usd` | no | `null` | If set, compare to py-clob **`allowance`** (same normalization as `balance`). |
+| `capital_gate_enabled` | no | `false` | If **true**, risk requires fresh **capital state** from `DefaultCapitalStateProvider` (Nautilus account + optional CLOB merge inside the provider; live). |
+| `max_account_snapshot_age_seconds` | no | `30` | Max age before the provider refreshes the **account** leg (`Portfolio.account` snapshot). |
+| `max_allowance_snapshot_age_seconds` | no | `120` | Max age before the provider refreshes the **CLOB** leg when that leg is used (mins, reserve, or observability). |
+| `min_collateral_balance_usd` | no | `null` | If set, compare to **canonical free collateral** from the provider (prefers Nautilus USDC `free`, else CLOB balance). Values are normalized in **`runtime/clob_collateral_money.py`** when sourced from CLOB: integer strings = **USDC 1e-6 atoms**; strings with a decimal point = human USD. |
+| `min_allowance_usd` | no | `null` | If set, compare to **allowance** from the merged capital snapshot (CLOB-sourced today). |
 | `fail_on_unresolved_token_deployment` | no | `false` | If **true** and per-token cap finite, deny when token **filled** deployment cannot be parsed; if **false**, treat missing leg as **0** (underestimate). |
 | `max_portfolio_notional_usd_open` | no | unlimited (`null`/omitted) | Reject if **portfolio_deploy** + order would exceed. **Live-only** (compose rejects finite cap in shadow). |
 | `fail_on_unresolved_portfolio_deployment` | no | `true` | If **true** and portfolio cap finite, deny when total deployment cannot be summed cleanly; if **false**, unresolvable filled legs count as **0** in the sum. |
 | `max_concurrent_guru_resting_orders` | no | `null` (off) | Deny when open guru-origin rests (Polymarket) are already at ``>=`` this limit. Identity: ``state_readers.is_guru_resting_order`` (tags ``guru_cid=``, else ``TX``+26 hex). **Live-only** (compose). |
-| `collateral_reserve_usd` | no | `0` | **BUY** intents require py-clob **`balance` ≥ reserve + n** when enabled (same snapshot as ``min_*``). Breach: ``RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE``. Missing snapshot/unparsable balance: fail-closed (``RISK_ALLOWANCE_UNAVAILABLE``). Requires **`capital_gate_enabled: true`**. Invalid when **`execution_mode: shadow`** (compose). |
+| `collateral_reserve_usd` | no | `0` | **BUY** intents require **canonical free collateral ≥ reserve + n** when enabled (same provider snapshot as ``min_*``). Breach: ``RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE``. Missing/unparsable fields: fail-closed (``RISK_ALLOWANCE_UNAVAILABLE``). Requires **`capital_gate_enabled: true`**. Invalid when **`execution_mode: shadow`** (compose). |
+| **`tradable_state_health_gate_enabled`** | no | **`false`** | When **true**, risk applies **TradableStateHealth** §10 before deploy adjust; compose wires **`NautilusLiveExecutionHealthSource`** (Nautilus ``LiveExecutionEngine`` startup reconciliation latch). Requires a live-shaped exec engine; see **`Implementation/refactor_lifecycle/tradable_state_health.md`**. **Misconfiguration / missing producer at evaluate:** policy still fail-closes the same way; reporting emits a synthetic **`tradable_state_health`** row (`reason_code=health_source_missing`, `reporting_only_synthetic`) so operators can join the deny path. |
+| **`allow_exit_when_degraded_oms`** | no | **`false`** | §10 — when **true**, SELL may pass under `DEGRADED_OMS` (inventory gates still apply). |
 
 **Obsolete YAML (loader raises):** `max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, `fail_on_unresolved_position_for_token_cap` — removed with the marked-exposure / quantity-cap model; do not use in new configs.
 
@@ -138,6 +140,10 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | **`reporting_sink_batch_size`** | no | `128` | JSONL batch size. |
 | **`reporting_capital_observability_enabled`** | no | **`true`** | When **true** with reporting on, record **wallet/CLOB** snapshots and capital fields on `risk_decision` even if **`capital_gate_enabled: false`**. |
 | **`reporting_capital_snapshot_period_seconds`** | no | **`300`** | Minimum interval (seconds) for extra `account_snapshot` rows with `snapshot_trigger=periodic` (checked around risk evaluations). **`0`** disables periodic-only snapshots. |
+| **`startup_readiness_timeout_seconds`** | no | **`120`** | Phase 3 — `deadline_mono = T0 + this` after `node.build()` (`startup_readiness.md` §8.5.1). |
+| **`startup_strict_shadow`** | no | **`false`** | When **true**, shadow runs the full readiness gate instead of immediate READY (§8.3). |
+| **`startup_allow_degraded_live`** | no | **`false`** | Live only — allow `DEGRADED` / `NO_NEW_ENTRIES` when tradable health is `DEGRADED_OMS` (§8.2.4). |
+| **`startup_not_ready_behavior`** | no | **`exit`** | After deadline still `NOT_READY`: **`exit`** → `node.stop()` + non-zero process exit; **`no_trade`** → keep process up, block all submits. |
 
 **Derived (not YAML):** `polymarket_token_to_instrument` — built from non-empty `polymarket_instrument_ids`.
 

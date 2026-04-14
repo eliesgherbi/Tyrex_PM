@@ -301,6 +301,36 @@ def test_load_risk_and_runtime(tmp_path: Path) -> None:
     assert live.guru_max_activity_pages_per_poll == 4
 
 
+def test_runtime_shutdown_drain_defaults_and_yaml(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump({"trader_id": "A-001", "execution_mode": "live"}),
+        encoding="utf-8",
+    )
+    r = load_runtime_settings(p)
+    assert r.shutdown_drain_enabled is True
+    assert r.shutdown_drain_timeout_seconds == 30.0
+    assert r.shutdown_drain_override is False
+
+    p2 = tmp_path / "live_sd.yaml"
+    p2.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "shutdown_drain_enabled": False,
+                "shutdown_drain_timeout_seconds": 60.0,
+                "shutdown_drain_override": True,
+            },
+        ),
+        encoding="utf-8",
+    )
+    r2 = load_runtime_settings(p2)
+    assert r2.shutdown_drain_enabled is False
+    assert r2.shutdown_drain_timeout_seconds == 60.0
+    assert r2.shutdown_drain_override is True
+
+
 def test_runtime_rejects_bad_mode(tmp_path: Path) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(

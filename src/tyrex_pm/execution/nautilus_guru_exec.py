@@ -35,6 +35,7 @@ from tyrex_pm.execution.c3_entry_guard import check_entry_guard
 from tyrex_pm.execution.c3_normalize import floor_quantity_to_step, quantize_limit_order_for_instrument
 from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
 from tyrex_pm.runtime.clob_factory import build_clob_client_from_env
+from tyrex_pm.runtime.lifecycle.instrument_readiness_policy import InstrumentReadinessPolicy
 
 if TYPE_CHECKING:
     from nautilus_trader.trading.strategy import Strategy
@@ -86,6 +87,7 @@ class NautilusGuruExecutionPort:
         "_rest_clob",
         "_fact_emit",
         "_order_registry",
+        "_instrument_policy",
     )
 
     def __init__(
@@ -104,6 +106,7 @@ class NautilusGuruExecutionPort:
         self._rest_clob: Any | None = None
         self._fact_emit = fact_emit
         self._order_registry = order_registry
+        self._instrument_policy = InstrumentReadinessPolicy(runtime)
 
     def _emit(self, fact_type: str, payload: dict[str, Any]) -> None:
         fe = self._fact_emit
@@ -453,6 +456,25 @@ class NautilusGuruExecutionPort:
             return
 
         assert instrument_id is not None and inst is not None
+
+        if not self._instrument_policy.allow_submit(tid, self._strategy.cache):
+            self._strategy.log.error(
+                f"event={ReasonCode.GURU_INSTRUMENT_NOT_IN_CACHE} "
+                f"component=nautilus_guru_exec correlation_id={intent.correlation_id} "
+                f"detail=instrument_readiness_policy instrument_id={instrument_id}",
+            )
+            self._emit(
+                "execution_outcome",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "outcome": "error",
+                    "reason_code": str(ReasonCode.GURU_INSTRUMENT_NOT_IN_CACHE),
+                    "instrument_id": str(instrument_id),
+                    "submitted_qty": 0.0,
+                    "submitted_price": 0.0,
+                },
+            )
+            return
 
         r = self._runtime
         c3_shape = r.execution_entry_guard_enabled or r.execution_book_depth_clip_enabled

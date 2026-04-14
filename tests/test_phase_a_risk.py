@@ -14,6 +14,7 @@ from tyrex_pm.config.loaders import RiskSettings
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import OrderIntent
 from tyrex_pm.risk.configured import ConfiguredRiskPolicy
+from tyrex_pm.runtime.capital import DefaultCapitalStateProvider
 from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
 from tyrex_pm.runtime.state_readers import (
     AccountSnapshot,
@@ -107,8 +108,7 @@ def test_capital_gate_denies_missing_account_present() -> None:
     acct.snapshot.return_value = snap_off()
     pol = ConfiguredRiskPolicy(
         _risk(capital_gate_enabled=True),
-        account_snapshot=acct,
-        allowance_provider=MagicMock(),
+        capital_provider=DefaultCapitalStateProvider(acct, None),
     )
     ok, rc, _ = pol.evaluate(_d_intent)
     assert ok is False
@@ -139,8 +139,7 @@ def test_capital_gate_collateral_below_min() -> None:
             fail_on_missing_price_for_notional=True,
             min_collateral_balance_usd=1.0,
         ),
-        account_snapshot=acct,
-        allowance_provider=allow,
+        capital_provider=DefaultCapitalStateProvider(acct, allow),
     )
     ok, rc, _ = pol.evaluate(_d_intent)
     assert ok is False
@@ -166,8 +165,7 @@ def test_capital_gate_allowance_below_min() -> None:
             capital_gate_enabled=True,
             min_allowance_usd=10.0,
         ),
-        account_snapshot=acct,
-        allowance_provider=allow,
+        capital_provider=DefaultCapitalStateProvider(acct, allow),
     )
     ok, rc, _ = pol.evaluate(_d_intent)
     assert ok is False
@@ -196,8 +194,7 @@ def test_capital_gate_reuses_cached_allowance_within_age() -> None:
             min_collateral_balance_usd=1.0,
             max_allowance_snapshot_age_seconds=60.0,
         ),
-        account_snapshot=acct,
-        allowance_provider=allow,
+        capital_provider=DefaultCapitalStateProvider(acct, allow),
     )
     pol.evaluate(_d_intent)
     pol.evaluate(_d_intent)

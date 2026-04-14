@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from nautilus_trader.adapters.polymarket import (
     POLYMARKET,
@@ -45,6 +46,19 @@ from tyrex_pm.runtime.guru_cache_warmup import (
 from tyrex_pm.runtime.guru_instrument_dynamic import GuruInstrumentDynamicController
 from tyrex_pm.runtime.phase_b_startup import phase_b_startup_summary_line
 from tyrex_pm.runtime.polymarket_nautilus_env import ensure_polymarket_l2_env_from_pk_if_missing
+from tyrex_pm.runtime.capital import DefaultCapitalStateProvider
+from tyrex_pm.runtime.lifecycle import (
+    ExecClientsConnected,
+    ExecutionLifecycleStatus,
+    NautilusExecEngineClientsConnected,
+    SpikePendingExecClientsConnected,
+    StartupReadinessGate,
+)
+from tyrex_pm.runtime.tradable_state import (
+    NautilusLiveExecutionHealthSource,
+    TradableStateHealthSource,
+    UnknownBootstrapHealthSource,
+)
 from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
 from tyrex_pm.runtime.layer_a_context import NautilusLayerAContext
 from tyrex_pm.runtime.state_readers import (
@@ -73,8 +87,11 @@ def _live_exec_engine_config(runtime: RuntimeSettings) -> LiveExecEngineConfig:
     **Single constructor call** with only the overrides we intend: all other fields keep
     Nautilus class defaults. ``None`` for an interval → omit kwarg (engine default; typically
     no periodic task for that dimension).
+
+    Phase 5 — ``execution_truth_alignment.md``: optional ``open_check_open_only`` passthrough when
+    ``runtime.live_exec_open_check_open_only`` is not ``None``.
     """
-    kwargs: dict[str, float] = {}
+    kwargs: dict[str, Any] = {}
     if runtime.exec_position_check_interval_secs is not None:
         kwargs["position_check_interval_secs"] = float(
             runtime.exec_position_check_interval_secs,
@@ -83,6 +100,8 @@ def _live_exec_engine_config(runtime: RuntimeSettings) -> LiveExecEngineConfig:
         kwargs["open_check_interval_secs"] = float(
             runtime.exec_open_check_interval_secs,
         )
+    if runtime.live_exec_open_check_open_only is not None:
+        kwargs["open_check_open_only"] = bool(runtime.live_exec_open_check_open_only)
     if not kwargs:
         return LiveExecEngineConfig()
     return LiveExecEngineConfig(**kwargs)
@@ -113,10 +132,17 @@ class GuruTradingAssembly:
     execution_state: NautilusExecutionStateReader
     account_snapshots: NautilusAccountSnapshotProvider
     allowance: ClobAllowanceStateProvider | None
+    capital_state: DefaultCapitalStateProvider | None
+    tradable_state_health: TradableStateHealthSource | None
+    #: Phase 3 — shared with strategy + :func:`tyrex_pm.runtime.lifecycle.coordinator` (``startup_readiness.md``).
+    execution_lifecycle: ExecutionLifecycleStatus
+    startup_readiness_gate: StartupReadinessGate
     #: Live-only instrument/position reader for **reporting** (``position`` facts); not used by risk caps.
     position_state: NautilusPositionStateReader | None
     #: **Deployment budget** (pending + filled entry notional); ``None`` in shadow mode.
     deployment_budget: NautilusDeploymentBudget | None
+    #: Registered Nautilus strategy instance (``node.trader.add_strategy``) — shutdown drain §7.
+    guru_strategy: CopyStrategy | BotSellValidateStrategy
     #: Optional structured reporting context (``reporting_enabled`` runtime).
     run_context: RunContext | None = None
     order_correlation_registry: OrderCorrelationRegistry | None = None
@@ -139,6 +165,7 @@ def build_guru_trading_node(
     *,
     nautilus_file_logging: GuruNautilusFileLogging | None = None,
     run_context: RunContext | None = None,
+    exec_clients_connected_for_startup: ExecClientsConnected | None = None,
 ) -> GuruTradingAssembly:
     """
     Build a ``TradingNode`` with ``GuruMonitorActor`` + copy strategy registered
@@ -216,6 +243,20 @@ def build_guru_trading_node(
                 "config_json": cfg_json,
             },
         )
+        oc = runtime.live_exec_open_check_open_only
+        emit(
+            "execution_alignment_profile",
+            {
+                "polymarket_use_data_api_for_positions": bool(
+                    runtime.polymarket_use_data_api_for_positions,
+                ),
+                "live_exec_open_check_open_only": (
+                    "framework_default"
+                    if oc is None
+                    else ("true" if oc else "false")
+                ),
+            },
+        )
 
     if live:
         ensure_polymarket_l2_env_from_pk_if_missing()
@@ -232,11 +273,14 @@ def build_guru_trading_node(
             instrument_provider=instrument_provider_cfg,
             routing=routing,
         )
+        # Phase 5 trace: ``TradingNodeConfig.exec_clients`` → factory builds
+        # ``PolymarketExecClientConfig`` with the kwargs below (``use_data_api`` is adapter position source).
         exec_cfg = PolymarketExecClientConfig(
             signature_type=sig_type,
             funder=funder,
             instrument_provider=instrument_provider_cfg,
             routing=routing,
+            use_data_api=bool(runtime.polymarket_use_data_api_for_positions),
         )
         exec_engine = _live_exec_engine_config(runtime)
         cfg = TradingNodeConfig(
@@ -292,23 +336,63 @@ def build_guru_trading_node(
         and runtime.reporting_enabled
         and runtime.reporting_capital_observability_enabled
     )
+    _obs_clob = (
+        _cap_obs
+        and allowance_provider is not None
+        and runtime.execution_mode == "live"
+    )
+    capital_provider: DefaultCapitalStateProvider | None = DefaultCapitalStateProvider(
+        account_provider,
+        allowance_provider,
+        observability_include_clob=_obs_clob,
+    )
+    # WP2 — ``NautilusLiveExecutionHealthSource``: ``LiveExecutionEngine`` startup reconciliation
+    # latch (``_startup_reconciliation_event``); see ``tradable_state/nautilus_live_health.py``.
+    tradable_state_health: TradableStateHealthSource | None = None
+    if risk.tradable_state_health_gate_enabled:
+        _ee = node.kernel.exec_engine
+        try:
+            tradable_state_health = NautilusLiveExecutionHealthSource(_ee)
+        except TypeError as exc:
+            raise RuntimeError(
+                "tradable_state_health_gate_enabled requires Nautilus "
+                "LiveExecutionEngine (``kernel.exec_engine`` with "
+                "``_startup_reconciliation_event: asyncio.Event``). "
+                f"Compose cannot wire health producer: {exc}",
+            ) from exc
+    # Phase 3: readiness needs a typed health source on live / strict-shadow (stub UNKNOWN until spike).
+    readiness_health_source: TradableStateHealthSource | None = tradable_state_health
+    if live or runtime.startup_strict_shadow:
+        if readiness_health_source is None:
+            readiness_health_source = UnknownBootstrapHealthSource()
+    lifecycle = ExecutionLifecycleStatus()
+    exec_pred: ExecClientsConnected
+    if exec_clients_connected_for_startup is not None:
+        exec_pred = exec_clients_connected_for_startup
+    elif live:
+        exec_pred = NautilusExecEngineClientsConnected(node.kernel.exec_engine)
+    else:
+        exec_pred = SpikePendingExecClientsConnected()
+    startup_readiness_gate = StartupReadinessGate(
+        runtime=runtime,
+        risk=risk,
+        capital_provider=capital_provider,
+        health_source=readiness_health_source,
+        cache=node.cache,
+        exec_connected=exec_pred,
+    )
     risk_pol = ConfiguredRiskPolicy(
         risk,
         execution_reader=exec_reader,
-        account_snapshot=account_provider,
-        allowance_provider=allowance_provider,
+        capital_provider=capital_provider,
         deployment_budget=deployment_agg,
+        tradable_state_health_source=tradable_state_health,
         fact_emit=emit,
         reporting_capital_observability_enabled=_cap_obs,
         reporting_capital_snapshot_period_seconds=(
             runtime.reporting_capital_snapshot_period_seconds
             if _cap_obs
             else 0.0
-        ),
-        allowance_observability_enabled=(
-            _cap_obs
-            and allowance_provider is not None
-            and runtime.execution_mode == "live"
         ),
     )
     dedup_path = strategy.strategy_dedup_state_path or runtime.guru_dedup_state_path
@@ -414,6 +498,9 @@ def build_guru_trading_node(
         )
         strat = CopyStrategy(copy_cfg)
     strat.set_risk_policy(risk_pol)
+    strat.set_risk_settings(risk)
+    strat.set_execution_lifecycle(lifecycle)
+    strat.assert_startup_dependencies_wired()
     strat.set_layer_a_context(
         NautilusLayerAContext(
             node.portfolio,
@@ -494,8 +581,13 @@ def build_guru_trading_node(
         execution_state=exec_reader,
         account_snapshots=account_provider,
         allowance=allowance_provider,
+        capital_state=capital_provider,
+        tradable_state_health=tradable_state_health,
+        execution_lifecycle=lifecycle,
+        startup_readiness_gate=startup_readiness_gate,
         position_state=position_reader if live else None,
         deployment_budget=deployment_agg,
+        guru_strategy=strat,
         run_context=run_context,
         order_correlation_registry=order_registry,
     )

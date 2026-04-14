@@ -20,6 +20,7 @@ from tyrex_pm.config.loaders import (
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import OrderIntent
 from tyrex_pm.risk.configured import ConfiguredRiskPolicy
+from tyrex_pm.runtime.capital import DefaultCapitalStateProvider
 from tyrex_pm.runtime.state_readers import AccountSnapshot, AllowanceSnapshot
 
 
@@ -65,6 +66,10 @@ def _allow_raw(balance: str, allowance: str = "999999") -> MagicMock:
     return prov
 
 
+def _capital(acct: MagicMock, allow: MagicMock | None) -> DefaultCapitalStateProvider:
+    return DefaultCapitalStateProvider(acct, allow, observability_include_clob=True)
+
+
 def _intent_buy(qty: float = 1.0, price: float | None = 0.5) -> OrderIntent:
     return OrderIntent(
         correlation_id="c",
@@ -93,8 +98,7 @@ def test_reserve_zero_no_reserve_deny() -> None:
     """Reserve off: sufficient balance is not required for free-after-reserve (only mins if set)."""
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=0.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("0.01"),
+        capital_provider=_capital(_acct_present(), _allow_raw("0.01")),
     )
     ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=0.5))  # n=5
     assert ok is True
@@ -104,8 +108,7 @@ def test_reserve_zero_no_reserve_deny() -> None:
 def test_reserve_allows_when_balance_above_reserve_plus_n() -> None:
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=50.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("150.0"),
+        capital_provider=_capital(_acct_present(), _allow_raw("150.0")),
     )
     ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=5.0))  # n=50, need bal >= 100
     assert ok is True
@@ -115,8 +118,7 @@ def test_reserve_allows_when_balance_above_reserve_plus_n() -> None:
 def test_reserve_allows_when_balance_exactly_reserve_plus_n() -> None:
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=50.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("100.0"),
+        capital_provider=_capital(_acct_present(), _allow_raw("100.0")),
     )
     ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=5.0))  # n=50, reserve+n=100
     assert ok is True
@@ -126,8 +128,7 @@ def test_reserve_allows_when_balance_exactly_reserve_plus_n() -> None:
 def test_reserve_denies_when_balance_below_reserve_plus_n() -> None:
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=50.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("99.99"),
+        capital_provider=_capital(_acct_present(), _allow_raw("99.99")),
     )
     # n = 10 * 5.0 = 50; reserve + n = 100 > 99.99
     ok, rc, _ = pol.evaluate(_intent_buy(qty=10.0, price=5.0))
@@ -141,8 +142,7 @@ def test_reserve_deny_emits_ops_log(
     caplog.set_level(logging.INFO, logger="tyrex_pm.risk.configured")
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=50.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("99.99"),
+        capital_provider=_capital(_acct_present(), _allow_raw("99.99")),
     )
     it = _intent_buy(qty=10.0, price=5.0)
     ok, rc, _ = pol.evaluate(it)
@@ -151,7 +151,7 @@ def test_reserve_deny_emits_ops_log(
     joined = " ".join(r.message for r in caplog.records)
     assert "tyrex_risk_ops" in joined
     assert "gate=reserve" in joined
-    assert "py_clob_balance=" in joined
+    assert "free_collateral_usd=" in joined
     assert "reserve_usd=50" in joined
     assert "required_free=100" in joined
     assert it.correlation_id in joined
@@ -160,8 +160,7 @@ def test_reserve_deny_emits_ops_log(
 def test_reserve_fail_closed_no_allowance_provider() -> None:
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=10.0, min_collateral_balance_usd=None, min_allowance_usd=None),
-        account_snapshot=_acct_present(),
-        allowance_provider=None,
+        capital_provider=_capital(_acct_present(), None),
     )
     ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
@@ -173,8 +172,7 @@ def test_reserve_fail_closed_snapshot_none() -> None:
     prov.snapshot.return_value = None  # type: ignore[assignment]
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=10.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=prov,
+        capital_provider=_capital(_acct_present(), prov),
     )
     ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
@@ -184,8 +182,7 @@ def test_reserve_fail_closed_snapshot_none() -> None:
 def test_reserve_fail_closed_unparsable_balance() -> None:
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=10.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("not-a-float"),
+        capital_provider=_capital(_acct_present(), _allow_raw("not-a-float")),
     )
     ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False
@@ -199,8 +196,7 @@ def test_reserve_missing_price_buy_same_as_portfolio_cap_contract() -> None:
             collateral_reserve_usd=10.0,
             fail_on_missing_price_for_notional=False,
         ),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("1000.0"),
+        capital_provider=_capital(_acct_present(), _allow_raw("1000.0")),
     )
     intent = replace(_intent_buy(), price_ref=None)
     ok, rc, _ = pol.evaluate(intent)
@@ -211,8 +207,7 @@ def test_reserve_missing_price_buy_same_as_portfolio_cap_contract() -> None:
 def test_reserve_sell_not_subject_to_free_after_reserve_math() -> None:
     pol = ConfiguredRiskPolicy(
         _risk(collateral_reserve_usd=10_000.0),
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("5.0"),
+        capital_provider=_capital(_acct_present(), _allow_raw("5.0")),
     )
     ok, rc, _ = pol.evaluate(_intent_sell(qty=1.0, price=0.5))
     assert ok is True
@@ -224,8 +219,7 @@ def test_misconfigured_reserve_without_capital_gate_fail_closed() -> None:
     s = _risk(capital_gate_enabled=False, collateral_reserve_usd=25.0)
     pol = ConfiguredRiskPolicy(
         s,
-        account_snapshot=_acct_present(),
-        allowance_provider=_allow_raw("999.0"),
+        capital_provider=_capital(_acct_present(), _allow_raw("999.0")),
     )
     ok, rc, _ = pol.evaluate(_intent_buy())
     assert ok is False

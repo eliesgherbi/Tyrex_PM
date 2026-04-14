@@ -61,6 +61,45 @@ def _p(ft: str) -> dict:
         return {"correlation_id": "c1", "target_qty": 1.0, "signal_branch": "entry"}
     if ft == "risk_decision":
         return {"correlation_id": "c1", "allowed": False, "reason_code": "risk_kill_switch"}
+    if ft == "tradable_state_health":
+        return {
+            "correlation_id": "c1",
+            "level": "healthy",
+            "reason_code": "test",
+            "observed_at_utc": _ISO,
+            "risk_allowed": True,
+            "risk_reason_code": "approved",
+        }
+    if ft == "startup_readiness":
+        return {
+            "status": "READY",
+            "reasons": [],
+            "timeout_seconds": 120.0,
+            "mode": "shadow",
+            "t0_mono": 1.0,
+            "deadline_mono": 121.0,
+            "terminal": False,
+        }
+    if ft == "shutdown_drain":
+        return {
+            "skipped": False,
+            "skip_reason": "",
+            "timed_out": False,
+            "residual_count": 0,
+            "canceled_count": 0,
+            "drain_duration_ms": 0,
+            "residual_client_order_ids": [],
+            "instruments_cancelled": 0,
+            "cancel_failures": [],
+            "cancel_partial_failure": False,
+            "internal_error": "",
+            "drain_aborted_internal": False,
+        }
+    if ft == "execution_alignment_profile":
+        return {
+            "polymarket_use_data_api_for_positions": False,
+            "live_exec_open_check_open_only": "framework_default",
+        }
     if ft == "execution_intent":
         return {
             "correlation_id": "c1",

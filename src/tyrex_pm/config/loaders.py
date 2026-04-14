@@ -171,6 +171,12 @@ class RiskSettings:
     min_notional_policy: str = "deny"
     #: ``deny`` | ``cap`` — above maximum: reject or clip quantity down to cap.
     max_notional_policy: str = "cap"
+    #: When **true**, :class:`~tyrex_pm.risk.configured.ConfiguredRiskPolicy` applies
+    #: ``TradableStateHealth`` §10 before capital/deployment gates. Compose wires
+    #: :class:`~tyrex_pm.runtime.tradable_state.nautilus_live_health.NautilusLiveExecutionHealthSource`.
+    tradable_state_health_gate_enabled: bool = False
+    #: §10 — allow SELL under ``DEGRADED_OMS`` when **true** (default **false**).
+    allow_exit_when_degraded_oms: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +263,24 @@ class RuntimeSettings:
     #: Extra ``account_snapshot`` facts with ``snapshot_trigger=periodic`` at most this often
     #: (wall clock, seconds). ``0`` disables periodic-only snapshots (risk/submit/deny still record).
     reporting_capital_snapshot_period_seconds: float = 300.0
+    #: Phase 3 — ``startup_readiness.md`` §8.5: ``deadline_mono = T0 + this`` (seconds).
+    startup_readiness_timeout_seconds: float = 120.0
+    #: Shadow: when **true**, run full gate instead of immediate READY (§8.3 dev flag).
+    startup_strict_shadow: bool = False
+    #: Live: allow ``DEGRADED`` / ``NO_NEW_ENTRIES`` when health is ``DEGRADED_OMS`` (§8.2.4).
+    startup_allow_degraded_live: bool = False
+    #: §8.5.2 — ``exit`` (non-zero process exit) vs ``no_trade`` (keep running, block all submits).
+    startup_not_ready_behavior: str = "exit"
+    #: Phase 4 — ``shutdown_drain.md`` §5: cancel-and-drain before ``node.stop()`` (live; shadow skips).
+    shutdown_drain_enabled: bool = True
+    #: Bounded wait for open orders to clear after cancel (seconds); default **30** (frozen §14).
+    shutdown_drain_timeout_seconds: float = 30.0
+    #: YAML opt-in to skip drain (``TYREX_SHUTDOWN_DRAIN_OVERRIDE`` env also); loud log when active.
+    shutdown_drain_override: bool = False
+    #: Phase 5 — ``execution_truth_alignment.md`` §14: Data API vs CLOB for adapter position reports.
+    polymarket_use_data_api_for_positions: bool = False
+    #: Phase 5 — ``LiveExecEngineConfig.open_check_open_only``; ``None`` = omit kwarg (Nautilus default).
+    live_exec_open_check_open_only: bool | None = None
 
 
 def _polymarket_token_instrument_map(
@@ -574,6 +598,9 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
     if max_pol not in ("deny", "cap"):
         raise ValueError(f"{p}: max_notional_policy must be deny or cap (got {max_pol!r})")
 
+    tsh_gate = bool(raw.get("tradable_state_health_gate_enabled", False))
+    allow_deg = bool(raw.get("allow_exit_when_degraded_oms", False))
+
     return RiskSettings(
         max_notional_usd_per_order=max_notional_usd_per_order,
         max_token_notional_usd_open=max_token,
@@ -592,6 +619,8 @@ def load_risk_settings(path: str | Path) -> RiskSettings:
         min_notional_usd_per_order=min_order,
         min_notional_policy=min_pol,
         max_notional_policy=max_pol,
+        tradable_state_health_gate_enabled=tsh_gate,
+        allow_exit_when_degraded_oms=allow_deg,
     )
 
 
@@ -835,6 +864,37 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     if r_cap_period < 0:
         raise ValueError(f"{p}: reporting_capital_snapshot_period_seconds must be >= 0")
 
+    su_to = float(raw.get("startup_readiness_timeout_seconds", 120.0))
+    if su_to <= 0:
+        raise ValueError(f"{p}: startup_readiness_timeout_seconds must be positive")
+    su_strict_sh = bool(raw.get("startup_strict_shadow", False))
+    su_deg = bool(raw.get("startup_allow_degraded_live", False))
+    su_nrb = str(raw.get("startup_not_ready_behavior", "exit")).strip().lower()
+    if su_nrb not in ("exit", "no_trade"):
+        raise ValueError(
+            f"{p}: startup_not_ready_behavior must be exit or no_trade (got {su_nrb!r})",
+        )
+    if mode != "live" and su_deg:
+        raise ValueError(
+            f"{p}: startup_allow_degraded_live is only valid when execution_mode is live",
+        )
+
+    sd_en = bool(raw.get("shutdown_drain_enabled", True))
+    sd_to = float(raw.get("shutdown_drain_timeout_seconds", 30.0))
+    if sd_to <= 0:
+        raise ValueError(f"{p}: shutdown_drain_timeout_seconds must be positive")
+    sd_override = bool(raw.get("shutdown_drain_override", False))
+
+    use_data_api_pos = bool(raw.get("polymarket_use_data_api_for_positions", False))
+    if "live_exec_open_check_open_only" in raw:
+        oc_raw = raw["live_exec_open_check_open_only"]
+        if oc_raw is None:
+            live_oc_open_only: bool | None = None
+        else:
+            live_oc_open_only = bool(oc_raw)
+    else:
+        live_oc_open_only = None
+
     return RuntimeSettings(
         trader_id=tid,
         execution_mode=mode,
@@ -885,4 +945,13 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         reporting_sink_batch_size=r_batch,
         reporting_capital_observability_enabled=r_cap_obs,
         reporting_capital_snapshot_period_seconds=r_cap_period,
+        startup_readiness_timeout_seconds=su_to,
+        startup_strict_shadow=su_strict_sh,
+        startup_allow_degraded_live=su_deg,
+        startup_not_ready_behavior=su_nrb,
+        shutdown_drain_enabled=sd_en,
+        shutdown_drain_timeout_seconds=sd_to,
+        shutdown_drain_override=sd_override,
+        polymarket_use_data_api_for_positions=use_data_api_pos,
+        live_exec_open_check_open_only=live_oc_open_only,
     )

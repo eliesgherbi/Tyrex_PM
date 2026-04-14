@@ -6,6 +6,7 @@ import json
 import logging
 import socket
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,12 @@ class RunContext:
     nautilus_log_path: str | None = None
     data_quality: RunDataQuality = field(default_factory=RunDataQuality)
     execution_path: str = "unknown"  # live | shadow (aligned with execution_mode)
+    _manifest_lock: threading.Lock = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default_factory=threading.Lock,
+    )
 
     def emit(self, fact_type: str, payload: dict[str, Any]) -> None:
         self.sink.emit_fact(fact_type, payload)
@@ -77,23 +84,26 @@ class RunContext:
 
     def update_manifest_fields(self, **fields: Any) -> None:
         """Merge non-None fields into ``manifest.json`` (e.g. ``execution_path`` after compose)."""
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        man: dict[str, Any]
-        if self.manifest_path.is_file():
-            man = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        else:
-            man = {"run_id": self.run_id}
-        for k, v in fields.items():
-            if v is not None:
-                man[k] = v
-        if "data_quality" not in man:
-            man["data_quality"] = self.data_quality.to_dict()
-        self.manifest_path.write_text(json.dumps(man, indent=2) + "\n", encoding="utf-8")
+        with self._manifest_lock:
+            self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            man: dict[str, Any]
+            if self.manifest_path.is_file():
+                man = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            else:
+                man = {"run_id": self.run_id}
+            for k, v in fields.items():
+                if v is not None:
+                    man[k] = v
+            if "data_quality" not in man:
+                man["data_quality"] = self.data_quality.to_dict()
+            self.manifest_path.write_text(json.dumps(man, indent=2) + "\n", encoding="utf-8")
 
     def finalize_manifest(self, *, run_ended_cleanly: bool) -> None:
-        self.data_quality.run_ended_cleanly = run_ended_cleanly
-        if not run_ended_cleanly:
-            self.data_quality.facts_incomplete = True
+        with self._manifest_lock:
+            self.data_quality.run_ended_cleanly = run_ended_cleanly
+            if not run_ended_cleanly:
+                self.data_quality.facts_incomplete = True
+        # Release lock before sink join so startup/drain threads can still merge manifest fields.
         stats = self.sink.drain_and_close()
         try:
             from tyrex_pm.reporting.post_run_dq import apply_fact_file_heuristics
@@ -102,16 +112,17 @@ class RunContext:
         except OSError as exc:
             _LOG.warning("reporting post-run data quality scan failed: %s", exc)
         ended = _iso_utc_now()
-        man: dict[str, Any]
-        if self.manifest_path.is_file():
-            man = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        else:
-            man = {"run_id": self.run_id}
-        man["ended_at_utc"] = ended
-        man["execution_path"] = self.execution_path
-        man["data_quality"] = self.data_quality.to_dict()
-        man["reporting_sink_stats"] = stats
-        self.manifest_path.write_text(json.dumps(man, indent=2) + "\n", encoding="utf-8")
+        with self._manifest_lock:
+            man: dict[str, Any]
+            if self.manifest_path.is_file():
+                man = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            else:
+                man = {"run_id": self.run_id}
+            man["ended_at_utc"] = ended
+            man["execution_path"] = self.execution_path
+            man["data_quality"] = self.data_quality.to_dict()
+            man["reporting_sink_stats"] = stats
+            self.manifest_path.write_text(json.dumps(man, indent=2) + "\n", encoding="utf-8")
 
 
 def create_run_context(

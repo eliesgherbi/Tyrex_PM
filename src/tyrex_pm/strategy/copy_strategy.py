@@ -13,7 +13,7 @@ from typing import Any
 from nautilus_trader.model.events.order import OrderDenied, OrderEvent
 from nautilus_trader.trading.config import StrategyConfig
 
-from tyrex_pm.config.loaders import LayerAFiltersSettings, _default_layer_a_filters
+from tyrex_pm.config.loaders import LayerAFiltersSettings, RiskSettings, _default_layer_a_filters
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import GuruTradeSignal, OrderIntent
 from tyrex_pm.data.guru_monitor import GURU_TRADE_TOPIC
@@ -27,6 +27,7 @@ from tyrex_pm.signal.layer_a.orchestrator import LayerAOrchestrator
 from tyrex_pm.signal.layer_a.types import LayerAContext, LayerAOutcome, LayerAStepRecord
 from tyrex_pm.signal.sizing import SizingPolicy, build_sizing_policy
 from tyrex_pm.signal.token_filter_spec import TokenFilterSpec
+from tyrex_pm.runtime.lifecycle.status import ExecutionLifecycleStatus
 from tyrex_pm.strategy.base import BaseComposableStrategy
 
 FactEmitFn = Callable[[str, dict[str, Any]], None]
@@ -71,6 +72,8 @@ class CopyStrategy(BaseComposableStrategy):
             conviction_sizing_cap=config.conviction_sizing_cap,
         )
         self._risk: RiskPolicy = ShadowAllPassRisk()
+        self._risk_settings: RiskSettings | None = None
+        self._execution_lifecycle: ExecutionLifecycleStatus | None = None
         self._execution: ExecutionPort = NoOpExecutionPort()
         self._reporting_emit: FactEmitFn | None = None
         self._order_registry: OrderCorrelationRegistry | None = None
@@ -80,6 +83,30 @@ class CopyStrategy(BaseComposableStrategy):
     def set_risk_policy(self, policy: RiskPolicy) -> None:
         """Inject real `RiskPolicy` in v1.06+ tests or runtime."""
         self._risk = policy
+
+    def set_risk_settings(self, settings: RiskSettings | None) -> None:
+        """Runtime-injected :class:`~tyrex_pm.config.loaders.RiskSettings` for startup §8.4 SELL matrix."""
+        self._risk_settings = settings
+
+    def set_execution_lifecycle(self, status: ExecutionLifecycleStatus | None) -> None:
+        """Phase 3 — :class:`~tyrex_pm.runtime.lifecycle.status.ExecutionLifecycleStatus` from compose."""
+        self._execution_lifecycle = status
+
+    def assert_startup_dependencies_wired(self) -> None:
+        """
+        WP1 — compose contract: :meth:`set_risk_settings` and :meth:`set_execution_lifecycle` must
+        run before ``add_strategy`` so startup §8.4 / readiness blocking cannot silently disappear.
+        """
+        if self._risk_settings is None:
+            raise RuntimeError(
+                "CopyStrategy startup contract violation: RiskSettings not injected "
+                "(compose must call set_risk_settings before node.trader.add_strategy).",
+            )
+        if self._execution_lifecycle is None:
+            raise RuntimeError(
+                "CopyStrategy startup contract violation: ExecutionLifecycleStatus not injected "
+                "(compose must call set_execution_lifecycle before node.trader.add_strategy).",
+            )
 
     def set_execution_port(self, port: ExecutionPort) -> None:
         """Tests or runtime wiring may inject a custom port."""
@@ -208,6 +235,13 @@ class CopyStrategy(BaseComposableStrategy):
             branch,
             ts_signal_ms=ts_signal_ms,
         )
+
+    def _startup_block_reason(self, side: str) -> str | None:
+        lc = self._execution_lifecycle
+        rs = self._risk_settings
+        if lc is None or rs is None:
+            return None
+        return lc.block_reason_for_side(side.upper(), risk=rs)
 
     def _adjust_intent_before_risk(
         self,
@@ -349,6 +383,26 @@ class CopyStrategy(BaseComposableStrategy):
             price_ref=sig.price_raw,
         )
         intent = self._adjust_intent_before_risk(intent, signal=sig, branch=kind)
+        su = self._startup_block_reason(sig.side)
+        if su is not None:
+            self.log.info(
+                "event=copy_skip "
+                "component=copy_strategy "
+                f"correlation_id={sig.source_trade_id} "
+                f"reason_code={su} detail=startup_readiness"
+            )
+            if em is not None:
+                em(
+                    "strategy_decision",
+                    {
+                        "correlation_id": cid,
+                        "branch": kind,
+                        "decision": "skip",
+                        "reason_code": str(su),
+                    },
+                )
+            return
+
         approved, risk_rc, intent_risk = self._risk.evaluate(intent)
         if not approved or intent_risk is None:
             self.log.info(

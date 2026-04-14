@@ -23,6 +23,7 @@ Structured run observability when **`reporting_enabled: true`** in runtime YAML.
 | `order_lifecycle` | `run_id`, `client_order_id`, optional `venue_order_id`, `correlation_id` |
 | `fill` | `run_id`, `client_order_id`, optional `venue_order_id`, `correlation_id`, `fill_event_id` |
 | `account_snapshot` | `run_id`, `account_snapshot_seq`, optional `correlation_id` |
+| `tradable_state_health` | `run_id`, `correlation_id`, `observed_at_utc` |
 | `reconciliation` | `run_id`, optional `client_order_id` |
 
 Full list: `src/tyrex_pm/reporting/schema/joins.md`.
@@ -34,7 +35,8 @@ Full list: `src/tyrex_pm/reporting/schema/joins.md`.
 - **`correlation_id`:** stable guru-trade identity (e.g. transaction hash + outcome token), carried from signal through risk and execution.
 - **`risk_decision`:** includes deployment fields (`order_deploy_usd_at_eval`, token/portfolio deploy), clip/bump flags (`max_notional_policy_clipped`, `min_notional_policy_bumped`), and optional capital snapshots when observability is on.
 - **`normalization`:** instrument grid quantize; `skipped_submit: true` + `exec_instrument_quantize_skip` when venue min size cannot be satisfied without exceeding risk-approved qty.
-- **Capital:** `account_snapshot` and enriched `risk_decision` rows may include Nautilus cash vs py-clob balance strings; see `capital_canonical_balance_source` fields in facts.
+- **Capital (WP3):** `account_snapshot` and enriched `risk_decision` rows include Nautilus cash vs py-clob fields; **`capital_canonical_balance_source`** / **`capital_attrib_free_collateral_usd`** / **`capital_attrib_allowance_usd`** document which inputs fed **`free_collateral_usd`** vs **allowance** (per-field attribution; **`capital_state_merged_clob`** when CLOB was merged into the snapshot).
+- **Tradable health (WP4):** `tradable_state_health` rows align with risk §10; when the gate is on but no producer is wired at evaluate, **`reason_code=health_source_missing`** and optional **`reporting_only_synthetic: true`** mark reporting-only synthesis (not live framework health).
 
 ---
 

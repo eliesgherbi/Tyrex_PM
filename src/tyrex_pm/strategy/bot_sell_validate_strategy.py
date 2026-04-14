@@ -903,6 +903,16 @@ class BotSellValidateStrategy(CopyStrategy):
             reason_code=str(ReasonCode.BOT_SELL_VALIDATE),
             price_ref=px_in,
         )
+        su = self._startup_block_reason("SELL")
+        if su is not None:
+            self._validate_sell_pending = False
+            self.log.info(
+                "event=bot_sell_validate component=bot_sell_validate_strategy "
+                f"kind=startup_block sell_correlation_id={sell_correlation_id} "
+                f"entry_correlation_id={entry_correlation_id} reason_code={su}"
+            )
+            return
+
         approved, risk_rc, intent_risk = self._risk.evaluate(intent)
         if not approved or intent_risk is None:
             self._validate_sell_pending = False

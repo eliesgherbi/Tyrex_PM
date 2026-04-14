@@ -22,15 +22,16 @@ from tyrex_pm.reporting.capital_observability import (
     compute_buy_headroom_usd,
     trim_json_text,
 )
-from tyrex_pm.runtime.clob_collateral_money import parse_clob_collateral_usd
+from tyrex_pm.runtime.capital import CapitalState, CapitalStateProvider
+from tyrex_pm.runtime.capital.policy import CapitalSnapshotPolicy
 from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
-from tyrex_pm.runtime.nautilus_cash_extract import extract_nautilus_cash_free_usd
-from tyrex_pm.runtime.state_readers import (
-    POLYMARKET_VENUE_ID,
-    AccountSnapshotSource,
-    AllowanceSnapshotSource,
-    ExecutionStateReader,
+from tyrex_pm.runtime.state_readers import POLYMARKET_VENUE_ID, ExecutionStateReader
+from tyrex_pm.runtime.tradable_state import (
+    TradableStateHealthSnapshot,
+    TradableStateHealthSource,
+    tradable_health_allows_intent,
 )
+from tyrex_pm.runtime.tradable_state.synthetic import synthetic_snapshot_health_source_missing
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,28 +73,26 @@ class ConfiguredRiskPolicy:
         settings: RiskSettings,
         *,
         execution_reader: ExecutionStateReader | None = None,
-        account_snapshot: AccountSnapshotSource | None = None,
-        allowance_provider: AllowanceSnapshotSource | None = None,
+        capital_provider: CapitalStateProvider | None = None,
         deployment_budget: NautilusDeploymentBudget | None = None,
+        tradable_state_health_source: TradableStateHealthSource | None = None,
         fact_emit: Callable[[str, dict[str, Any]], None] | None = None,
         reporting_capital_observability_enabled: bool = False,
         reporting_capital_snapshot_period_seconds: float = 0.0,
-        allowance_observability_enabled: bool = False,
     ) -> None:
         self._s = settings
         self._execution_reader = execution_reader
-        self._account_snapshot = account_snapshot
-        self._allowance_provider = allowance_provider
+        self._capital_provider = capital_provider
         self._deployment_budget = deployment_budget
-        self._account_cache = None
-        self._allowance_cache = None
+        self._tradable_state_health_source = tradable_state_health_source
+        self._last_health_snap: TradableStateHealthSnapshot | None = None
+        self._capital_cache: CapitalState | None = None
         self._fact_emit = fact_emit
         self._reporting_account_seq = 0
         self._reporting_capital_observability_enabled = bool(
             reporting_capital_observability_enabled,
         )
         self._reporting_capital_period_s = float(reporting_capital_snapshot_period_seconds)
-        self._allowance_observability_enabled = bool(allowance_observability_enabled)
         self._last_periodic_capital_mono: float | None = None
 
     @property
@@ -102,19 +101,17 @@ class ConfiguredRiskPolicy:
         return self._execution_reader
 
     @property
-    def account_snapshot_provider(self):
-        """Portfolio-backed account snapshots (may be empty until exec connects)."""
-        return self._account_snapshot
-
-    @property
-    def allowance_provider(self):
-        """py-clob collateral snapshot owner; ``None`` in shadow mode."""
-        return self._allowance_provider
+    def capital_state_provider(self) -> CapitalStateProvider | None:
+        """Single capital read path (framework account + optional CLOB inside provider)."""
+        return self._capital_provider
 
     @property
     def deployment_budget(self):
         """Deployment accounting; ``None`` in shadow (no framework portfolio cap)."""
         return self._deployment_budget
+
+    def _capital_policy(self) -> CapitalSnapshotPolicy:
+        return CapitalSnapshotPolicy.from_risk_settings(self._s)
 
     def framework_open_order_count(self) -> int:
         """Count of orders Nautilus marks open — for tests and operator diagnostics."""
@@ -124,6 +121,7 @@ class ConfiguredRiskPolicy:
 
     def evaluate(self, intent: OrderIntent) -> tuple[bool, str, OrderIntent | None]:
         self._maybe_periodic_capital_snapshot()
+        self._last_health_snap = None
         if self._s.kill_switch:
             meta = _deploy_adjust_base_meta(intent, self._s)
             self._emit_risk_and_deployment(
@@ -134,6 +132,39 @@ class ConfiguredRiskPolicy:
                 deploy_adjust_meta=meta,
             )
             return False, str(ReasonCode.RISK_KILL_SWITCH), None
+
+        if self._s.tradable_state_health_gate_enabled:
+            if self._tradable_state_health_source is None:
+                # WP4 — joinable health reporting without implying a real framework producer exists.
+                self._last_health_snap = synthetic_snapshot_health_source_missing(
+                    observed_at_utc=_utc_now(),
+                )
+                meta = _deploy_adjust_base_meta(intent, self._s)
+                self._emit_risk_and_deployment(
+                    intent_strategy=intent,
+                    intent_at_eval=intent,
+                    allowed=False,
+                    reason_code=str(ReasonCode.RISK_HEALTH_UNKNOWN_BOOTSTRAP),
+                    deploy_adjust_meta=meta,
+                )
+                return False, str(ReasonCode.RISK_HEALTH_UNKNOWN_BOOTSTRAP), None
+            h_snap = self._tradable_state_health_source.snapshot()
+            self._last_health_snap = h_snap
+            ok_h, rc_h = tradable_health_allows_intent(
+                h_snap,
+                side_upper=intent.side.upper(),
+                allow_exit_when_degraded_oms=self._s.allow_exit_when_degraded_oms,
+            )
+            if not ok_h:
+                meta = _deploy_adjust_base_meta(intent, self._s)
+                self._emit_risk_and_deployment(
+                    intent_strategy=intent,
+                    intent_at_eval=intent,
+                    allowed=False,
+                    reason_code=rc_h,
+                    deploy_adjust_meta=meta,
+                )
+                return False, rc_h, None
 
         adjusted, d_reason, meta = self._apply_order_deploy_policies(intent)
         if adjusted is None:
@@ -172,7 +203,7 @@ class ConfiguredRiskPolicy:
         """
         if not self._reporting_capital_observability_enabled or self._fact_emit is None:
             return
-        self._observability_refresh_caches_best_effort()
+        self._refresh_capital_cache_observability()
         self._emit_account_snapshot_row(
             snapshot_trigger=snapshot_trigger,
             correlation_id=correlation_id,
@@ -464,11 +495,7 @@ class ConfiguredRiskPolicy:
             return
         rc = str(reason_code)
         order_deploy = _order_deploy_usd(intent_at_eval)
-        if (
-            self._reporting_capital_observability_enabled
-            and not self._s.capital_gate_enabled
-        ):
-            self._observability_refresh_caches_best_effort()
+        self._maybe_refresh_capital_cache_for_emit()
 
         snap_seq = 0
         if self._reporting_capital_observability_enabled or self._s.capital_gate_enabled:
@@ -500,6 +527,7 @@ class ConfiguredRiskPolicy:
             "allowed": bool(allowed),
             "reason_code": rc,
             "gate": "",
+            "tradable_state_health_gate_enabled": self._s.tradable_state_health_gate_enabled,
             "capital_gate_enabled": self._s.capital_gate_enabled,
             "pre_venue_collateral_check_active": self._s.capital_gate_enabled,
             "account_snapshot_seq": snap_seq if snap_seq > 0 else None,
@@ -513,7 +541,22 @@ class ConfiguredRiskPolicy:
             **deploy_adjust_meta,
             **cap_m,
         }
+        hs = self._last_health_snap
+        if hs is not None:
+            rd["tradable_state_health_level"] = hs.level.value
+            rd["tradable_state_health_reason_code"] = hs.reason_code
+            if hs.framework_detail is not None:
+                rd["tradable_state_health_framework_detail"] = hs.framework_detail
         fe("risk_decision", rd)
+
+        if hs is not None:
+            self._emit_tradable_state_health_fact(
+                hs,
+                correlation_id=intent_strategy.correlation_id,
+                risk_allowed=bool(allowed),
+                risk_reason_code=rc,
+                reporting_only_synthetic=(hs.reason_code == "health_source_missing"),
+            )
 
         if db is not None and order_deploy is not None:
             pend_t, pend_ok, _ = db.pending_usd_for_token(intent_strategy.token_id)
@@ -534,6 +577,32 @@ class ConfiguredRiskPolicy:
                 },
             )
 
+    def _emit_tradable_state_health_fact(
+        self,
+        snap: TradableStateHealthSnapshot,
+        *,
+        correlation_id: str,
+        risk_allowed: bool,
+        risk_reason_code: str,
+        reporting_only_synthetic: bool = False,
+    ) -> None:
+        fe = self._fact_emit
+        if fe is None:
+            return
+        payload: dict[str, Any] = {
+            "correlation_id": correlation_id,
+            "level": snap.level.value,
+            "reason_code": snap.reason_code,
+            "observed_at_utc": snap.observed_at_utc.isoformat(),
+            "risk_allowed": risk_allowed,
+            "risk_reason_code": risk_reason_code,
+        }
+        if snap.framework_detail is not None:
+            payload["framework_detail"] = snap.framework_detail
+        if reporting_only_synthetic:
+            payload["reporting_only_synthetic"] = True
+        fe("tradable_state_health", payload)
+
     def _maybe_periodic_capital_snapshot(self) -> None:
         if (
             self._fact_emit is None
@@ -546,56 +615,55 @@ class ConfiguredRiskPolicy:
         if last is not None and (now_m - last) < self._reporting_capital_period_s:
             return
         self._last_periodic_capital_mono = now_m
-        self._observability_refresh_caches_best_effort()
+        self._refresh_capital_cache_observability()
         self._emit_account_snapshot_row(
             snapshot_trigger="periodic",
             correlation_id=None,
             intent=None,
         )
 
-    def _observability_refresh_caches_best_effort(self) -> None:
-        if self._account_snapshot is not None:
+    def _refresh_capital_cache_observability(self) -> None:
+        if self._capital_provider is None:
+            return
+        try:
+            self._capital_cache = self._capital_provider.snapshot(
+                purpose="observability",
+                policy=self._capital_policy(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _maybe_refresh_capital_cache_for_emit(self) -> None:
+        """Prefer observability snapshot for fact richness when enabled."""
+        if self._capital_provider is None:
+            return
+        if self._reporting_capital_observability_enabled:
+            self._refresh_capital_cache_observability()
+        elif self._s.capital_gate_enabled and self._capital_cache is None:
             try:
-                self._account_cache = self._account_snapshot.snapshot()
-            except Exception:  # noqa: BLE001
-                pass
-        if (
-            self._allowance_observability_enabled
-            and self._allowance_provider is not None
-        ):
-            try:
-                self._allowance_cache = self._allowance_provider.snapshot()
+                self._capital_cache = self._capital_provider.snapshot(
+                    purpose="risk_gate",
+                    policy=self._capital_policy(),
+                )
             except Exception:  # noqa: BLE001
                 pass
 
     def _capital_metrics_for_facts(self, intent: OrderIntent | None) -> dict[str, Any]:
         """
-        Normalized py-clob money, optional Nautilus cash free, canonical balance for headroom.
+        Capital metrics from the unified :class:`~tyrex_pm.runtime.capital.CapitalState` cache.
 
         ``balance_canonical_usd`` prefers Nautilus cash ``free`` when extractable (framework truth);
         otherwise normalized CLOB balance. Headroom uses canonical only.
         """
-        acct = self._account_cache
-        balances = None
-        if acct is not None and acct.account_present:
-            balances = acct.balances
-        n_free, n_note = extract_nautilus_cash_free_usd(balances)
-
-        clob_p = None
-        bal_py: float | None = None
-        allow_py: float | None = None
-        raw_bal_s: str | None = None
-        raw_allow_s: str | None = None
-        b_note = "no_allowance_cache"
-        a_note = "no_allowance_cache"
-        if self._allowance_cache is not None:
-            clob_p = parse_clob_collateral_usd(self._allowance_cache.raw)
-            bal_py = clob_p.balance_usd
-            allow_py = clob_p.allowance_usd
-            raw_bal_s = clob_p.balance_raw
-            raw_allow_s = clob_p.allowance_raw
-            b_note = clob_p.balance_parse_note
-            a_note = clob_p.allowance_parse_note
+        cap = self._capital_cache
+        n_free = cap.nautilus_cash_free_usd if cap is not None else None
+        n_note = cap.nautilus_cash_extract_note if cap is not None else "no_capital_cache"
+        bal_py = cap.py_clob_balance_usd if cap is not None else None
+        allow_py = cap.py_clob_allowance_usd if cap is not None else None
+        raw_bal_s = cap.py_clob_balance_raw if cap is not None else None
+        raw_allow_s = cap.py_clob_allowance_raw if cap is not None else None
+        b_note = cap.py_clob_balance_parse_note if cap is not None else "no_capital_cache"
+        a_note = cap.py_clob_allowance_parse_note if cap is not None else "no_capital_cache"
 
         if n_free is not None:
             canonical = n_free
@@ -625,7 +693,7 @@ class ConfiguredRiskPolicy:
 
         business_ok = canonical is not None and (n_free is not None or not disagree)
 
-        return {
+        out: dict[str, Any] = {
             "py_clob_balance_usd": bal_py,
             "py_clob_allowance_usd": allow_py,
             "py_clob_balance_raw": raw_bal_s,
@@ -642,6 +710,33 @@ class ConfiguredRiskPolicy:
             "estimated_buy_headroom_usd": headroom,
             "wallet_collateral_numeric_known": canonical is not None,
         }
+        if cap is not None:
+            out["capital_state_source"] = cap.source.value
+            out["capital_state_ok"] = cap.ok
+            out["capital_state_merged_clob"] = cap.merged_clob
+            pol = self._capital_policy()
+            out["capital_fresh_enough"] = (
+                self._capital_provider.freshness_ok(cap, policy=pol)
+                if self._capital_provider is not None
+                else None
+            )
+            out["capital_attrib_free_collateral_usd"] = (
+                "nautilus_cash_free_usd"
+                if cap.nautilus_cash_free_usd is not None
+                else (
+                    "py_clob_balance_usd"
+                    if cap.py_clob_balance_usd is not None
+                    else "unavailable"
+                )
+            )
+            allow_raw = cap.py_clob_allowance_raw
+            out["capital_attrib_allowance_usd"] = (
+                "py_clob_allowance_usd"
+                if cap.py_clob_allowance_usd is not None
+                or (allow_raw is not None and str(allow_raw).strip() != "")
+                else "unavailable"
+            )
+        return out
 
     def _emit_account_snapshot_row(
         self,
@@ -661,20 +756,17 @@ class ConfiguredRiskPolicy:
 
         self._reporting_account_seq += 1
         seq = self._reporting_account_seq
-        acct = self._account_cache
+        cap = self._capital_cache
         captured = datetime.now(tz=UTC)
         acct_present = False
         venue_s = ""
         balances_txt: str | None = None
-        if acct is not None:
-            captured = acct.captured_at_utc
-            acct_present = bool(acct.account_present)
-            venue_s = str(acct.venue)
-            if acct.balances is not None:
-                balances_txt = trim_json_text(acct.balances)
-        if self._allowance_cache is not None:
-            if self._allowance_cache.captured_at_utc > captured:
-                captured = self._allowance_cache.captured_at_utc
+        if cap is not None:
+            captured = cap.captured_at_utc
+            acct_present = cap.account_present
+            venue_s = cap.venue
+            if cap.nautilus_balances is not None:
+                balances_txt = trim_json_text(cap.nautilus_balances)
 
         cap_m = self._capital_metrics_for_facts(intent)
         n = _order_deploy_usd(intent) if intent is not None else None
@@ -686,7 +778,7 @@ class ConfiguredRiskPolicy:
             "capital_gate_enabled": self._s.capital_gate_enabled,
             "pre_venue_collateral_check_active": self._s.capital_gate_enabled,
             "observability_mode_enabled": self._reporting_capital_observability_enabled,
-            "allowance_pull_enabled": self._allowance_observability_enabled,
+            "allowance_pull_enabled": bool(cap.merged_clob) if cap is not None else False,
             "nautilus_venue": venue_s or None,
             "collateral_reserve_usd": float(self._s.collateral_reserve_usd),
             "intent_notional_usd": n,
@@ -757,66 +849,53 @@ class ConfiguredRiskPolicy:
                 return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
             return True, ""
 
-        if self._account_snapshot is None:
+        if self._capital_provider is None:
             return False, ReasonCode.RISK_ACCOUNT_UNAVAILABLE
 
-        need_acct = (
-            self._account_cache is None
-            or (now - self._account_cache.captured_at_utc).total_seconds()
-            >= self._s.max_account_snapshot_age_seconds
-        )
-        if need_acct:
-            self._account_cache = self._account_snapshot.snapshot()
-        if self._account_cache is None or not self._account_cache.account_present:
-            return False, ReasonCode.RISK_ACCOUNT_UNAVAILABLE
-
-        need_py_clob_snapshot = (
-            self._s.min_collateral_balance_usd is not None
-            or self._s.min_allowance_usd is not None
-            or self._s.collateral_reserve_usd > 0
-        )
-        bal: float | None = None
-        allow: float | None = None
-
-        if need_py_clob_snapshot:
-            if self._allowance_provider is None:
-                return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
-            need_alw = (
-                self._allowance_cache is None
-                or (now - self._allowance_cache.captured_at_utc).total_seconds()
-                >= self._s.max_allowance_snapshot_age_seconds
+        try:
+            cap = self._capital_provider.snapshot(
+                purpose="risk_gate",
+                policy=self._capital_policy(),
             )
-            if need_alw:
-                self._allowance_cache = self._allowance_provider.snapshot()
-            if self._allowance_cache is None:
-                return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
-            clob_p = parse_clob_collateral_usd(self._allowance_cache.raw)
-            bal, allow = clob_p.balance_usd, clob_p.allowance_usd
+        except Exception:  # noqa: BLE001
+            return False, ReasonCode.RISK_ACCOUNT_UNAVAILABLE
+        self._capital_cache = cap
 
-            if self._s.min_collateral_balance_usd is not None:
-                if bal is None:
-                    return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
-                if bal < self._s.min_collateral_balance_usd:
-                    _LOG.info(
-                        "event=%s gate=min_collateral reason=%s py_clob_balance=%.6g min_required=%.6g",
-                        _TYREX_RISK_OPS_EVENT,
-                        ReasonCode.RISK_INSUFFICIENT_COLLATERAL_BALANCE,
-                        float(bal),
-                        float(self._s.min_collateral_balance_usd),
-                    )
-                    return False, ReasonCode.RISK_INSUFFICIENT_COLLATERAL_BALANCE
-            if self._s.min_allowance_usd is not None:
-                if allow is None:
-                    return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
-                if allow < self._s.min_allowance_usd:
-                    _LOG.info(
-                        "event=%s gate=min_allowance reason=%s py_clob_allowance=%.6g min_required=%.6g",
-                        _TYREX_RISK_OPS_EVENT,
-                        ReasonCode.RISK_INSUFFICIENT_ALLOWANCE,
-                        float(allow),
-                        float(self._s.min_allowance_usd),
-                    )
-                    return False, ReasonCode.RISK_INSUFFICIENT_ALLOWANCE
+        if not cap.ok:
+            if cap.error == "allowance_source_unavailable":
+                return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
+            return False, ReasonCode.RISK_ACCOUNT_UNAVAILABLE
+
+        if not cap.account_present:
+            return False, ReasonCode.RISK_ACCOUNT_UNAVAILABLE
+
+        bal = cap.free_collateral_usd
+        allow = cap.allowance_usd
+
+        if self._s.min_collateral_balance_usd is not None:
+            if bal is None:
+                return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
+            if bal < self._s.min_collateral_balance_usd:
+                _LOG.info(
+                    "event=%s gate=min_collateral reason=%s free_collateral_usd=%.6g min_required=%.6g",
+                    _TYREX_RISK_OPS_EVENT,
+                    ReasonCode.RISK_INSUFFICIENT_COLLATERAL_BALANCE,
+                    float(bal),
+                    float(self._s.min_collateral_balance_usd),
+                )
+                return False, ReasonCode.RISK_INSUFFICIENT_COLLATERAL_BALANCE
+        if self._s.min_allowance_usd is not None:
+            if allow is None:
+                return False, ReasonCode.RISK_ALLOWANCE_UNAVAILABLE
+            if allow < self._s.min_allowance_usd:
+                _LOG.info(
+                    "event=%s gate=min_allowance reason=%s allowance_usd=%.6g min_required=%.6g",
+                    _TYREX_RISK_OPS_EVENT,
+                    ReasonCode.RISK_INSUFFICIENT_ALLOWANCE,
+                    float(allow),
+                    float(self._s.min_allowance_usd),
+                )
+                return False, ReasonCode.RISK_INSUFFICIENT_ALLOWANCE
 
         if self._s.collateral_reserve_usd > 0:
             if bal is None:
@@ -829,7 +908,7 @@ class ConfiguredRiskPolicy:
                 if bal < need:
                     _LOG.info(
                         "event=%s gate=reserve reason=%s correlation_id=%s "
-                        "py_clob_balance=%.6g reserve_usd=%.6g intent_notional=%.6g required_free=%.6g",
+                        "free_collateral_usd=%.6g reserve_usd=%.6g intent_notional=%.6g required_free=%.6g",
                         _TYREX_RISK_OPS_EVENT,
                         ReasonCode.RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE,
                         intent.correlation_id,

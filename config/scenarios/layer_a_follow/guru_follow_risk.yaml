@@ -1,5 +1,9 @@
 # =============================================================================
 # Scenario risk — Layer A follow (tight demo caps + Phase B portfolio cap).
+# Live startup readiness: tradable_state_health_gate_enabled wires
+# NautilusLiveExecutionHealthSource (WP2) so UNKNOWN_BOOTSTRAP can clear to
+# HEALTHY after exec reconciliation; without this, StartupReadinessGate stays
+# NOT_READY until timeout (see stabilization_roadmap / tradable_state_health).
 # =============================================================================
 
 kill_switch: false
@@ -23,3 +27,6 @@ max_allowance_snapshot_age_seconds: 120.0
 min_collateral_balance_usd: null
 min_allowance_usd: null
 collateral_reserve_usd: 1.0
+
+tradable_state_health_gate_enabled: true
+allow_exit_when_degraded_oms: false

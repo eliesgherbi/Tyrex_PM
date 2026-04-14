@@ -104,3 +104,19 @@ class ReasonCode(StrEnum):
     LAYER_A_EXIT_FULL_DENIED_NO_POSITION = "layer_a_exit_full_denied_no_position"
     LAYER_A_EXIT_INTERPRETATION_OK = "layer_a_exit_interpretation_ok"
     LAYER_A_EXIT_MIRROR_OK = "layer_a_exit_mirror_ok"
+    #: TradableStateHealth §10 — ``UNKNOWN_BOOTSTRAP`` (no / invalid framework signal yet).
+    RISK_HEALTH_UNKNOWN_BOOTSTRAP = "risk_health_unknown_bootstrap"
+    #: TradableStateHealth §10 — ``DEGRADED_OMS`` blocks BUY; blocks SELL unless opt-in.
+    RISK_HEALTH_DEGRADED_OMS = "risk_health_degraded_oms"
+    #: TradableStateHealth §10 — ``DIVERGENT_PERSISTENT``.
+    RISK_HEALTH_DIVERGENT_PERSISTENT = "risk_health_divergent_persistent"
+    #: Startup readiness §8.4 — waiting (deadline not yet exceeded).
+    STARTUP_NOT_READY = "startup_not_ready"
+    #: Startup readiness §8.5 — deadline exceeded with ``startup_not_ready_behavior: exit`` path.
+    STARTUP_TERMINAL_NOT_READY = "startup_terminal_not_ready"
+    #: Startup ``DEGRADED`` / ``NO_NEW_ENTRIES`` — **BUY** blocked.
+    STARTUP_DEGRADED_NO_BUY = "startup_degraded_no_buy"
+    #: ``DEGRADED`` but health snapshot missing (should not happen if gate wired).
+    STARTUP_DEGRADED_HEALTH_MISSING = "startup_degraded_health_missing"
+    #: Phase 4 — live shutdown drain in progress (``shutdown_drain.md`` §8.2); blocks BUY and SELL.
+    SHUTDOWN_DRAIN_ACTIVE = "shutdown_drain_active"

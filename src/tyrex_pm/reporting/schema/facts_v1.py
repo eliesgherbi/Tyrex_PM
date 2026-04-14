@@ -56,6 +56,49 @@ _REQUIRED: dict[str, frozenset[str]] = {
     ),
     "sizing": frozenset({"correlation_id", "target_qty", "signal_branch"}),
     "risk_decision": frozenset({"correlation_id", "allowed", "reason_code"}),
+    "tradable_state_health": frozenset(
+        {
+            "correlation_id",
+            "level",
+            "reason_code",
+            "observed_at_utc",
+            "risk_allowed",
+            "risk_reason_code",
+        },
+    ),
+    "startup_readiness": frozenset(
+        {
+            "status",
+            "reasons",
+            "timeout_seconds",
+            "mode",
+            "t0_mono",
+            "deadline_mono",
+            "terminal",
+        },
+    ),
+    "shutdown_drain": frozenset(
+        {
+            "skipped",
+            "skip_reason",
+            "timed_out",
+            "residual_count",
+            "canceled_count",
+            "drain_duration_ms",
+            "residual_client_order_ids",
+            "instruments_cancelled",
+            "cancel_failures",
+            "cancel_partial_failure",
+            "internal_error",
+            "drain_aborted_internal",
+        },
+    ),
+    "execution_alignment_profile": frozenset(
+        {
+            "polymarket_use_data_api_for_positions",
+            "live_exec_open_check_open_only",
+        },
+    ),
     "execution_intent": frozenset({"correlation_id", "token_id", "side", "quantity", "signal_kind"}),
     "normalization": frozenset(
         {

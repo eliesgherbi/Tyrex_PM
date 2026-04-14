@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock, MessageBus
 from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.portfolio.portfolio import Portfolio
 
+from tyrex_pm.config.loaders import RiskSettings
 from tyrex_pm.core.types import GuruTradeSignal, OrderIntent
 from tyrex_pm.data.guru_monitor import GURU_TRADE_TOPIC
 from tyrex_pm.execution.port import NoOpExecutionPort
+from tyrex_pm.runtime.lifecycle.status import ExecutionLifecycleStatus
 from tyrex_pm.strategy.copy_strategy import CopyStrategy, CopyStrategyConfig
 
 
@@ -249,3 +252,21 @@ def test_conviction_sizing_second_buy_larger_qty_than_flat() -> None:
     q1 = port.records[1][0].quantity
     assert q0 == 10.0
     assert q1 == 40.0
+
+
+def test_assert_startup_dependencies_wired_requires_risk_and_lifecycle() -> None:
+    strat = CopyStrategy(CopyStrategyConfig(execution_mode="shadow"))
+    with pytest.raises(RuntimeError, match="RiskSettings"):
+        strat.assert_startup_dependencies_wired()
+    strat.set_risk_settings(
+        RiskSettings(
+            max_notional_usd_per_order=1.0,
+            max_token_notional_usd_open=float("inf"),
+            kill_switch=False,
+            fail_on_missing_price_for_notional=True,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="ExecutionLifecycleStatus"):
+        strat.assert_startup_dependencies_wired()
+    strat.set_execution_lifecycle(ExecutionLifecycleStatus())
+    strat.assert_startup_dependencies_wired()

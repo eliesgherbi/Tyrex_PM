@@ -3,7 +3,7 @@
 Bundled **strategy + risk + runtime** for trying **Layer A** (see `Docs/CONFIG_MODEL.md` § `filters`, `Docs/Implementation/LayerA_Filters/`).
 
 - **Strategy:** `guru_follow.yaml` — **static amount** and **significance conviction (median)** **enabled** at moderate defaults (`amount_usd: 50`); **exit** remains **`mirror_guru`** (`exit_filter.enabled: false`). For **`full_exit`**, see CONFIG_MODEL (fail-closed when context missing).
-- **Risk / runtime:** demo caps (per-order / token / portfolio) + capital gate + reserve; guru watermark/dedup under **`var/scenarios/layer_a_follow/`**.
+- **Risk / runtime:** demo caps (per-order / token / portfolio) + capital gate + reserve; **`tradable_state_health_gate_enabled: true`** so live runs can reach startup **READY** (WP2 reconciliation latch); guru watermark/dedup under **`var/scenarios/layer_a_follow/`**.
 
 Run (repo root):
 

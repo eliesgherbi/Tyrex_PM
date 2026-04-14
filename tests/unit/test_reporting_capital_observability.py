@@ -14,6 +14,7 @@ from tyrex_pm.reporting.capital_observability import (
     venue_denial_insufficient_balance_likely,
 )
 from tyrex_pm.risk.configured import ConfiguredRiskPolicy
+from tyrex_pm.runtime.capital import DefaultCapitalStateProvider
 from tyrex_pm.runtime.state_readers import AccountSnapshot, AllowanceSnapshot
 
 
@@ -88,12 +89,10 @@ def test_risk_eval_emits_account_snapshot_when_observability_on_gate_off() -> No
     )
     pol = ConfiguredRiskPolicy(
         rs,
-        account_snapshot=AS(),
-        allowance_provider=AP(),
+        capital_provider=DefaultCapitalStateProvider(AS(), AP(), observability_include_clob=True),
         fact_emit=fe,
         reporting_capital_observability_enabled=True,
         reporting_capital_snapshot_period_seconds=0.0,
-        allowance_observability_enabled=True,
     )
     ok, _rc, _ = pol.evaluate(intent)
     assert ok is True
@@ -163,12 +162,10 @@ def test_capital_facts_prefer_nautilus_free_over_clob_atomic() -> None:
     )
     pol = ConfiguredRiskPolicy(
         rs,
-        account_snapshot=AS(),
-        allowance_provider=AP(),
+        capital_provider=DefaultCapitalStateProvider(AS(), AP(), observability_include_clob=True),
         fact_emit=fe,
         reporting_capital_observability_enabled=True,
         reporting_capital_snapshot_period_seconds=0.0,
-        allowance_observability_enabled=True,
     )
     pol.evaluate(intent)
     rsk = next(p for t, p in rows if t == "risk_decision")
@@ -176,3 +173,5 @@ def test_capital_facts_prefer_nautilus_free_over_clob_atomic() -> None:
     assert abs(float(rsk["nautilus_cash_free_usd"]) - 0.423789) < 1e-9
     assert abs(float(rsk["balance_canonical_usd"]) - 0.423789) < 1e-9
     assert rsk["capital_canonical_balance_source"] == "nautilus_cash_account"
+    assert rsk["capital_attrib_free_collateral_usd"] == "nautilus_cash_free_usd"
+    assert rsk["capital_attrib_allowance_usd"] == "unavailable"

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 from tyrex_pm.config.loaders import (
@@ -15,19 +18,24 @@ from tyrex_pm.config.loaders import (
 )
 from tyrex_pm.execution.nautilus_guru_exec import NautilusGuruExecutionPort
 from tyrex_pm.runtime.guru_compose import build_guru_trading_node
+from tyrex_pm.runtime.lifecycle import NautilusExecEngineClientsConnected, SpikePendingExecClientsConnected
+from tyrex_pm.runtime.tradable_state import NautilusLiveExecutionHealthSource
 from tyrex_pm.runtime.guru_instrument_dynamic import GuruInstrumentDynamicController
 from tyrex_pm.runtime.guru_run_logging import GuruNautilusFileLogging
 from tyrex_pm.strategy.bot_sell_validate_strategy import BotSellValidateStrategy
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+# Prefer this scenario for compose / integration-style tests (stable paths, current knobs).
+_LIFECYCLE_SCENARIO_DIR = _REPO_ROOT / "config" / "scenarios" / "lifecycle_test"
+_LIFECYCLE_STRATEGY_YAML = _LIFECYCLE_SCENARIO_DIR / "guru_follow.yaml"
+_LIFECYCLE_RISK_SHADOW_YAML = _LIFECYCLE_SCENARIO_DIR / "guru_follow_risk_shadow.yaml"
+
 
 @patch("tyrex_pm.runtime.guru_compose.TradingNode")
 def test_compose_registers_bot_sell_validate_strategy(mock_node_cls: MagicMock, tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parent.parent
-    strat = load_strategy_settings(
-        root / "config" / "scenarios" / "bot_sell_validate" / "guru_follow.yaml",
-    )
+    strat = load_strategy_settings(_LIFECYCLE_STRATEGY_YAML)
     assert strat.bot_sell_validate is not None
-    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    risk = load_risk_settings(_LIFECYCLE_RISK_SHADOW_YAML)
     live = tmp_path / "live.yaml"
     live.write_text(
         yaml.safe_dump(
@@ -49,9 +57,8 @@ def test_compose_registers_bot_sell_validate_strategy(mock_node_cls: MagicMock, 
 
 
 def test_compose_shadow_builds(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parent.parent
-    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
-    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    strat = load_strategy_settings(_LIFECYCLE_STRATEGY_YAML)
+    risk = load_risk_settings(_LIFECYCLE_RISK_SHADOW_YAML)
     live = tmp_path / "live.yaml"
     live.write_text(
         yaml.safe_dump(
@@ -66,9 +73,17 @@ def test_compose_shadow_builds(tmp_path: Path) -> None:
     runtime = load_runtime_settings(live)
 
     assembly = build_guru_trading_node(strat, risk, runtime)
+    assert isinstance(
+        assembly.startup_readiness_gate._exec_connected,
+        SpikePendingExecClientsConnected,
+    )
     assert assembly.risk_policy is not None
     assert assembly.execution_state is not None
     assert assembly.account_snapshots is not None
+    assert assembly.capital_state is not None
+    assert assembly.tradable_state_health is None  # gate off by default
+    assert assembly.execution_lifecycle is not None
+    assert assembly.startup_readiness_gate is not None
     assert assembly.allowance is None  # shadow: no CLOB allowance reads
     assert assembly.position_state is None
     assert assembly.deployment_budget is None
@@ -123,8 +138,64 @@ def test_compose_live_nautilus_registers_factories(
     assert len(cfg.exec_clients) == 1
     assert cfg.exec_engine.position_check_interval_secs == 45.0
     assert cfg.exec_engine.open_check_interval_secs == 20.0
+    assert cfg.exec_engine.open_check_open_only is True
+    ec = next(iter(cfg.exec_clients.values()))
+    assert ec.use_data_api is False
     mock_instance.add_data_client_factory.assert_called_once()
     mock_instance.add_exec_client_factory.assert_called_once()
+    assert isinstance(
+        assembly.startup_readiness_gate._exec_connected,
+        NautilusExecEngineClientsConnected,
+    )
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_live_execution_alignment_yaml_overrides(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Phase 5 — adapter ``use_data_api`` + engine ``open_check_open_only`` from runtime YAML."""
+    root = Path(__file__).resolve().parent.parent
+    strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-EA-001",
+                "execution_mode": "live",
+                "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
+                "polymarket_use_data_api_for_positions": True,
+                "live_exec_open_check_open_only": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    with patch.dict(os.environ, {"POLYMARKET_PK": "0x" + "1" * 64}, clear=False):
+        with patch(
+            "tyrex_pm.runtime.guru_compose.build_clob_client_from_env",
+            return_value=MagicMock(),
+        ):
+            with patch(
+                "tyrex_pm.runtime.guru_compose.warm_polymarket_cache_from_wallet_positions",
+            ):
+                with patch(
+                    "tyrex_pm.runtime.guru_compose.ensure_polymarket_l2_env_from_pk_if_missing",
+                ):
+                    _ = build_guru_trading_node(strat, risk, runtime)
+
+    cfg = mock_node_cls.call_args.kwargs["config"]
+    assert cfg.exec_engine.open_check_open_only is False
+    ec = next(iter(cfg.exec_clients.values()))
+    assert ec.use_data_api is True
 
 
 @patch("tyrex_pm.runtime.guru_compose.TradingNode")
@@ -414,3 +485,71 @@ def test_compose_without_nautilus_file_logging_uses_level_only(
     assert log_cfg.log_level_file is None
     assert log_cfg.log_directory is None
     assert log_cfg.log_file_name is None
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_tradable_health_gate_wires_nautilus_live_source(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    strat = load_strategy_settings(_LIFECYCLE_STRATEGY_YAML)
+    risk = replace(
+        load_risk_settings(_LIFECYCLE_RISK_SHADOW_YAML),
+        tradable_state_health_gate_enabled=True,
+    )
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-HLTH-001",
+                "execution_mode": "shadow",
+                "guru_poll_interval_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_ee = MagicMock()
+    mock_ee._startup_reconciliation_event = asyncio.Event()
+    mock_instance.kernel = MagicMock(exec_engine=mock_ee)
+    mock_node_cls.return_value = mock_instance
+
+    assembly = build_guru_trading_node(strat, risk, runtime)
+    assert isinstance(assembly.tradable_state_health, NautilusLiveExecutionHealthSource)
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_tradable_health_gate_raises_when_exec_engine_not_live_shape(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    strat = load_strategy_settings(_LIFECYCLE_STRATEGY_YAML)
+    risk = replace(
+        load_risk_settings(_LIFECYCLE_RISK_SHADOW_YAML),
+        tradable_state_health_gate_enabled=True,
+    )
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-HLTH-BAD-001",
+                "execution_mode": "shadow",
+                "guru_poll_interval_seconds": 60.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_instance.kernel = MagicMock(exec_engine=object())
+    mock_node_cls.return_value = mock_instance
+
+    with pytest.raises(RuntimeError, match="tradable_state_health_gate_enabled"):
+        build_guru_trading_node(strat, risk, runtime)

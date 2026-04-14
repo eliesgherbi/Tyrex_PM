@@ -17,7 +17,7 @@
 | File | Contents |
 |------|----------|
 | `policy.py` | `RiskPolicy` `Protocol`, `ShadowAllPassRisk`. |
-| `configured.py` | **`ConfiguredRiskPolicy`** — `RiskSettings`; optional readers + **`NautilusDeploymentBudget`** (portfolio/token deployment caps) + concurrent guru rests; collateral reserve in `_capital_gate_eval`; **capital gate** (CLOB `balance` / `allowance`); per-order / per-token / portfolio deployment caps; **reporting:** `_capital_metrics_for_facts`, **`account_snapshot`** + enriched **`risk_decision`** when run sink is active. |
+| `configured.py` | **`ConfiguredRiskPolicy`** — `RiskSettings`; optional readers + **`NautilusDeploymentBudget`** (portfolio/token deployment caps) + concurrent guru rests; **`CapitalStateProvider`** (`runtime/capital`) for gate + reporting metrics; per-order / per-token / portfolio deployment caps; **reporting:** `_capital_metrics_for_facts`, **`account_snapshot`** + enriched **`risk_decision`** when run sink is active. |
 | `__init__.py` | Exports. |
 
 ## D. Main interactions
