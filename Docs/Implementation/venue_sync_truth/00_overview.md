@@ -37,6 +37,10 @@ After reading every relevant source file in the Tyrex tree and the installed `na
 
 4. **`open_check_open_only: false` is beneficial but not required by this design.** The proposal lists it as a supporting change. With continuous instrument discovery ensuring cache coverage, the existing reconciliation machinery works. Setting `open_check_open_only: false` improves staleness recovery for edge cases where WS messages are lost, but it is an orthogonal hardening measure, not a dependency of the wallet-sync design.
 
+## Correctness guarantee
+
+After any venue-side action on a market the wallet has ever touched, the deployment budget reflects it within 30 seconds typically and 120 seconds under worst-case Data API propagation lag. This is eventual consistency, not real-time mirroring. See `04_lifecycle.md` "Latency bounds" for the component breakdown.
+
 ## Plan structure
 
 | File | Contents |

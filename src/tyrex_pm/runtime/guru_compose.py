@@ -102,9 +102,16 @@ def _live_exec_engine_config(runtime: RuntimeSettings) -> LiveExecEngineConfig:
         )
     if runtime.live_exec_open_check_open_only is not None:
         kwargs["open_check_open_only"] = bool(runtime.live_exec_open_check_open_only)
-    if not kwargs:
-        return LiveExecEngineConfig()
-    return LiveExecEngineConfig(**kwargs)
+    config = LiveExecEngineConfig(**kwargs) if kwargs else LiveExecEngineConfig()
+    if runtime.position_reconciliation_enabled and not config.generate_missing_orders:
+        raise ValueError(
+            "position_reconciliation_enabled=True requires "
+            "LiveExecEngineConfig.generate_missing_orders=True (current: False). "
+            "The engine cannot process PositionStatusReport reconciliation without "
+            "synthetic order generation. Remove the explicit generate_missing_orders=False "
+            "override or disable position reconciliation."
+        )
+    return config
 
 
 def _trading_node_logging_config(
@@ -278,12 +285,13 @@ def build_guru_trading_node(
         _use_data_api = bool(runtime.polymarket_use_data_api_for_positions)
         if runtime.wallet_sync_enabled and not runtime.polymarket_use_data_api_for_positions:
             _use_data_api = True
+        _data_api_url = runtime.data_api_base_url if _use_data_api else None
         exec_cfg = PolymarketExecClientConfig(
             signature_type=sig_type,
             funder=funder,
             instrument_provider=instrument_provider_cfg,
             routing=routing,
-            use_data_api=_use_data_api,
+            base_url_data_api=_data_api_url,
         )
         exec_engine = _live_exec_engine_config(runtime)
         cfg = TradingNodeConfig(
@@ -364,6 +372,12 @@ def build_guru_trading_node(
             gamma_base_url=runtime.polymarket_gamma_base_url,
             gamma_http_timeout_seconds=runtime.polymarket_gamma_http_timeout_seconds,
             clob_host=runtime.clob_host,
+            position_reconciliation_enabled=runtime.position_reconciliation_enabled,
+            position_reconciliation_shadow_mode=runtime.position_reconciliation_shadow_mode,
+            data_api_lag_tolerance_seconds=runtime.data_api_lag_tolerance_seconds,
+            position_reconciliation_deferral_max=runtime.position_reconciliation_deferral_max,
+            recently_reconciled_ttl_seconds=runtime.recently_reconciled_ttl_seconds,
+            reconcile_venue_has_more=runtime.reconcile_venue_has_more,
         )
         wallet_sync_actor = WalletSyncActor(
             config=ws_config,

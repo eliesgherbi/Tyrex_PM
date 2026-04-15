@@ -190,6 +190,7 @@ def _mock_wallet_sync(
     consecutive_failure_count: int = 0,
     terminally_unresolvable_count: int = 0,
     poll_interval_seconds: float = 15.0,
+    stuck_deferral_count: int = 0,
 ) -> MagicMock:
     ws = MagicMock()
     ws.first_sync_complete = first_sync_complete
@@ -198,6 +199,7 @@ def _mock_wallet_sync(
     ws.consecutive_failure_count = consecutive_failure_count
     ws.terminally_unresolvable_count = terminally_unresolvable_count
     ws.poll_interval_seconds = poll_interval_seconds
+    ws.stuck_deferral_count = stuck_deferral_count
     return ws
 
 

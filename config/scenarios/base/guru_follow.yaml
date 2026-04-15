@@ -1,0 +1,33 @@
+# =============================================================================
+# Scenario strategy — Position Reconciliation Validation.
+# Same strategy config as Layer A follow; reconciliation is tested at the
+# runtime / risk layer, not the strategy layer.
+# Replace guru_wallet_address before running.
+# =============================================================================
+
+guru_wallet_address: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+
+token_filter:
+  enabled: false
+  allowlisted_token_ids: []
+
+copy_scale: 1.0
+
+conviction_sizing_enabled: false
+conviction_sizing_cap: 2.0
+conviction_sizing_lookback_trades: 20
+
+filters:
+  exit_filter:
+    enabled: false
+    exit_method: mirror_guru
+  significance_filter:
+    static_amount:
+      enabled: true
+      amount_usd: 700.0
+    significance_conviction:
+      enabled: false
+      lookback_trades: 20
+      threshold_method: median
+
+strategy_dedup_state_path: null

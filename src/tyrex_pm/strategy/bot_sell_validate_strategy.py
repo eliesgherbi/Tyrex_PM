@@ -590,6 +590,8 @@ class BotSellValidateStrategy(CopyStrategy):
         )
 
     def on_order_event(self, event: OrderEvent) -> None:
+        if getattr(event, "reconciliation", False):
+            return
         super().on_order_event(event)
         if self._vcfg.execution_mode != "live":
             return

@@ -23,7 +23,7 @@ The target startup sequence integrates wallet sync into the existing flow:
 4. StartupReadinessCoordinator.start_background()  → polls readiness gate
 5. node.run()  → blocking; starts the event loop
    a. actors' on_start() called by Nautilus
-   b. WalletSyncActor.on_start() runs first sync cycle immediately
+   b. WalletSyncActor.on_start() dispatches first sync cycle via run_in_executor
    c. exec engine startup reconciliation runs → _startup_reconciliation_event set
    d. continuous reconciliation loop begins
 ```
@@ -47,12 +47,13 @@ StartupReadinessGate.evaluate()
   §2 exec_clients_connected → NOT_READY if false (no change)
   §3 capital_gate → NOT_READY if snapshot fails (no change)
   §4 [NEW] wallet_sync_ready → NOT_READY if WalletSyncActor exists and first_sync_complete is False
-      reason: "startup_wallet_sync_pending"
-  §5 health_source → UNKNOWN_BOOTSTRAP / DIVERGENT / DEGRADED / HEALTHY (enhanced)
+      reason: "startup_wallet_sync_pending"  (if deadline not exceeded)
+      reason: "startup_wallet_sync_timeout"  (if startup_deadline_seconds exceeded)
+  §5 health_source → UNKNOWN_BOOTSTRAP / DEGRADED_OMS / DIVERGENT_PERSISTENT / HEALTHY (enhanced)
   §6 instrument_readiness → NOT_READY if policy fails (no change)
 ```
 
-The wallet sync check is placed **before** the health source check because health should not report HEALTHY until we know the cache is populated. This is also why the health source is enhanced: `NautilusLiveExecutionHealthSource` reports `UNKNOWN_BOOTSTRAP` when `wallet_sync_ready` returns `False`, even if the engine's `_startup_reconciliation_event` is already set. This replaces the weak signal ("reconciliation pass finished") with a meaningful one ("reconciliation finished AND wallet instruments are loaded").
+The wallet sync check is placed **before** the health source check because health should not report HEALTHY until we know the cache is populated. This is also why the health source is enhanced: `NautilusLiveExecutionHealthSource` reports `UNKNOWN_BOOTSTRAP` when `first_sync_complete` is False and deadline is not exceeded, or `DEGRADED_OMS` on timeout — even if the engine's `_startup_reconciliation_event` is already set. This replaces the weak signal ("reconciliation pass finished") with a meaningful one ("reconciliation finished AND wallet instruments are loaded"). See `02_components.md` for the full health source rule set covering both startup and steady-state failures.
 
 ## Continuous operation
 
@@ -92,7 +93,20 @@ every position_check_interval_secs (default 45s):
 5. **T ≤ position_check_interval (45s):** Engine's `_check_positions_consistency` fires → calls `adapter.generate_position_status_reports` → now includes `XYZ` → fetches position → engine reconciles.
 6. **T ≤ max(20, 45)s:** Both orders and positions for `XYZ` are reconciled into Cache/Portfolio. Deployment budget reads correct state.
 
-**Worst-case latency:** `wallet_sync_poll_interval + max(open_check_interval, position_check_interval)` = 15 + 45 = **60 seconds** from venue action to deployment budget reflecting it.
+### Latency bounds
+
+The total time from a venue-side action to the deployment budget reflecting it has three additive components:
+
+1. **Data API propagation lag:** The Polymarket Data API (`/positions`) is not real-time. Observed delays range from a few seconds to ~60 seconds after a fill (see `07_open_questions.md` OQ-6).
+2. **Wallet sync poll interval:** Up to `wallet_sync_poll_interval_seconds` (default 15s) before the actor discovers the new state.
+3. **Engine reconciliation interval:** Up to `max(open_check_interval_secs, position_check_interval_secs)` (default max(20, 45) = 45s) before the engine reconciles the newly cached instrument into Cache/Portfolio.
+
+| Scenario | Typical | Upper bound (p99) |
+|----------|---------|-------------------|
+| Data API current, happy path | ~30 seconds | — |
+| Data API lagging, all intervals at max | — | ~120 seconds |
+
+**This is eventual consistency, not real-time mirroring.** The system guarantees that after any venue-side action on a market the wallet has ever touched, the deployment budget reflects it within approximately 30 seconds typically and 120 seconds under worst-case Data API lag. See `07_open_questions.md` OQ-6 for discussion of Data API propagation characteristics.
 
 ### Why NOT calling `_maintain_active_market` directly
 
@@ -124,7 +138,26 @@ This is noted as a future optimization, not a launch requirement.
 
 ## Shutdown
 
-No changes to shutdown behavior. The `WalletSyncActor.on_stop()` cancels its timer. The actor does not own any orders or positions — it is purely read-side. The existing shutdown drain logic (`guru_shutdown.py`, `shutdown_drain.py`) is unaffected.
+The `WalletSyncActor.on_stop()` cancels its timer and any in-flight executor tasks. The actor does not own any orders or positions — it is purely read-side. The existing shutdown drain logic (`guru_shutdown.py`, `shutdown_drain.py`) is unaffected.
+
+### Shutdown and mid-cycle interruption
+
+**`on_stop` behavior:** `on_stop` is a synchronous method (`cpdef void on_stop`, `actor.pxd:94`). The Nautilus framework does not await it. The implementation:
+
+1. Cancel the timer: `self.clock.cancel_timer("wallet_sync")`. This prevents future cycles from being dispatched.
+2. Cancel in-flight tasks: `self.cancel_all_tasks()` (`actor.pxd:150`). This requests cancellation of any sync cycle dispatched via `run_in_executor` (`actor.pxd:143`). The HTTP call inside the executor thread (`httpx.Client.get` in `fetch_wallet_position_rows`, `guru_cache_warmup.py:275`) is not directly cancellable by `asyncio` task cancellation, but the executor wrapper will not deliver the result after the task is cancelled, and the node shutdown proceeds regardless.
+
+There is no need for an explicit drain-with-timeout because `on_stop` is synchronous — we cannot await anything. The `shutdown_cycle_drain_seconds` config key is reserved for a future enhancement if the framework gains async `on_stop` support, but is not used in the current implementation. The pattern is consistent with `GuruMonitorActor`, which also does not override `on_stop` at all.
+
+**State written mid-cycle:** Instruments added to `Cache` via `force_add_instrument` before shutdown remain in a clean state. There is no partial-instrument corruption because `Cache.add_instrument` is atomic per-instrument — each call either fully adds the instrument or does not (`guru_instrument_dynamic.py:266–268`, `277–280`). The actor holds no transactional state across instruments — each instrument resolution is independent.
+
+**Restart behavior:** The actor has **no persistent state of its own and no cleanup obligation on restart.** On next startup:
+
+1. Compose-time warmup (`warm_polymarket_cache_from_wallet_positions`, `guru_cache_warmup.py:299–455`) reseeds Cache from current wallet positions.
+2. The actor's first cycle re-diffs from scratch against a fresh `_known_condition_ids` set built from `Cache.instruments(venue=POLYMARKET)`.
+3. Any instrument added in the interrupted run that is still wallet-relevant will simply be observed as already-cached.
+4. Any instrument from the interrupted run that is no longer on the wallet is harmless — it remains in Cache but is not actively tracked.
+5. The `_unresolvable_condition_ids` map starts empty on each process, so previously-exhausted retries are re-attempted on restart.
 
 ## Reconnect / WS disconnect
 

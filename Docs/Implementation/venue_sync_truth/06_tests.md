@@ -8,13 +8,16 @@
 
 | Test case | Setup | Assert |
 |-----------|-------|--------|
-| **Happy path: discovers 2 new instruments** | Mock Data API returns 2 positions with distinct condition_ids. Mock py-clob returns 1 open order on a 3rd condition_id. Cache has 0 Polymarket instruments. | `WalletSyncResult.instruments_newly_added == 3`. All 3 instruments in cache. `first_sync_complete == True`. |
+| **Happy path: discovers 2 new instruments** | Mock Data API returns 2 positions with distinct condition_ids. Mock py-clob returns 1 open order on a 3rd condition_id. Cache has 0 Polymarket instruments. | `WalletSyncResult.instruments_newly_added == 3`. All 3 in cache. `first_sync_complete == True`. `http_positions_ok == True`. `http_orders_ok == True`. |
 | **No new instruments (all cached)** | Cache pre-seeded with 3 instruments matching the wallet positions/orders. | `instruments_newly_added == 0`. `first_sync_complete == True`. |
-| **Resolution failure for 1 instrument** | Data API returns 2 positions. CLOB `get_market` raises for condition_id #2. | `instruments_newly_added == 1`. `resolution_failures == 1`. `first_sync_complete == True` (partial success does not block startup). |
-| **Data API failure** | `fetch_wallet_position_rows` raises `httpx.HTTPError`. | `positions_fetched == 0`. Cycle completes without crashing. `first_sync_complete == True` (HTTP failure does not block indefinitely). |
-| **py-clob failure** | `get_orders()` raises. | `orders_fetched == 0`. Positions still processed. |
+| **Resolution failure for 1 instrument, cycle 1** | Data API returns 2 positions. CLOB `get_market` raises for condition_id #2. | `instruments_newly_added == 1`. `resolution_failures == 1`. `unresolvable_retrying == 1`. `first_sync_complete == False` (non-terminal failure blocks completeness). |
+| **Resolution failure exhausts retries** | Same condition_id fails across 3 cycles (`per_instrument_max_retries=3`). | After cycle 3: `unresolvable_terminal == 1`. `first_sync_complete == True` (terminal entries excluded from completeness check). |
+| **Data API failure only** | `fetch_wallet_position_rows` raises `httpx.HTTPError`. py-clob returns 1 order. | `http_positions_ok == False`. `http_orders_ok == True`. Orders processed normally. `first_sync_complete` depends on whether all order condition_ids are cached. |
+| **Both HTTP calls fail** | Both Data API and py-clob raise. | `http_positions_ok == False`. `http_orders_ok == False`. `first_sync_complete == False`. `consecutive_failure_count` incremented. |
+| **py-clob failure only** | `get_orders()` raises. Data API returns 2 positions. | `http_orders_ok == False`. Positions processed. `first_sync_complete` depends on position condition_id resolution. |
 | **Deduplication across cycles** | Run 2 cycles. Second cycle: same wallet state. | Second cycle: `instruments_newly_added == 0`. No re-resolution. |
 | **New instrument appears between cycles** | Cycle 1: 2 positions. Cycle 2: 3 positions (1 new). | Cycle 2: `instruments_newly_added == 1`. |
+| **Startup deadline** | Both HTTP calls fail repeatedly. Advance monotonic clock past `startup_deadline_seconds`. | `startup_deadline_exceeded == True`. Fact `wallet_sync_startup_timeout` emitted. |
 
 ### 2. `GuruInstrumentDynamicController.resolve_and_activate_by_condition_and_token`
 
@@ -34,7 +37,8 @@
 | Test case | Assert |
 |-----------|--------|
 | `wallet_sync_ready` is None | No change to existing behavior. |
-| `wallet_sync_ready()` returns False | `NOT_READY` with reason `"startup_wallet_sync_pending"`. |
+| `wallet_sync_ready()` returns False, deadline not exceeded | `NOT_READY` with reason `"startup_wallet_sync_pending"`. |
+| `wallet_sync_ready()` returns False, deadline exceeded | `NOT_READY` with reason `"startup_wallet_sync_timeout"`. |
 | `wallet_sync_ready()` returns True, other clauses pass | `READY`. |
 | `wallet_sync_ready()` returns True, capital gate fails | `NOT_READY` with capital reason (wallet sync does not short-circuit other checks). |
 
@@ -42,12 +46,17 @@
 
 **File:** `tests/unit/test_tradable_state_health_risk.py` (extend existing)
 
-| Test case | Assert |
-|-----------|--------|
-| Reconciliation done, wallet_sync_ready None | `HEALTHY` (existing behavior). |
-| Reconciliation done, wallet_sync_ready False | `UNKNOWN_BOOTSTRAP` with reason `"wallet_sync_pending"`. |
-| Reconciliation done, wallet_sync_ready True | `HEALTHY`. |
-| Reconciliation not done, wallet_sync_ready True | `UNKNOWN_BOOTSTRAP` with existing reason. |
+| Test case | Setup | Assert |
+|-----------|-------|--------|
+| Reconciliation done, `wallet_sync_status` None | No wallet sync wired. | `HEALTHY` (existing behavior, `nautilus_live_health.py:75–80`). |
+| Reconciliation done, `first_sync_complete` False, deadline not exceeded | `startup_deadline_exceeded=False`. | `UNKNOWN_BOOTSTRAP` with reason `"wallet_sync_pending"`. |
+| Reconciliation done, `first_sync_complete` False, deadline exceeded | `startup_deadline_exceeded=True`. | `DEGRADED_OMS` with reason `"wallet_sync_startup_timeout"`. |
+| Reconciliation done, `first_sync_complete` True, all healthy | No stale/unresolvable conditions. | `HEALTHY`. |
+| Reconciliation done, `first_sync_complete` True, stale cycle | `last_successful_cycle_utc` older than `2 × poll_interval_seconds`. | `DEGRADED_OMS` with reason `"wallet_sync_stale"`. |
+| Reconciliation done, `first_sync_complete` True, consecutive failures | `consecutive_failure_count=3`. | `DEGRADED_OMS` with reason `"wallet_sync_stale"`. |
+| Reconciliation done, `first_sync_complete` True, unresolvable instruments | `terminally_unresolvable_count=2`. | `DEGRADED_OMS` with reason `"wallet_sync_unresolvable_instruments"`. |
+| Reconciliation done, both stale and unresolvable | Both conditions present. | `DEGRADED_OMS` with reason `"wallet_sync_stale"` (more urgent), `framework_detail` mentions both. |
+| Reconciliation not done, `first_sync_complete` True | Engine event not set. | `UNKNOWN_BOOTSTRAP` with existing reason `"nautilus_exec_startup_reconciliation_pending"` (engine check comes first). |
 
 ### 5. Config loaders
 
@@ -125,15 +134,16 @@
 ### Scenario 5: Instrument not found / dynamic activation edge case
 
 **Setup:**
-- Wallet has a position on a market that Gamma API does not return (archived or delisted).
-- `resolve_binary_option_for_condition_and_token` fails with `"clob_error_string"`.
+- Wallet has 3 positions: 2 on resolvable markets, 1 on an archived market that `resolve_binary_option_for_condition_and_token` fails for with `"clob_error_string"`.
+- `per_instrument_max_retries = 3`.
 
 **Sequence:**
-1. WalletSyncActor tries to resolve. Fails.
-2. Assert: failure logged with detail. `first_sync_complete` still becomes True. Other instruments resolved normally.
-3. On next cycle: same failure. No crash, no infinite retry storm.
+1. WalletSyncActor runs cycle 1. Resolves 2 instruments. Fails on the archived one. `first_sync_complete == False` (non-terminal failure blocks completeness). `unresolvable_retrying == 1`.
+2. Cycle 2: same failure. `retry_count == 2`.
+3. Cycle 3: same failure. `retry_count == 3` — marked terminally unresolvable. `first_sync_complete == True` (terminal entries excluded from completeness check). Health source reports `DEGRADED_OMS` with reason `"wallet_sync_unresolvable_instruments"`.
+4. Subsequent cycles: no retry of the terminal condition_id. No crash, no infinite retry storm.
 
-**Pass criteria:** Graceful degradation. Unresolvable instruments are logged and skipped, not fatal.
+**Pass criteria:** Bounded retry with terminal marking. System proceeds with degraded health after retries exhausted. Readiness gate unblocks after terminal classification.
 
 ## What "pass" means
 

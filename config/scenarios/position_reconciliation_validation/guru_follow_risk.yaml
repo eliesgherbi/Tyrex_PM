@@ -1,18 +1,20 @@
 # =============================================================================
-# Scenario risk — lifecycle_test (current risk surface + Phase 2 health keys).
+# Scenario risk — Position Reconciliation Validation.
+# Tight demo caps so portfolio cap is easily reached and reconciliation can
+# unblock it by detecting external closes.
 # =============================================================================
 
 kill_switch: false
 fail_on_missing_price_for_notional: true
 
-max_notional_usd_per_order: 5.0
+max_notional_usd_per_order: 2.0
 max_notional_policy: cap
 min_notional_usd_per_order: 0.0
 min_notional_policy: deny
 
-max_token_notional_usd_open: 10.0
+max_token_notional_usd_open: 4.0
 
-max_portfolio_notional_usd_open: 25.0
+max_portfolio_notional_usd_open: 6.0
 max_concurrent_guru_resting_orders: null
 fail_on_unresolved_portfolio_deployment: true
 fail_on_unresolved_token_deployment: false
@@ -24,8 +26,5 @@ min_collateral_balance_usd: null
 min_allowance_usd: null
 collateral_reserve_usd: 1.0
 
-# ---- Phase 2 — TradableStateHealth (tradable_state_health.md §10) ----
-# Gate default false. If true, compose wires NautilusLiveExecutionHealthSource (WP2).
-tradable_state_health_gate_enabled: false
-# When true, SELL may pass under DEGRADED_OMS (inventory gates still apply).
+tradable_state_health_gate_enabled: true
 allow_exit_when_degraded_oms: false

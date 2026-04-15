@@ -140,7 +140,7 @@ def test_compose_live_nautilus_registers_factories(
     assert cfg.exec_engine.open_check_interval_secs == 20.0
     assert cfg.exec_engine.open_check_open_only is True
     ec = next(iter(cfg.exec_clients.values()))
-    assert ec.use_data_api is True  # wallet_sync_enabled defaults to True for live
+    assert ec.base_url_data_api is not None  # wallet_sync_enabled defaults to True for live
     mock_instance.add_data_client_factory.assert_called_once()
     mock_instance.add_exec_client_factory.assert_called_once()
     assert isinstance(
@@ -154,7 +154,7 @@ def test_compose_live_execution_alignment_yaml_overrides(
     mock_node_cls: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Phase 5 — adapter ``use_data_api`` + engine ``open_check_open_only`` from runtime YAML."""
+    """Phase 5 — adapter ``base_url_data_api`` + engine ``open_check_open_only`` from runtime YAML."""
     root = Path(__file__).resolve().parent.parent
     strat = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
     risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
@@ -195,7 +195,7 @@ def test_compose_live_execution_alignment_yaml_overrides(
     cfg = mock_node_cls.call_args.kwargs["config"]
     assert cfg.exec_engine.open_check_open_only is False
     ec = next(iter(cfg.exec_clients.values()))
-    assert ec.use_data_api is True
+    assert ec.base_url_data_api is not None
 
 
 @patch("tyrex_pm.runtime.guru_compose.TradingNode")

@@ -163,6 +163,40 @@ def _p(ft: str) -> dict:
         return {"check_type": "submit_vs_cache", "outcome": "match"}
     if ft == "bot_sell_validate":
         return {"kind": "scheduled"}
+    if ft == "wallet_sync":
+        return {
+            "cycle": 1,
+            "positions_fetched": 3,
+            "orders_fetched": 0,
+            "condition_ids_wallet": 3,
+            "condition_ids_cache": 3,
+            "newly_added": 3,
+            "resolution_failures": 0,
+            "unresolvable_retrying": 0,
+            "unresolvable_terminal": 0,
+            "http_positions_ok": True,
+            "http_orders_ok": True,
+            "first_sync_complete": True,
+            "elapsed_ms": 1250.0,
+            "failure_details": {},
+        }
+    if ft == "wallet_sync_startup_timeout":
+        return {
+            "cycle": 8,
+            "elapsed_since_start_s": 125.0,
+            "deadline_s": 120.0,
+        }
+    if ft == "position_reconciliation":
+        return {
+            "cycle": 1,
+            "instrument_id": "YES-1234..POLYMARKET",
+            "venue_qty": "0.0",
+            "cache_qty": "50.0",
+            "diff_direction": "close",
+            "deferred": False,
+            "defer_count": 0,
+            "reconciliation_sent": True,
+        }
     raise AssertionError(f"add golden payload for {ft}")
 
 

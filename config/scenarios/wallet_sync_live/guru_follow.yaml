@@ -1,5 +1,6 @@
 # =============================================================================
-# Scenario strategy — lifecycle_test (latest template; see README.md).
+# Scenario strategy — Wallet Sync Truth live validation.
+# Cloned from layer_a_follow; Layer A filters ON for realistic signal path.
 # Replace guru_wallet_address before running.
 # =============================================================================
 
@@ -15,7 +16,6 @@ conviction_sizing_enabled: false
 conviction_sizing_cap: 2.0
 conviction_sizing_lookback_trades: 20
 
-# Layer A: static USD floor + median vs prior BUYs (same defaults as layer_a_follow).
 filters:
   exit_filter:
     enabled: false
@@ -23,21 +23,10 @@ filters:
   significance_filter:
     static_amount:
       enabled: true
-      amount_usd: 50.0
+      amount_usd: 100.0
     significance_conviction:
       enabled: true
       lookback_trades: 20
       threshold_method: median
 
 strategy_dedup_state_path: null
-
-# Optional: bot-originated sell validation harness (compose tests + drills).
-bot_sell_validate:
-  sell_delay_seconds: 1.0
-  max_cycles: 1
-  validation_aggressive_limits: true
-  validation_buy_aggression_ticks: 2
-  validation_sell_aggression_ticks: 2
-  validation_max_slippage_fraction: 0.08
-  validation_rest_book_for_pricing: true
-  validation_sell_inventory_haircut_bps: 25.0

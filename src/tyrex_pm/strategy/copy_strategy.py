@@ -134,6 +134,8 @@ class CopyStrategy(BaseComposableStrategy):
         self.msgbus.subscribe(topic=GURU_TRADE_TOPIC, handler=self._on_guru_trade)
 
     def on_order_event(self, event: OrderEvent) -> None:
+        if getattr(event, "reconciliation", False):
+            return
         super().on_order_event(event)
         re = self._reporting_emit
         rid = self._reporting_run_id

@@ -151,6 +151,43 @@ _REQUIRED: dict[str, frozenset[str]] = {
     "reconciliation": frozenset({"check_type", "outcome"}),
     # Harness diagnostics: rows share ``kind``; other keys vary by event (flattened into row).
     "bot_sell_validate": frozenset({"kind"}),
+    "wallet_sync": frozenset(
+        {
+            "cycle",
+            "positions_fetched",
+            "orders_fetched",
+            "condition_ids_wallet",
+            "condition_ids_cache",
+            "newly_added",
+            "resolution_failures",
+            "unresolvable_retrying",
+            "unresolvable_terminal",
+            "http_positions_ok",
+            "http_orders_ok",
+            "first_sync_complete",
+            "elapsed_ms",
+            "failure_details",
+        },
+    ),
+    "wallet_sync_startup_timeout": frozenset(
+        {
+            "cycle",
+            "elapsed_since_start_s",
+            "deadline_s",
+        },
+    ),
+    "position_reconciliation": frozenset(
+        {
+            "cycle",
+            "instrument_id",
+            "venue_qty",
+            "cache_qty",
+            "diff_direction",
+            "deferred",
+            "defer_count",
+            "reconciliation_sent",
+        },
+    ),
 }
 
 
