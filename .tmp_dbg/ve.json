@@ -1,0 +1,32 @@
+{
+  "lots": [
+    {
+      "armed_at_ts_ms": 1700000000000,
+      "created_ts_ms": 1700000000000,
+      "entry_client_order_id": "TX74280edc3b81fed007715460c0",
+      "entry_guru_correlation_id": "g-grace",
+      "entry_qty_filled": 10.0,
+      "entry_vwap": 0.5,
+      "exit_attempts": 0,
+      "exit_client_order_id": null,
+      "exit_kind": null,
+      "exit_nonce": 0,
+      "instrument_id": "0x12a0cb60174abc437bf1178367c72d11f069e1a3add20b148fb0ab4279b772b2-92544998123698303655208967887569360731013655782348975589292031774495159624905.POLYMARKET",
+      "last_exit_was_market": false,
+      "last_trigger_ts_ms": null,
+      "lot_id": "0020d5d6-eeaa-4caa-9c9f-1d8665ac1aa8",
+      "qty_open": 10.0,
+      "schema_version": 1,
+      "sl_armed": true,
+      "sl_pct": 5.0,
+      "sl_trigger_price": 0.475,
+      "state": "ARMED",
+      "token_id": "92544998123698303655208967887569360731013655782348975589292031774495159624905",
+      "tp_armed": true,
+      "tp_pct": 10.0,
+      "tp_trigger_price": 0.55,
+      "updated_ts_ms": 1700000000000
+    }
+  ],
+  "schema_version": 1
+}

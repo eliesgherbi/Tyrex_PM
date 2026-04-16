@@ -23,6 +23,7 @@ from tyrex_pm.runtime.tradable_state import NautilusLiveExecutionHealthSource
 from tyrex_pm.runtime.guru_instrument_dynamic import GuruInstrumentDynamicController
 from tyrex_pm.runtime.guru_run_logging import GuruNautilusFileLogging
 from tyrex_pm.strategy.bot_sell_validate_strategy import BotSellValidateStrategy
+from tyrex_pm.strategy.copy_strategy import CopyStrategy
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 # Prefer this scenario for compose / integration-style tests (stable paths, current knobs).
@@ -54,6 +55,55 @@ def test_compose_registers_bot_sell_validate_strategy(mock_node_cls: MagicMock, 
     build_guru_trading_node(strat, risk, runtime)
     reg = mock_instance.trader.add_strategy.call_args_list[0].args[0]
     assert isinstance(reg, BotSellValidateStrategy)
+
+
+@patch("tyrex_pm.runtime.guru_compose.TradingNode")
+def test_compose_live_wires_virtual_exit_manager(
+    mock_node_cls: MagicMock,
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parent.parent
+    strat0 = load_strategy_settings(root / "config" / "strategy" / "guru_follow.yaml")
+    strat = replace(
+        strat0,
+        virtual_exit=replace(strat0.virtual_exit, enabled=True),
+    )
+    risk = load_risk_settings(root / "config" / "risk" / "guru_follow_risk.yaml")
+    live = tmp_path / "live.yaml"
+    live.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "TEST-VE-001",
+                "execution_mode": "live",
+                "polymarket_instrument_ids": ["0xabc-0xdef.POLYMARKET"],
+                "virtual_exit": {"state_path": str(tmp_path / "ve_state.json")},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_settings(live)
+
+    mock_instance = MagicMock()
+    mock_instance.cache = MagicMock()
+    mock_instance.portfolio = MagicMock()
+    mock_instance.trader = MagicMock()
+    mock_node_cls.return_value = mock_instance
+
+    with patch.dict(os.environ, {"POLYMARKET_PK": "0x" + "1" * 64}, clear=False):
+        with patch(
+            "tyrex_pm.runtime.guru_compose.build_clob_client_from_env",
+            return_value=MagicMock(),
+        ):
+            with patch(
+                "tyrex_pm.runtime.guru_compose.warm_polymarket_cache_from_wallet_positions",
+            ):
+                with patch(
+                    "tyrex_pm.runtime.guru_compose.ensure_polymarket_l2_env_from_pk_if_missing",
+                ):
+                    assembly = build_guru_trading_node(strat, risk, runtime)
+
+    assert isinstance(assembly.guru_strategy, CopyStrategy)
+    assert assembly.guru_strategy._virtual_exit_manager is not None
 
 
 def test_compose_shadow_builds(tmp_path: Path) -> None:

@@ -5,3 +5,5 @@
 **Also read:** [Architecture.md](../Architecture.md) · [OPERATIONS.md](../OPERATIONS.md) · [CONFIG_MODEL.md](../CONFIG_MODEL.md) · [road_map.md](road_map.md) (governance one-pager).
 
 **Deep dives:** [end_to_end_review_logic.md](end_to_end_review_logic.md) (signal → risk → execution trace) · validation notes under this folder for greps and checklists — subordinate to **LIVE_ARCHITECTURE** when they conflict on the truth model.
+
+**Virtual TP/SL (v1 shipped):** `src/tyrex_pm/runtime/virtual_exit/` + compose wiring; operator/config: [CONFIG_MODEL.md](../CONFIG_MODEL.md) · scenario `config/scenarios/virtual_tp_sl_live/`. Design history: [virtual_tp_sl/](virtual_tp_sl/README.md).

@@ -225,7 +225,8 @@ class ConfiguredRiskPolicy:
         side_u = intent.side.upper()
         # SELL: verify reducible long on token before any open-cap bypass; blocks naked sells.
         # Then bypass only the **additive** token/portfolio open-cap checks (not kill_switch,
-        # per-order limits, capital gate, guru concurrent cap, etc.).
+        # per-order limits, capital gate, etc.). Guru concurrent-rest cap still applies to
+        # guru-origin intents only (virtual exits skip it — see below).
         sell_bypass_additive_open_caps = False
         if side_u == "SELL":
             deny_rc = self._sell_exit_inventory_gate(intent, order_deploy)
@@ -250,9 +251,13 @@ class ConfiguredRiskPolicy:
                 return False, str(rc_p), intent
 
         if self._s.max_concurrent_guru_resting_orders is not None:
-            ok_cg, rc_cg = self._guru_concurrent_resting_cap_eval(intent)
-            if not ok_cg:
-                return False, str(rc_cg), intent
+            # Virtual TP/SL exits use non-guru tags/COIDs; they must not consume guru resting
+            # slots. Counting is guru-only; skipping the cap here avoids blocking exits when the
+            # guru mirror is already at its concurrent-rest limit.
+            if intent.intent_origin not in ("virtual_tp", "virtual_sl"):
+                ok_cg, rc_cg = self._guru_concurrent_resting_cap_eval(intent)
+                if not ok_cg:
+                    return False, str(rc_cg), intent
 
         return True, "approved", intent
 
@@ -931,6 +936,9 @@ def _intent_with_qty(intent: OrderIntent, qty: float) -> OrderIntent:
         signal_kind=intent.signal_kind,
         reason_code=intent.reason_code,
         price_ref=intent.price_ref,
+        intent_origin=intent.intent_origin,
+        virtual_lot_id=intent.virtual_lot_id,
+        virtual_exit_kind=intent.virtual_exit_kind,
     )
 
 

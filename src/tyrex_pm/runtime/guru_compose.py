@@ -62,6 +62,7 @@ from tyrex_pm.runtime.tradable_state import (
 from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
 from tyrex_pm.runtime.layer_a_context import NautilusLayerAContext
 from tyrex_pm.runtime.venue_state import VenueState, VenueStateConfig
+from tyrex_pm.runtime.virtual_exit import VirtualExitManager, VirtualExitStore
 from tyrex_pm.runtime.state_readers import (
     ClobAllowanceStateProvider,
     NautilusAccountSnapshotProvider,
@@ -620,15 +621,48 @@ def build_guru_trading_node(
                     guru_wallet_address=strategy.guru_wallet_address,
                     runtime=runtime,
                 )
-        strat.set_execution_port(
-            NautilusGuruExecutionPort(
-                strat,
-                runtime,
-                dynamic=dynamic_ctrl,
-                fact_emit=emit,
-                order_registry=order_registry,
-            ),
+        exec_port = NautilusGuruExecutionPort(
+            strat,
+            runtime,
+            dynamic=dynamic_ctrl,
+            fact_emit=emit,
+            order_registry=order_registry,
         )
+        strat.set_execution_port(exec_port)
+
+        if (
+            strategy.bot_sell_validate is None
+            and isinstance(strat, CopyStrategy)
+            and strategy.virtual_exit.enabled
+        ):
+            ve_store = VirtualExitStore(Path(runtime.virtual_exit.state_path))
+
+            def _wallet_sync_ready() -> bool:
+                if wallet_sync_actor is None:
+                    return True
+                return bool(wallet_sync_actor.first_sync_complete)
+
+            def _venue_cash_ready() -> bool:
+                if venue_state is None:
+                    return True
+                return bool(venue_state.venue_state_cash_ready)
+
+            vem = VirtualExitManager(
+                strat,
+                ve_strategy=strategy.virtual_exit,
+                ve_runtime=runtime.virtual_exit,
+                runtime=runtime,
+                store=ve_store,
+                venue_state=venue_state,
+                risk=risk_pol,
+                execution=exec_port,
+                emit=emit,
+                wallet_sync_ready=_wallet_sync_ready,
+                venue_cash_ready=_venue_cash_ready,
+                lifecycle=lifecycle,
+                risk_settings=risk,
+            )
+            strat.set_virtual_exit_manager(vem)
     else:
         raise RuntimeError(f"Unknown execution_mode: {runtime.execution_mode}")
 

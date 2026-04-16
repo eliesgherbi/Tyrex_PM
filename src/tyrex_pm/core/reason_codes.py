@@ -120,3 +120,7 @@ class ReasonCode(StrEnum):
     STARTUP_DEGRADED_HEALTH_MISSING = "startup_degraded_health_missing"
     #: Phase 4 — live shutdown drain in progress (``shutdown_drain.md`` §8.2); blocks BUY and SELL.
     SHUTDOWN_DRAIN_ACTIVE = "shutdown_drain_active"
+    #: Virtual TP/SL — take-profit exit intent (Tyrex-owned; not a guru mirror).
+    VIRTUAL_EXIT_TP = "virtual_exit_tp"
+    #: Virtual TP/SL — stop-loss exit intent (Tyrex-owned; not a guru mirror).
+    VIRTUAL_EXIT_SL = "virtual_exit_sl"

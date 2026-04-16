@@ -1,0 +1,89 @@
+# =============================================================================
+# Runtime — virtual TP/SL live drill (isolated paths under var/scenarios/...).
+# =============================================================================
+
+trader_id: "TYREX-VIRTUAL-TP-SL-LIVE-001"
+execution_mode: live
+
+guru_poll_interval_seconds: 30.0
+data_api_base_url: "https://data-api.polymarket.com"
+guru_state_path: "var/scenarios/virtual_tp_sl_live/guru_watermark.json"
+guru_dedup_state_path: "var/scenarios/virtual_tp_sl_live/guru_dedup.json"
+guru_activity_limit: 200
+guru_max_activity_pages_per_poll: 4
+guru_startup_backfill_seconds: 0.0
+
+guru_ingest_mode: rtds_primary
+guru_ingest_phase: "virtual_tp_sl_live"
+guru_rtds_url: "wss://ws-live-data.polymarket.com"
+guru_rtds_liveness_timeout_seconds: 120.0
+guru_rtds_reconnect_retry_initial_seconds: 1.0
+guru_rtds_reconnect_retry_max_seconds: 60.0
+guru_rtds_ping_interval_seconds: 5.0
+guru_poll_fallback_enabled: true
+guru_poll_fallback_interval_seconds: null
+guru_gap_fill_enabled: true
+guru_gap_fill_lookback_seconds: 60.0
+guru_proxy_wallet_validation_required: false
+guru_stream_queue_drain_interval_ms: 50
+
+logging_level: INFO
+clob_host: "https://clob.polymarket.com"
+chain_id: 137
+
+polymarket_instrument_ids: []
+polymarket_dynamic_instruments: true
+polymarket_dynamic_max_activations: 32
+polymarket_gamma_base_url: "https://gamma-api.polymarket.com"
+polymarket_gamma_http_timeout_seconds: 15.0
+polymarket_startup_token_warmup_max: 32
+
+execution_entry_guard_enabled: false
+execution_max_entry_slippage_ticks: 0
+execution_book_depth_clip_enabled: false
+execution_book_depth_utilization_cap: 1.0
+execution_book_rest_snapshot_enabled: false
+execution_book_strict: false
+execution_limit_timeout_enabled: false
+execution_limit_timeout_seconds: 30.0
+
+wallet_sync_enabled: true
+wallet_sync_poll_interval_seconds: 15.0
+wallet_sync_startup_deadline_seconds: 120.0
+wallet_sync_per_instrument_max_retries: 3
+
+polymarket_use_data_api_for_positions: true
+
+venue_state_ttl_seconds: 30.0
+venue_state_cash_poll_interval_seconds: 10.0
+venue_state_refresh_force_max_ms: 500
+
+exec_position_check_interval_seconds: 45
+exec_open_check_interval_seconds: 20
+
+startup_readiness_timeout_seconds: 120.0
+shutdown_drain_enabled: true
+shutdown_drain_timeout_seconds: 30.0
+
+reporting_enabled: true
+reporting_base_dir: "var/reporting/runs"
+reporting_sink_max_queue: 50000
+reporting_sink_batch_size: 128
+reporting_capital_observability_enabled: true
+reporting_capital_snapshot_period_seconds: 300.0
+
+# --- Virtual TP/SL engine (operational) --------------------------------------
+virtual_exit:
+  state_path: "var/scenarios/virtual_tp_sl_live/virtual_exit_state.json"
+  evaluate_interval_seconds: 2.0
+  trigger_price_source: book_bid
+  max_venue_staleness_seconds: 45.0
+  exit_take_profit_style: aggressive_limit
+  exit_stop_loss_style: market
+  aggressive_limit_ticks: 2
+  exit_retry_max: 5
+  exit_retry_cooldown_seconds: 2.0
+  drift_policy: clamp_to_venue
+  min_entry_qty_to_arm: 0.0
+  execution_book_rest_for_triggers: true
+  market_sl_fallback_to_limit: true

@@ -18,6 +18,7 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 | `config/scenarios/bot_sell_validate/` | **Scenario A** — guru follow + `bot_sell_validate` block for bot-originated sell validation (isolated state paths); see [Implementation/validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md). |
 | `config/scenarios/layer_a_follow/` | **Layer A demo** — `filters:` with significance gates on (see folder `README.md`); isolated `var/scenarios/layer_a_follow/` state. |
 | `config/scenarios/venue_state_live/` | **Current live validation** — WalletSync + VenueState explicit keys; isolated `var/scenarios/venue_state_live/` (see folder `README.md`). |
+| `config/scenarios/virtual_tp_sl_live/` | **Small live drill** — virtual TP/SL enabled; isolated state under `var/scenarios/virtual_tp_sl_live/` (see folder `README.md`). |
 | `config/scenarios/position_reconciliation_validation/` | **Obsolete** scenario name — reconciliation removed; do not use for new runs (see folder `README.md`). |
 
 YAML is **flat** at the top level (except `token_filter` and optional nested `filters`): grouping is by **comments and key order** only. Loaders: `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings`.
@@ -56,6 +57,17 @@ Significance conviction history is **in-memory** only (restart clears). Reportin
 
 Empty list does **not** implicitly mean “all tokens” — use `enabled: false` for iteration / shadow testing; use `enabled: true` + explicit ids for controlled follow.
 
+### `virtual_exit` (optional — Tyrex-owned TP/SL)
+
+Parsed into `StrategySettings.virtual_exit`. **v1:** long-only, post-entry monitoring, no native OCO. **Default:** `enabled: false` (no manager wired). When enabled on **live** `CopyStrategy` (not `bot_sell_validate`), compose wires `VirtualExitManager` + `VirtualExitStore` (`runtime.virtual_exit.state_path`).
+
+| Key | Default | Notes |
+|-----|---------|--------|
+| `enabled` | `false` | Master switch for policy + compose wiring. |
+| `take_profit_pct` | `10.0` | TP trigger vs entry VWAP: `vwap × (1 + pct/100)`. Must be **> 0**. |
+| `stop_loss_pct` | `5.0` | SL trigger: `vwap × (1 − pct/100)`. Must be **> 0**. |
+| `adopt_existing_positions` | **`false`** | **v1:** only lots opened by this run (Tyrex entry fills) are protected when `false`. |
+
 ## Risk (`RiskSettings` → `load_risk_settings`)
 
 **Deployment budget (one model):** Caps compare **USD deployed**, not marked-to-market portfolio value. **Per-order:** `order_deploy = price_ref × quantity` vs `max_notional_usd_per_order`. **Per-token:** `token_deploy` (pending + filled on that token) + `order_deploy` vs `max_token_notional_usd_open`. **Portfolio:** sum of pending + filled across Polymarket + `order_deploy` vs `max_portfolio_notional_usd_open`. **Live + WalletSync:** **pending** and **filled** inputs are **venue-backed** when **`VenueState`** is composed; **filled** uses venue size × mark (fallback + fact on missing mark). **Without** VenueState (shadow / no wallet sync), **filled** reverts to Nautilus position cost basis and **pending** to cache-backed order lists. Implementation: `risk/configured.py`, `runtime/deployment_budget.py`. See **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)**.
@@ -77,7 +89,7 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | `fail_on_unresolved_token_deployment` | no | `false` | If **true** and per-token cap finite, deny when token **filled** deployment cannot be parsed; if **false**, treat missing leg as **0** (underestimate). |
 | `max_portfolio_notional_usd_open` | no | unlimited (`null`/omitted) | Reject if **portfolio_deploy** + order would exceed. **Live-only** (compose rejects finite cap in shadow). |
 | `fail_on_unresolved_portfolio_deployment` | no | `true` | If **true** and portfolio cap finite, deny when total deployment cannot be summed cleanly; if **false**, unresolvable filled legs count as **0** in the sum. |
-| `max_concurrent_guru_resting_orders` | no | `null` (off) | Deny when open guru-origin rests (Polymarket) are already at ``>=`` this limit. Identity: ``state_readers.is_guru_resting_order`` (tags ``guru_cid=``, else ``TX``+26 hex). **Live-only** (compose). |
+| `max_concurrent_guru_resting_orders` | no | `null` (off) | Deny when open guru-origin rests (Polymarket) are already at ``>=`` this limit. Identity: ``state_readers.is_guru_resting_order`` (tags ``guru_cid=``, else ``TX``+26 hex). **Virtual TP/SL** orders use ``VE…`` COIDs and ``virt_exit_*`` tags — they **do not** count toward this cap, and **virtual exit** intents **skip** this gate so exits are not blocked when the guru mirror is already at the limit. **Live-only** (compose). |
 | `collateral_reserve_usd` | no | `0` | **BUY** intents require **canonical free collateral ≥ reserve + n** when enabled (same provider snapshot as ``min_*``). Breach: ``RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE``. Missing/unparsable fields: fail-closed (``RISK_ALLOWANCE_UNAVAILABLE``). Requires **`capital_gate_enabled: true`**. Invalid when **`execution_mode: shadow`** (compose). |
 | **`tradable_state_health_gate_enabled`** | no | **`false`** | When **true**, risk applies **TradableStateHealth** §10 before deploy adjust; compose wires **`NautilusLiveExecutionHealthSource`** (Nautilus ``LiveExecutionEngine`` startup reconciliation latch). Requires a live-shaped exec engine; see **`Implementation/refactor_lifecycle/tradable_state_health.md`**. **Misconfiguration / missing producer at evaluate:** policy still fail-closes the same way; reporting emits a synthetic **`tradable_state_health`** row (`reason_code=health_source_missing`, `reporting_only_synthetic`) so operators can join the deny path. |
 | **`allow_exit_when_degraded_oms`** | no | **`false`** | §10 — when **true**, SELL may pass under `DEGRADED_OMS` (inventory gates still apply). |
@@ -153,6 +165,27 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | **`venue_state_ttl_seconds`** | no | **`30.0`** | Staleness horizon for VenueState refresh; must be **> 0**. |
 | **`venue_state_cash_poll_interval_seconds`** | no | **`10.0`** | CLOB collateral poll cadence; must be **≥ 3.0**. |
 | **`venue_state_refresh_force_max_ms`** | no | **`500`** | Max blocking time when forcing cache price reads for marks; must be **≥ 1**. |
+
+### `virtual_exit` (optional — runtime / engine)
+
+Parsed into `RuntimeSettings.virtual_exit`. Operational controls for evaluation, persistence, Tier A stale hold, drift, and exit order styles. Ignored when strategy `virtual_exit.enabled` is `false` (store path may still default).
+
+| Key | Default | Notes |
+|-----|---------|--------|
+| `state_path` | `var/virtual_exit_state.json` | Atomic JSON for protected lots; use a **dedicated path** per scenario/run. No `..`. |
+| `evaluate_interval_seconds` | `1.0` | Strategy timer cadence for trigger evaluation. |
+| `trigger_price_source` | `book_bid` | `book_bid` or `last` — executable bias for long exit triggers. |
+| `max_venue_staleness_seconds` | `45.0` | When **> 0** and `VenueState.is_stale()`, hold triggers; emit `virtual_exit_hold`. |
+| `exit_take_profit_style` | `aggressive_limit` | `aggressive_limit` or `market`. |
+| `exit_stop_loss_style` | `market` | `market` (FOK, base qty) or `aggressive_limit`. |
+| `aggressive_limit_ticks` | `2` | SELL limit price: bid minus this many tick steps. |
+| `exit_retry_max` | `5` | Max exit submit attempts per lot (counter in store). |
+| `exit_retry_cooldown_seconds` | `2.0` | Min ms between triggers per lot. |
+| `drift_policy` | `clamp_to_venue` | `clamp_to_venue` (Tier A qty clamps `qty_open`) or `disarm` (terminal disarm on drift). |
+| `tier_a_flat_disarm_grace_seconds` | `2.0` | After arming, wait this long before allowing ``DISARMED_EXTERNAL_FLAT`` when Tier A long qty is still zero (sync lag after Tier B fills). `0` disables the grace (testing / aggressive). |
+| `min_entry_qty_to_arm` | `0.0` | Require cumulative entry fill **≥** this before arming. |
+| `execution_book_rest_for_triggers` | `true` | Allow REST book for trigger/exit pricing when cache L2 thin. |
+| `market_sl_fallback_to_limit` | `true` | After **market** SL `OrderRejected`, one aggressive-limit retry. |
 
 **Derived (not YAML):** `polymarket_token_to_instrument` — built from non-empty `polymarket_instrument_ids`.
 

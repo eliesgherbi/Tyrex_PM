@@ -45,6 +45,11 @@ if TYPE_CHECKING:
 _TAG_SAFE = re.compile(r"[^a-zA-Z0-9_.:-]+")
 
 
+def guru_client_order_id_value(correlation_id: str) -> str:
+    """Stable COID string for guru entry orders (matches :func:`_client_order_id_from_guru_correlation`)."""
+    return _client_order_id_from_guru_correlation(correlation_id).value
+
+
 def _client_order_id_from_guru_correlation(correlation_id: str) -> ClientOrderId:
     """
     Deterministic, short ``ClientOrderId`` from guru ``source_trade_id`` (often a tx hash).
@@ -60,6 +65,26 @@ def _guru_tag(correlation_id: str) -> str:
     """Nautilus order tag for grep / ops (ASCII-safe, length-bounded)."""
     s = _TAG_SAFE.sub("_", correlation_id.strip())[:120]
     return f"guru_cid={s}"
+
+
+def virtual_exit_client_order_id_value(correlation_id: str) -> str:
+    """Public: COID string for a virtual exit ``correlation_id``."""
+    return _virtual_exit_client_order_id(correlation_id).value
+
+
+def _virtual_exit_client_order_id(correlation_id: str) -> ClientOrderId:
+    """
+    Virtual exit COID — ``VE`` + 24 hex (not ``TX`` + 26 hex) so
+    :func:`tyrex_pm.runtime.state_readers.is_guru_resting_order` is false.
+    """
+    digest = hashlib.sha256(correlation_id.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return ClientOrderId(f"VE{digest}")
+
+
+def _virtual_exit_tags(lot_id: str, kind: str) -> list[str]:
+    s_lot = _TAG_SAFE.sub("_", lot_id.strip())[:80]
+    s_kind = _TAG_SAFE.sub("_", kind.strip())[:8]
+    return [f"virt_exit_lot={s_lot}", f"virt_exit_kind={s_kind}"]
 
 
 def _tick_float(inst: Any) -> float:
@@ -629,3 +654,207 @@ class NautilusGuruExecutionPort:
 
         if r.execution_limit_timeout_enabled and r.execution_limit_timeout_seconds > 0:
             self._schedule_limit_cancel(order.client_order_id, intent.correlation_id)
+
+    def submit_virtual_exit_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        mode: str,
+        order_style: str,
+        aggression_ticks: int,
+        use_rest_book: bool,
+    ) -> None:
+        """
+        Virtual TP/SL SELL — market (base qty, ``quote_quantity=False``) or aggressive limit
+        priced from bid − ticks. Tags ``virt_exit_*`` (not guru); COID ``VE…``.
+        """
+        if mode != "live":
+            return
+        if intent.side.upper() != "SELL":
+            self._strategy.log.error(
+                "event=virtual_exit_invalid_side component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id}",
+            )
+            return
+        if intent.virtual_lot_id is None or intent.virtual_exit_kind not in ("tp", "sl"):
+            self._strategy.log.error(
+                "event=virtual_exit_missing_meta component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id}",
+            )
+            return
+
+        style = order_style.strip().lower()
+        if style not in ("market", "aggressive_limit"):
+            self._strategy.log.error(
+                f"event=virtual_exit_bad_style component=nautilus_guru_exec style={style!r}",
+            )
+            return
+
+        qty = float(intent.quantity)
+        if qty <= 0:
+            return
+
+        tid = str(intent.token_id)
+        instr_s = self._token_to_instrument.get(tid)
+        instrument_id: InstrumentId | None = None
+        inst = None
+        dyn_fail: str | None = None
+
+        if self._dynamic is not None:
+            inst, dtag = self._dynamic.resolve_and_activate(tid)
+            if inst is not None:
+                instrument_id = inst.id
+            else:
+                dyn_fail = dtag
+
+        if inst is None and instr_s is not None:
+            instrument_id = InstrumentId.from_str(instr_s)
+            inst = self._strategy.cache.instrument(instrument_id)
+
+        if inst is None:
+            self._strategy.log.error(
+                f"event=virtual_exit_no_instrument component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id} token_id={tid}",
+            )
+            self._emit(
+                "execution_outcome",
+                {
+                    "correlation_id": intent.correlation_id,
+                    "outcome": "error",
+                    "reason_code": str(ReasonCode.GURU_INSTRUMENT_UNMAPPED),
+                    "instrument_id": "",
+                    "submitted_qty": 0.0,
+                    "submitted_price": 0.0,
+                    "intent_origin": intent.intent_origin,
+                },
+            )
+            return
+
+        assert instrument_id is not None and inst is not None
+
+        if not self._instrument_policy.allow_submit(tid, self._strategy.cache):
+            self._strategy.log.error(
+                f"event=virtual_exit_not_ready component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id}",
+            )
+            return
+
+        tags = _virtual_exit_tags(intent.virtual_lot_id, str(intent.virtual_exit_kind))
+        coid = _virtual_exit_client_order_id(intent.correlation_id)
+
+        if style == "market":
+            order = self._strategy.order_factory.market(
+                instrument_id=instrument_id,
+                order_side=OrderSide.SELL,
+                quantity=inst.make_qty(Decimal(str(qty))),
+                time_in_force=TimeInForce.FOK,
+                quote_quantity=False,
+                client_order_id=coid,
+                tags=tags,
+            )
+            self._strategy.submit_order(order, client_id=POLYMARKET_CLIENT_ID)
+            self._strategy.log.info(
+                f"event=virtual_exit_submit_market component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id} client_order_id={order.client_order_id} "
+                f"instrument_id={instrument_id} qty={qty}",
+            )
+        else:
+            clob = None
+            if use_rest_book:
+                if self._rest_clob is None:
+                    self._rest_clob = build_clob_client_from_env(self._runtime)
+                clob = self._rest_clob
+            book = resolve_book_top(
+                cache=self._strategy.cache,
+                instrument_id=instrument_id,
+                token_id=tid,
+                rest_enabled=use_rest_book,
+                clob=clob,
+            )
+            bid = book.best_bid if book is not None else None
+            if bid is None:
+                from nautilus_trader.model.enums import PriceType
+
+                px = self._strategy.cache.price(instrument_id, price_type=PriceType.LAST)
+                if px is not None:
+                    bid = float(px.as_double()) if hasattr(px, "as_double") else float(px)
+            if bid is None:
+                self._strategy.log.warning(
+                    "event=virtual_exit_no_bid component=nautilus_guru_exec "
+                    f"correlation_id={intent.correlation_id}",
+                )
+                self._emit(
+                    "execution_outcome",
+                    {
+                        "correlation_id": intent.correlation_id,
+                        "outcome": "skip",
+                        "reason_code": str(ReasonCode.EXEC_BOOK_UNAVAILABLE_SKIP),
+                        "instrument_id": str(instrument_id),
+                        "submitted_qty": 0.0,
+                        "submitted_price": 0.0,
+                        "intent_origin": intent.intent_origin,
+                    },
+                )
+                return
+            tick = _tick_float(inst)
+            n_tick = max(0, int(aggression_ticks))
+            price = float(bid) - n_tick * tick
+            if price <= 0:
+                price = float(bid)
+            qres = quantize_limit_order_for_instrument(
+                inst,
+                side="SELL",
+                price=price,
+                quantity=qty,
+            )
+            if not qres.ok:
+                self._strategy.log.info(
+                    f"event=virtual_exit_quantize_skip component=nautilus_guru_exec "
+                    f"correlation_id={intent.correlation_id} detail={qres.detail}",
+                )
+                return
+            qty_q, price_q = qres.quantity, qres.price
+            order = self._strategy.order_factory.limit(
+                instrument_id=instrument_id,
+                order_side=OrderSide.SELL,
+                quantity=inst.make_qty(Decimal(str(qty_q))),
+                price=inst.make_price(Decimal(str(price_q))),
+                time_in_force=TimeInForce.GTC,
+                client_order_id=coid,
+                tags=tags,
+            )
+            self._strategy.submit_order(order, client_id=POLYMARKET_CLIENT_ID)
+            self._strategy.log.info(
+                f"event=virtual_exit_submit_limit component=nautilus_guru_exec "
+                f"correlation_id={intent.correlation_id} client_order_id={order.client_order_id} "
+                f"instrument_id={instrument_id} qty={qty_q} price={price_q}",
+            )
+
+        coid_s = str(coid)
+        reg = self._order_registry
+        if reg is not None:
+            reg.register(coid_s, intent.correlation_id)
+        self._emit(
+            "order_correlation_map",
+            {
+                "correlation_id": intent.correlation_id,
+                "client_order_id": coid_s,
+                "instrument_id": str(instrument_id),
+                "intent_origin": intent.intent_origin,
+            },
+        )
+        self._emit(
+            "execution_outcome",
+            {
+                "correlation_id": intent.correlation_id,
+                "outcome": "submit",
+                "stage": "virtual_exit_submit",
+                "reason_code": str(ReasonCode.LIVE_ORDER_SUBMIT),
+                "client_order_id": coid_s,
+                "instrument_id": str(instrument_id),
+                "submitted_qty": float(qty),
+                "submitted_price": 0.0,
+                "intent_origin": intent.intent_origin,
+                "virtual_exit_order_style": style,
+            },
+        )

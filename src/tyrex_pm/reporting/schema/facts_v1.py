@@ -194,6 +194,26 @@ _REQUIRED: dict[str, frozenset[str]] = {
             "fallback_price",
         },
     ),
+    # Virtual TP/SL (Tyrex): payloads vary slightly by phase; only a minimal key set is required.
+    "virtual_exit_arm": frozenset({"lot_id", "token_id", "guru_correlation_id"}),
+    "virtual_exit_trigger": frozenset(
+        {"lot_id", "kind", "executable_price", "trigger_basis"},
+    ),
+    "virtual_exit_submit": frozenset(
+        {
+            "lot_id",
+            "kind",
+            "order_style",
+            "qty",
+            "correlation_id",
+            "intent_origin",
+        },
+    ),
+    "virtual_exit_hold": frozenset({"reason"}),
+    "virtual_exit_retry": frozenset({"lot_id", "reason", "attempt"}),
+    "virtual_exit_reconcile": frozenset({"lot_id", "reason"}),
+    "virtual_exit_disarm": frozenset({"lot_id", "reason"}),
+    "virtual_exit_recovery": frozenset({"action"}),
 }
 
 

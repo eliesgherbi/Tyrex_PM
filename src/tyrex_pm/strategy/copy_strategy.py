@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.model.events.order import OrderDenied, OrderEvent
 from nautilus_trader.trading.config import StrategyConfig
@@ -17,6 +17,7 @@ from tyrex_pm.config.loaders import LayerAFiltersSettings, RiskSettings, _defaul
 from tyrex_pm.core.reason_codes import ReasonCode
 from tyrex_pm.core.types import GuruTradeSignal, OrderIntent
 from tyrex_pm.data.guru_monitor import GURU_TRADE_TOPIC
+from tyrex_pm.execution.nautilus_guru_exec import guru_client_order_id_value
 from tyrex_pm.execution.port import ExecutionPort, NoOpExecutionPort
 from tyrex_pm.reporting.correlation_registry import OrderCorrelationRegistry
 from tyrex_pm.reporting.order_events import emit_order_event_facts
@@ -29,6 +30,9 @@ from tyrex_pm.signal.sizing import SizingPolicy, build_sizing_policy
 from tyrex_pm.signal.token_filter_spec import TokenFilterSpec
 from tyrex_pm.runtime.lifecycle.status import ExecutionLifecycleStatus
 from tyrex_pm.strategy.base import BaseComposableStrategy
+
+if TYPE_CHECKING:
+    from tyrex_pm.runtime.virtual_exit.manager import VirtualExitManager
 
 FactEmitFn = Callable[[str, dict[str, Any]], None]
 
@@ -79,6 +83,11 @@ class CopyStrategy(BaseComposableStrategy):
         self._order_registry: OrderCorrelationRegistry | None = None
         self._reporting_run_id: str | None = None
         self._position_reader: Any | None = None
+        self._virtual_exit_manager: VirtualExitManager | None = None
+
+    def set_virtual_exit_manager(self, mgr: VirtualExitManager | None) -> None:
+        """Runtime-injected :class:`~tyrex_pm.runtime.virtual_exit.manager.VirtualExitManager` (live TP/SL)."""
+        self._virtual_exit_manager = mgr
 
     def set_risk_policy(self, policy: RiskPolicy) -> None:
         """Inject real `RiskPolicy` in v1.06+ tests or runtime."""
@@ -132,6 +141,15 @@ class CopyStrategy(BaseComposableStrategy):
     def on_start(self) -> None:
         super().on_start()
         self.msgbus.subscribe(topic=GURU_TRADE_TOPIC, handler=self._on_guru_trade)
+        vem = self._virtual_exit_manager
+        if vem is not None:
+            vem.on_strategy_start()
+
+    def on_stop(self) -> None:
+        vem = self._virtual_exit_manager
+        if vem is not None:
+            vem.on_strategy_stop()
+        super().on_stop()
 
     def on_order_event(self, event: OrderEvent) -> None:
         if getattr(event, "reconciliation", False):
@@ -202,6 +220,9 @@ class CopyStrategy(BaseComposableStrategy):
         notify = getattr(self._execution, "notify_order_event", None)
         if callable(notify):
             notify(event)
+        vem = self._virtual_exit_manager
+        if vem is not None:
+            vem.on_order_event(event)
 
     def _on_guru_trade(self, msg: object) -> None:
         if not isinstance(msg, GuruTradeSignal):
@@ -432,6 +453,19 @@ class CopyStrategy(BaseComposableStrategy):
             )
 
         self._execution.submit_intent(intent_risk, mode=self._cfg.execution_mode)
+        vem = self._virtual_exit_manager
+        if (
+            vem is not None
+            and vem.enabled
+            and kind == "entry"
+            and sig.side.upper() == "BUY"
+            and self._cfg.execution_mode == "live"
+        ):
+            vem.register_pending_entry(
+                client_order_id=guru_client_order_id_value(sig.source_trade_id),
+                guru_correlation_id=sig.source_trade_id,
+                token_id=str(sig.token_id),
+            )
         emit_cap = getattr(self._risk, "emit_capital_observation", None)
         if em is not None and callable(emit_cap):
             emit_cap("submit", correlation_id=cid, intent=intent_risk)

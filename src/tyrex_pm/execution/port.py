@@ -20,6 +20,22 @@ class NoOpExecutionPort:
 
     def __init__(self) -> None:
         self.records: list[tuple[OrderIntent, str]] = []
+        self.virtual_exit_records: list[
+            tuple[OrderIntent, str, str, int, bool]
+        ] = []
 
     def submit_intent(self, intent: OrderIntent, *, mode: str) -> None:
         self.records.append((intent, mode))
+
+    def submit_virtual_exit_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        mode: str,
+        order_style: str,
+        aggression_ticks: int,
+        use_rest_book: bool,
+    ) -> None:
+        self.virtual_exit_records.append(
+            (intent, mode, order_style, aggression_ticks, use_rest_book),
+        )

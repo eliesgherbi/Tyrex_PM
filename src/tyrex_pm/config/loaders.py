@@ -80,6 +80,44 @@ def _default_layer_a_filters() -> LayerAFiltersSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class VirtualExitStrategySettings:
+    """Strategy YAML ``virtual_exit`` — TP/SL policy (long-only v1)."""
+
+    enabled: bool = False
+    take_profit_pct: float = 10.0
+    stop_loss_pct: float = 5.0
+    #: v1 default **false** — only lots opened by this Tyrex session (entry fills) get protection.
+    adopt_existing_positions: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class VirtualExitRuntimeSettings:
+    """Runtime YAML ``virtual_exit`` — persistence, evaluation, exit order styles."""
+
+    state_path: str = "var/virtual_exit_state.json"
+    evaluate_interval_seconds: float = 1.0
+    #: ``book_bid`` | ``last`` — executable bias for long exit triggers.
+    trigger_price_source: str = "book_bid"
+    max_venue_staleness_seconds: float = 45.0
+    #: ``aggressive_limit`` | ``market`` — TP default aggressive limit.
+    exit_take_profit_style: str = "aggressive_limit"
+    #: ``market`` | ``aggressive_limit`` — SL default market (FOK) when adapter allows.
+    exit_stop_loss_style: str = "market"
+    aggressive_limit_ticks: int = 2
+    exit_retry_max: int = 5
+    exit_retry_cooldown_seconds: float = 2.0
+    #: ``clamp_to_venue`` | ``disarm`` — Tier A qty below protected qty.
+    drift_policy: str = "clamp_to_venue"
+    #: After arming, suppress ``tier_a_flat`` disarm until this many seconds elapse
+    #: (Tier A position can lag Tier B right after entry fills).
+    tier_a_flat_disarm_grace_seconds: float = 2.0
+    min_entry_qty_to_arm: float = 0.0
+    execution_book_rest_for_triggers: bool = True
+    #: After market SELL deny/reject, retry once as aggressive limit when true.
+    market_sl_fallback_to_limit: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class BotSellValidateSettings:
     """Optional strategy YAML ``bot_sell_validate`` block (isolated Scenario A harness)."""
 
@@ -115,6 +153,8 @@ class StrategySettings:
     bot_sell_validate: BotSellValidateSettings | None = None
     #: Optional Layer A filters (``filters:`` in strategy YAML). Omitted YAML → defaults (all off).
     layer_a: LayerAFiltersSettings = _default_layer_a_filters()
+    #: Optional virtual TP/SL (Tyrex-owned); see ``Docs/CONFIG_MODEL.md``.
+    virtual_exit: VirtualExitStrategySettings = VirtualExitStrategySettings()
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +332,8 @@ class RuntimeSettings:
     venue_state_ttl_seconds: float = 30.0
     venue_state_cash_poll_interval_seconds: float = 10.0
     venue_state_refresh_force_max_ms: int = 500
+    #: Virtual TP/SL engine (operational controls); strategy YAML enables policy.
+    virtual_exit: VirtualExitRuntimeSettings = VirtualExitRuntimeSettings()
 
 
 def _polymarket_token_instrument_map(
@@ -402,6 +444,94 @@ def _parse_layer_a_filters(p: Path, raw: Any) -> LayerAFiltersSettings:
     return LayerAFiltersSettings(exit_filter=exit_filter, significance_filter=significance_filter)
 
 
+def _parse_virtual_exit_strategy(p: Path, raw: Any) -> VirtualExitStrategySettings:
+    if raw is None:
+        return VirtualExitStrategySettings()
+    if not isinstance(raw, dict):
+        raise ValueError(f"{p}: virtual_exit must be a mapping when present")
+    en = bool(raw.get("enabled", False))
+    tp = float(raw.get("take_profit_pct", 10.0))
+    sl = float(raw.get("stop_loss_pct", 5.0))
+    adopt = bool(raw.get("adopt_existing_positions", False))
+    if tp <= 0 or sl <= 0:
+        raise ValueError(
+            f"{p}: virtual_exit.take_profit_pct and stop_loss_pct must be > 0",
+        )
+    return VirtualExitStrategySettings(
+        enabled=en,
+        take_profit_pct=tp,
+        stop_loss_pct=sl,
+        adopt_existing_positions=adopt,
+    )
+
+
+def _parse_virtual_exit_runtime(p: Path, raw: Any) -> VirtualExitRuntimeSettings:
+    if raw is None:
+        return VirtualExitRuntimeSettings()
+    if not isinstance(raw, dict):
+        raise ValueError(f"{p}: virtual_exit must be a mapping when present")
+    sp = str(raw.get("state_path", "var/virtual_exit_state.json")).strip()
+    if not sp or ".." in sp:
+        raise ValueError(f"{p}: virtual_exit.state_path must be non-empty without '..'")
+    ev_iv = float(raw.get("evaluate_interval_seconds", 1.0))
+    if ev_iv <= 0:
+        raise ValueError(f"{p}: virtual_exit.evaluate_interval_seconds must be > 0")
+    tps = str(raw.get("trigger_price_source", "book_bid")).strip().lower()
+    if tps not in ("book_bid", "last"):
+        raise ValueError(f"{p}: virtual_exit.trigger_price_source must be book_bid or last")
+    mvs = float(raw.get("max_venue_staleness_seconds", 45.0))
+    if mvs < 0:
+        raise ValueError(f"{p}: virtual_exit.max_venue_staleness_seconds must be >= 0")
+    ets_tp = str(raw.get("exit_take_profit_style", "aggressive_limit")).strip().lower()
+    ets_sl = str(raw.get("exit_stop_loss_style", "market")).strip().lower()
+    for label, val in (
+        ("exit_take_profit_style", ets_tp),
+        ("exit_stop_loss_style", ets_sl),
+    ):
+        if val not in ("aggressive_limit", "market"):
+            raise ValueError(
+                f"{p}: virtual_exit.{label} must be aggressive_limit or market (got {val!r})",
+            )
+    ticks = int(raw.get("aggressive_limit_ticks", 2))
+    if ticks < 0:
+        raise ValueError(f"{p}: virtual_exit.aggressive_limit_ticks must be >= 0")
+    rmax = int(raw.get("exit_retry_max", 5))
+    if rmax < 0:
+        raise ValueError(f"{p}: virtual_exit.exit_retry_max must be >= 0")
+    rcool = float(raw.get("exit_retry_cooldown_seconds", 2.0))
+    if rcool < 0:
+        raise ValueError(f"{p}: virtual_exit.exit_retry_cooldown_seconds must be >= 0")
+    drift = str(raw.get("drift_policy", "clamp_to_venue")).strip().lower()
+    if drift not in ("clamp_to_venue", "disarm"):
+        raise ValueError(
+            f"{p}: virtual_exit.drift_policy must be clamp_to_venue or disarm (got {drift!r})",
+        )
+    min_arm = float(raw.get("min_entry_qty_to_arm", 0.0))
+    if min_arm < 0:
+        raise ValueError(f"{p}: virtual_exit.min_entry_qty_to_arm must be >= 0")
+    flat_grace = float(raw.get("tier_a_flat_disarm_grace_seconds", 2.0))
+    if flat_grace < 0:
+        raise ValueError(f"{p}: virtual_exit.tier_a_flat_disarm_grace_seconds must be >= 0")
+    rest_tr = bool(raw.get("execution_book_rest_for_triggers", True))
+    msl_fb = bool(raw.get("market_sl_fallback_to_limit", True))
+    return VirtualExitRuntimeSettings(
+        state_path=sp,
+        evaluate_interval_seconds=ev_iv,
+        trigger_price_source=tps,
+        max_venue_staleness_seconds=mvs,
+        exit_take_profit_style=ets_tp,
+        exit_stop_loss_style=ets_sl,
+        aggressive_limit_ticks=ticks,
+        exit_retry_max=rmax,
+        exit_retry_cooldown_seconds=rcool,
+        drift_policy=drift,
+        tier_a_flat_disarm_grace_seconds=flat_grace,
+        min_entry_qty_to_arm=min_arm,
+        execution_book_rest_for_triggers=rest_tr,
+        market_sl_fallback_to_limit=msl_fb,
+    )
+
+
 def load_strategy_settings(path: str | Path) -> StrategySettings:
     p = Path(path)
     raw = _root(yaml.safe_load(p.read_text(encoding="utf-8")), p)
@@ -505,6 +635,7 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
         )
 
     layer_a = _parse_layer_a_filters(p, raw.get("filters"))
+    ve_st = _parse_virtual_exit_strategy(p, raw.get("virtual_exit"))
 
     return StrategySettings(
         guru_wallet_address=gw,
@@ -516,6 +647,7 @@ def load_strategy_settings(path: str | Path) -> StrategySettings:
         conviction_sizing_lookback_trades=lookback,
         bot_sell_validate=bsv,
         layer_a=layer_a,
+        virtual_exit=ve_st,
     )
 
 
@@ -945,6 +1077,8 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
     if vs_ref_ms < 1:
         raise ValueError(f"{p}: venue_state_refresh_force_max_ms must be >= 1")
 
+    ve_rt = _parse_virtual_exit_runtime(p, raw.get("virtual_exit"))
+
     return RuntimeSettings(
         trader_id=tid,
         execution_mode=mode,
@@ -1011,4 +1145,5 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         venue_state_ttl_seconds=vs_ttl,
         venue_state_cash_poll_interval_seconds=vs_cash_poll,
         venue_state_refresh_force_max_ms=vs_ref_ms,
+        virtual_exit=ve_rt,
     )

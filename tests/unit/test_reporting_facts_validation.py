@@ -202,6 +202,34 @@ def _p(ft: str) -> dict:
             "instrument_id": "YES-1234..POLYMARKET",
             "fallback_price": 0.5,
         }
+    if ft == "virtual_exit_arm":
+        return {"lot_id": "l1", "token_id": "t1", "guru_correlation_id": "g1"}
+    if ft == "virtual_exit_trigger":
+        return {
+            "lot_id": "l1",
+            "kind": "tp",
+            "executable_price": 0.6,
+            "trigger_basis": "last",
+        }
+    if ft == "virtual_exit_submit":
+        return {
+            "lot_id": "l1",
+            "kind": "tp",
+            "order_style": "aggressive_limit",
+            "qty": 10.0,
+            "correlation_id": "ve:l1:tp:n1",
+            "intent_origin": "virtual_tp",
+        }
+    if ft == "virtual_exit_hold":
+        return {"reason": "venue_stale"}
+    if ft == "virtual_exit_retry":
+        return {"lot_id": "l1", "reason": "OrderRejected", "attempt": 1}
+    if ft == "virtual_exit_reconcile":
+        return {"lot_id": "l1", "reason": "clamp_to_venue"}
+    if ft == "virtual_exit_disarm":
+        return {"lot_id": "l1", "reason": "tier_a_flat"}
+    if ft == "virtual_exit_recovery":
+        return {"action": "load_store", "lot_count": 0}
     raise AssertionError(f"add golden payload for {ft}")
 
 

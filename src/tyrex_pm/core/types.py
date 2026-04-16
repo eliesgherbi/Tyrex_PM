@@ -29,6 +29,7 @@ class OrderIntent:
     Copy intent after signal + sizing (before risk + venue translation).
 
     `correlation_id` is the guru `source_trade_id` for traceability.
+    Virtual exits use ``correlation_id`` like ``ve:{lot_id}:{kind}`` and set ``intent_origin``.
     """
 
     correlation_id: str
@@ -38,3 +39,8 @@ class OrderIntent:
     signal_kind: str  # "entry" | "exit"
     reason_code: str
     price_ref: float | None = None
+    #: ``guru`` | ``virtual_tp`` | ``virtual_sl`` — concurrent guru-rest cap uses tags/COID only.
+    intent_origin: str = "guru"
+    virtual_lot_id: str | None = None
+    #: When ``intent_origin`` is virtual: ``tp`` | ``sl``.
+    virtual_exit_kind: str | None = None

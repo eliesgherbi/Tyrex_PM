@@ -14,6 +14,7 @@ This section is the **operator-facing** summary. The **authoritative** split-tru
 - **Runtime** **`exec_position_check_interval_seconds`** / **`exec_open_check_interval_seconds`** — wired for Nautilus live engine convergence. Validation: **[validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md)**.
 - **Scenario A (bot-originated sell)** — optional **`bot_sell_validate`** harness for bot-owned BUY → SELL lifecycle drills. See **[validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md)**.
 - **Current live validation scenario:** **`config/scenarios/venue_state_live/`** — see folder **`README.md`**.
+- **Virtual TP/SL (Tyrex-owned):** optional **`virtual_exit`** blocks in strategy + runtime YAML. On **live** `CopyStrategy`, arms on Tyrex **entry BUY** fills, evaluates TP/SL on a timer, submits **SELL** via `NautilusGuruExecutionPort.submit_virtual_exit_intent` (TP default aggressive limit, SL default **market** FOK with optional limit fallback). **Does not** count toward **`max_concurrent_guru_resting_orders`**. Facts: `virtual_exit_arm`, `virtual_exit_trigger`, `virtual_exit_submit`, `virtual_exit_hold`, `virtual_exit_retry`, `virtual_exit_reconcile`, `virtual_exit_disarm`, `virtual_exit_recovery`. Small validation pack: **`config/scenarios/virtual_tp_sl_live/`**.
 
 ### Wallet cash vs deployment (why they diverge)
 

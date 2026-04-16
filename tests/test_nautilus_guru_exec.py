@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import InstrumentId
 
 from tyrex_pm.config.loaders import RuntimeSettings
@@ -233,3 +233,58 @@ def test_nautilus_guru_static_overlay_when_dynamic_fails() -> None:
 
     strategy.submit_order.assert_called_once()
     strategy.cache.instrument.assert_called()
+
+
+def test_submit_virtual_exit_market_uses_base_qty_fok() -> None:
+    """Market virtual SELL uses ``quote_quantity=False`` (outcome token quantity)."""
+    instr_s = "0xabc-12345.POLYMARKET"
+    rt = _runtime_live_nautilus(token_map=(("12345", instr_s),))
+
+    inst_stub = MagicMock()
+    inst_stub.make_qty.return_value = MagicMock()
+    inst_stub.make_price.return_value = MagicMock()
+    inst_stub.price_increment = 0.01
+    inst_stub.size_increment = 1.0
+    inst_stub.min_quantity = 1.0
+
+    order_sent = MagicMock()
+    order_sent.client_order_id = "VEtestmarket"
+
+    of = MagicMock()
+    of.market.return_value = order_sent
+
+    strategy = MagicMock()
+    strategy.cache = MagicMock()
+    strategy.cache.instrument.return_value = inst_stub
+    strategy.order_factory = of
+    strategy.submit_order = MagicMock()
+    strategy.log = MagicMock()
+
+    port = NautilusGuruExecutionPort(strategy, rt)  # type: ignore[arg-type]
+    port._instrument_policy = MagicMock(allow_submit=MagicMock(return_value=True))  # type: ignore[method-assign]
+
+    intent = OrderIntent(
+        correlation_id="ve:lot:sl:n1",
+        token_id="12345",
+        side="SELL",
+        quantity=5.0,
+        signal_kind="exit",
+        reason_code=str(ReasonCode.VIRTUAL_EXIT_SL),
+        price_ref=0.5,
+        intent_origin="virtual_sl",
+        virtual_lot_id="lot1",
+        virtual_exit_kind="sl",
+    )
+    port.submit_virtual_exit_intent(
+        intent,
+        mode="live",
+        order_style="market",
+        aggression_ticks=2,
+        use_rest_book=False,
+    )
+
+    of.market.assert_called_once()
+    mk = of.market.call_args.kwargs
+    assert mk["quote_quantity"] is False
+    assert mk["time_in_force"] == TimeInForce.FOK
+    assert mk["order_side"] == OrderSide.SELL

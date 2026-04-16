@@ -259,3 +259,57 @@ def test_min_notional_policy_cap_bumps_qty() -> None:
     assert out is not None
     assert out.quantity == pytest.approx(10.0)
     assert out.quantity * 0.5 >= 5.0 - 1e-6
+
+
+def test_virtual_exit_skips_guru_concurrent_cap_when_at_limit() -> None:
+    """Virtual exits must not be blocked by guru resting-order saturation."""
+    s = RiskSettings(
+        max_notional_usd_per_order=1000.0,
+        max_token_notional_usd_open=float("inf"),
+        max_portfolio_notional_usd_open=float("inf"),
+        kill_switch=False,
+        fail_on_missing_price_for_notional=True,
+        max_concurrent_guru_resting_orders=1,
+    )
+    reader = MagicMock()
+    reader.count_guru_resting_orders_open.return_value = 1
+    db = MagicMock()
+    db.filled_usd_for_token.return_value = (50.0, True)
+    pol = ConfiguredRiskPolicy(s, execution_reader=reader, deployment_budget=db)
+    virt = OrderIntent(
+        correlation_id="ve:lot:tp:n1",
+        token_id="tok",
+        side="SELL",
+        quantity=2.0,
+        signal_kind="exit",
+        reason_code="ok",
+        price_ref=0.5,
+        intent_origin="virtual_tp",
+        virtual_lot_id="lot1",
+        virtual_exit_kind="tp",
+    )
+    ok, rc, out = pol.evaluate(virt)
+    assert ok is True
+    assert rc == "approved"
+    assert out is not None
+
+    virt_sl = OrderIntent(
+        correlation_id="ve:lot:sl:n1",
+        token_id="tok",
+        side="SELL",
+        quantity=2.0,
+        signal_kind="exit",
+        reason_code="ok",
+        price_ref=0.5,
+        intent_origin="virtual_sl",
+        virtual_lot_id="lot1",
+        virtual_exit_kind="sl",
+    )
+    ok_sl, rc_sl, out_sl = pol.evaluate(virt_sl)
+    assert ok_sl is True
+    assert rc_sl == "approved"
+    assert out_sl is not None
+
+    ok2, rc2, _ = pol.evaluate(_sell_intent(qty=1.0, price=0.5, token="tok"))
+    assert ok2 is False
+    assert rc2 == ReasonCode.RISK_GURU_CONCURRENT_RESTING_ORDERS_LIMIT

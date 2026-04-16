@@ -1,0 +1,42 @@
+# =============================================================================
+# Sample: virtual TP/SL (v1) — NOT wired until VirtualExitManager is implemented.
+# Placement options (to be finalized in loaders):
+#   - Under strategy YAML (follows guru_follow / instrument-specific intent), or
+#   - Under runtime YAML (process-wide defaults).
+# =============================================================================
+
+virtual_exit:
+  enabled: false
+  # Persist armed lots (required for restart reconciliation).
+  state_path: "var/virtual_exit_state.json"
+
+  # Percent moves vs entry VWAP (long-only v1). Example: 10 = +10% TP, -5% SL.
+  take_profit_pct: 10.0
+  stop_loss_pct: 5.0
+
+  # Minimum filled entry qty (instrument units) before arming.
+  min_entry_qty_to_arm: 0.0
+
+  # How often to re-evaluate triggers (seconds). Null = use default (e.g. 1.0).
+  evaluate_interval_seconds: 1.0
+
+  # Price source for trigger evaluation: last | book_bid | book_bid_rest
+  trigger_price_source: "book_bid"
+
+  # Max age (seconds) for venue snapshot / quote before blocking triggers.
+  max_venue_staleness_seconds: 45.0
+
+  # Exit submission style (v1: aggressive_limit only; market_fak reserved).
+  exit_order_style: "aggressive_limit"
+  # Ticks through the book for aggressive limit (mirror execution tuning).
+  exit_aggression_ticks: 2
+
+  # Retry policy for denied/rejected exit orders.
+  exit_retry_max: 5
+  exit_retry_cooldown_seconds: 2.0
+
+  # When wallet position < protected qty (manual sell / external bot).
+  drift_policy: "clamp_to_venue" # clamp_to_venue | disarm
+
+# Optional: annotate facts / risk for virtual exits (requires OrderIntent fields).
+# intent_origin: guru | virtual_tp | virtual_sl
