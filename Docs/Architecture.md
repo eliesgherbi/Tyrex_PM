@@ -1,6 +1,6 @@
 # Tyrex_PM — architecture overview
 
-Grounded in the current codebase (`src/tyrex_pm/`). **Documentation hub:** [README.md](README.md). For operators: [OPERATIONS.md](OPERATIONS.md). For YAML: [CONFIG_MODEL.md](CONFIG_MODEL.md). For contributors: [developer_guide.md](developer_guide.md).
+Grounded in the current codebase (`src/tyrex_pm/`). **Live truth model:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md). **Documentation hub:** [README.md](README.md). For operators: [OPERATIONS.md](OPERATIONS.md). For YAML: [CONFIG_MODEL.md](CONFIG_MODEL.md). For contributors: [developer_guide.md](developer_guide.md).
 
 **Per-module detail:** [modules/README.md](modules/README.md).
 
@@ -22,7 +22,8 @@ Grounded in the current codebase (`src/tyrex_pm/`). **Documentation hub:** [READ
 - Typed YAML: strategy / risk / runtime (`config/loaders.py`).
 - **`ConfiguredRiskPolicy`** — **deployment-budget** caps (pending ``leaves ×`` limit + filled ``abs(qty) × avg_px_open`` via **`NautilusDeploymentBudget`**), optional **capital gate** (account + py-clob allowance snapshots). **Not** mark / ``net_exposure`` for caps.
 - **`execution/`** — `NoOpExecutionPort`, **`NautilusGuruExecutionPort`** (live `submit_order`). Optional book hooks + mandatory instrument grid quantize in **`nautilus_guru_exec`** — see **`CONFIG_MODEL.md`** (`execution_*` keys; no operator venue-alignment YAML).
-- **`runtime/state_readers.py`** — canonical read boundary; injected into risk from `guru_compose`.
+- **`runtime/state_readers.py`** — canonical read boundary; injected into risk from `guru_compose`. **Live + wallet sync:** Tier A reads use **`VenueState`** when composed (see **LIVE_ARCHITECTURE**).
+- **`runtime/venue_state.py`**, **`runtime/wallet_sync.py`** — Tier A aggregate and HTTP polling into **`VenueState`** (live when **`wallet_sync_enabled`**).
 - **Dynamic instruments / zero-bootstrap** — `guru_instrument_dynamic.py`, optional `guru_cache_warmup.py`.
 - **`scripts/run_guru.py` + `guru_compose.py`** — `TradingNode` with **empty** clients (shadow) or **Polymarket live** data + exec (live).
 
@@ -34,9 +35,9 @@ Grounded in the current codebase (`src/tyrex_pm/`). **Documentation hub:** [READ
 
 **Structured run reporting (optional):** when **`reporting_enabled`** in runtime YAML, each run writes **`var/reporting/runs/<run_id>/`** — **`Docs/reporting_fact_model.md`**, **`Docs/OPERATIONS.md`** § Structured reporting.
 
-**Maintainer hub:** [`Implementation/current_state.md`](Implementation/current_state.md) · **End-to-end trace:** [`Implementation/end_to_end_review_logic.md`](Implementation/end_to_end_review_logic.md).
+**Maintainer hub:** [`Implementation/current_state.md`](Implementation/current_state.md) (pointer) · **End-to-end trace:** [`Implementation/end_to_end_review_logic.md`](Implementation/end_to_end_review_logic.md).
 
-**Operators — supported model:** Nautilus **framework truth** drives deployment caps; wallet cash is separate. **One bot, one wallet**; external/manual/shared-wallet reconciliation is **bounded**, not guaranteed instant. See **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model* and **[README.md](README.md)** § *Validation & evidence*.
+**Operators — supported model (live):** **Tier A** (**VenueState** / **WalletSync**) drives **deployment** and wallet-level reads for risk when wired; **Tier B** (Nautilus) is session/order lifecycle. **One bot, one wallet**; see **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** and **[OPERATIONS.md](OPERATIONS.md)**.
 
 ---
 
@@ -127,7 +128,7 @@ flowchart TB
   Copy -->|submit_intent| XNau
 ```
 
-**Live:** Shadow uses `NoOpExecutionPort`. **Live** uses `NautilusGuruExecutionPort` → `submit_order`; pending cap uses **`Cache` open orders** (leaves qty); token/portfolio **filled** deployment uses **open positions** via **`state_readers`** / **`NautilusDeploymentBudget`** (cost-basis style: `abs(qty) × avg_px_open` — not mark-to-market).
+**Live:** Shadow uses `NoOpExecutionPort`. **Live** uses `NautilusGuruExecutionPort` → `submit_order`. **Deployment caps:** when **`VenueState`** is composed (**live** + **`wallet_sync_enabled`**), **`NautilusDeploymentBudget`** uses **venue** resting orders and **venue** position × mark for pending/filled; without **`VenueState`**, the same class falls back to **Nautilus** cache/portfolio (shadow / opt-out).
 
 **ASCII (same idea):**
 
@@ -152,7 +153,7 @@ flowchart TB
    - Instantiates `GuruMonitorActor` (wallet, poll interval, dedup path, Data API URL) — always registered; poll **publishes** when `guru_ingest_mode` is `poll_only` or `rtds_shadow`, and in `rtds_primary` **only during fallback** when configured.
    - If `guru_ingest_mode` is `rtds_shadow` or `rtds_primary`, registers **`GuruStreamActor`** (RTDS URL, shared dedup/watermark, ingest state). **Primary:** stream publishes when not in fallback; **shadow:** stream logs `guru_stream_would_emit` only.
    - Instantiates `CopyStrategy` with strategy YAML (`token_filter`, `copy_scale`, optional conviction fields) and **`execution_mode`** from runtime YAML.
-   - Builds **state readers** and injects **`NautilusDeploymentBudget`** + execution/account/allowance readers into **`ConfiguredRiskPolicy`**. Wires **`NautilusPositionStateReader`** into **`CopyStrategy`** for optional **reporting** only (marked exposure facts), not for risk caps.
+   - Builds **state readers** and injects **`NautilusDeploymentBudget`** + execution/account/allowance readers into **`ConfiguredRiskPolicy`**; **live** may construct **`VenueState`** and **`WalletSyncActor`**. Wires **`NautilusPositionStateReader`** into **`CopyStrategy`** for optional **reporting** only (marked exposure facts), not for risk caps.
    - Injects execution port: **`NoOpExecutionPort`** (shadow) or **`NautilusGuruExecutionPort`** (live).
    - Registers **actor** and **strategy** on the trader **before** `build()`.
 5. **Lifecycle:** `node.build()` then `node.run()` — Nautilus starts clocks; actor `on_start` runs first poll + timer; strategy subscribes to guru topic.
@@ -167,12 +168,12 @@ flowchart TB
 |--------|--------|------|
 | **`ExecutionPort`** | `NoOpExecutionPort` | `NautilusGuruExecutionPort` |
 | **Node clients** | Empty | **Polymarket DATA + EXEC** |
-| **Pending token cap** | N/A | **`Cache` orders**, **leaves × price** |
-| **Filled deployment (token/portfolio caps)** | N/A | **`avg_px_open × abs(qty)`** on open positions (cost basis; adapter must populate positions) |
+| **Pending token cap** | N/A | Venue resting orders when **`VenueState`** wired; else **`Cache`** orders |
+| **Filled deployment (token/portfolio caps)** | N/A | Venue position × mark when **`VenueState`** wired; else **`Portfolio`** cost basis |
 | **Capital gate** | Allowance provider **None** | Optional |
 | **Secrets** | — | `.env` + L2 |
 
-**Why:** operators validate in **shadow** without venue clients; **live** is always the Nautilus framework path. Strategy code path unchanged; ports and reader wiring differ by mode.
+**Why:** operators validate in **shadow** without full Tier A in some configs; **live** with **wallet sync** enables **VenueState** Tier A. Strategy code path unchanged; ports and reader wiring differ by mode.
 
 ---
 
@@ -181,20 +182,21 @@ flowchart TB
 | Area | Current state | Notes |
 |------|---------------|--------|
 | **Guru input** | Single wallet; **recommended** RTDS **`rtds_primary`** + poll fallback/shadow; **`poll_only`** available | Not full `/trades` history crawler; RTDS is unfiltered stream (client-side wallet filter). |
-| **Risk / exposure** | **Live:** pending **Cache** open orders (leaves) + filled **`Portfolio`** + optional **capital gate** | **Filled** and **events** depend on **Nautilus + Polymarket adapter** updating `Portfolio` / `Cache`. |
+| **Risk / exposure** | **Live + wallet sync:** Tier A **VenueState** for deployment inputs; **Tier B** Nautilus for session convergence + optional **capital gate** | External activity: trust **Tier A** facts for caps; **Tier B** may lag — see **LIVE_ARCHITECTURE**. |
 | **Execution** | **Live:** Nautilus `submit_order` via **`NautilusGuruExecutionPort`**; book hooks optional | Limit lifecycle / timeout implemented on the guru Nautilus path. |
 | **Restart** | **`load_state=False`** in `guru_compose` | Post-restart truth = **venue + adapter** + optional Tyrex warmup. |
 | **Follow extras** | Pacing, TWAP, richer suppression | **Not** shipped unless implemented in code — see **`Implementation/road_map.md`** (archived backlog). |
-| **Multi-actor / shared wallet** | **Manual UI**, second bot, or mixed strategies on **same** keys | Framework may **lag** venue; **not** recommended as primary ops mode. See **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model* and **[Implementation/validate_manual_sell_reconciliation.md](Implementation/validate_manual_sell_reconciliation.md)**. |
+| **Multi-actor / shared wallet** | **Manual UI**, second bot, or mixed strategies on **same** keys | **Tier A** (**VenueState**) is the operator check for caps; **Tier B** may lag. See **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** and **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*. |
 | **New strategies** | `CopyStrategy` | Reuse injected `RiskPolicy` / `ExecutionPort` pattern. |
 
 ---
 
 ## Where to read next
 
-1. **[Implementation/current_state.md](Implementation/current_state.md)** — migration / status hub.
-2. **[modules/README.md](modules/README.md)** — per-module docs.
-3. **[OPERATIONS.md](OPERATIONS.md)** — runbook, modes, log semantics.
-4. **[CONFIG_MODEL.md](CONFIG_MODEL.md)** — YAML fields.
-5. **[developer_guide.md](developer_guide.md)** — boundaries, tests, shadow vs live.
-6. **Module guides:** [modules/README.md](modules/README.md) — `DEVELOPER.md` per mature package.
+1. **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** — live Tier A vs Tier B, workflow, facts.
+2. **[Implementation/current_state.md](Implementation/current_state.md)** — pointer hub.
+3. **[modules/README.md](modules/README.md)** — per-module docs.
+4. **[OPERATIONS.md](OPERATIONS.md)** — runbook, modes, log semantics.
+5. **[CONFIG_MODEL.md](CONFIG_MODEL.md)** — YAML fields.
+6. **[developer_guide.md](developer_guide.md)** — boundaries, tests, shadow vs live.
+7. **Module guides:** [modules/README.md](modules/README.md) — `DEVELOPER.md` per mature package.

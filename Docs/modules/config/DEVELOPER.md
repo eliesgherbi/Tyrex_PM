@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.config`
 
-[README](README.md) · [CONFIG_MODEL](../../CONFIG_MODEL.md)
+[README](README.md) · [CONFIG_MODEL](../../CONFIG_MODEL.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 
@@ -25,4 +25,4 @@ Parse and validate **strategy**, **risk**, and **runtime** YAML into typed setti
 ## Pitfalls
 
 - **Flat YAML:** only `token_filter` is nested; loaders expect top-level keys on risk/runtime.
-- **`framework_phase_b_eligible`**: predicate aligns with “live framework truth” for deployment-budget wiring — keep in sync with `guru_compose` expectations.
+- **`framework_phase_b_eligible` / `phase_b_framework_truth_gates_active`**: gate **live-only** risk YAML that needs deployment-budget readers (portfolio cap, concurrent guru rests) — **not** the Tier A/Tier B split; naming is historical. Keep in sync with `guru_compose` + **`validate_phase_b_runtime_contract`**.

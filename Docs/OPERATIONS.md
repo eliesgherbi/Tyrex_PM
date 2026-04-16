@@ -1,42 +1,45 @@
 # Operations — guru follow (v1)
 
-**Doc index:** [README.md](README.md) · **Architecture:** [Architecture.md](Architecture.md) · **Current state:** [Implementation/current_state.md](Implementation/current_state.md) · **Live deployment-budget checklist:** [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) · **CLI: deployment-budget live run:** [Runbooks/deployment_budget_live_validation.md](Runbooks/deployment_budget_live_validation.md) · **Strategy module:** [modules/strategy/README.md](modules/strategy/README.md)
+**Doc index:** [README.md](README.md) · **Live architecture:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) · **Architecture:** [Architecture.md](Architecture.md) · **Hub:** [Implementation/current_state.md](Implementation/current_state.md) · **Live deployment-budget checklist:** [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) · **CLI: deployment-budget live run:** [Runbooks/deployment_budget_live_validation.md](Runbooks/deployment_budget_live_validation.md) · **Strategy module:** [modules/strategy/README.md](modules/strategy/README.md)
 
 ## Current status & operating model
 
-This section is the **operator-facing** summary of what the stack assumes after reconciliation / validation work. Detailed evidence lives under **[Docs/Implementation/](Implementation/)** — see the validation index in **[README.md](README.md)**.
+This section is the **operator-facing** summary. The **authoritative** split-truth model is **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** (Tier A **VenueState** vs Tier B Nautilus). Implementation deep-dives live under **[Docs/Implementation/](Implementation/)** — see **[README.md](README.md)**.
 
 ### What works reliably today
 
-- **Deployment-budget caps** (`max_portfolio_notional_usd_open`, token caps, pending rests) use **Nautilus framework readers**: **`Cache`** open orders (resting `leaves ×` limit) and **`Portfolio`** open positions (filled leg: cost-basis deployment). This is **intentional**: caps measure **economic deployment in the trading framework**, not “free cash” in your wallet.
-- **Startup** wallet position hydration (`polymarket_wallet_position_warmup_max`) plus dynamic instruments is **production-grade** for guru follow: open holdings are seeded into `Cache` so risk and reconciliation have instruments to attach to. Validation: **[validate_startup_instrument_hydration.md](Implementation/validate_startup_instrument_hydration.md)**.
-- **Runtime reconciliation prerequisites** (live **`exec_position_check_interval_seconds`** / **`exec_open_check_interval_seconds`**) are **wired from Tyrex** and visible in compose + Nautilus startup logs. Validation: **[validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md)**.
-- **Scenario A (bot-originated sell)** — optional **`bot_sell_validate`** harness — proves **bot-owned** BUY → SELL on the **same** Nautilus order lifecycle; suitable for “did we free deployment after our own exit?” drills. See **[validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md)**.
+- **Live deployment-budget caps** use **`VenueState`**-backed readers when **`wallet_sync_enabled: true`** (default on live): venue resting orders for **pending**, venue positions × mark for **filled** (Tier A). This measures **wallet-level** economic deployment for caps, not “free cash” alone.
+- **Nautilus `Cache` / `Portfolio`** remain essential for **this bot’s** order lifecycle, fills, periodic position/open-order **checks** (Tier B convergence), and **`shutdown_drain`** — but they are **not** described as the sole source for **live** deployment caps anymore.
+- **Startup** wallet position hydration (`polymarket_wallet_position_warmup_max`) plus dynamic instruments seeds **`Cache`** so instruments exist; validation: **[validate_startup_instrument_hydration.md](Implementation/validate_startup_instrument_hydration.md)**.
+- **Runtime** **`exec_position_check_interval_seconds`** / **`exec_open_check_interval_seconds`** — wired for Nautilus live engine convergence. Validation: **[validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md)**.
+- **Scenario A (bot-originated sell)** — optional **`bot_sell_validate`** harness for bot-owned BUY → SELL lifecycle drills. See **[validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md)**.
+- **Current live validation scenario:** **`config/scenarios/venue_state_live/`** — see folder **`README.md`**.
 
 ### Wallet cash vs deployment (why they diverge)
 
-- **Wallet USDC** (py-clob balance / allowance when capital gate is on) answers **“can we pay margin / fees?”** It does **not** tell you **`portfolio_deploy`** — the sum of **pending + filled** deployment across outcomes.
-- **After you sell**, USDC may rise while **`portfolio_deploy`** still reflects **open** positions until Nautilus **positions / orders** match the venue. **Do not** infer “cap headroom” from cash alone.
-- **`tyrex_risk_ops`** lines with **`portfolio_deploy=…`** and **`cap=…`** reference **deployment math**, not wallet cash — the log hint **`portfolio_uses_nautilus_positions_not_wallet_cash`** is literal.
+- **Wallet USDC** (py-clob / venue collateral when wired) answers **“can we pay margin / fees?”** It does **not** replace **`portfolio_deploy`** — use **`risk_decision`**, **`deployment_budget`**, and **`venue_state`** facts for headroom.
+- **After external activity**, USDC may move while caps depend on **VenueState** position/order snapshots and marks — **do not** infer cap headroom from cash alone.
+- **`tyrex_risk_ops`** **`portfolio_deploy=…`** / **`cap=…`** lines reference **deployment math** from the active readers (venue-backed when Tier A is wired).
 
-### Reconciliation: simple mental model
+### External activity: simple mental model
 
-- **At cold start**, Tyrex can **warm** open positions from the Data API into `Cache` — reconciliation often **looks good early** because holdings are explicit.
-- **Mid-run**, trades **outside** the bot (UI, another process) require the **Nautilus Polymarket adapter** + periodic **position / open-order** checks to **import** venue truth. Convergence is **bounded by intervals and adapter behavior** — see **[validate_runtime_reconciliation_behavior.md](Implementation/validate_runtime_reconciliation_behavior.md)** and **[review_nautilus_polymarket_reconciliation_model.md](Implementation/review_nautilus_polymarket_reconciliation_model.md)**.
-- **Bot-submitted SELL** (Scenario A or normal copy exit) stays on the **same** order lifecycle Tyrex already tracks — that path is **more predictable** than manual UI sells on a busy wallet.
+- **`WalletSyncActor`** refreshes **`VenueState`** on an interval; **no** synthetic **`PositionStatusReport`** “reconciliation” pass (removed).
+- **Manual / UI / other-bot** sells **do not** need to show up as Tyrex **strategy SELL** events to be “successful” — verify **`venue_state`**, **`wallet_sync`**, and falling **`token_deploy_at_eval` / `portfolio_deploy_at_eval`** in **`risk_decision`** / **`deployment_budget`**.
+- **Tier B** may still lag for external events; **Tier A** is what risk uses for **live** deployment when composed. See **[validate_runtime_reconciliation_behavior.md](Implementation/validate_runtime_reconciliation_behavior.md)** and **[review_nautilus_polymarket_reconciliation_model.md](Implementation/review_nautilus_polymarket_reconciliation_model.md)** for adapter behavior (session side).
 
 ### What is not fully solved (honest limits)
 
-- **Shared wallet / multi-actor** operation (manual sells, second bot, mixed strategies) is **not** a guaranteed-first-class mode: framework state may **lag** or **disagree** with what you see in the UI until reconciliation runs; edge cases remain. Guidance: **[validate_manual_sell_reconciliation.md](Implementation/validate_manual_sell_reconciliation.md)**.
-- **Prediction markets:** while a position remains **open** on the venue (not settled/closed in framework terms), it **consumes** deployment / cap budget. **Winning or losing** only “frees” the budget in Tyrex terms once the framework reflects **exit / resolution** — don’t assume UI “profit” alone released cap.
-- **Future:** broader automatic repair of **all** external-wallet drift is **not** claimed here; keep **`one bot = one dedicated wallet`** until product requirements change.
+- **Nautilus cache** is not guaranteed perfect real-time **wallet** truth for external activity.
+- **Burst** concurrent operations can still provoke **exchange-side** rejects; **shutdown drain** under pressure is not assumed perfect — see **`shutdown_drain_*`** runtime keys and logs.
+- **Prediction markets:** open venue positions still count toward caps until Tier A reflects flat / closed exposure.
+- Keep **`one bot = one dedicated wallet`** as the operating default.
 
 ### Recommended operating rules (today)
 
 1. **One Tyrex live node ↔ one dedicated Polymarket wallet** (signer/funder pair you configure).
-2. **Avoid** routine **manual / UI** trades on that same wallet while the bot runs; if you must, budget **time** for reconciliation and accept possible **`portfolio_deployment_cap`** denials until `portfolio_deploy` catches up.
-3. Use **reporting** (`risk_decision`, `deployment_budget` facts) to compare **`portfolio_deploy_at_eval`** before vs after your own bot exits — see Scenario A validation doc for an example drill.
-4. For go-live checklists (restart, caps, logs), keep using **[phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md)**.
+2. Prefer **`venue_state_live`**-style configs for validation; **do not** use removed **`position_reconciliation_*`** or **`venue_state_reads_enabled`** keys (loaders reject or ignore obsolete surfaces — see **LIVE_ARCHITECTURE**).
+3. Use **reporting** (`risk_decision`, `deployment_budget`, `venue_state`, `wallet_sync`) for before/after drills.
+4. Go-live checklist: **[phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md)** (supplement with **LIVE_ARCHITECTURE** grep targets).
 
 ## Config files
 

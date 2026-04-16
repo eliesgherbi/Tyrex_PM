@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.data`
 
-[README](README.md) · [OPERATIONS](../../OPERATIONS.md) § Guru ingestion
+[README](README.md) · [OPERATIONS](../../OPERATIONS.md) § Guru ingestion · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 

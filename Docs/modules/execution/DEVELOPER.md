@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.execution`
 
-[README](README.md) · [Architecture](../../Architecture.md)
+[README](README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 
@@ -32,7 +32,7 @@ Strategy must not call `submit_order` directly.
 2. Optional **entry guard** (slippage ticks vs guru `price_ref`).
 3. Optional **depth clip** to top-of-book size × cap.
 4. **Quantize** price/qty to venue grid; if risk qty cannot fit min size → **`exec_instrument_quantize_skip`** (no submit).
-5. `submit_order` + reconciliation / reporting (`execution_outcome`, `normalization`).
+5. `submit_order` + reporting (`execution_outcome`, `normalization`); Nautilus **session** events (fills, lifecycle) feed **Tier B** — distinct from **Tier A** wallet snapshots used in **risk** for deployment caps.
 
 ## Integration points
 

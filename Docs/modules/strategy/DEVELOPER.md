@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.strategy`
 
-[README](README.md) (full flow examples) · [Architecture](../../Architecture.md)
+[README](README.md) (full flow examples) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 
@@ -8,7 +8,7 @@ Nautilus **Strategy** shell: subscribe to guru topic, orchestrate **`signal/`** 
 
 ## Hard invariants (enforced by architecture tests)
 
-- **No** direct `Cache`, `Portfolio`, or order-book reads in `CopyStrategy`.
+- **No** direct `Cache`, `Portfolio`, **`VenueState`**, or order-book reads in `CopyStrategy` — **risk** receives injected readers from **`guru_compose`** (Tier A vs B is a runtime concern).
 - **No** `py-clob` or HTTP for orders — execution port only.
 - **`on_order_event`** may forward to execution port for **limit timeout** cleanup — no business interpretation of fills here.
 

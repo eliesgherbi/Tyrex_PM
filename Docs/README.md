@@ -8,8 +8,8 @@
 
 | I am… | Start with |
 |--------|------------|
-| **New to the repo** | [Architecture.md](Architecture.md) — what the system is and how modules connect. |
-| **Operating a node** | [OPERATIONS.md](OPERATIONS.md) — modes, configs, logs, troubleshooting. |
+| **New to the repo** | [Architecture.md](Architecture.md) — what the system is and how modules connect. **Live truth model:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md). |
+| **Operating a node** | [OPERATIONS.md](OPERATIONS.md) — modes, configs, logs, troubleshooting. **Tier A vs B:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md). |
 | **Changing code** | [developer_guide.md](developer_guide.md) — ownership boundaries; then the relevant **`modules/*/DEVELOPER.md`**. |
 | **Configuring YAML** | [CONFIG_MODEL.md](CONFIG_MODEL.md) — field tables for strategy / risk / runtime. |
 
@@ -17,22 +17,24 @@
 
 ## Current status & operating model
 
-**Framework truth (intentional):** Tyrex **deployment-budget** caps (`portfolio_deploy`, token deploy, pending rests) are computed from **Nautilus `Cache` + `Portfolio`** via `state_readers` / `NautilusDeploymentBudget`. **USDC balance / allowance** from py-clob is used only where **`capital_gate_enabled`** (and related fields) say so — it is **not** a substitute for “how much market risk is deployed” in the framework.
+**Authoritative summary:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) — **Tier A** (**VenueState**, **WalletSync**) vs **Tier B** (Nautilus session), end-to-end workflow, external wallet activity, guarantees, and current **`venue_state_live`** validation.
+
+**Live deployment caps:** With **`execution_mode: live`** and **`wallet_sync_enabled: true`** (default on live), **`NautilusDeploymentBudget`** and **`state_readers`** use **venue-backed** positions and resting orders for Tier A math. **USDC / allowance** for **`capital_gate_enabled`** still flows through **`DefaultCapitalStateProvider`** (venue-sourced collateral when wired). Shadow or **`wallet_sync_enabled: false`** uses Nautilus cache/portfolio for deployment — not the recommended production posture for shared wallets.
 
 **What is in good shape for production-like guru follow today**
 
-- **Startup instrument hydration** (wallet positions warmup + dynamic instruments) — hardened; see [Implementation/validate_startup_instrument_hydration.md](Implementation/validate_startup_instrument_hydration.md).
-- **Runtime reconciliation prerequisites** (position/open-order check intervals wired from Tyrex) — see [Implementation/validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md).
-- **Scenario A (bot-originated sell)** — validation harness exercises **bot-owned** BUY → SELL on the same Nautilus order lifecycle; see [Implementation/validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md).
-- **Internal bot-owned lifecycle** is the **reliable** path for “did the framework free deployment after we closed exposure on the venue?”
+- **VenueState + WalletSync** path for wallet-level positions, orders, and collateral freshness.
+- **Startup instrument hydration** (wallet positions warmup + dynamic instruments) — see [Implementation/validate_startup_instrument_hydration.md](Implementation/validate_startup_instrument_hydration.md).
+- **Nautilus position/open-order intervals** (Tier B convergence) — still wired; see [Implementation/validate_runtime_reconciliation_prerequisites.md](Implementation/validate_runtime_reconciliation_prerequisites.md).
+- **Scenario A (bot-originated sell)** — bot-owned BUY → SELL lifecycle drill; see [Implementation/validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md).
 
-**What is not fully solved**
+**Honest limits (see LIVE_ARCHITECTURE)**
 
-- **External / manual / shared-wallet** activity (Polymarket UI sells, a second bot, another strategy on the same keys) can still **lag or diverge** from Nautilus `Cache` / `Portfolio` until reconciliation catches up — or indefinitely in edge cases. Tyrex does **not** promise instant multi-actor truth. See [Implementation/validate_manual_sell_reconciliation.md](Implementation/validate_manual_sell_reconciliation.md) and [Implementation/validate_runtime_reconciliation_behavior.md](Implementation/validate_runtime_reconciliation_behavior.md).
-- **Recommended operating rule:** **one Tyrex bot instance ↔ one dedicated wallet**. Avoid routine manual trading on the **same** live wallet the bot uses.
-- **Unresolved** prediction-market positions (still open on the venue) **continue to count** toward deployment / caps until the framework sees them closed (win or loss does not matter for “still deployed” until exit/reconcile).
+- Nautilus **Cache** is not a guarantee of instant agreement with the venue for **external** activity; Tier A is the operator-facing check for caps/headroom.
+- Manual UI / concurrent venue actions may not produce a tidy **strategy-side** SELL audit trail; success is **VenueState** + **`risk_decision` / `deployment_budget`** evidence.
+- Burst pressure and shutdown drain remain **ops** concerns.
 
-**Where operators should read next:** [OPERATIONS.md](OPERATIONS.md) (full runbook + reconciliation mental model + limitations), [CONFIG_MODEL.md](CONFIG_MODEL.md) § Risk (deployment vs capital gate), [Implementation/review_nautilus_polymarket_reconciliation_model.md](Implementation/review_nautilus_polymarket_reconciliation_model.md) (deep reconciliation review).
+**Where operators should read next:** [OPERATIONS.md](OPERATIONS.md), [CONFIG_MODEL.md](CONFIG_MODEL.md) § Risk + Runtime (`wallet_sync_*`, `venue_state_*`).
 
 ---
 
@@ -58,6 +60,7 @@ Use these for **checklists, greps, and run artifacts** — not as a substitute f
 
 | Document | Purpose |
 |----------|---------|
+| [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) | **Live** Tier A vs Tier B, WalletSync, workflow, facts, obsolete settings. |
 | [Architecture.md](Architecture.md) | End-to-end flow, module map, shadow vs live, diagrams. |
 | [developer_guide.md](developer_guide.md) | Where to add behavior, anti-patterns, test map. |
 | [generale_workflow.md](generale_workflow.md) | Plain-language gate-by-gate walkthrough (guru → execution). |
@@ -65,11 +68,11 @@ Use these for **checklists, greps, and run artifacts** — not as a substitute f
 | [OPERATIONS.md](OPERATIONS.md) | Operator runbook: ingest modes, deployment-budget risk, logs, reporting. |
 | [reporting_fact_model.md](reporting_fact_model.md) | Structured reporting: join keys, fact semantics, CLI summarize. |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Quick setup + pointer to module guides. |
-| [Implementation/current_state.md](Implementation/current_state.md) | Maintainer hub: what the code does today, failure classes. |
+| [Implementation/current_state.md](Implementation/current_state.md) | Pointer hub → LIVE_ARCHITECTURE + traces. |
 | [Implementation/end_to_end_review_logic.md](Implementation/end_to_end_review_logic.md) | Live path: signal → risk → execution → facts. |
 | [Implementation/phase_b_operational_validation.md](Implementation/phase_b_operational_validation.md) | Live checklist for deployment-budget / restart behavior. |
 | [OPERATIONS.md](OPERATIONS.md) § *Current status & operating model* | Supported vs limited behavior; wallet model; links to validation docs. |
-| [Implementation/road_map.md](Implementation/road_map.md) | **Archived** phased plan — use Architecture + current_state for active behavior. |
+| [Implementation/road_map.md](Implementation/road_map.md) | Governance: split Tier A / Tier B; subordinate to LIVE_ARCHITECTURE for ops detail. |
 
 ---
 
@@ -97,7 +100,7 @@ When you change **behavior** or **config loaders**, update in order:
 1. Code + tests  
 2. `CONFIG_MODEL.md` (if YAML surface changed)  
 3. `OPERATIONS.md` (if operators need new procedures or grep lines)  
-4. `Architecture.md` or `Implementation/current_state.md` (if the mental model shifts)  
+4. `LIVE_ARCHITECTURE.md` + `Architecture.md` or `Implementation/current_state.md` (if the mental model shifts)  
 5. `reporting_fact_model.md` + `modules/reporting/*` (if fact types change)  
 6. Relevant `modules/*/DEVELOPER.md`
 

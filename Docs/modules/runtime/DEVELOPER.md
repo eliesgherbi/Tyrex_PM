@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.runtime`
 
-[README](README.md) · [Architecture](../../Architecture.md)
+[README](README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 
@@ -14,8 +14,11 @@
 
 | Module | Role |
 |--------|------|
-| `state_readers.py` | Nautilus `Cache` / `Portfolio` / order views; guru resting detection; allowance provider; **instrument_id_for_outcome_token**. |
-| `deployment_budget.py` | **`NautilusDeploymentBudget`** — pending + filled USD for risk. |
+| `state_readers.py` | Read boundary for risk: **Tier B** (`Cache` / `Portfolio`) plus optional **Tier A** `VenueState` injection; guru resting detection; allowance provider; **instrument_id_for_outcome_token**. |
+| `deployment_budget.py` | **`NautilusDeploymentBudget`** — pending + filled USD; uses venue snapshots when `venue_state` is set. |
+| `venue_state.py` | **`VenueState`** — positions, orders, collateral TTL/polling. |
+| `wallet_sync.py` | **`WalletSyncActor`** — HTTP polls feeding **`VenueState`**. |
+| `layer_a_context.py` | **`NautilusLayerAContext`** — Layer A `full_exit` qty from venue or portfolio. |
 | `phase_b_startup.py` | Formats the **`tyrex_pm phase_b:`** INFO log line (compose summary of gate wiring). |
 | `guru_instrument_dynamic.py` | Dynamic instrument activation from guru tokens + Gamma/CLOB. |
 | `guru_cache_warmup.py` | Optional proactive `Cache` seed from guru activity. |
@@ -25,7 +28,7 @@
 
 - **`load_state=False`, `save_state=False`** on `TradingNodeConfig` — restart behavior documented in Architecture / current_state.
 - **Shadow:** no Polymarket exec client; risk cannot use deployment readers that require live framework for **finite portfolio / concurrent / reserve** combos — **fail fast at compose**.
-- **Live:** register data + exec clients; wire **`NautilusGuruExecutionPort`**; inject **`NautilusDeploymentBudget`** when eligibility predicates match.
+- **Live:** register data + exec clients; wire **`NautilusGuruExecutionPort`**; construct **`VenueState`** + **`WalletSyncActor`** when **`wallet_sync_enabled`**; inject **`NautilusDeploymentBudget`** and readers with **`venue_state`** when applicable.
 
 ## Extension patterns
 

@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.reporting`
 
-[README](README.md) · [reporting_fact_model.md](../../reporting_fact_model.md)
+[README](README.md) · [reporting_fact_model.md](../../reporting_fact_model.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 

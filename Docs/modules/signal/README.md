@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.signal`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[DEVELOPER.md](DEVELOPER.md)**
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md) · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
@@ -17,7 +17,7 @@
 | File | Contents |
 |------|----------|
 | `token_filter_spec.py` | **`TokenFilterSpec`** — explicit `enabled` + `allowlisted`; `allows_token()` used by entry/exit. |
-| `layer_a/` | **`LayerAOrchestrator`**, gating + **`ExitInterpretationFilter`**; wired from strategy YAML **`filters:`** (see `CONFIG_MODEL.md`). |
+| `layer_a/` | **`LayerAOrchestrator`**, gating + **`ExitInterpretationFilter`**; wired from strategy YAML **`filters:`** (see `CONFIG_MODEL.md`). **`full_exit`** long-qty context is implemented by **`runtime/layer_a_context.NautilusLayerAContext`** — **Tier A** **`VenueState`** when composed, else **`Portfolio`**. |
 | `entry.py` | `GuruFollowEntryPolicy`, **`GuruMirrorExitPolicy`**, `SignalDecision`. |
 | `sizing.py` | **`SizingPolicy`** protocol + **`build_sizing_policy`**: proportional `copy_scale`, optional conviction weighting + rolling average + `record_accepted_entry_size` / diagnostics. |
 | `__init__.py` | Public exports for policies. |

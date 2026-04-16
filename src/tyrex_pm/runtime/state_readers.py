@@ -1,10 +1,15 @@
 """
-Nautilus-backed live state readers — **single canonical read path** for execution cache
-and portfolio account state.
+Canonical **read boundary** for risk and deployment: Nautilus **Tier B** (``Cache`` /
+``Portfolio``) plus optional **Tier A** :class:`~tyrex_pm.runtime.venue_state.VenueState`
+when composed (live + wallet sync — see ``guru_compose``).
+
+When ``VenueState`` is injected, list-open-orders, account snapshot, and position exposure
+paths prefer **venue HTTP snapshots** for deployment and capital where implemented; otherwise
+behavior matches **Nautilus** cache/portfolio (shadow / no wallet sync).
 
 **Package-source-confirmed** (installed Nautilus): open orders via ``Cache.orders_open`` /
-``Cache.order``; account via ``Portfolio.account(venue)``. Allowance is **not** a
-first-class Nautilus field for Polymarket — it is read via py-clob in
+``Cache.order`` when not using venue snapshots; account via ``Portfolio.account(venue)``.
+Allowance is **not** a first-class Nautilus field for Polymarket — it is read via py-clob in
 :class:`ClobAllowanceStateProvider` (**implementation detail** of
 :class:`tyrex_pm.runtime.capital.DefaultCapitalStateProvider`; do not wire into risk directly).
 

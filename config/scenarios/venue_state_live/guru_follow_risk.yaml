@@ -1,0 +1,29 @@
+# =============================================================================
+# Risk — VenueState live validation (startup health + deployment strictness).
+# Tight caps suitable for a first real run; adjust before production scale-up.
+# =============================================================================
+
+kill_switch: false
+fail_on_missing_price_for_notional: true
+
+max_notional_usd_per_order: 5.0
+max_notional_policy: cap
+min_notional_usd_per_order: 0.0
+min_notional_policy: deny
+
+max_token_notional_usd_open: 10.0
+
+max_portfolio_notional_usd_open: 21.0
+max_concurrent_guru_resting_orders: null
+fail_on_unresolved_portfolio_deployment: true
+fail_on_unresolved_token_deployment: false
+
+capital_gate_enabled: true
+max_account_snapshot_age_seconds: 30.0
+max_allowance_snapshot_age_seconds: 120.0
+min_collateral_balance_usd: null
+min_allowance_usd: null
+collateral_reserve_usd: 1.0
+
+tradable_state_health_gate_enabled: true
+allow_exit_when_degraded_oms: false

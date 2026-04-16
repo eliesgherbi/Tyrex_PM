@@ -2,7 +2,7 @@
 
 Polymarket **guru-follow** trading stack on **NautilusTrader**: RTDS + Data API ingest, typed YAML config, deployment-based risk, and shadow or live execution via **`NautilusGuruExecutionPort`**.
 
-**Operators:** Risk caps use **Nautilus framework truth** (open orders + position cost basis for deployment), **not** wallet cash. **One bot, one dedicated wallet** is the supported model today; manual/UI or other bots on the same wallet can desync framework state. See **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)** § *Current status & operating model* and **[Docs/README.md](Docs/README.md)** for validation doc links.
+**Operators (live):** **Tier A** deployment and wallet-level reads use **`VenueState`** (fed by **WalletSync**) when `execution_mode: live` and **`wallet_sync_enabled`** (default on live). **Tier B** remains Nautilus **Cache** / **Portfolio** for this bot’s session and order lifecycle. **One bot, one dedicated wallet** is still the supported model; external activity is handled via Tier A updates, not by requiring strategy-side SELL audit events. See **[Docs/LIVE_ARCHITECTURE.md](Docs/LIVE_ARCHITECTURE.md)** and **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)**.
 
 ## Quick start
 
@@ -39,14 +39,15 @@ Opt-in network test: `set TYREX_NETWORK_TESTS=1 && pytest tests/test_resolution_
 | Doc | Purpose |
 |-----|---------|
 | **[Docs/README.md](Docs/README.md)** | Index and documentation map |
+| **[Docs/LIVE_ARCHITECTURE.md](Docs/LIVE_ARCHITECTURE.md)** | **Authoritative** live truth model: Tier A (VenueState) vs Tier B (Nautilus), workflow, caveats |
 | **[Docs/Architecture.md](Docs/Architecture.md)** | System layout, diagrams, shadow vs live |
 | **[Docs/developer_guide.md](Docs/developer_guide.md)** | Contributor boundaries and tests |
 | **[Docs/CONFIG_MODEL.md](Docs/CONFIG_MODEL.md)** | YAML reference |
 | **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)** | Operator runbook |
 | **[Docs/reporting_fact_model.md](Docs/reporting_fact_model.md)** | Structured reporting / joins |
-| **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)** § *Current status & operating model* | What is reliable today, limits, wallet model |
-| **[Docs/Implementation/current_state.md](Docs/Implementation/current_state.md)** | Implementation status hub |
-| **[Docs/Implementation/road_map.md](Docs/Implementation/road_map.md)** | **Archived** roadmap (historical) |
+| **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)** § *Current status & operating model* | Wallet model, limitations, reporting |
+| **[Docs/Implementation/current_state.md](Docs/Implementation/current_state.md)** | Pointer hub → LIVE_ARCHITECTURE + deep dives |
+| **[Docs/Implementation/road_map.md](Docs/Implementation/road_map.md)** | Governance one-pager (Tier A / Tier B) |
 | **[Docs/modules/README.md](Docs/modules/README.md)** | Per-package **README** + **DEVELOPER.md** |
 
 Dependency notes: **[Docs/dependency_lock.md](Docs/dependency_lock.md)** · Runbooks: **`Docs/Runbooks/`**.

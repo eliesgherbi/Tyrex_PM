@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.execution`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[Current state](../../Implementation/current_state.md)** · **[DEVELOPER.md](DEVELOPER.md)**
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md) · **[Current state](../../Implementation/current_state.md)** · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
@@ -28,7 +28,7 @@ Translate approved **`OrderIntent`** into **venue actions** (or deliberate no-op
 
 ## E. Status
 
-**Single live guru path:** **`NautilusGuruExecutionPort`** — guru orders align with **`Cache`** for risk pending exposure; optional book hooks from runtime YAML; always instrument grid quantize before submit.
+**Single live guru path:** **`NautilusGuruExecutionPort`** — submits through Nautilus (**Tier B** session). **Risk** deployment caps use **`VenueState`**-backed readers when live + wallet sync (**Tier A**); execution does not reimplement that math. Optional book hooks from runtime YAML; always instrument grid quantize before submit.
 
 ## F. Extension guidance
 

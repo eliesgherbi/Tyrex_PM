@@ -1,10 +1,10 @@
 # Module: `tyrex_pm.reporting`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [Fact model](../../reporting_fact_model.md) · [DEVELOPER.md](DEVELOPER.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md) · [Fact model](../../reporting_fact_model.md) · [DEVELOPER.md](DEVELOPER.md)
 
 ## A. Role
 
-**Structured observability for every run:** durable **`facts.jsonl`** (validated rows), optional **SQLite** ETL, **`summary.json` / `summary.md`** for operators and analysis. Records **strategy → risk → execution → venue** truth without embedding trading policy inside the reporting package.
+**Structured observability for every run:** durable **`facts.jsonl`** (validated rows), optional **SQLite** ETL, **`summary.json` / `summary.md`** for operators and analysis. Records **strategy → risk → execution** and **Tier A/Tier B** observability (`venue_state`, `wallet_sync`, `risk_decision`, order lifecycle) without embedding trading policy inside the reporting package.
 
 ## B. Boundaries
 
@@ -30,14 +30,14 @@
 
 ## D. Main interactions
 
-- **`scripts/run_guru.py`** / **`runtime/guru_compose.py`:** when `runtime.reporting_enabled`, build `RunContext`, pass `emit` into strategy, risk, execution, ingest actors.
+- **`scripts/run_guru.py`** / **`runtime/guru_compose.py`:** when `runtime.reporting_enabled`, build `RunContext`, pass `emit` into strategy, risk, execution, ingest actors, **`WalletSyncActor` / `VenueState`** emit sites.
 - **`risk/configured.py`:** emits `risk_decision`, `exposure`, `account_snapshot` (capital triggers).
 - **`strategy/copy_strategy.py`:** strategy/sizing facts; order events; optional `emit_capital_observation` on submit / denial.
 - **Operators:** `python -m tyrex_pm.reporting summarize --run-dir var/reporting/runs/<uuid>`.
 
 ## E. Status
 
-**Operational** for manifest, config snapshot, facts spine, lifecycle/fill/position paths, reconciliation, guru-vs-us summary, **capital facts** (canonical balance, CLOB normalization, venue denial flags). See [**reporting_fact_model.md**](../../reporting_fact_model.md).
+**Operational** for manifest, config snapshot, facts spine, lifecycle/fill/position paths, **`venue_state`** / **`wallet_sync`** / **`deployment_budget`** rows, guru-vs-us summary, **capital facts** (canonical balance, CLOB normalization, venue denial flags). See [**reporting_fact_model.md**](../../reporting_fact_model.md). (**Removed:** `position_reconciliation` fact type — do not document.)
 
 ## F. Extension guidance
 

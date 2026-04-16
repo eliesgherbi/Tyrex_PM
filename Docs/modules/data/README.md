@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.data`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[DEVELOPER.md](DEVELOPER.md)**
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md) · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## A. Role
 
@@ -37,6 +37,7 @@
 - **core:** emits `GuruTradeSignal`.
 - **strategy:** `CopyStrategy` subscribes to `GURU_TRADE_TOPIC` (see `guru_monitor.py`).
 - **runtime:** `guru_compose` constructs **`GuruMonitorActor`** and optionally **`GuruStreamActor`** from strategy + runtime settings.
+- **Tier A (not this package):** wallet / CLOB polling for **`VenueState`** is **`runtime/wallet_sync.py`** — keep guru ingest (`data/`) separate from venue snapshot actors.
 
 ## E. Status
 

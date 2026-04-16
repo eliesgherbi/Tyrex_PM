@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.indicator`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md)
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## A. Role
 

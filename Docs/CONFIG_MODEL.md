@@ -4,7 +4,7 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 
 **Navigation:** [README.md](README.md) · **Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
 
-**Framework truth vs wallet (read once):** **Token / portfolio deployment caps** compare **`portfolio_deploy` / `token_deploy`** built from **Nautilus `Cache` + `Portfolio`** (pending orders + open positions, cost-basis filled leg). **`capital_gate_enabled`** and **`min_collateral_balance_usd` / `min_allowance_usd` / `collateral_reserve_usd`** use a single **`runtime/capital/DefaultCapitalStateProvider`**: **Nautilus `Portfolio.account`** first; **py-clob** `get_balance_allowance` only **inside** that provider when mins/reserve/observability require it — **not** a second ad hoc HTTP path from risk. Operators: **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*.
+**Tier A vs Tier B (read once):** On **live** with **`wallet_sync_enabled: true`** (default), **deployment-budget** inputs and Tier A read boundaries prefer **`VenueState`** (HTTP snapshots + WalletSync) via **`state_readers`** / **`NautilusDeploymentBudget`**. **Pending** rests use venue-listed orders when wired; **filled** deployment uses venue position size × mark (see **`LIVE_ARCHITECTURE.md`**). **Shadow** or live with **`wallet_sync_enabled: false`** falls back to Nautilus **`Cache` + `Portfolio`** inside the same classes — for **capital gate**, **`DefaultCapitalStateProvider`** merges account / CLOB as documented; venue collateral is preferred when VenueState is wired. Operators: **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** · **[OPERATIONS.md](OPERATIONS.md)**.
 
 ## Repository layout (files on disk)
 
@@ -17,6 +17,8 @@ Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
 | `config/scenarios/live_validation/` | Bundled strategy + risk + **live** runtime for controlled live checks; see `README.md` there. |
 | `config/scenarios/bot_sell_validate/` | **Scenario A** — guru follow + `bot_sell_validate` block for bot-originated sell validation (isolated state paths); see [Implementation/validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md). |
 | `config/scenarios/layer_a_follow/` | **Layer A demo** — `filters:` with significance gates on (see folder `README.md`); isolated `var/scenarios/layer_a_follow/` state. |
+| `config/scenarios/venue_state_live/` | **Current live validation** — WalletSync + VenueState explicit keys; isolated `var/scenarios/venue_state_live/` (see folder `README.md`). |
+| `config/scenarios/position_reconciliation_validation/` | **Obsolete** scenario name — reconciliation removed; do not use for new runs (see folder `README.md`). |
 
 YAML is **flat** at the top level (except `token_filter` and optional nested `filters`): grouping is by **comments and key order** only. Loaders: `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings`.
 
@@ -56,7 +58,7 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 
 ## Risk (`RiskSettings` → `load_risk_settings`)
 
-**Deployment budget (one model):** Caps compare **USD deployed**, not marked-to-market portfolio value. **Per-order:** `order_deploy = price_ref × quantity` vs `max_notional_usd_per_order`. **Per-token:** `token_deploy` (pending + filled on that token) + `order_deploy` vs `max_token_notional_usd_open`. **Portfolio:** sum of pending + filled across Polymarket + `order_deploy` vs `max_portfolio_notional_usd_open`. **Pending** = resting `leaves_quantity × limit price` (venue-scoped). **Filled** = `abs(signed_qty) × avg_px_open` from open positions (cost basis). Implementation: `risk/configured.py`, `runtime/deployment_budget.py`.
+**Deployment budget (one model):** Caps compare **USD deployed**, not marked-to-market portfolio value. **Per-order:** `order_deploy = price_ref × quantity` vs `max_notional_usd_per_order`. **Per-token:** `token_deploy` (pending + filled on that token) + `order_deploy` vs `max_token_notional_usd_open`. **Portfolio:** sum of pending + filled across Polymarket + `order_deploy` vs `max_portfolio_notional_usd_open`. **Live + WalletSync:** **pending** and **filled** inputs are **venue-backed** when **`VenueState`** is composed; **filled** uses venue size × mark (fallback + fact on missing mark). **Without** VenueState (shadow / no wallet sync), **filled** reverts to Nautilus position cost basis and **pending** to cache-backed order lists. Implementation: `risk/configured.py`, `runtime/deployment_budget.py`. See **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)**.
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|-------|
@@ -144,6 +146,13 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 | **`startup_strict_shadow`** | no | **`false`** | When **true**, shadow runs the full readiness gate instead of immediate READY (§8.3). |
 | **`startup_allow_degraded_live`** | no | **`false`** | Live only — allow `DEGRADED` / `NO_NEW_ENTRIES` when tradable health is `DEGRADED_OMS` (§8.2.4). |
 | **`startup_not_ready_behavior`** | no | **`exit`** | After deadline still `NOT_READY`: **`exit`** → `node.stop()` + non-zero process exit; **`no_trade`** → keep process up, block all submits. |
+| **`wallet_sync_enabled`** | no | **`true` when `execution_mode` is `live`** | **`false`** in YAML forces off. If **`true`**, **`execution_mode`** must be **`live`**. Drives **`WalletSyncActor`** → **`VenueState`**. |
+| **`wallet_sync_poll_interval_seconds`** | no | **`15.0`** | Seconds between polls; must be **≥ 5.0**. |
+| **`wallet_sync_startup_deadline_seconds`** | no | **`120.0`** | Startup budget for first successful sync; must be **≥ 30.0**. |
+| **`wallet_sync_per_instrument_max_retries`** | no | **`3`** | Instrument resolution retries per cycle; must be **≥ 1**. |
+| **`venue_state_ttl_seconds`** | no | **`30.0`** | Staleness horizon for VenueState refresh; must be **> 0**. |
+| **`venue_state_cash_poll_interval_seconds`** | no | **`10.0`** | CLOB collateral poll cadence; must be **≥ 3.0**. |
+| **`venue_state_refresh_force_max_ms`** | no | **`500`** | Max blocking time when forcing cache price reads for marks; must be **≥ 1**. |
 
 **Derived (not YAML):** `polymarket_token_to_instrument` — built from non-empty `polymarket_instrument_ids`.
 
@@ -152,6 +161,8 @@ Empty list does **not** implicitly mean “all tokens” — use `enabled: false
 **Obsolete YAML (runtime — loader raises):** `venue_size_alignment_mode`, `execution_venue_normalize_enabled` — removed; order-size policy is risk YAML only; execution quantizes to instrument tick/step internally.
 
 **Removed keys (runtime YAML):** `polymarket_nautilus_live`, `polymarket_framework_submit` — **`live`** always uses Nautilus data/exec + framework submit; loader errors if these appear in YAML.
+
+**Removed keys (reconciliation / migration — do not use):** `position_reconciliation_enabled`, `position_reconciliation_shadow_mode`, `position_reconciliation_deferral_max`, `venue_state_reads_enabled`, `reconcile_venue_has_more`, `recently_reconciled_ttl_seconds`, `data_api_lag_tolerance_seconds` — stripped from loaders; see **LIVE_ARCHITECTURE.md** § obsolete settings.
 
 **Removed keys (risk YAML):** `max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, `fail_on_unresolved_position_for_token_cap` — replaced by the deployment-budget model (`CONFIG_MODEL.md` § Risk, `load_risk_settings` raises if present).
 

@@ -1,29 +1,23 @@
-# Scenario: `position_reconciliation_validation`
+# Scenario: `base`
 
-Two-phase live validation of the position reconciliation feature (venue-truth cache sync).
+Shared **template** runtime YAMLs for experiments. State files default under **`var/scenarios/base/`** (create the directory if missing).
 
-- **Strategy / Risk:** Identical to `layer_a_follow` — tight demo caps so portfolio cap is easily reached.
-- **Runtime (shadow):** `live_polymarket_shadow.yaml` — reconciliation pass runs and emits facts but does **not** mutate engine state. Use first.
-- **Runtime (live):** `live_polymarket_live.yaml` — reconciliation pass sends `PositionStatusReport` to the engine, mutating cache. Use after shadow validation passes.
+**Prefer** **[`../venue_state_live/`](../venue_state_live/)** for documented VenueState + wallet-sync validation and explicit `venue_state_*` keys.
+
+## Files
+
+| File | Role |
+|------|------|
+| `live_polymarket_live.yaml` | Live execution example with wallet sync + VenueState defaults (via loaders when keys omitted). |
+| `live_polymarket_shadow.yaml` | Same shape; adjust `trader_id` / phase tags for your run. |
 
 ## Quick start
 
-### Shadow mode (Phase 1)
-
 ```bash
 python scripts/run_guru.py \
-  --strategy-conf config/scenarios/position_reconciliation_validation/guru_follow.yaml \
-  --risk-conf config/scenarios/position_reconciliation_validation/guru_follow_risk.yaml \
-  --live-conf config/scenarios/position_reconciliation_validation/live_polymarket_shadow.yaml
+  --strategy-conf config/scenarios/base/guru_follow.yaml \
+  --risk-conf config/scenarios/base/guru_follow_risk.yaml \
+  --live-conf config/scenarios/base/live_polymarket_live.yaml
 ```
 
-### Live mode (Phase 2)
-
-```bash
-python scripts/run_guru.py \
-  --strategy-conf config/scenarios/position_reconciliation_validation/guru_follow.yaml \
-  --risk-conf config/scenarios/position_reconciliation_validation/guru_follow_risk.yaml \
-  --live-conf config/scenarios/position_reconciliation_validation/live_polymarket_live.yaml
-```
-
-See **`RUNBOOK.md`** for detailed validation steps, pass/fail criteria, and log/fact grep patterns.
+See **`RUNBOOK.md`** for where current validation lives (pointer to **`venue_state_live`**).

@@ -1,6 +1,6 @@
 # Module: `tyrex_pm.strategy`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [developer_guide](../../developer_guide.md) · **[DEVELOPER.md](DEVELOPER.md)**
+[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md) · [developer_guide](../../developer_guide.md) · **[DEVELOPER.md](DEVELOPER.md)**
 
 ## 1. General purpose of the strategy module
 
@@ -36,7 +36,7 @@
 ### Risk
 
 - Builds **`OrderIntent`** (correlation id, token, side, qty, `price_ref` from guru, reason from signal decision).
-- Calls **`self._risk.evaluate(intent)`**. Risk may **clip** or **bump** quantity per `max_notional_policy` / `min_notional_policy`; the returned intent is what flows to execution when approved. If rejected → `copy_skip` with `reason_code=risk_denied` and policy reason.
+- Calls **`self._risk.evaluate(intent)`**. Risk may **clip** or **bump** quantity per `max_notional_policy` / `min_notional_policy`; the returned intent is what flows to execution when approved. If rejected → `copy_skip` with `reason_code=risk_denied` and policy reason. **Deployment / capital gates** use **`runtime`** injected readers (**Tier A** **`VenueState`** when live + wallet sync — transparent to the strategy).
 
 ### Execution
 

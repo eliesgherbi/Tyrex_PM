@@ -167,6 +167,6 @@ Guru trade happens
 3. **Risk** = *whether your rules allow the intent*, including per-order min/max deploy (**deny** vs **clip**/**bump**), token/portfolio caps, and capital gates.
 4. **Execution** = *actually placing* the order (live) or not (shadow).
 
-5. **Deployment caps** (`portfolio_deploy`, token caps, pending limits) come from **Nautilus framework state** (open orders + open positions), **not** from wallet cash — USDC/allowance checks are a separate **capital gate**. **One bot, one wallet** is the supported live model; manual UI or other actors on the same wallet can desync framework truth until reconciliation catches up. Read **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model* and the validation index in **[README.md](README.md)**.
+5. **Deployment caps** on **live** use **Tier A** (**VenueState** / **WalletSync**) for wallet-level pending + filled math when composed; **Tier B** (Nautilus) is still the session/order lifecycle. USDC/allowance checks are a separate **capital gate**. **One bot, one wallet** remains the supported model; external activity is reflected in **VenueState** + **`risk_decision`** / **`deployment_budget`** facts — not by requiring strategy-side SELL events. Read **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** and **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*.
 
 If you want, we can take **one line from your `facts.jsonl`** (e.g. one `sizing` + one `risk_decision`) and walk through that exact trade with your real parameters step by step.

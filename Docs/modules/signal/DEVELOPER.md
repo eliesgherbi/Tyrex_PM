@@ -1,10 +1,10 @@
 # Developer guide — `tyrex_pm.signal`
 
-[README](README.md) · [Architecture](../../Architecture.md)
+[README](README.md) · [Architecture](../../Architecture.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 
-**Pure policy and sizing:** given a `GuruTradeSignal`, compute **accept/reject** for entry or exit and **follower quantity** at strategy baseline — **no** HTTP, **no** `Cache`, **no** risk notional caps (those are **`risk/`**).
+**Pure policy and sizing:** given a `GuruTradeSignal`, compute **accept/reject** for entry or exit and **follower quantity** at strategy baseline — **no** HTTP, **no** direct `Cache` / **`VenueState`** imports (Layer A **`full_exit`** uses **`LayerAContext`** injected from **`runtime`**, which may be venue-backed). **Risk** notional caps stay in **`risk/`**.
 
 ## Components
 

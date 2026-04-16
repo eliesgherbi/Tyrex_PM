@@ -1,11 +1,14 @@
 """
 **Deployment budget** — single accounting basis for per-order, per-token, and portfolio caps.
 
-**Pending deployment:** sum of ``leaves_quantity × limit_price`` for open Polymarket orders
-(venue-scoped); BUY and SELL resting orders both add positive USD to pending deployment.
+**Live + VenueState (Tier A):** **pending** uses venue resting orders via
+:class:`~tyrex_pm.runtime.state_readers.NautilusExecutionStateReader` when wired; **filled**
+uses :func:`~tyrex_pm.runtime.venue_state.filled_deployment_usd_venue` (size × mark; missing
+mark → fallback + ``venue_state_missing_mark`` fact).
 
-**Filled deployment:** per open position, ``abs(signed_qty) × avg_px_open`` (entry-style
-notional from Nautilus position state — **no** live mark / ``net_exposure`` / cache quote).
+**Without VenueState** (shadow or ``wallet_sync_enabled: false``): **pending** uses Nautilus
+``Cache`` open orders; **filled** uses ``abs(signed_qty) × avg_px_open`` from Nautilus positions
+(cost basis — **no** live mark / ``net_exposure``).
 
 Caps in :class:`~tyrex_pm.risk.configured.ConfiguredRiskPolicy` compare ``order_deploy``,
 ``token_deploy + order_deploy``, and ``portfolio_deploy + order_deploy`` against YAML limits.
@@ -60,12 +63,14 @@ def position_entry_deployment_usd(position: Any) -> float | None:
 
 class NautilusDeploymentBudget:
     """
-    Canonical deployment read path: Polymarket venue, this node's ``Cache`` / ``Portfolio`` /
-    open orders (same scope as historical framework-truth gates).
+    Canonical deployment accounting for risk caps.
 
-    When ``venue_state`` is set (live wallet sync), **filled** deployment uses
+    When ``venue_state`` is set (**live** + wallet sync), **filled** deployment uses
     venue size × mark (fallback 0.5 + ``venue_state_missing_mark`` fact); **pending** uses
-    venue resting orders via the execution reader.
+    venue resting orders via :class:`~tyrex_pm.runtime.state_readers.NautilusExecutionStateReader`.
+
+    When ``venue_state`` is ``None``, **filled** uses Nautilus open-position cost basis and
+    **pending** uses cache-backed open orders — shadow / unwired live only.
     """
 
     __slots__ = (

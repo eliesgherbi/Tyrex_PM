@@ -1,6 +1,6 @@
 # Developer guide — `tyrex_pm.risk`
 
-[README](README.md) · [Architecture](../../Architecture.md) · [CONFIG_MODEL](../../CONFIG_MODEL.md)
+[README](README.md) · [Architecture](../../Architecture.md) · [CONFIG_MODEL](../../CONFIG_MODEL.md) · [LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)
 
 ## Responsibility
 
@@ -12,13 +12,13 @@
 CopyStrategy → OrderIntent → ConfiguredRiskPolicy.evaluate → ExecutionPort
 ```
 
-Risk runs **after** strategy sizing and **before** any venue submit. It must **not** decide whether the guru trade “counts” as a copy candidate (that is `signal/` + strategy). It **does** decide economic caps, collateral, and deployment accounting on **live** framework state.
+Risk runs **after** strategy sizing and **before** any venue submit. It must **not** decide whether the guru trade “counts” as a copy candidate (that is `signal/` + strategy). It **does** decide economic caps, collateral, and deployment accounting using **injected readers** — on **live** with wallet sync, **Tier A** (**VenueState**) for deployment inputs; **Tier B** (Nautilus) only when Tier A is not wired.
 
 ## Core types
 
 - **`RiskPolicy`** (`policy.py`) — protocol: `evaluate(intent) -> (bool, reason)`.
 - **`ConfiguredRiskPolicy`** (`configured.py`) — production implementation: reads **`RiskSettings`**, uses injected **readers** and optional **`NautilusDeploymentBudget`**.
-- **`NautilusDeploymentBudget`** (`runtime/deployment_budget.py`) — pending USD (open order leaves × limit) + filled USD (position × avg open) per token and portfolio.
+- **`NautilusDeploymentBudget`** (`runtime/deployment_budget.py`) — pending USD + filled USD per token and portfolio; **filled** uses **venue size × mark** when **`VenueState`** is set, else Nautilus **avg_px_open × qty**.
 
 ## Injected dependencies (live)
 
@@ -53,7 +53,7 @@ When `RunContext` is active, `configured.py` emits **`risk_decision`**, **`accou
 
 ## Pitfalls
 
-- **Mark vs deploy:** caps are **not** mark-to-market; they use **limit price × leaves** and **avg_px_open × qty** for positions.
+- **Mark vs deploy:** caps are **not** full portfolio mark-to-market; **pending** uses limit × leaves; **filled** with Tier A uses **venue × mark** (fallback + fact if mark missing), else **avg_px_open × qty** from Nautilus positions.
 - **Unresolved positions:** strict flags can deny with `RISK_*_DEPLOYMENT_UNRESOLVED` until `Portfolio` is usable — operational, not necessarily “wrong YAML.”
 - **Min notional in risk vs venue min quantity:** risk floors are **USD deploy**; venue **min_quantity** is enforced later — may yield **`exec_instrument_quantize_skip`** without a risk deny.
 
