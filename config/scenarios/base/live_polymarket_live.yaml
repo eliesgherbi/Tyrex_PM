@@ -55,6 +55,9 @@ wallet_sync_poll_interval_seconds: 15.0
 wallet_sync_startup_deadline_seconds: 120.0
 wallet_sync_per_instrument_max_retries: 3
 
+# Tier A reads from VenueState (production cutover — Step 4).
+venue_state_reads_enabled: true
+
 polymarket_use_data_api_for_positions: true
 
 # --- Position Reconciliation (LIVE — engine mutation active) ------------------
