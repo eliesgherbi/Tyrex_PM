@@ -188,6 +188,24 @@ _REQUIRED: dict[str, frozenset[str]] = {
             "reconciliation_sent",
         },
     ),
+    "venue_state": frozenset(
+        {
+            "status",
+            "position_count",
+            "resting_order_count",
+            "cash_ready",
+            "ttl_seconds",
+            "cash_poll_interval_seconds",
+            "last_positions_success_utc",
+            "last_cash_success_utc",
+        },
+    ),
+    "venue_state_missing_mark": frozenset(
+        {
+            "instrument_id",
+            "fallback_price",
+        },
+    ),
 }
 
 

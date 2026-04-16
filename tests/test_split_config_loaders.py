@@ -582,3 +582,49 @@ def test_wallet_sync_per_instrument_retries_floor(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="wallet_sync_per_instrument_max_retries"):
         load_runtime_settings(p)
+
+
+def test_venue_state_defaults(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump({"trader_id": "A-001", "execution_mode": "live"}),
+        encoding="utf-8",
+    )
+    r = load_runtime_settings(p)
+    assert r.venue_state_reads_enabled is False
+    assert r.venue_state_ttl_seconds == 30.0
+    assert r.venue_state_cash_poll_interval_seconds == 10.0
+    assert r.venue_state_refresh_force_max_ms == 500
+
+
+def test_venue_state_cash_poll_floor(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "venue_state_cash_poll_interval_seconds": 2.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="venue_state_cash_poll_interval_seconds"):
+        load_runtime_settings(p)
+
+
+def test_venue_state_reads_requires_wallet_sync(tmp_path: Path) -> None:
+    p = tmp_path / "live.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "trader_id": "A-001",
+                "execution_mode": "live",
+                "wallet_sync_enabled": False,
+                "venue_state_reads_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="venue_state_reads_enabled"):
+        load_runtime_settings(p)

@@ -61,6 +61,7 @@ from tyrex_pm.runtime.tradable_state import (
 )
 from tyrex_pm.runtime.deployment_budget import NautilusDeploymentBudget
 from tyrex_pm.runtime.layer_a_context import NautilusLayerAContext
+from tyrex_pm.runtime.venue_state import VenueState, VenueStateConfig
 from tyrex_pm.runtime.state_readers import (
     ClobAllowanceStateProvider,
     NautilusAccountSnapshotProvider,
@@ -321,8 +322,32 @@ def build_guru_trading_node(
         node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
         node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
 
-    exec_reader = NautilusExecutionStateReader(node.cache)
-    account_provider = NautilusAccountSnapshotProvider(node.portfolio)
+    venue_state: VenueState | None = None
+    if live and runtime.wallet_sync_enabled:
+        venue_state = VenueState(
+            config=VenueStateConfig(
+                ttl_seconds=float(runtime.venue_state_ttl_seconds),
+                cash_poll_interval_seconds=float(
+                    runtime.venue_state_cash_poll_interval_seconds,
+                ),
+                refresh_force_max_blocking_ms=int(
+                    runtime.venue_state_refresh_force_max_ms,
+                ),
+            ),
+            cache=node.cache,
+            fact_emit=emit,
+        )
+
+    exec_reader = NautilusExecutionStateReader(
+        node.cache,
+        venue_state=venue_state,
+        venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
+    )
+    account_provider = NautilusAccountSnapshotProvider(
+        node.portfolio,
+        venue_state=venue_state,
+        venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
+    )
     allowance_provider: ClobAllowanceStateProvider | None = None
     if runtime.execution_mode == "live":
         allowance_provider = ClobAllowanceStateProvider.from_runtime(runtime)
@@ -334,12 +359,16 @@ def build_guru_trading_node(
             node.portfolio,
             node.cache,
             dict(runtime.polymarket_token_to_instrument),
+            venue_state=venue_state,
+            venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
         )
         deployment_agg = NautilusDeploymentBudget(
             node.portfolio,
             node.cache,
             exec_reader,
             dict(runtime.polymarket_token_to_instrument),
+            venue_state=venue_state,
+            venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
         )
 
     _cap_obs = (
@@ -384,6 +413,7 @@ def build_guru_trading_node(
             clob_client=_ws_clob,
             dynamic_controller=_ws_ctrl,
             fact_emit=emit,
+            venue_state=venue_state,
         )
 
     # WP2 — ``NautilusLiveExecutionHealthSource``: ``LiveExecutionEngine`` startup reconciliation
@@ -416,6 +446,15 @@ def build_guru_trading_node(
         exec_pred = NautilusExecEngineClientsConnected(node.kernel.exec_engine)
     else:
         exec_pred = SpikePendingExecClientsConnected()
+    def _wallet_sync_and_venue_cash_ready() -> bool:
+        if wallet_sync_actor is None:
+            return True
+        if not wallet_sync_actor.first_sync_complete:
+            return False
+        if venue_state is not None and not venue_state.venue_state_cash_ready:
+            return False
+        return True
+
     startup_readiness_gate = StartupReadinessGate(
         runtime=runtime,
         risk=risk,
@@ -424,7 +463,7 @@ def build_guru_trading_node(
         cache=node.cache,
         exec_connected=exec_pred,
         wallet_sync_ready=(
-            (lambda: wallet_sync_actor.first_sync_complete)
+            _wallet_sync_and_venue_cash_ready
             if wallet_sync_actor is not None
             else None
         ),
@@ -559,11 +598,15 @@ def build_guru_trading_node(
             node.portfolio,
             node.cache,
             dict(runtime.polymarket_token_to_instrument),
+            venue_state=venue_state,
+            venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
         ),
     )
     if strategy.bot_sell_validate is not None:
         assert isinstance(strat, BotSellValidateStrategy)
         strat.set_pricing_runtime(runtime)
+        strat._tyrex_venue_state = venue_state
+        strat._tyrex_venue_state_reads_enabled = bool(runtime.venue_state_reads_enabled)
     if run_context is not None:
         strat.set_reporting_emit(emit)
         strat.set_order_correlation_registry(order_registry)

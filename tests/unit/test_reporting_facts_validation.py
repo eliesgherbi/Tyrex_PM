@@ -197,6 +197,22 @@ def _p(ft: str) -> dict:
             "defer_count": 0,
             "reconciliation_sent": True,
         }
+    if ft == "venue_state":
+        return {
+            "status": "ok",
+            "position_count": 0,
+            "resting_order_count": 0,
+            "cash_ready": False,
+            "ttl_seconds": 30.0,
+            "cash_poll_interval_seconds": 10.0,
+            "last_positions_success_utc": _ISO,
+            "last_cash_success_utc": _ISO,
+        }
+    if ft == "venue_state_missing_mark":
+        return {
+            "instrument_id": "YES-1234..POLYMARKET",
+            "fallback_price": 0.5,
+        }
     raise AssertionError(f"add golden payload for {ft}")
 
 

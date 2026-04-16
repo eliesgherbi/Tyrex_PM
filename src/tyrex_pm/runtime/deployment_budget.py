@@ -27,6 +27,7 @@ from tyrex_pm.runtime.state_readers import (
     NautilusExecutionStateReader,
     instrument_id_for_outcome_token,
 )
+from tyrex_pm.runtime.venue_state import filled_deployment_usd_venue
 
 
 def _decimal_or_float(x: Any) -> float | None:
@@ -61,9 +62,20 @@ class NautilusDeploymentBudget:
     """
     Canonical deployment read path: Polymarket venue, this node's ``Cache`` / ``Portfolio`` /
     open orders (same scope as historical framework-truth gates).
+
+    When ``venue_state_reads_enabled`` and ``venue_state`` are set, **filled** deployment uses
+    venue size × mark (fallback 0.5 + ``venue_state_missing_mark`` fact); **pending** uses
+    venue resting orders via the execution reader.
     """
 
-    __slots__ = ("_cache", "_portfolio", "_exec", "_static")
+    __slots__ = (
+        "_cache",
+        "_portfolio",
+        "_exec",
+        "_static",
+        "_venue_state",
+        "_venue_state_reads_enabled",
+    )
 
     def __init__(
         self,
@@ -71,11 +83,16 @@ class NautilusDeploymentBudget:
         cache: Cache,
         execution_reader: NautilusExecutionStateReader,
         static_token_to_instrument: Mapping[str, str],
+        *,
+        venue_state: Any | None = None,
+        venue_state_reads_enabled: bool = False,
     ) -> None:
         self._portfolio = portfolio
         self._cache = cache
         self._exec = execution_reader
         self._static = static_token_to_instrument
+        self._venue_state = venue_state
+        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     def order_deploy_usd(self, price_ref: float | None, quantity: float) -> float | None:
         """``price_ref * quantity`` when price present; else ``None``."""
@@ -142,8 +159,16 @@ class NautilusDeploymentBudget:
         Sum filled deployment across **open** Polymarket positions.
 
         Returns ``(sum, complete)``. ``complete`` is ``False`` if any non-flat position
-        yields ``None`` from :func:`position_entry_deployment_usd`.
+        yields ``None`` from :func:`position_entry_deployment_usd` (cache path), or venue
+        filled leg cannot be resolved (Tier A path).
         """
+        if self._venue_state_reads_enabled and self._venue_state is not None:
+            return filled_deployment_usd_venue(
+                venue_state=self._venue_state,
+                cache=self._cache,
+                venue_state_reads_enabled=True,
+                token_id_filter=None,
+            )
         total = 0.0
         try:
             positions = self._cache.positions_open(venue=POLYMARKET_VENUE_ID)
@@ -163,6 +188,13 @@ class NautilusDeploymentBudget:
 
     def filled_usd_for_token(self, token_id: str) -> tuple[float, bool]:
         """Filled deployment for ``token_id`` (open positions only)."""
+        if self._venue_state_reads_enabled and self._venue_state is not None:
+            return filled_deployment_usd_venue(
+                venue_state=self._venue_state,
+                cache=self._cache,
+                venue_state_reads_enabled=True,
+                token_id_filter=str(token_id),
+            )
         iid_target = instrument_id_for_outcome_token(
             self._cache,
             token_id,

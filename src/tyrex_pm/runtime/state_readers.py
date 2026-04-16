@@ -30,6 +30,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
+# VenueState imported lazily where needed to avoid import cycles with venue_state.py.
+
 from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
 from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_token_id
 from nautilus_trader.cache.cache import Cache
@@ -222,14 +224,23 @@ class NautilusExecutionStateReader:
     """
     Canonical Tyrex read path for **open orders** and **order lookup**.
 
-    Reads **only** from the live ``TradingNode``'s ``Cache``
-    (**Spike-observed** / **Package-source-confirmed**).
+    When ``venue_state_reads_enabled`` and ``venue_state`` are set, **Tier A**
+    ``list_open_orders`` reads venue CLOB snapshot (via :class:`~tyrex_pm.runtime.venue_state.VenueState`).
+    Otherwise **Package-source-confirmed:** ``Cache.orders_open(...)``.
     """
 
-    __slots__ = ("_cache",)
+    __slots__ = ("_cache", "_venue_state", "_venue_state_reads_enabled")
 
-    def __init__(self, cache: Cache) -> None:
+    def __init__(
+        self,
+        cache: Cache,
+        *,
+        venue_state: Any | None = None,
+        venue_state_reads_enabled: bool = False,
+    ) -> None:
         self._cache = cache
+        self._venue_state = venue_state
+        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     @property
     def cache(self) -> Cache:
@@ -242,8 +253,23 @@ class NautilusExecutionStateReader:
         instrument_id: InstrumentId | None = None,
     ) -> tuple[OrderSnapshot, ...]:
         """
-        **Package-source-confirmed:** ``Cache.orders_open(venue=..., instrument_id=...)``.
+        **Package-source-confirmed:** ``Cache.orders_open(venue=..., instrument_id=...)`` when
+        Tier A flag is off; otherwise venue resting orders from ``VenueState``.
         """
+        if self._venue_state_reads_enabled and self._venue_state is not None:
+            snaps = self._venue_state.orders_resting()
+            out: list[OrderSnapshot] = []
+            for s in snaps:
+                try:
+                    iid = InstrumentId.from_str(s.instrument_id)
+                except ValueError:
+                    continue
+                if venue is not None and iid.venue != venue:
+                    continue
+                if instrument_id is not None and iid != instrument_id:
+                    continue
+                out.append(s)
+            return tuple(out)
         orders = self._cache.orders_open(
             venue=venue,
             instrument_id=instrument_id,
@@ -293,21 +319,58 @@ class NautilusExecutionStateReader:
 
 class NautilusAccountSnapshotProvider:
     """
-    Reads **framework account** state via ``Portfolio.account(venue)``.
+    Reads **framework account** state via ``Portfolio.account(venue)``, or **Tier A**
+    collateral from :class:`~tyrex_pm.runtime.venue_state.VenueState` when enabled.
 
     Until the Polymarket exec client has emitted account events, ``account_present`` may
     be false — **Docs-confirmed** / **Spike-observed** lifecycle.
     """
 
-    __slots__ = ("_portfolio", "_venue")
+    __slots__ = ("_portfolio", "_venue", "_venue_state", "_venue_state_reads_enabled")
 
-    def __init__(self, portfolio: Portfolio, venue: Venue | None = None) -> None:
+    def __init__(
+        self,
+        portfolio: Portfolio,
+        venue: Venue | None = None,
+        *,
+        venue_state: Any | None = None,
+        venue_state_reads_enabled: bool = False,
+    ) -> None:
         self._portfolio = portfolio
         self._venue = venue or POLYMARKET_VENUE_ID
+        self._venue_state = venue_state
+        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     def snapshot(self) -> AccountSnapshot:
         """Timestamped snapshot; capture time always recorded."""
         ts = _utc_now()
+        if self._venue_state_reads_enabled and self._venue_state is not None:
+            free_d = self._venue_state.cash_free()
+            total_d = self._venue_state.cash_total()
+            if free_d is None and total_d is None:
+                return AccountSnapshot(
+                    venue=str(self._venue),
+                    captured_at_utc=ts,
+                    account_present=False,
+                    balances=None,
+                    raw_summary=None,
+                )
+            cf = float(free_d) if free_d is not None else 0.0
+            ct = float(total_d) if total_d is not None else cf
+            balances = {
+                "currency": "USDC",
+                "free": str(cf),
+                "locked": "0.0",
+                "total": str(ct),
+                "venue_state_source": True,
+            }
+            return AccountSnapshot(
+                venue=str(self._venue),
+                captured_at_utc=ts,
+                account_present=True,
+                balances=balances,
+                raw_summary=None,
+            )
         acc = self._portfolio.account(self._venue)
         if acc is None:
             return AccountSnapshot(
@@ -382,26 +445,31 @@ class ClobAllowanceStateProvider:
 
 class NautilusPositionStateReader:
     """
-    Best-effort **marked** USD exposure via ``Portfolio.net_exposure`` (given an explicit mark).
+    Best-effort **marked** USD exposure via ``Portfolio.net_exposure`` (given an explicit mark),
+    or ``abs(venue size) × mark`` when Tier A is enabled.
 
     Used for **reporting** / diagnostics (e.g. ``position`` facts). **Not** used for pre-trade
-    deployment caps — those use :class:`~tyrex_pm.runtime.deployment_budget.NautilusDeploymentBudget`
-    (``abs(qty) × avg_px_open`` cost basis, no live mark).
+    deployment caps — those use :class:`~tyrex_pm.runtime.deployment_budget.NautilusDeploymentBudget`.
 
-    **Adapter-dependent:** position events must keep ``Portfolio`` aligned with venue holdings.
+    **Adapter-dependent (flag off):** position events must keep ``Portfolio`` aligned with venue holdings.
     """
 
-    __slots__ = ("_portfolio", "_cache", "_static")
+    __slots__ = ("_portfolio", "_cache", "_static", "_venue_state", "_venue_state_reads_enabled")
 
     def __init__(
         self,
         portfolio: Portfolio,
         cache: Cache,
         static_token_to_instrument: Mapping[str, str],
+        *,
+        venue_state: Any | None = None,
+        venue_state_reads_enabled: bool = False,
     ) -> None:
         self._portfolio = portfolio
         self._cache = cache
         self._static = static_token_to_instrument
+        self._venue_state = venue_state
+        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     def instrument_id_for_token(self, token_id: str) -> InstrumentId | None:
         return instrument_id_for_outcome_token(
@@ -429,6 +497,12 @@ class NautilusPositionStateReader:
         inst = self._cache.instrument(iid)
         if inst is None:
             return None
+        if self._venue_state_reads_enabled and self._venue_state is not None:
+            sz = self._venue_state.position_size(iid)
+            if sz is None:
+                return 0.0
+            q = abs(float(sz))
+            return q * float(mark_price)
         try:
             px = inst.make_price(Decimal(str(mark_price)))
         except (ValueError, TypeError, ArithmeticError):

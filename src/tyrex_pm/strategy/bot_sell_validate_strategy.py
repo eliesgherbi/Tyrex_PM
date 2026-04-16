@@ -197,6 +197,8 @@ def resolve_validation_sell_quantity(
     instrument_id: InstrumentId,
     quantity_from_buy_fill: float,
     haircut_bps: float,
+    venue_state: Any | None = None,
+    venue_state_reads_enabled: bool = False,
 ) -> tuple[float, dict[str, Any]]:
     """
     Scenario A **validation SELL** size: ``min(BUY filled, long inventory after optional haircut)``,
@@ -232,10 +234,10 @@ def resolve_validation_sell_quantity(
     if q_in <= 0:
         return 0.0, out | {"resolution_note": "non_positive_buy_fill"}
 
-    if portfolio is None or cache is None:
+    if cache is None:
         return q_in, out | {
-            "resolution_note": "portfolio_or_cache_unavailable",
-            "validation_inventory_haircut_note": "haircut_skipped_no_portfolio_cache",
+            "resolution_note": "cache_unavailable",
+            "validation_inventory_haircut_note": "haircut_skipped_no_cache",
         }
 
     inst = cache.instrument(instrument_id)
@@ -245,8 +247,17 @@ def resolve_validation_sell_quantity(
             "validation_inventory_haircut_note": "haircut_skipped_no_instrument",
         }
 
-    net = portfolio.net_position(instrument_id)
-    inv_long = max(0.0, _float_portfolio_net(net))
+    if venue_state_reads_enabled and venue_state is not None:
+        sz = venue_state.position_size(instrument_id)
+        inv_long = max(0.0, float(sz)) if sz is not None else 0.0
+    else:
+        if portfolio is None:
+            return q_in, out | {
+                "resolution_note": "portfolio_or_cache_unavailable",
+                "validation_inventory_haircut_note": "haircut_skipped_no_portfolio_cache",
+            }
+        net = portfolio.net_position(instrument_id)
+        inv_long = max(0.0, _float_portfolio_net(net))
     out["portfolio_net_long"] = inv_long
     out["inventory_long_before_haircut"] = inv_long
     raw_before = min(q_in, inv_long)
@@ -825,6 +836,10 @@ class BotSellValidateStrategy(CopyStrategy):
             instrument_id=instrument_id,
             quantity_from_buy_fill=float(quantity_from_buy_fill),
             haircut_bps=float(self._vcfg.validation_sell_inventory_haircut_bps),
+            venue_state=getattr(self, "_tyrex_venue_state", None),
+            venue_state_reads_enabled=bool(
+                getattr(self, "_tyrex_venue_state_reads_enabled", False),
+            ),
         )
 
         em0 = self._reporting_emit

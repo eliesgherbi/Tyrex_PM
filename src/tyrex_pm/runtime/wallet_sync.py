@@ -184,11 +184,13 @@ class WalletSyncActor(Actor):
         *,
         fact_emit: Callable[[str, dict[str, Any]], None] | None = None,
         positions_fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+        venue_state: Any | None = None,
     ) -> None:
         super().__init__()
         self._wsconfig = config
         self._clob = clob_client
         self._dynamic_ctrl = dynamic_controller
+        self._venue_state = venue_state
         self._known_condition_ids: set[str] = set()
         self._first_sync_complete: bool = False
         self._unresolvable_condition_ids: dict[str, UnresolvableEntry] = {}
@@ -467,6 +469,15 @@ class WalletSyncActor(Actor):
         self._sync_count += 1
 
         self._maybe_emit_timeout_fact()
+
+        # --- VenueState snapshot (same executor thread; no duplicate HTTP) ---
+        if self._venue_state is not None:
+            self._venue_state.apply_positions_and_orders_rows(
+                position_rows=positions,
+                orders_raw=orders,
+                ts_utc=datetime.now(tz=UTC),
+            )
+            self._venue_state.maybe_poll_clob_balance(self._clob)
 
         # --- Position reconciliation pass ---
         recon_actions: list[ReconciliationAction] = []
