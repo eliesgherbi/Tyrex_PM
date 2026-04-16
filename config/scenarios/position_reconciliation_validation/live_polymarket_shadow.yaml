@@ -59,7 +59,7 @@ wallet_sync_per_instrument_max_retries: 3
 polymarket_use_data_api_for_positions: true
 
 # --- Position Reconciliation (SHADOW — observe-only) --------------------------
-position_reconciliation_enabled: true
+position_reconciliation_enabled: false
 position_reconciliation_shadow_mode: true
 data_api_lag_tolerance_seconds: 60.0
 position_reconciliation_deferral_max: 5
