@@ -26,5 +26,5 @@ def test_venue_state_cash_ready_after_balance() -> None:
 
 def test_execution_reader_flag_off_uses_cache() -> None:
     c = _minimal_cache()
-    r = NautilusExecutionStateReader(c, venue_state=None, venue_state_reads_enabled=False)
+    r = NautilusExecutionStateReader(c, venue_state=None)
     assert r.list_open_orders(venue=None) == ()

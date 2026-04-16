@@ -155,18 +155,6 @@ class NautilusLiveExecutionHealthSource:
                     ),
                 )
 
-            # Rule 6.5: stuck reconciliation deferrals
-            if ws.stuck_deferral_count > 0:
-                return TradableStateHealthSnapshot(
-                    level=TradableStateHealth.DEGRADED_OMS,
-                    reason_code="position_reconciliation_stuck",
-                    observed_at_utc=now,
-                    framework_detail=(
-                        f"{ws.stuck_deferral_count} position reconciliation(s) "
-                        "deferred past maximum; cache may be stale"
-                    ),
-                )
-
         # Rule 7: healthy
         return TradableStateHealthSnapshot(
             level=TradableStateHealth.HEALTHY,

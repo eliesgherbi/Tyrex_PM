@@ -57,14 +57,6 @@ wallet_sync_per_instrument_max_retries: 3
 
 polymarket_use_data_api_for_positions: true
 
-# --- Position Reconciliation (LIVE — engine mutation active) ------------------
-position_reconciliation_enabled: false
-position_reconciliation_shadow_mode: false
-data_api_lag_tolerance_seconds: 60.0
-position_reconciliation_deferral_max: 5
-recently_reconciled_ttl_seconds: 60.0
-reconcile_venue_has_more: false
-
 # --- Reconciliation intervals -------------------------------------------------
 exec_position_check_interval_seconds: 45
 exec_open_check_interval_seconds: 20

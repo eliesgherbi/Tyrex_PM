@@ -224,23 +224,21 @@ class NautilusExecutionStateReader:
     """
     Canonical Tyrex read path for **open orders** and **order lookup**.
 
-    When ``venue_state_reads_enabled`` and ``venue_state`` are set, **Tier A**
-    ``list_open_orders`` reads venue CLOB snapshot (via :class:`~tyrex_pm.runtime.venue_state.VenueState`).
+    When ``venue_state`` is set (live wallet sync), **Tier A** ``list_open_orders`` reads the
+    venue CLOB snapshot (via :class:`~tyrex_pm.runtime.venue_state.VenueState`).
     Otherwise **Package-source-confirmed:** ``Cache.orders_open(...)``.
     """
 
-    __slots__ = ("_cache", "_venue_state", "_venue_state_reads_enabled")
+    __slots__ = ("_cache", "_venue_state")
 
     def __init__(
         self,
         cache: Cache,
         *,
         venue_state: Any | None = None,
-        venue_state_reads_enabled: bool = False,
     ) -> None:
         self._cache = cache
         self._venue_state = venue_state
-        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     @property
     def cache(self) -> Cache:
@@ -256,7 +254,7 @@ class NautilusExecutionStateReader:
         **Package-source-confirmed:** ``Cache.orders_open(venue=..., instrument_id=...)`` when
         Tier A flag is off; otherwise venue resting orders from ``VenueState``.
         """
-        if self._venue_state_reads_enabled and self._venue_state is not None:
+        if self._venue_state is not None:
             snaps = self._venue_state.orders_resting()
             out: list[OrderSnapshot] = []
             for s in snaps:
@@ -320,13 +318,13 @@ class NautilusExecutionStateReader:
 class NautilusAccountSnapshotProvider:
     """
     Reads **framework account** state via ``Portfolio.account(venue)``, or **Tier A**
-    collateral from :class:`~tyrex_pm.runtime.venue_state.VenueState` when enabled.
+    collateral from :class:`~tyrex_pm.runtime.venue_state.VenueState` when that object is wired.
 
     Until the Polymarket exec client has emitted account events, ``account_present`` may
     be false — **Docs-confirmed** / **Spike-observed** lifecycle.
     """
 
-    __slots__ = ("_portfolio", "_venue", "_venue_state", "_venue_state_reads_enabled")
+    __slots__ = ("_portfolio", "_venue", "_venue_state")
 
     def __init__(
         self,
@@ -334,17 +332,15 @@ class NautilusAccountSnapshotProvider:
         venue: Venue | None = None,
         *,
         venue_state: Any | None = None,
-        venue_state_reads_enabled: bool = False,
     ) -> None:
         self._portfolio = portfolio
         self._venue = venue or POLYMARKET_VENUE_ID
         self._venue_state = venue_state
-        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     def snapshot(self) -> AccountSnapshot:
         """Timestamped snapshot; capture time always recorded."""
         ts = _utc_now()
-        if self._venue_state_reads_enabled and self._venue_state is not None:
+        if self._venue_state is not None:
             free_d = self._venue_state.cash_free()
             total_d = self._venue_state.cash_total()
             if free_d is None and total_d is None:
@@ -454,7 +450,7 @@ class NautilusPositionStateReader:
     **Adapter-dependent (flag off):** position events must keep ``Portfolio`` aligned with venue holdings.
     """
 
-    __slots__ = ("_portfolio", "_cache", "_static", "_venue_state", "_venue_state_reads_enabled")
+    __slots__ = ("_portfolio", "_cache", "_static", "_venue_state")
 
     def __init__(
         self,
@@ -463,13 +459,11 @@ class NautilusPositionStateReader:
         static_token_to_instrument: Mapping[str, str],
         *,
         venue_state: Any | None = None,
-        venue_state_reads_enabled: bool = False,
     ) -> None:
         self._portfolio = portfolio
         self._cache = cache
         self._static = static_token_to_instrument
         self._venue_state = venue_state
-        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     def instrument_id_for_token(self, token_id: str) -> InstrumentId | None:
         return instrument_id_for_outcome_token(
@@ -497,7 +491,7 @@ class NautilusPositionStateReader:
         inst = self._cache.instrument(iid)
         if inst is None:
             return None
-        if self._venue_state_reads_enabled and self._venue_state is not None:
+        if self._venue_state is not None:
             sz = self._venue_state.position_size(iid)
             if sz is None:
                 return 0.0

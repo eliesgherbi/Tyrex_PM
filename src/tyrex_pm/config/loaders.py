@@ -289,20 +289,6 @@ class RuntimeSettings:
     wallet_sync_startup_deadline_seconds: float = 120.0
     #: Max cycles a single condition_id may fail resolution before terminal. Floor: 1.
     wallet_sync_per_instrument_max_retries: int = 3
-    #: Position reconciliation — master enable.
-    position_reconciliation_enabled: bool = False
-    #: Observation-only mode: diff + facts but no engine mutation.
-    position_reconciliation_shadow_mode: bool = True
-    #: Defer reconciliation if Position.ts_last younger than this (seconds).
-    data_api_lag_tolerance_seconds: float = 60.0
-    #: Max consecutive deferred cycles before proceeding anyway.
-    position_reconciliation_deferral_max: int = 5
-    #: TTL after reconciliation send before re-reconciling same instrument.
-    recently_reconciled_ttl_seconds: float = 60.0
-    #: Also reconcile venue-has-more (opening) discrepancies.
-    reconcile_venue_has_more: bool = False
-    #: Tier A reads from :class:`~tyrex_pm.runtime.venue_state.VenueState` (migration; removed after migration).
-    venue_state_reads_enabled: bool = False
     venue_state_ttl_seconds: float = 30.0
     venue_state_cash_poll_interval_seconds: float = 10.0
     venue_state_refresh_force_max_ms: int = 500
@@ -947,14 +933,9 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         )
 
     # -- VenueState (Tier A) -----------------------------------------------
-    vs_reads = bool(raw.get("venue_state_reads_enabled", False))
     vs_ttl = float(raw.get("venue_state_ttl_seconds", 30.0))
     vs_cash_poll = float(raw.get("venue_state_cash_poll_interval_seconds", 10.0))
     vs_ref_ms = int(raw.get("venue_state_refresh_force_max_ms", 500))
-    if vs_reads and not ws_enabled:
-        raise ValueError(
-            f"{p}: venue_state_reads_enabled requires wallet_sync_enabled=true",
-        )
     if vs_ttl <= 0.0:
         raise ValueError(f"{p}: venue_state_ttl_seconds must be > 0")
     if vs_cash_poll < 3.0:
@@ -963,46 +944,6 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         )
     if vs_ref_ms < 1:
         raise ValueError(f"{p}: venue_state_refresh_force_max_ms must be >= 1")
-
-    # -- Position reconciliation -------------------------------------------
-    pr_enabled = bool(raw.get("position_reconciliation_enabled", False))
-    pr_shadow = bool(raw.get("position_reconciliation_shadow_mode", True))
-    pr_lag_tol = float(raw.get("data_api_lag_tolerance_seconds", 60.0))
-    pr_defer_max = int(raw.get("position_reconciliation_deferral_max", 5))
-    pr_recon_ttl = float(raw.get("recently_reconciled_ttl_seconds", 60.0))
-    pr_venue_more = bool(raw.get("reconcile_venue_has_more", False))
-
-    if pr_enabled and not ws_enabled:
-        raise ValueError(
-            f"{p}: position_reconciliation_enabled requires wallet_sync_enabled=true",
-        )
-    if pr_lag_tol < 0.0:
-        raise ValueError(
-            f"{p}: data_api_lag_tolerance_seconds must be >= 0.0",
-        )
-    if pr_lag_tol < 30.0:
-        import warnings
-        warnings.warn(
-            f"{p}: data_api_lag_tolerance_seconds={pr_lag_tol} is below 30.0; "
-            "this may not cover typical Data API propagation delay",
-            stacklevel=2,
-        )
-    if pr_defer_max < 1:
-        raise ValueError(
-            f"{p}: position_reconciliation_deferral_max must be >= 1",
-        )
-    if pr_recon_ttl < 0.0:
-        raise ValueError(
-            f"{p}: recently_reconciled_ttl_seconds must be >= 0.0",
-        )
-    if pr_recon_ttl < ws_poll:
-        import warnings
-        warnings.warn(
-            f"{p}: recently_reconciled_ttl_seconds={pr_recon_ttl} is below "
-            f"wallet_sync_poll_interval_seconds={ws_poll}; TTL shorter than poll "
-            "interval is effectively a no-op defense",
-            stacklevel=2,
-        )
 
     return RuntimeSettings(
         trader_id=tid,
@@ -1067,13 +1008,6 @@ def load_runtime_settings(path: str | Path) -> RuntimeSettings:
         wallet_sync_poll_interval_seconds=ws_poll,
         wallet_sync_startup_deadline_seconds=ws_deadline,
         wallet_sync_per_instrument_max_retries=ws_retries,
-        position_reconciliation_enabled=pr_enabled,
-        position_reconciliation_shadow_mode=pr_shadow,
-        data_api_lag_tolerance_seconds=pr_lag_tol,
-        position_reconciliation_deferral_max=pr_defer_max,
-        recently_reconciled_ttl_seconds=pr_recon_ttl,
-        reconcile_venue_has_more=pr_venue_more,
-        venue_state_reads_enabled=vs_reads,
         venue_state_ttl_seconds=vs_ttl,
         venue_state_cash_poll_interval_seconds=vs_cash_poll,
         venue_state_refresh_force_max_ms=vs_ref_ms,

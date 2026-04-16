@@ -186,17 +186,6 @@ def _p(ft: str) -> dict:
             "elapsed_since_start_s": 125.0,
             "deadline_s": 120.0,
         }
-    if ft == "position_reconciliation":
-        return {
-            "cycle": 1,
-            "instrument_id": "YES-1234..POLYMARKET",
-            "venue_qty": "0.0",
-            "cache_qty": "50.0",
-            "diff_direction": "close",
-            "deferred": False,
-            "defer_count": 0,
-            "reconciliation_sent": True,
-        }
     if ft == "venue_state":
         return {
             "status": "ok",

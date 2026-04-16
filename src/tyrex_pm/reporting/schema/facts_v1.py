@@ -176,18 +176,6 @@ _REQUIRED: dict[str, frozenset[str]] = {
             "deadline_s",
         },
     ),
-    "position_reconciliation": frozenset(
-        {
-            "cycle",
-            "instrument_id",
-            "venue_qty",
-            "cache_qty",
-            "diff_direction",
-            "deferred",
-            "defer_count",
-            "reconciliation_sent",
-        },
-    ),
     "venue_state": frozenset(
         {
             "status",

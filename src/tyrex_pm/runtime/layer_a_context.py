@@ -39,7 +39,7 @@ class NautilusLayerAContext:
     or :class:`~tyrex_pm.runtime.venue_state.VenueState` (Tier A) for ``full_exit`` interpretation.
     """
 
-    __slots__ = ("_portfolio", "_cache", "_static", "_venue_state", "_venue_state_reads_enabled")
+    __slots__ = ("_portfolio", "_cache", "_static", "_venue_state")
 
     def __init__(
         self,
@@ -48,13 +48,11 @@ class NautilusLayerAContext:
         static_token_to_instrument: Mapping[str, str],
         *,
         venue_state: Any | None = None,
-        venue_state_reads_enabled: bool = False,
     ) -> None:
         self._portfolio = portfolio
         self._cache = cache
         self._static = static_token_to_instrument
         self._venue_state = venue_state
-        self._venue_state_reads_enabled = bool(venue_state_reads_enabled)
 
     def follower_long_qty_for_outcome_token(self, token_id: str) -> float | None:
         iid = instrument_id_for_outcome_token(
@@ -66,7 +64,7 @@ class NautilusLayerAContext:
             return None
         if self._cache.instrument(iid) is None:
             return None
-        if self._venue_state_reads_enabled and self._venue_state is not None:
+        if self._venue_state is not None:
             sz = self._venue_state.position_size(iid)
             return _float_venue_sz(sz)
         net = self._portfolio.net_position(iid)

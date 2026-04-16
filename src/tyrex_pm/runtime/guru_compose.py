@@ -104,14 +104,6 @@ def _live_exec_engine_config(runtime: RuntimeSettings) -> LiveExecEngineConfig:
     if runtime.live_exec_open_check_open_only is not None:
         kwargs["open_check_open_only"] = bool(runtime.live_exec_open_check_open_only)
     config = LiveExecEngineConfig(**kwargs) if kwargs else LiveExecEngineConfig()
-    if runtime.position_reconciliation_enabled and not config.generate_missing_orders:
-        raise ValueError(
-            "position_reconciliation_enabled=True requires "
-            "LiveExecEngineConfig.generate_missing_orders=True (current: False). "
-            "The engine cannot process PositionStatusReport reconciliation without "
-            "synthetic order generation. Remove the explicit generate_missing_orders=False "
-            "override or disable position reconciliation."
-        )
     return config
 
 
@@ -341,12 +333,10 @@ def build_guru_trading_node(
     exec_reader = NautilusExecutionStateReader(
         node.cache,
         venue_state=venue_state,
-        venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
     )
     account_provider = NautilusAccountSnapshotProvider(
         node.portfolio,
         venue_state=venue_state,
-        venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
     )
     allowance_provider: ClobAllowanceStateProvider | None = None
     if runtime.execution_mode == "live":
@@ -360,7 +350,6 @@ def build_guru_trading_node(
             node.cache,
             dict(runtime.polymarket_token_to_instrument),
             venue_state=venue_state,
-            venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
         )
         deployment_agg = NautilusDeploymentBudget(
             node.portfolio,
@@ -368,7 +357,6 @@ def build_guru_trading_node(
             exec_reader,
             dict(runtime.polymarket_token_to_instrument),
             venue_state=venue_state,
-            venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
         )
 
     _cap_obs = (
@@ -401,12 +389,6 @@ def build_guru_trading_node(
             gamma_base_url=runtime.polymarket_gamma_base_url,
             gamma_http_timeout_seconds=runtime.polymarket_gamma_http_timeout_seconds,
             clob_host=runtime.clob_host,
-            position_reconciliation_enabled=runtime.position_reconciliation_enabled,
-            position_reconciliation_shadow_mode=runtime.position_reconciliation_shadow_mode,
-            data_api_lag_tolerance_seconds=runtime.data_api_lag_tolerance_seconds,
-            position_reconciliation_deferral_max=runtime.position_reconciliation_deferral_max,
-            recently_reconciled_ttl_seconds=runtime.recently_reconciled_ttl_seconds,
-            reconcile_venue_has_more=runtime.reconcile_venue_has_more,
         )
         wallet_sync_actor = WalletSyncActor(
             config=ws_config,
@@ -599,14 +581,12 @@ def build_guru_trading_node(
             node.cache,
             dict(runtime.polymarket_token_to_instrument),
             venue_state=venue_state,
-            venue_state_reads_enabled=bool(runtime.venue_state_reads_enabled),
         ),
     )
     if strategy.bot_sell_validate is not None:
         assert isinstance(strat, BotSellValidateStrategy)
         strat.set_pricing_runtime(runtime)
         strat._tyrex_venue_state = venue_state
-        strat._tyrex_venue_state_reads_enabled = bool(runtime.venue_state_reads_enabled)
     if run_context is not None:
         strat.set_reporting_emit(emit)
         strat.set_order_correlation_registry(order_registry)

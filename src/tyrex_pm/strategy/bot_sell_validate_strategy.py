@@ -198,7 +198,6 @@ def resolve_validation_sell_quantity(
     quantity_from_buy_fill: float,
     haircut_bps: float,
     venue_state: Any | None = None,
-    venue_state_reads_enabled: bool = False,
 ) -> tuple[float, dict[str, Any]]:
     """
     Scenario A **validation SELL** size: ``min(BUY filled, long inventory after optional haircut)``,
@@ -247,7 +246,7 @@ def resolve_validation_sell_quantity(
             "validation_inventory_haircut_note": "haircut_skipped_no_instrument",
         }
 
-    if venue_state_reads_enabled and venue_state is not None:
+    if venue_state is not None:
         sz = venue_state.position_size(instrument_id)
         inv_long = max(0.0, float(sz)) if sz is not None else 0.0
     else:
@@ -837,9 +836,6 @@ class BotSellValidateStrategy(CopyStrategy):
             quantity_from_buy_fill=float(quantity_from_buy_fill),
             haircut_bps=float(self._vcfg.validation_sell_inventory_haircut_bps),
             venue_state=getattr(self, "_tyrex_venue_state", None),
-            venue_state_reads_enabled=bool(
-                getattr(self, "_tyrex_venue_state_reads_enabled", False),
-            ),
         )
 
         em0 = self._reporting_emit

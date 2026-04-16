@@ -297,7 +297,6 @@ def filled_deployment_usd_venue(
     *,
     venue_state: VenueState,
     cache: Cache,
-    venue_state_reads_enabled: bool,
     token_id_filter: str | None = None,
 ) -> tuple[float, bool]:
     """
@@ -306,8 +305,6 @@ def filled_deployment_usd_venue(
     Returns ``(total_usd, complete)`` — ``complete`` is False only if a positive size
     cannot be paired with an instrument in cache (should not happen after sync).
     """
-    if not venue_state_reads_enabled:
-        raise RuntimeError("filled_deployment_usd_venue requires venue_state_reads_enabled")
     total = 0.0
     positions = venue_state.positions()
     for iid, sz in positions.items():
