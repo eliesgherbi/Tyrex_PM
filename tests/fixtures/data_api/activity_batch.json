@@ -1,0 +1,34 @@
+{
+  "activities": [
+    {
+      "id": "act-a",
+      "timestamp": 1700000000,
+      "asset": "1234567890",
+      "side": "BUY",
+      "size": "10",
+      "price": "0.5",
+      "usdcSize": "5",
+      "transactionHash": "0xaaa"
+    },
+    {
+      "id": "act-b",
+      "timestamp": 1700000001,
+      "asset": "1234567890",
+      "side": "BUY",
+      "size": "2",
+      "price": "0.4",
+      "usdcSize": "0.8",
+      "transactionHash": "0xbbb"
+    },
+    {
+      "id": "act-a",
+      "timestamp": 1700000000,
+      "asset": "1234567890",
+      "side": "BUY",
+      "size": "10",
+      "price": "0.5",
+      "usdcSize": "5",
+      "transactionHash": "0xaaa"
+    }
+  ]
+}

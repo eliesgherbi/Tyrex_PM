@@ -1,46 +1,168 @@
-# Reporting fact model (v1)
+# Reporting fact model
 
-Structured run observability when **`reporting_enabled: true`** in runtime YAML. Facts append to **`var/reporting/runs/<run_id>/facts.jsonl`**; **`manifest.json`** records paths and data-quality flags; **`python -m tyrex_pm.reporting summarize --run-dir …`** produces **`summary.json`** / **`summary.md`**.
+**Hub:** [README.md](README.md) · **Architecture:** [Architecture.md](Architecture.md) · **Operations:** [OPERATIONS.md](OPERATIONS.md)
 
-**Code:** `src/tyrex_pm/reporting/` — schema in `schema/facts_v1.py`, join keys in `schema/joins.md` (duplicate table below for convenience).
-
----
-
-## Join keys (per fact type)
-
-| Fact type | Primary join keys |
-|-----------|-------------------|
-| `run_manifest` | `run_id` |
-| `config_snapshot` | `run_id` |
-| `guru_signal` | `run_id`, `correlation_id` |
-| `strategy_decision` | `run_id`, `correlation_id` |
-| `layer_a_filter` | `run_id`, `correlation_id` |
-| `sizing` | `run_id`, `correlation_id` |
-| `risk_decision` | `run_id`, `correlation_id`, optional `account_snapshot_seq` |
-| `execution_intent` | `run_id`, `correlation_id` |
-| `normalization` | `run_id`, `correlation_id`, optional `client_order_id` |
-| `execution_outcome` | `run_id`, `correlation_id`, optional `client_order_id` |
-| `order_lifecycle` | `run_id`, `client_order_id`, optional `venue_order_id`, `correlation_id` |
-| `fill` | `run_id`, `client_order_id`, optional `venue_order_id`, `correlation_id`, `fill_event_id` |
-| `account_snapshot` | `run_id`, `account_snapshot_seq`, optional `correlation_id` |
-| `tradable_state_health` | `run_id`, `correlation_id`, `observed_at_utc` |
-| `reconciliation` | `run_id`, optional `client_order_id` |
-
-Full list: `src/tyrex_pm/reporting/schema/joins.md`.
+`facts.jsonl` is **the** operator surface. Every meaningful decision, lifecycle transition, and reconcile outcome is one JSON line. Logs are debug detail; facts are the audit trail.
 
 ---
 
-## Semantics (short)
+## 1. Envelope
 
-- **`correlation_id`:** stable guru-trade identity (e.g. transaction hash + outcome token), carried from signal through risk and execution.
-- **`risk_decision`:** includes deployment fields (`order_deploy_usd_at_eval`, token/portfolio deploy), clip/bump flags (`max_notional_policy_clipped`, `min_notional_policy_bumped`), and optional capital snapshots when observability is on.
-- **`normalization`:** instrument grid quantize; `skipped_submit: true` + `exec_instrument_quantize_skip` when venue min size cannot be satisfied without exceeding risk-approved qty.
-- **Capital (WP3):** `account_snapshot` and enriched `risk_decision` rows include Nautilus cash vs py-clob fields; **`capital_canonical_balance_source`** / **`capital_attrib_free_collateral_usd`** / **`capital_attrib_allowance_usd`** document which inputs fed **`free_collateral_usd`** vs **allowance** (per-field attribution; **`capital_state_merged_clob`** when CLOB was merged into the snapshot).
-- **Tradable health (WP4):** `tradable_state_health` rows align with risk §10; when the gate is on but no producer is wired at evaluate, **`reason_code=health_source_missing`** and optional **`reporting_only_synthetic: true`** mark reporting-only synthesis (not live framework health).
+Every line is the dict produced by `reporting/facts.py::make_fact`:
+
+```json
+{
+  "schema_version": 2,
+  "fact_type":      "<one of FACT_TYPE_* in reporting/schema_v2.py>",
+  "ts":             "2026-04-17T14:23:11.412+00:00",
+  "run_id":         "<uuid or --run-name>",
+  "correlation_id": "<dedup_key | client_order_id | venue_order_id | null>",
+  "payload":        { ... fact-specific ... }
+}
+```
+
+- `schema_version=2` is the current contract; bump it when payload semantics change incompatibly.
+- `ts` is UTC ISO from `core.time.utc_now()`.
+- `correlation_id` is what you grep on to follow a single chain (guru_signal → strategy_skip / intent → risk_decision → oms_submit → oms_result).
+- All `Decimal` values are stringified; USD totals in `risk_decision` evidence are quantized to 6 decimals via `risk/evidence_format.py::s_usd`.
 
 ---
 
-## Further reading
+## 2. Fact catalog
 
-- **Module guide:** [modules/reporting/DEVELOPER.md](modules/reporting/DEVELOPER.md) (if present) or [modules/reporting/README.md](modules/reporting/README.md)
-- **Operators:** [OPERATIONS.md](OPERATIONS.md) — log grep + reporting paths
+Constants live in `src/tyrex_pm/reporting/schema_v2.py`. Adding a fact starts there.
+
+| `fact_type` | Producer | Correlation id | Purpose |
+|-------------|----------|----------------|---------|
+| `health` | `runtime/app.py`, `runtime/live_supervisor.py` | none | Process / heartbeat / WS state transitions (`started`, `stopped`, `heartbeat_unhealthy`, `user_ws_stale`, ...) |
+| `guru_poll` | `runtime/app.py` | none | Each Data API tick: page count, fetched, kept-after-watermark, errors |
+| `guru_signal` | `pipeline.process_new_guru_signals` | `dedup_key` | Normalized guru trade |
+| `strategy_skip` | `pipeline.process_new_guru_signals` | `dedup_key` | Strategy filtered out the signal (token allowlist, min notional, dust, no inventory, ...) |
+| `intent_created` | `pipeline.process_new_guru_signals` | `dedup_key` | Strategy emitted an `EnterIntent` / `ExitIntent` / `ReduceIntent` / `CancelIntent` |
+| `risk_decision` | `risk/engine.evaluate_intent` | `dedup_key` | Approve / deny + per-policy evidence (the dense fact) |
+| `oms_submit` | `pipeline` | `dedup_key` | Successful submit ack with raw `oms_result` |
+| `oms_reject` | `pipeline` | `dedup_key` | Submit failed (HTTP error, duplicate fingerprint) |
+| `oms_cancel` | `pipeline` | `dedup_key` | Cancel attempt + result |
+| `oms_result` | reserved | — | Reserved for richer post-submit lifecycle (currently `oms_submit/cancel` carry the result inline) |
+| `reconcile` | `pipeline.reconcile_coordinator` | none | Drift flags, severity, repair / adoption decisions, suppressed REST ids |
+| `wallet_sync` | `pipeline.emit_wallet_sync` | none | Snapshot of balance, allowance, position count, open-order count after a REST refresh |
+| `live_attest` | `runtime/live_attest.py` | none | Attestation milestones (`auth_ok`, `submit_ok`, `cancel_ok`, ...) |
+
+---
+
+## 3. Key payloads
+
+### `risk_decision`
+
+```json
+{
+  "approved": false,
+  "reason_codes": ["below_venue_min_size"],
+  "detail": "...",
+  "venue_min_size_final_size":      "4.54",
+  "venue_min_size_default":         "5",
+  "venue_min_size_policy":          "deny",
+  "venue_min_size_final_notional_usd": "1.812456",
+  ...                              // additional per-policy evidence keys
+}
+```
+
+Reason codes are stable strings from `core/reason_codes.py`. Always extend that file rather than inventing new strings inline.
+
+### `reconcile`
+
+```json
+{
+  "drift_flags":           ["venue_open_not_tracked_locally"],
+  "blocking_drift_flags":  [],
+  "reconcile_blocks_live": false,
+  "reconcile_severity":    "info",
+  "drift_flag_counts":     {"venue_open_not_tracked_locally": 1},
+  "venue_user_ws_stale":   false,
+  "venue_restart_suspected": false,
+  "submit_grace_s":        15.0,
+  "unknown_terminal_timeout_s": 60.0,
+  "adoption_grace_s":      5.0,
+  "venue_adoption_decisions": [
+    {"venue_order_id": "0xabc...", "decision": "non_blocking_within_adoption_grace",
+     "candidate_local_cid": "...", "match_basis": "token+side+size+price",
+     "age_s": 1.2}
+  ],
+  "tombstoned_rest_vids": ["0xdef..."]
+}
+```
+
+**Dedup**: consecutive reconciles with the same `_reconcile_signature` are dropped (see `pipeline._reconcile_signature`). The signature includes all drift flags + severity + suppressed-rest-ids + decision counts; per-row decision payloads are not inside the signature, so a *new* row still emits.
+
+### `wallet_sync`
+
+```json
+{
+  "wallet_usdc_balance":   "532.412304",
+  "wallet_usdc_allowance": "1000000000000000000.000000",
+  "last_sync_ts":          "2026-04-17T14:23:11.111+00:00",
+  "last_positions_sync_ts":"2026-04-17T14:23:11.290+00:00",
+  "position_count":        2,
+  "open_order_count":      1,
+  "marks_present_count":   2,
+  "marks_missing_count":   0
+}
+```
+
+**Dedup**: the signature deliberately **excludes** both `last_sync_ts` and `last_positions_sync_ts` (they advance on every refresh; including them defeated dedup as observed in `live_tes_700`). Two refreshes that change nothing actionable produce one fact.
+
+### `oms_submit` / `oms_reject`
+
+```json
+{
+  "client_order_id":  "...",
+  "oms_result":       "<raw venue JSON or shadow ack string>",
+  "status_code":      400,                       // reject only
+  "error_msg":        "not enough balance / allowance",
+  "venue_restart_suspected": false               // true on HTTP 425
+}
+```
+
+---
+
+## 4. Other run artifacts
+
+`var/reporting/runs/<run_id>/` also contains:
+
+- `manifest.json` — parsed `AppConfig.raw`, git SHA, scenario name, args.
+- `run_summary.json` — generated by `reporting/summarize.py` after the loop exits: counts per `fact_type`, top reason codes, last reconcile severity, runtime seconds.
+
+---
+
+## 5. How to add a fact
+
+1. Add `FACT_TYPE_<NAME>` in `reporting/schema_v2.py`.
+2. Decide whether it should dedup; if so, write the signature alongside its emitter and persist `last_<name>_signature` on `RuntimeCoordinator`.
+3. Use `make_fact(FACT_TYPE_<NAME>, run_id, payload, correlation_id=...)` and `JsonlSink.write(...)`.
+4. Quantize Decimal USD values via `s_usd()` (or `s_usd_map()` for dicts).
+5. Update §2 above and add at least one golden test asserting the payload shape.
+6. Never log the same information twice (logs vs facts) — pick the operator surface that matters and keep the other quiet.
+
+---
+
+## 6. Reading patterns
+
+```bash
+# Quick counts
+jq -r '.fact_type' var/reporting/runs/<id>/facts.jsonl | sort | uniq -c
+
+# Why was a guru signal dropped?
+jq -c 'select(.fact_type=="strategy_skip") | {ts, dedup_key: .correlation_id, reason: .payload.reason}' \
+  var/reporting/runs/<id>/facts.jsonl
+
+# All denied risk decisions and their codes
+jq -c 'select(.fact_type=="risk_decision" and .payload.approved==false)
+       | {ts, codes: .payload.reason_codes, cid: .correlation_id}' \
+  var/reporting/runs/<id>/facts.jsonl
+
+# Reconciles that actually blocked
+jq -c 'select(.fact_type=="reconcile" and .payload.reconcile_blocks_live==true) | .payload.blocking_drift_flags' \
+  var/reporting/runs/<id>/facts.jsonl
+```
+
+The `correlation_id` is the cheap join key; a single guru trade typically produces one of each: `guru_signal`, `intent_created`, `risk_decision`, then `oms_submit` / `oms_reject` / `oms_cancel` (or one `strategy_skip`).

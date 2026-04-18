@@ -1,37 +1,48 @@
-# Module: `tyrex_pm.risk`
+# `risk/`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · [CONFIG_MODEL](../../CONFIG_MODEL.md) · **[LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)** · **[Current state](../../Implementation/current_state.md)** · **[DEVELOPER.md](DEVELOPER.md)**
+The **only** thing that can approve an intent. Fail-closed: anything not explicitly approved is denied. Every denial carries a stable reason code and structured evidence so `facts.jsonl` is enough to debug.
 
-## A. Role
+## Files
 
-**Pre-trade gates:** given an `OrderIntent`, approve or reject with a reason string suitable for logs and automation.
+| File | Role |
+|------|------|
+| `engine.py` | `evaluate_intent(intent, ctx, app, run_id) -> RiskDecision` — orchestrates the gate sequence |
+| `kill_switch.py` | Operator-flipped global block |
+| `concurrency.py` | Cap on simultaneous unacked submits (`max_orders_in_flight`) |
+| `health.py` | `check_aggressive_readiness` — wallet sync freshness, heartbeat, user-WS staleness |
+| `pretrade.py` | `apply_notional_min_max` — clip-or-deny on USD notional band |
+| `deployment.py` | Per-token + portfolio long-side cap including positions, resting BUYs, and in-flight reservations |
+| `capital.py` | USDC balance + allowance gate for BUYs (with in-flight reservations subtracted) |
+| `inventory.py` | SELL requires non-zero venue position (configurable) |
+| `venue_min_size.py` | Final pre-submit guard against the venue's hard min-size floor (deny or bump) |
+| `in_flight.py` | `derive_in_flight_buy_reservations` — synthesizes `OpenOrderView`s from provisional `OrderStore` rows so deployment + capital see venue-locked collateral immediately |
+| `evidence_format.py` | `q_usd / s_usd / s_usd_map` — Decimal quantization for fact emission (6 decimals, ROUND_HALF_EVEN) with a high-precision `Context` and fallback for absurdly large allowances |
 
-## B. Boundaries
+## Gate sequence (`engine.evaluate_intent`)
 
-**Belongs here:** `RiskPolicy` protocol, concrete policies (`ShadowAllPassRisk`, `ConfiguredRiskPolicy`), **exposure / capital logic** that risk owns.
+For BUY/SELL/REDUCE intents (cancels skip to the cancel-only branch):
 
-**Does not belong here:** Building `OrderIntent` (strategy), HTTP/CLOB (execution), guru polling (data). **No** direct `Cache` / `Portfolio` / **`VenueState`** imports in policy code — readers are **injected** from `runtime/guru_compose`.
+1. **Kill switch** → `KILL_SWITCH`
+2. **Concurrency** → `CONCURRENCY_LIMIT`
+3. **Aggressive readiness** (wallet sync, heartbeat, user-WS) → `NOT_READY` / specifics
+4. **Notional band** (`min_usd` ≤ N ≤ `max_usd`); `max_policy=cap` clips, `deny` rejects → `NOTIONAL_BELOW_MIN` / `NOTIONAL_ABOVE_MAX`
+5. **In-flight reservation evidence** — totals are *always* attached to the decision (approve or deny) so audits show what was already locked
+6. **Deployment caps** (per-token + portfolio, including in-flight) → `TOKEN_DEPLOYMENT_CAP` / `PORTFOLIO_DEPLOYMENT_CAP` / `DEPLOYMENT_MARK_UNKNOWN`
+7. **Capital** (BUY only): wallet balance + allowance vs. notional + in-flight → `INSUFFICIENT_CAPITAL` / `INSUFFICIENT_ALLOWANCE` / `STALE_WALLET_SNAPSHOT`
+8. **Inventory** (SELL only): non-zero venue position → `INSUFFICIENT_INVENTORY` / `NAKED_SELL`
+9. **Venue min-size** (last gate): if final `size < default_min_size`, either deny (`BELOW_VENUE_MIN_SIZE`) or bump and **re-validate** deployment + capital (still denying with `BELOW_VENUE_MIN_SIZE` if the bump would breach a higher gate, evidence flagged `venue_min_size_bump_unsafe`)
 
-## C. Internal structure (implemented)
+## In-flight reservation lifecycle
 
-| File | Contents |
-|------|----------|
-| `policy.py` | `RiskPolicy` `Protocol`, `ShadowAllPassRisk`. |
-| `configured.py` | **`ConfiguredRiskPolicy`** — `RiskSettings`; injected readers (**Tier A** when **`VenueState`** wired) + **`NautilusDeploymentBudget`** + concurrent guru rests; **`CapitalStateProvider`** (`runtime/capital`) for gate + reporting metrics; **reporting:** `_capital_metrics_for_facts`, **`account_snapshot`** + enriched **`risk_decision`** when run sink is active. |
-| `__init__.py` | Exports. |
+A live BUY submit briefly locks venue collateral *before* the merged wallet view reflects it. The reservation accounting (synthetic `OpenOrderView`s) closes that gap:
 
-## D. Main interactions
+- **Add**: at `register_submit` (provisional row created in `OrderStore`).
+- **Visible to risk**: as `RiskContext.in_flight_buy_reservations`, derived per call by `derive_in_flight_buy_reservations`.
+- **Release**: when the merged venue view actually carries the order (REST/WS), or when the order is terminal (cancel/fill/reject), or when `OrderStore` drops the row (provisional unknown-terminal timeout).
+- **Evidence**: `risk_decision` payloads always carry `in_flight_reserved_usd_total`, `in_flight_reservation_count`, and `in_flight_reserved_usd_by_token`.
 
-- **strategy:** `CopyStrategy` calls `evaluate(intent)` before execution.
-- **config:** `RiskSettings` from YAML (**includes capital gate / reserve fields**).
-- **runtime:** injects reader implementations from **`guru_compose`**.
+Detail: [LIVE_ARCHITECTURE §4](../../LIVE_ARCHITECTURE.md#4-in-flight-buy-reservations).
 
-## E. Status
+## Adding a policy
 
-**Operational:** **Live** deployment budget uses **`NautilusDeploymentBudget`** fed by injected **`state_readers`** — **Tier A** when **`VenueState`** is composed (venue resting orders + venue position × mark for filled leg), **Tier B** fallbacks when not (shadow / `wallet_sync_enabled: false`). Optional **capital gate** + **collateral reserve** via **`CapitalStateProvider`** (venue-sourced collateral when wired). **Capital vs logs:** with **`reporting_enabled`**, `_capital_metrics_for_facts` records **canonical USD balance**, raw CLOB strings, and trust/disagreement flags — see [**reporting_fact_model.md**](../../reporting_fact_model.md). Operator **matrix / reason codes:** `Docs/OPERATIONS.md` § Deployment-budget risk. **Session convergence:** Nautilus adapter still updates **`Cache` / `Portfolio`** over time — see [**LIVE_ARCHITECTURE**](../../LIVE_ARCHITECTURE.md) for what to trust for **caps** vs **order lifecycle**.
-
-## F. Extension guidance
-
-- Implement `RiskPolicy` with the same `evaluate` signature; inject via `CopyStrategy.set_risk_policy`.
-- Prefer **`ReasonCode`** / explicit strings over silent drops.
-- **Collateral reserve** extends this module **without** moving logic into strategy; guru concurrent-rest identity stays in ``state_readers``. **[DEVELOPER.md](DEVELOPER.md)** — evaluation stages and pitfalls.
+[developer_guide.md §4.1](../../developer_guide.md#41-add-a-new-risk-policy) walks through the recipe. Place new gates in the sequence carefully — anything that depends on size/price runs **after** notional clipping and (almost always) **before** `venue_min_size`.

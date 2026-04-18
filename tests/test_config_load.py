@@ -1,32 +1,26 @@
-"""Application config loading (v1.03)."""
+from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-import yaml
+from decimal import Decimal
 
-from tyrex_pm.core.app_config import load_app_config
-
-
-def test_load_example_config():
-    root = Path(__file__).resolve().parent.parent
-    cfg = load_app_config(root / "config" / "v1.example.yaml")
-    assert cfg.mode == "backtest"
-    assert cfg.trader_id == "TYREX-001"
+from tyrex_pm.runtime.config import load_app_config
 
 
-def test_missing_key(tmp_path: Path):
-    p = tmp_path / "c.yaml"
-    p.write_text(yaml.safe_dump({"mode": "live"}), encoding="utf-8")
-    with pytest.raises(ValueError, match="trader_id"):
-        load_app_config(p)
+def test_scenario_overlay_execution_mode() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app = load_app_config(repo_root=root, scenario_file="config/scenarios/live_guru.yaml")
+    from tyrex_pm.core.enums import ExecutionMode
+
+    assert app.runtime.execution_mode == ExecutionMode.LIVE
+    assert app.risk.deployment.token_cap_usd == Decimal("100")
 
 
-def test_bad_mode(tmp_path: Path):
-    p = tmp_path / "c.yaml"
-    p.write_text(
-        yaml.safe_dump({"mode": "paper", "trader_id": "X"}),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="mode"):
-        load_app_config(p)
+def test_scenario_bare_name_resolves() -> None:
+    root = Path(__file__).resolve().parents[1]
+    from tyrex_pm.core.enums import ExecutionMode
+
+    by_name = load_app_config(repo_root=root, scenario_file="live_guru")
+    by_path = load_app_config(repo_root=root, scenario_file="config/scenarios/live_guru.yaml")
+    assert by_name.runtime.execution_mode == ExecutionMode.LIVE
+    assert by_name.risk.deployment.token_cap_usd == by_path.risk.deployment.token_cap_usd

@@ -1,0 +1,27 @@
+guru:
+  wallet: "0x204f72f35326db932158cba6adff0b9a1da95e14" #"0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+  data_api_poll_interval_s: 5
+  data_api_limit: 50
+
+filters:
+  exclude_untradeable_markets: false
+  token_allowlist: []
+  min_notional_usd: "700"
+  significance_min_notional_usd: "0"
+  min_conviction_score: "0"
+
+sizing:
+  # static_enabled: true → BUY entries use static_amount_usd notional (ignores copy_scale & conviction).
+  static_enabled: true
+  static_amount_usd: "5"
+  copy_scale: "1.0"
+  conviction:
+    enabled: false
+    score_min: "0"
+    score_max: "1"
+    min_multiplier: "0.5"
+    max_multiplier: "2.0"
+
+exits:
+  dust_notional_usd: "0.5"
+  sell_mode: proportional_to_guru

@@ -1,5 +1,9 @@
-"""Pytest configuration."""
+from __future__ import annotations
 
+import sys
+from pathlib import Path
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "network: tests that call Polymarket HTTP APIs")
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))

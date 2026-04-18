@@ -1,22 +1,26 @@
-# Module documentation index
+# Module reference
 
-Each folder mirrors a package under `src/tyrex_pm/`.
+**Hub:** [../README.md](../README.md) · **Architecture:** [../Architecture.md](../Architecture.md) · **Developer guide:** [../developer_guide.md](../developer_guide.md)
 
-**Start:** [Documentation index](../README.md) · [**LIVE_ARCHITECTURE**](../LIVE_ARCHITECTURE.md) · [**Architecture**](../Architecture.md) · [**Implementation/current_state.md**](../Implementation/current_state.md) · [**developer_guide.md**](../developer_guide.md)
+One short README per implemented package under `src/tyrex_pm/`. Read these alongside the source — they explain *why* the module exists and *what its boundaries are*; the source explains *how*.
 
-## Package docs
+| Module | What it owns | Doc |
+|--------|--------------|-----|
+| `core/` | Shared dataclasses, enums, ids, time, errors, reason codes | [core/](core/README.md) |
+| `ingestion/` | Data API polling (guru), market & user WebSocket loops, fixture replay | [ingestion/](ingestion/README.md) |
+| `signals/` | Pluggable signal building blocks (currently `GuruCopySignal` adapter) | [signals/](signals/README.md) |
+| `strategies/` | Composition layer that turns signals into intents (currently `guru_follow`) | [strategies/](strategies/README.md) |
+| `risk/` | `RiskEngine` + per-policy modules (deny/approve, evidence, in-flight reservations) | [risk/](risk/README.md) |
+| `execution/` | Single-writer OMS, order builder/lifecycle, shadow + live backends | [execution/](execution/README.md) |
+| `state/` | `WalletStore`, `OrderStore`, `MarketStateStore`, `StrategyStore`, reconcile state machine | [state/](state/README.md) |
+| `runtime/` | App entrypoint, config loader, coordinator, supervisors, pipeline | [runtime/](runtime/README.md) |
+| `reporting/` | Fact schema, sinks, summarizer | [reporting/](reporting/README.md) |
+| `venue/polymarket/` | CLOB bridge, REST clients (Data API, Gamma), market & user WS, normalizers, auth | [venue/](venue/README.md) |
 
-| Module | README | Developer guide |
-|--------|--------|-----------------|
-| core | [core/README.md](core/README.md) | — |
-| config | [config/README.md](config/README.md) | [config/DEVELOPER.md](config/DEVELOPER.md) |
-| data | [data/README.md](data/README.md) | [data/DEVELOPER.md](data/DEVELOPER.md) |
-| signal | [signal/README.md](signal/README.md) | [signal/DEVELOPER.md](signal/DEVELOPER.md) |
-| risk | [risk/README.md](risk/README.md) | [risk/DEVELOPER.md](risk/DEVELOPER.md) |
-| execution | [execution/README.md](execution/README.md) | [execution/DEVELOPER.md](execution/DEVELOPER.md) |
-| strategy | [strategy/README.md](strategy/README.md) | [strategy/DEVELOPER.md](strategy/DEVELOPER.md) |
-| runtime | [runtime/README.md](runtime/README.md) | [runtime/DEVELOPER.md](runtime/DEVELOPER.md) |
-| reporting | [reporting/README.md](reporting/README.md) | [reporting/DEVELOPER.md](reporting/DEVELOPER.md) |
-| indicator | [indicator/README.md](indicator/README.md) | — (stub) |
+Modules in the original rebuild plan that were intentionally **not** implemented in this milestone:
 
-**Also:** [CONFIG_MODEL.md](../CONFIG_MODEL.md), [OPERATIONS.md](../OPERATIONS.md), [reporting_fact_model.md](../reporting_fact_model.md), [Implementation/road_map.md](../Implementation/road_map.md) (governance one-pager).
+- `features/` — feature pipelines. Folded into `signals/` as needed.
+- `protection/` — virtual exits / stops. Out of scope for the copy-only strategy.
+- `portfolio/` — PnL / attribution. The `wallet_sync` fact carries the operator-relevant data; deeper analytics are deferred.
+
+If those land later, recreate the corresponding folder under `Docs/modules/`.

@@ -1,0 +1,42 @@
+notional:
+  min_usd: "1"
+  max_usd: "4"
+  # cap: clip order size so notional <= max_usd | deny: reject when notional > max_usd
+  max_policy: cap
+
+venue_min_size:
+  enabled: true
+  policy: deny
+  default_min_size: "5"
+
+deployment:
+  token_cap_usd: "5"
+  portfolio_cap_usd: "15"
+  # LOCKED rule documented in tyrex_pm.risk.deployment
+
+# Live guru-follow: keep enabled so risk blocks BUYs before OMS when balance/allowance insufficient.
+# Exception: e.g. live_attest scenario sets capital.enabled: false for tiny orders / dry collateral.
+capital:
+  enabled: true
+  max_wallet_age_s: 120
+
+inventory:
+  sell_requires_venue_position: true
+
+kill_switch:
+  enabled: false
+
+concurrency:
+  max_orders_in_flight: 8
+
+readiness:
+  require_wallet_sync: true
+  max_wallet_age_s_live: 60
+  require_heartbeat_live: true
+  require_user_ws_live: true
+
+# Pre-submit guard: notional caps can shrink a BUY below Polymarket's hard 5-share floor.
+# policy=deny  → block locally (reason "below_venue_min_size") before the venue can reject.
+# policy=bump  → raise size to default_min_size and re-validate deployment + capital;
+#                if the bump would breach those, deny instead with bump_unsafe evidence.
+

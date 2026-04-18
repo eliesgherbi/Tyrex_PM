@@ -1,0 +1,22 @@
+execution_mode: shadow
+shadow_bootstrap:
+  usdc_balance: "1000000"
+  usdc_allowance: "1000000"
+reporting:
+  enabled: true
+  runs_dir: var/reporting/runs
+supervisors:
+  reconcile_interval_s: 30
+  # Provisional repair window (seconds): age below this is non-blocking ``provisional_pending_venue``.
+  submit_grace_s: 15
+  # Provisional age (seconds) past which an absent row auto-resolves to UNKNOWN_TERMINAL
+  # (non-blocking, audited) — only when user WS is fresh AND no venue restart suspected.
+  provisional_unknown_terminal_timeout_s: 60
+  # Back-compat alias kept so existing operators / scenarios keep working; mirrored above.
+  venue_confirm_provisional_timeout_s: 60
+  # Adoption grace (seconds): when a venue/REST view shows an order id we don't yet track locally,
+  # match it against recent no-vid provisional rows submitted within this window. Adopt on strong
+  # match (token+side+size+price); otherwise stay non-blocking briefly; otherwise block.
+  adoption_grace_s: 5
+logging:
+  level: INFO

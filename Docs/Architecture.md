@@ -1,202 +1,274 @@
-# Tyrex_PM — architecture overview
+# Architecture
 
-Grounded in the current codebase (`src/tyrex_pm/`). **Live truth model:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md). **Documentation hub:** [README.md](README.md). For operators: [OPERATIONS.md](OPERATIONS.md). For YAML: [CONFIG_MODEL.md](CONFIG_MODEL.md). For contributors: [developer_guide.md](developer_guide.md).
-
-**Per-module detail:** [modules/README.md](modules/README.md).
+**Hub:** [README.md](README.md) · **Live truth:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) · **Modules:** [modules/README.md](modules/README.md)
 
 ---
 
-## A. Project purpose
+## 1. What Tyrex_PM is
 
-**What Tyrex_PM is:** a Python package for **Polymarket** automation, organized around **NautilusTrader** patterns (actors, strategies, message bus) while keeping **venue I/O** and **risk** in explicit layers.
+A modular Polymarket trading stack composed of:
 
-**Current v1 scope:** a **guru-follow copy** path — ingest a wallet’s trades from **Polymarket RTDS** (recommended: **`guru_ingest_mode: rtds_primary`**) and/or incremental **Data API** polling as shadow, validation, or fallback, turn them into internal signals, size them, run **fail-closed risk**, and either **log-only shadow** or **live** execution via **Nautilus** (`submit_order` on **`NautilusGuruExecutionPort`**).
+- a small **runtime** (`runtime.app`, supervisors, coordinator),
+- **venue adapters** for Polymarket (CLOB REST, user/market WS, Gamma, Data API),
+- **explicit state stores** (`WalletStore`, `OrderStore`, `StrategyStore`),
+- **thin strategies** that emit `Intent`s,
+- a **fail-closed `RiskEngine`** that produces `RiskDecision`s,
+- a **single-writer OMS** (shadow or live) for submit/cancel,
+- a **structured reporting** layer (`facts.jsonl` per run).
 
-**Implemented now:**
-
-- **Guru ingestion (RTDS + poll):** **`GuruStreamActor`** — RTDS WebSocket (`activity` / `trades`), `proxyWallet` filter, shared dedup/watermark with poll, reconnect + liveness + optional REST **gap-fill** (`data/guru_stream_actor.py`, `guru_rtds_ws.py`, `guru_rtds_parse.py`, `guru_gap_fill.py`). **`GuruIngestRuntimeState`** selects publish path: `poll_only` | `rtds_shadow` | `rtds_primary` (`data/guru_ingest_state.py`).
-- Incremental **Data API** polling (`GET /activity`, `type=TRADE`) + watermark + optional dedup + `GuruTradeSignal` publication (**`GuruMonitorActor`**, `data/guru_monitor.py`, `data/guru_watermark.py`).
-- Shared **`GuruSignalPipeline`** for dedup + bus publish + structured **`guru_signal_emitted`** logging (`data/guru_ingest_pipeline.py`).
-- Entry / exit / sizing / optional **conviction** weighting (`signal/` — `entry`, `sizing`; per-order min/max USD is **risk** only).
-- **`CopyStrategy`** (`strategy/copy_strategy.py`) — thin orchestration; **no** direct `Cache` / `Portfolio` / order-book use; forwards **`on_order_event`** to the execution port for **limit-order timeout** cleanup when enabled.
-- Typed YAML: strategy / risk / runtime (`config/loaders.py`).
-- **`ConfiguredRiskPolicy`** — **deployment-budget** caps (pending ``leaves ×`` limit + filled ``abs(qty) × avg_px_open`` via **`NautilusDeploymentBudget`**), optional **capital gate** (account + py-clob allowance snapshots). **Not** mark / ``net_exposure`` for caps.
-- **`execution/`** — `NoOpExecutionPort`, **`NautilusGuruExecutionPort`** (live `submit_order`). Optional book hooks + mandatory instrument grid quantize in **`nautilus_guru_exec`** — see **`CONFIG_MODEL.md`** (`execution_*` keys; no operator venue-alignment YAML).
-- **`runtime/state_readers.py`** — canonical read boundary; injected into risk from `guru_compose`. **Live + wallet sync:** Tier A reads use **`VenueState`** when composed (see **LIVE_ARCHITECTURE**).
-- **`runtime/venue_state.py`**, **`runtime/wallet_sync.py`** — Tier A aggregate and HTTP polling into **`VenueState`** (live when **`wallet_sync_enabled`**).
-- **Dynamic instruments / zero-bootstrap** — `guru_instrument_dynamic.py`, optional `guru_cache_warmup.py`.
-- **`scripts/run_guru.py` + `guru_compose.py`** — `TradingNode` with **empty** clients (shadow) or **Polymarket live** data + exec (live).
-
-**Intentionally deferred / out of scope:**
-
-- Guru **discovery / ranking / analytics** (separate product surface).
-- Rich **analytics indicators** / dashboards (beyond post-run **`summarize`** on **`facts.jsonl`**).
-- Broader pacing, TWAP, analytics — **not** in core guru-follow scope unless added in code; see **`Implementation/road_map.md`** (archived backlog).
-
-**Structured run reporting (optional):** when **`reporting_enabled`** in runtime YAML, each run writes **`var/reporting/runs/<run_id>/`** — **`Docs/reporting_fact_model.md`**, **`Docs/OPERATIONS.md`** § Structured reporting.
-
-**Maintainer hub:** [`Implementation/current_state.md`](Implementation/current_state.md) (pointer) · **End-to-end trace:** [`Implementation/end_to_end_review_logic.md`](Implementation/end_to_end_review_logic.md).
-
-**Operators — supported model (live):** **Tier A** (**VenueState** / **WalletSync**) drives **deployment** and wallet-level reads for risk when wired; **Tier B** (Nautilus) is session/order lifecycle. **One bot, one wallet**; see **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** and **[OPERATIONS.md](OPERATIONS.md)**.
+NautilusTrader is **not** the runtime spine; the bot owns its own bus, state machines, and reconcile.
 
 ---
 
-## B. Architectural principles
+## 2. Core principles
 
-| Principle | What it means here |
-|-----------|-------------------|
-| **Modularity** | Packages under `src/tyrex_pm/*` with small public surfaces (`__init__.py` exports where useful). |
-| **Separation of concerns** | Strategy orchestrates; `signal/` is pure policy; `data/` owns external read I/O; `risk/` and `execution/` own gates and venue translation. |
-| **Shadow → live continuity** | Same `CopyStrategy`, same `OrderIntent`, same composition; only **`execution_mode`** and the **`ExecutionPort`** implementation change. |
-| **Strategy / risk / execution** | Strategy calls `RiskPolicy.evaluate` then `ExecutionPort.submit_intent` — it does **not** embed limit formulas, kill-switch rules, or `py-clob` calls. |
-| **Secrets vs config** | `.env` (or env vars) for keys; YAML for non-secrets — see [CONFIG_MODEL.md](CONFIG_MODEL.md). |
-| **Data / strategy / runtime split** | **Data** publishes facts; **strategy** decides; **runtime** wires Nautilus + policies + config loaders. |
-| **Fail-closed risk** | Missing price, over limit, or kill switch → reject with stable `ReasonCode` strings (`core/reason_codes.py`). |
-
----
-
-## C. High-level module map
-
-| Module path | Role |
-|-------------|------|
-| **core** | Shared types (`GuruTradeSignal`, `OrderIntent`), `ReasonCode`, legacy app YAML helpers, logging bits. |
-| **config** | Typed settings dataclasses + YAML loaders for **strategy / risk / runtime** (no secrets). |
-| **data** | Market helpers (allowlist, resolution, book check), Data API HTTP client, guru parse/dedup, **`GuruMonitorActor`**, **`GuruStreamActor`** (RTDS), gap-fill, ingest pipeline. |
-| **signal** | Reusable decision + sizing logic **without** Nautilus or HTTP. |
-| **risk** | `RiskPolicy`, `ConfiguredRiskPolicy` (readers injected from runtime). |
-| **execution** | `ExecutionPort`, `NoOpExecutionPort`, **`NautilusGuruExecutionPort`**. |
-| **strategy** | `BaseComposableStrategy`, **`CopyStrategy`**. |
-| **runtime** | `guru_compose`, **`state_readers`**, **`deployment_budget`**, **`guru_instrument_dynamic`**, `polymarket_nautilus_env`, `clob_factory`, `live_stub`. |
-| **reporting** | **Run observability:** `facts.jsonl`, manifest, optional SQLite + `summarize` (**`Docs/modules/reporting/README.md`**, **`Docs/reporting_fact_model.md`**). |
-
-`indicator/` exists as a stub; see [modules/indicator/README.md](modules/indicator/README.md).
+| Principle | What it means in code |
+|-----------|------------------------|
+| **One writer per wallet** | `SingleWriterOMS` serializes `submit`/`cancel` onto one queue (`execution/oms.py`). |
+| **Strategies never touch the venue** | `GuruFollowStrategy` consumes a normalized `GuruCopySignal` and returns `Intent`s. No HTTP/WS. |
+| **Separated state** | `WalletStore` (venue truth: positions, balance, open orders), `OrderStore` (local OMS with provisional repair), `StrategyStore` (guru watermark + dedup). |
+| **Fast path vs slow path** | User WS is primary live truth; REST `/data/orders`, `/balance-allowance`, `/positions` are bootstrap + repair backstop. |
+| **Venue truth vs local truth** | See [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) for reconcile state machines (provisional repair, venue adoption, WS-terminal tombstones). |
+| **Fail-closed risk** | `RiskEngine.evaluate_intent` returns a `RiskDecision` with a stable `reason_code`. Missing prices, stale wallet, drift, missing capital all deny. |
+| **Reporting is first-class** | Every decision emits a fact to `facts.jsonl` keyed by `run_id` + `correlation_id`. |
+| **Quantized USD evidence** | `risk/evidence_format.py` standardizes 6-decimal USD strings in facts so reports are diff-friendly. |
 
 ---
 
-## D. Module interaction diagram
+## 3. Runtime diagram
 
 ```mermaid
 flowchart TB
-  subgraph Config
-    YAML[Strategy / Risk / Runtime YAML]
-    Loaders[config.loaders]
+  subgraph Venue[Polymarket]
+    CLOB[CLOB REST + WS]
+    DataAPI[Data API]
+    Gamma[Gamma]
   end
 
-  subgraph DataLayer[data]
-    Actor[GuruMonitorActor]
-    Stream[GuruStreamActor]
-    API[PolymarketDataApiClient]
-    Actor --> API
-    Stream -.->|optional WS| RTDS[RTDS activity/trades]
+  subgraph Adapters[venue/polymarket]
+    Bridge[PyClobBridge]
+    UserWS[user_ws]
+    DAClient[DataApiClient]
+    GammaCl[GammaClient]
+    Norm[normalizers]
   end
 
-  subgraph Bus[Nautilus MessageBus]
-    Topic["topic: tyrex_pm.guru.GuruTradeSignal"]
+  subgraph Ingest[ingestion]
+    GuruPoll[guru_stream.poll_guru_incremental]
+    UserIngest[user_stream.run_user_ws_ingest]
   end
 
-  subgraph StrategyLayer[strategy]
-    Copy[CopyStrategy]
-    Entry[entry policies]
-    Exit[exit policies]
-    Size[sizing policy]
-    Copy --> Entry
-    Copy --> Exit
-    Copy --> Size
+  subgraph State[state]
+    Wallet[WalletStore]
+    Orders[OrderStore]
+    Strat[StrategyStore]
+    Reconcile[reconcile_open_orders]
   end
 
-  subgraph RiskExec[risk + execution]
-    Risk[ConfiguredRiskPolicy]
-    Readers[state_readers inject]
-    XShad[NoOpExecutionPort]
-    XNau[NautilusGuruExecutionPort]
-    NT[Nautilus ExecEngine / Cache]
-    XNau --> NT
-    Readers -.-> Risk
+  subgraph Strategy[strategies / signals]
+    Sig[GuruCopySignal]
+    GF[GuruFollowStrategy]
   end
 
-  YAML --> Loaders
-  Loaders --> Runtime[guru_compose]
-  Runtime --> TradingNode[TradingNode]
-  TradingNode --> Actor
-  TradingNode --> Stream
-  TradingNode --> Copy
-  Actor -->|publish| Topic
-  Stream -.->|rtds_primary: publish| Topic
-  Topic -->|subscribe| Copy
-  Copy -->|evaluate| Risk
-  Copy -->|submit_intent| XShad
-  Copy -->|submit_intent| XNau
+  subgraph Risk[risk]
+    Engine[RiskEngine.evaluate_intent]
+  end
+
+  subgraph Exec[execution]
+    OMS[SingleWriterOMS]
+    Live[LiveOMS]
+    Shadow[ShadowOMS]
+  end
+
+  subgraph Report[reporting]
+    Facts[JsonlSink → facts.jsonl]
+  end
+
+  subgraph RT[runtime]
+    Coord[RuntimeCoordinator]
+    Supers[supervisors]
+  end
+
+  DataAPI --> DAClient --> GuruPoll --> Strat
+  CLOB --> UserWS --> UserIngest --> Wallet
+  CLOB --> Bridge
+  Bridge --> Wallet
+  Strat --> GF
+  GuruPoll --> Sig --> GF --> Engine
+  Engine --> OMS --> Live --> Bridge
+  OMS --> Shadow
+  Coord --> Wallet
+  Coord --> Orders
+  Coord --> Reconcile
+  Supers --> Reconcile
+  Coord --> Engine
+  Engine --> Facts
+  Reconcile --> Facts
+  GuruPoll --> Facts
+  OMS --> Facts
 ```
 
-**Live:** Shadow uses `NoOpExecutionPort`. **Live** uses `NautilusGuruExecutionPort` → `submit_order`. **Deployment caps:** when **`VenueState`** is composed (**live** + **`wallet_sync_enabled`**), **`NautilusDeploymentBudget`** uses **venue** resting orders and **venue** position × mark for pending/filled; without **`VenueState`**, the same class falls back to **Nautilus** cache/portfolio (shadow / opt-out).
+Component owners (one writer each): `runtime.app` wires everything; `RuntimeCoordinator` holds shared state; supervisors (heartbeat, venue refresh, provisional repair, user-WS staleness) are the only producers of their respective truth deltas.
 
-**ASCII (same idea):**
+---
+
+## 4. Three engines
+
+1. **Data engine** — `ingestion/*` + `venue/polymarket/*` turn Polymarket feeds into normalized `GuruTradeSignal`, `OpenOrderView`, `WalletPosition`, and `TradeFillRecord` records that flow into `state/*` stores.
+2. **Trading engine** — `execution/oms.py` (`SingleWriterOMS`) serializes submit/cancel onto one queue; `LiveOMS`/`ShadowOMS` are pluggable backends; `execution/order_lifecycle.py` owns provisional → confirmed → terminal transitions.
+3. **Strategy / risk engine** — `signals/*` and `strategies/*` produce `Intent`s; `risk/engine.py` evaluates them through a fixed gate sequence and emits `RiskDecision`s.
+
+---
+
+## 5. Package map (`src/tyrex_pm/`)
+
+| Package | Role | Key files |
+|---------|------|-----------|
+| **core** | Shared dataclasses, ids, enums, time, errors, reason codes. | `models.py`, `enums.py`, `ids.py`, `reason_codes.py`, `events.py`, `bus.py` |
+| **venue/polymarket** | Pure I/O adapter. CLOB bridge, REST clients (Gamma, Data API), WS, normalizers, auth, heartbeat. | `clob_bridge.py`, `clob_wallet_sync.py`, `clob_heartbeat.py`, `gamma_client.py`, `data_api_client.py`, `user_ws.py`, `market_ws.py`, `normalizers.py`, `auth.py`, `clob_env.py`, `positions_sync.py` |
+| **state** | Internal truth: stores + reconcile. | `wallet_store.py`, `order_store.py`, `market_store.py`, `strategy_store.py`, `reconcile.py`, `shadow_wallet.py` |
+| **ingestion** | Long-lived inputs and watermark-driven guru polling. | `guru_stream.py`, `user_stream.py`, `market_stream.py`, `historical_backfill.py` |
+| **signals** | Reusable signal building blocks (no HTTP). | `base.py`, `guru_copy_signal.py` |
+| **strategies** | Composition only — filters + sizing + exits → intents. | `base.py`, `guru_follow/{strategy,filters,sizing,exits}.py` |
+| **risk** | Fail-closed `RiskEngine` + per-policy modules. | `engine.py`, `pretrade.py`, `deployment.py`, `capital.py`, `inventory.py`, `concurrency.py`, `health.py`, `kill_switch.py`, `venue_min_size.py`, `in_flight.py`, `evidence_format.py` |
+| **execution** | OMS, order builder, lifecycle, cancel manager, slippage / liquidity guards. | `oms.py`, `live_oms.py`, `adapters.py`, `order_builder.py`, `order_lifecycle.py`, `cancel_manager.py`, `router.py`, `slippage.py`, `liquidity_guard.py` |
+| **runtime** | App entrypoint, config loading, coordinator, supervisors, modes. | `app.py`, `config.py`, `coordinator.py`, `pipeline.py`, `live_supervisor.py`, `supervisors.py`, `health_runtime.py`, `healthchecks.py`, `live_attest.py`, `risk_contexts.py`, `dependency_graph.py`, `modes.py` |
+| **reporting** | Facts schema + sinks + summarizer. | `facts.py`, `schema_v2.py`, `oms_payload.py`, `summarize.py`, `sinks/jsonl.py` |
+
+Per-module READMEs live under [modules/](modules/README.md).
+
+---
+
+## 6. Canonical data model (`core/models.py`)
+
+```python
+GuruTradeSignal(guru_wallet, token_id, side, size, price, notional_usd,
+                dedup_key, ts_venue, raw_ref, conviction_score)
+
+EnterIntent(token_id, side, size, limit_price, order_style, intent_id)
+ExitIntent(...)        # SELL of an existing position
+ReduceIntent(...)      # partial close
+CancelIntent(venue_order_id, client_order_id, intent_id)
+Intent = EnterIntent | ExitIntent | ReduceIntent | CancelIntent
+
+ApprovedIntent(intent, client_order_id, run_id)
+ApprovedCancel(venue_order_id, client_order_id, run_id, intent_id)
+
+RiskDecision(approved: bool,
+             reason_codes: tuple[str, ...],
+             approved_intent: ApprovedIntent | None,
+             detail: str | None,
+             approved_cancel: ApprovedCancel | None,
+             extensions: dict | None)   # operator-visible evidence
+
+WalletPosition(token_id, qty, avg_price_usd)
+OpenOrderView(token_id, side, remaining_size, limit_price,
+              client_order_id, venue_order_id,
+              original_size, size_matched,
+              venue_state_source, order_status)
+TradeFillRecord(token_id, side, size, price, status, ts_utc, source)
+
+RiskContext(execution_mode, wallet_positions, open_orders,
+            usdc_balance, usdc_allowance, last_wallet_sync_ts,
+            mark_prices, kill_switch, health_ok, heartbeat_ok,
+            clob_session_ok, in_flight_order_count,
+            orders_in_flight_by_token, reconcile_drift,
+            venue_truth_stale, in_flight_buy_reservations)
+```
+
+`RiskContext` is built by `RuntimeCoordinator.build_risk_context(app)` on every signal, so risk always sees the freshest store snapshot.
+
+---
+
+## 7. The `RiskEngine` gate sequence
+
+`risk/engine.py::evaluate_intent` runs a deterministic ordered sequence (any failure returns immediately):
+
+1. **Kill switch** — `kill_switch.check_kill_switch`.
+2. **Cancel intents** — short-circuit; need `venue_order_id` or `client_order_id`.
+3. **Concurrency** — `concurrency.check_concurrency` (max in-flight).
+4. **Aggressive readiness** — wallet sync freshness, heartbeat, user WS, reconcile drift (`health.check_aggressive_readiness`).
+5. **Notional** — min/max with `cap` or `deny` policy (`pretrade.apply_notional_min_max`). Always attaches the in-flight reservation totals to the decision.
+6. **Deployment caps** — token + portfolio USD caps, including in-flight BUY reservations and mark requirement (`deployment.evaluate_deployment_caps`).
+7. **Capital (BUY only)** — USDC balance + allowance net of in-flight reservations (`capital.evaluate_capital_buy`).
+8. **Inventory (SELL/Reduce)** — venue position required when configured (`inventory.check_inventory_sell`).
+9. **Venue minimum size** — Polymarket's hard 5-share floor; `deny` or `bump` (then re-validate gates 6 + 7) (`venue_min_size.evaluate_venue_min_size`).
+
+Approved intents get a fresh `ClientOrderId` and become `ApprovedIntent`. The decision's `extensions` field carries operator-visible evidence (notional policy, deployment numbers, in-flight reservations, capital math, venue-min-size policy) and is merged into the `risk_decision` fact.
+
+See [modules/risk/README.md](modules/risk/README.md) for per-policy detail.
+
+---
+
+## 8. Execution model
+
+| Mode | Backend | Side effects |
+|------|---------|--------------|
+| **shadow** | `ShadowOMS` returns `"shadow_ack"`/`"shadow_cancel_ack"` immediately. | A synthetic fill is applied to `WalletStore` (`apply_local_shadow_fill=True`) so downstream risk sees the new position. |
+| **live** | `LiveOMS` wraps `PyClobBridge` (sync `py-clob-client.create_and_post_order` run on a thread). | Real submit; positions/balance update via user-WS + REST refresh loop; no synthetic fill. |
+
+Both backends are wrapped by `SingleWriterOMS` so submits and cancels never overlap for the same wallet.
+
+After a successful live ack the pipeline calls `refresh_wallet_coordinated_after_live_submit` to pull venue open orders one or two times, smoothing the REST-vs-WS race so the next signal sees the new resting order.
+
+---
+
+## 9. State stores
+
+| Store | Owns | Mutated by |
+|-------|------|------------|
+| **WalletStore** | venue positions, USDC balance + allowance, merged `open_orders` (user WS primary, REST backstop), `_ws_cancel_tombstones`, `trade_fill_records`, `last_sync_ts`, `last_positions_sync_ts`. | `clob_wallet_sync.refresh_wallet_from_clob`, `positions_sync.refresh_positions_from_data_api`, `user_stream._apply_order_event`, `shadow_wallet.apply_*`. |
+| **OrderStore** | local `LocalOrder` rows (`provisional` → `venue_confirmed`), `in_flight_by_token`, `pending_repair_fingerprints`, `terminal_audit`. | `execution.order_lifecycle.{register_submit,ack_submit,release_after_ack,apply_venue_open_order_to_local_orders,remove_local_resting_by_venue_order_id,sync_local_open_orders_from_venue_wallet}`. |
+| **MarketStateStore** | order books / trades scaffolding (when market WS is enabled). | `ingestion.market_stream`. |
+| **StrategyStore** | `guru_watermark` + `guru_seen_dedup` set. | `ingestion.guru_stream.ingest_guru_signals`. |
+
+`reconcile.reconcile_open_orders(wallet, orders, **kw)` is the single function that compares local vs venue truth and produces a `ReconcileResult` with `drift_flags`, `blocking_drift_flags`, and `reconcile_severity`. The result drives `HealthRuntime.apply_reconcile` (which gates new orders) and is emitted as a `reconcile` fact (deduped by signature so unchanged states don't flood the log).
+
+Full state-machine details: [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md).
+
+---
+
+## 10. Reporting model
+
+Every run writes to `var/reporting/runs/<run_id_or_name>/`:
 
 ```
-  [YAML] -> loaders -> guru_compose -> TradingNode (+ optional/state readers -> risk)
-                              |-> GuruMonitorActor --(bus)--> CopyStrategy
-                              |-> GuruStreamActor (RTDS; rtds_primary publish / rtds_shadow compare)
-                              |                               |-> RiskPolicy
-                              |                               |-> ExecutionPort (NoOp / Nautilus)
-                              +-> Path A: Polymarket DATA+EXEC clients on node
+manifest.json     # run_id, schema_version, git_sha, execution_mode, run_kind
+facts.jsonl       # one fact per line; see reporting_fact_model.md
+run_summary.json  # iteration counts, last guru_poll
 ```
 
----
+Facts are deduped where it makes operational sense:
+- `reconcile` facts are suppressed when the operator-relevant state tuple is unchanged (`pipeline._reconcile_signature`).
+- `wallet_sync` facts are suppressed when balance/allowance/positions/open-order counts/marks are unchanged (timestamps are intentionally **excluded** from the dedup signature — see `pipeline._wallet_sync_signature`).
 
-## E. Runtime flow (`scripts/run_guru.py`)
+USD figures in evidence are quantized to 6 decimal places (`risk/evidence_format.py::s_usd`) so diffs across runs are stable.
 
-1. **CLI** parses `--strategy-conf`, `--risk-conf`, `--live-conf`.
-2. **Env:** `python-dotenv` loads repo `.env` or `TYREX_PM_DOTENV` (does not replace shell overrides).
-3. **Config:** `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings` validate and return dataclasses.
-4. **Composition:** `build_guru_trading_node(strategy, risk, runtime)`:
-   - Builds `TradingNodeConfig` (`trader_id`, `LoggingConfig`, **`load_state=False`, `save_state=False`**; data/exec clients **empty** (shadow) or **Polymarket live** (`execution_mode: live`).
-   - Instantiates `GuruMonitorActor` (wallet, poll interval, dedup path, Data API URL) — always registered; poll **publishes** when `guru_ingest_mode` is `poll_only` or `rtds_shadow`, and in `rtds_primary` **only during fallback** when configured.
-   - If `guru_ingest_mode` is `rtds_shadow` or `rtds_primary`, registers **`GuruStreamActor`** (RTDS URL, shared dedup/watermark, ingest state). **Primary:** stream publishes when not in fallback; **shadow:** stream logs `guru_stream_would_emit` only.
-   - Instantiates `CopyStrategy` with strategy YAML (`token_filter`, `copy_scale`, optional conviction fields) and **`execution_mode`** from runtime YAML.
-   - Builds **state readers** and injects **`NautilusDeploymentBudget`** + execution/account/allowance readers into **`ConfiguredRiskPolicy`**; **live** may construct **`VenueState`** and **`WalletSyncActor`**. Wires **`NautilusPositionStateReader`** into **`CopyStrategy`** for optional **reporting** only (marked exposure facts), not for risk caps.
-   - Injects execution port: **`NoOpExecutionPort`** (shadow) or **`NautilusGuruExecutionPort`** (live).
-   - Registers **actor** and **strategy** on the trader **before** `build()`.
-5. **Lifecycle:** `node.build()` then `node.run()` — Nautilus starts clocks; actor `on_start` runs first poll + timer; strategy subscribes to guru topic.
-6. **Signal flow:** **RTDS path** (when enabled): stream parses trade payloads, matches `proxyWallet`, emits **`guru_signal_emitted`** with `source=rtds` on publish. **Poll path:** fetches **`GET /activity`** `TRADE` rows after watermark; emits with `source=poll`. **Gap-fill** may emit with `source=gap_fill`. Shared dedup prevents duplicate `correlation_id` / `source_trade_id`. Bus → **`CopyStrategy._on_guru_trade`** → entry/exit → sizing (optional conviction) → **`OrderIntent`** → **`risk.evaluate`** (per-order clip/bump + caps) → **`ExecutionPort.submit_intent`** (optional book hooks on **`NautilusGuruExecutionPort`**).
-7. **Logs:** structured `event=` lines (`guru_signal_emitted` with `source=`, `guru_stream_would_emit` in shadow, RTDS/fallback/gap-fill events, `guru_poll_error`, `copy_skip`, `shadow_order_intent` / `live_order_intent`, framework `LIVE_ORDER_SUBMIT` / guru `ReasonCode` from `nautilus_guru_exec`). Operators: [OPERATIONS.md](OPERATIONS.md).
+Catalog: [reporting_fact_model.md](reporting_fact_model.md).
 
 ---
 
-## F. Shadow vs live
+## 11. Configuration model (summary)
 
-| Aspect | Shadow | Live |
-|--------|--------|------|
-| **`ExecutionPort`** | `NoOpExecutionPort` | `NautilusGuruExecutionPort` |
-| **Node clients** | Empty | **Polymarket DATA + EXEC** |
-| **Pending token cap** | N/A | Venue resting orders when **`VenueState`** wired; else **`Cache`** orders |
-| **Filled deployment (token/portfolio caps)** | N/A | Venue position × mark when **`VenueState`** wired; else **`Portfolio`** cost basis |
-| **Capital gate** | Allowance provider **None** | Optional |
-| **Secrets** | — | `.env` + L2 |
+YAML files live under `config/` and merge in this order (later overrides earlier):
 
-**Why:** operators validate in **shadow** without full Tier A in some configs; **live** with **wallet sync** enables **VenueState** Tier A. Strategy code path unchanged; ports and reader wiring differ by mode.
+```
+config/risk/default.yaml
+config/runtime/default.yaml
+config/strategies/<strategy>.yaml      # via --strategy
+config/scenarios/<scenario>.yaml       # via --scenario (deep-merged into risk / runtime / strategy)
+```
 
----
+Secrets are **never** in YAML; they live in `.env` and are loaded by `runtime.app._maybe_load_dotenv` when `python-dotenv` is installed.
 
-## G. Limitations and extension points
-
-| Area | Current state | Notes |
-|------|---------------|--------|
-| **Guru input** | Single wallet; **recommended** RTDS **`rtds_primary`** + poll fallback/shadow; **`poll_only`** available | Not full `/trades` history crawler; RTDS is unfiltered stream (client-side wallet filter). |
-| **Risk / exposure** | **Live + wallet sync:** Tier A **VenueState** for deployment inputs; **Tier B** Nautilus for session convergence + optional **capital gate** | External activity: trust **Tier A** facts for caps; **Tier B** may lag — see **LIVE_ARCHITECTURE**. |
-| **Execution** | **Live:** Nautilus `submit_order` via **`NautilusGuruExecutionPort`**; book hooks optional | Limit lifecycle / timeout implemented on the guru Nautilus path. |
-| **Restart** | **`load_state=False`** in `guru_compose` | Post-restart truth = **venue + adapter** + optional Tyrex warmup. |
-| **Follow extras** | Pacing, TWAP, richer suppression | **Not** shipped unless implemented in code — see **`Implementation/road_map.md`** (archived backlog). |
-| **Multi-actor / shared wallet** | **Manual UI**, second bot, or mixed strategies on **same** keys | **Tier A** (**VenueState**) is the operator check for caps; **Tier B** may lag. See **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** and **[OPERATIONS.md](OPERATIONS.md)** § *Current status & operating model*. |
-| **New strategies** | `CopyStrategy` | Reuse injected `RiskPolicy` / `ExecutionPort` pattern. |
+Authoritative reference: [CONFIG_MODEL.md](CONFIG_MODEL.md).
 
 ---
 
-## Where to read next
+## 12. Where to read next
 
-1. **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** — live Tier A vs Tier B, workflow, facts.
-2. **[Implementation/current_state.md](Implementation/current_state.md)** — pointer hub.
-3. **[modules/README.md](modules/README.md)** — per-module docs.
-4. **[OPERATIONS.md](OPERATIONS.md)** — runbook, modes, log semantics.
-5. **[CONFIG_MODEL.md](CONFIG_MODEL.md)** — YAML fields.
-6. **[developer_guide.md](developer_guide.md)** — boundaries, tests, shadow vs live.
-7. **Module guides:** [modules/README.md](modules/README.md) — `DEVELOPER.md` per mature package.
+- **How risk decides:** [modules/risk/README.md](modules/risk/README.md)
+- **Why a fact appeared (or didn't):** [reporting_fact_model.md](reporting_fact_model.md)
+- **Why a venue order appeared "unmatched":** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) §3 (reconcile)
+- **How to add a new strategy:** [developer_guide.md](developer_guide.md) §4
+- **How to run live for the first time:** [OPERATIONS.md](OPERATIONS.md)

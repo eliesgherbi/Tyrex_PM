@@ -1,0 +1,7 @@
+execution_mode: shadow
+runtime:
+  shadow_bootstrap:
+    usdc_balance: "1000000"
+    usdc_allowance: "1000000"
+guru:
+  data_api_poll_interval_s: 1

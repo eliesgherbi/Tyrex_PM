@@ -1,53 +1,71 @@
 # Tyrex_PM
 
-Polymarket **guru-follow** trading stack on **NautilusTrader**: RTDS + Data API ingest, typed YAML config, deployment-based risk, and shadow or live execution via **`NautilusGuruExecutionPort`**.
+A Polymarket-native trading stack: small **event-driven runtime**, **venue adapters**, **explicit state stores**, **fail-closed risk**, and **structured reporting**. NautilusTrader is **not** the runtime spine.
 
-**Operators (live):** **Tier A** deployment and wallet-level reads use **`VenueState`** (fed by **WalletSync**) when `execution_mode: live` and **`wallet_sync_enabled`** (default on live). **Tier B** remains Nautilus **Cache** / **Portfolio** for this bot’s session and order lifecycle. **One bot, one dedicated wallet** is still the supported model; external activity is handled via Tier A updates, not by requiring strategy-side SELL audit events. See **[Docs/LIVE_ARCHITECTURE.md](Docs/LIVE_ARCHITECTURE.md)** and **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)**.
+```
+guru / market data ──► signals ──► strategies ──► RiskEngine ──► OMS ──► CLOB
+                                                       ▲                  │
+                                                       └── state stores ◄─┘
+                                                            (wallet, orders, marks)
+                                                                      │
+                                                                      ▼
+                                                              facts.jsonl  (reporting)
+```
 
 ## Quick start
 
-1. Python 3.10+ and `pip install -e ".[dev]"`
-2. Credentials: copy `.env.example` to **repo root** `.env` (or export the same variables). Shell overrides `.env` per key.
-3. `python scripts/verify_polymarket_auth.py`
-
-Do not commit `.env` or secrets.
-
-## Guru follow (`run_guru.py`)
-
 ```bash
-pip install -e .
-python scripts/run_guru.py \
-  --strategy-conf config/strategy/guru_follow.yaml \
-  --risk-conf config/risk/guru_follow_risk.yaml \
-  --live-conf config/runtime/live_polymarket.yaml
+pip install -e .[dev]            # development
+pip install -e .[live]           # add live CLOB deps (py-clob-client, websockets, dotenv)
+
+# shadow run (no real submits, synthetic USDC bootstrap)
+python -m tyrex_pm.runtime.app run --strategy config/strategies/guru_follow.yaml \
+    --scenario shadow_guru --run-name first_shadow
+
+# live run (requires .env with TYREX_PRIVATE_KEY [+ TYREX_FUNDER for proxy wallets])
+tyrex-pm run --strategy config/strategies/guru_follow.yaml \
+    --scenario live_guru --run-name first_live
+
+# minimal end-to-end live attestation (post + cancel one tiny order)
+tyrex-pm live-attest --token-id <numeric_clob_token_id> --size 1 --price 0.01 --side BUY
 ```
 
-Set `execution_mode: live` in runtime YAML only after operator checks (**[Docs/OPERATIONS.md](Docs/OPERATIONS.md)**). Logs: `logs/<mode>/run_tyrex.log`, `run_nautilus.log`; optional `--log-name`. Reporting: runtime `reporting_enabled` + `--reporting-run-id`. Optional **Layer A** signal filters: top-level **`token_filter`** unchanged; add **`filters:`** per **[Docs/CONFIG_MODEL.md](Docs/CONFIG_MODEL.md)** — try **`config/scenarios/layer_a_follow/`** for a wired example.
+Each run writes `var/reporting/runs/<run_id_or_name>/{manifest.json,facts.jsonl,run_summary.json}`.
 
-## Common commands
+## Documentation
 
-```bash
-pip install -e ".[dev]"
-ruff check src tests scripts
-pytest tests/ -q
+Start at **[`Docs/README.md`](Docs/README.md)**. Highlights:
+
+| Audience | Read |
+|----------|------|
+| New to the repo | [`Docs/Architecture.md`](Docs/Architecture.md) |
+| Operating a node | [`Docs/OPERATIONS.md`](Docs/OPERATIONS.md) |
+| Changing the code | [`Docs/developer_guide.md`](Docs/developer_guide.md) · [`Docs/modules/README.md`](Docs/modules/README.md) |
+| Tuning configuration | [`Docs/CONFIG_MODEL.md`](Docs/CONFIG_MODEL.md) |
+| Reading `facts.jsonl` | [`Docs/reporting_fact_model.md`](Docs/reporting_fact_model.md) |
+| Live truth & reconcile | [`Docs/LIVE_ARCHITECTURE.md`](Docs/LIVE_ARCHITECTURE.md) |
+
+Secrets live in **`.env`** (never commit). See [`.env.example`](.env.example).
+
+## Repository layout
+
 ```
-
-Opt-in network test: `set TYREX_NETWORK_TESTS=1 && pytest tests/test_resolution_network.py -v` (Windows).
-
-## Documentation (start here)
-
-| Doc | Purpose |
-|-----|---------|
-| **[Docs/README.md](Docs/README.md)** | Index and documentation map |
-| **[Docs/LIVE_ARCHITECTURE.md](Docs/LIVE_ARCHITECTURE.md)** | **Authoritative** live truth model: Tier A (VenueState) vs Tier B (Nautilus), workflow, caveats |
-| **[Docs/Architecture.md](Docs/Architecture.md)** | System layout, diagrams, shadow vs live |
-| **[Docs/developer_guide.md](Docs/developer_guide.md)** | Contributor boundaries and tests |
-| **[Docs/CONFIG_MODEL.md](Docs/CONFIG_MODEL.md)** | YAML reference |
-| **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)** | Operator runbook |
-| **[Docs/reporting_fact_model.md](Docs/reporting_fact_model.md)** | Structured reporting / joins |
-| **[Docs/OPERATIONS.md](Docs/OPERATIONS.md)** § *Current status & operating model* | Wallet model, limitations, reporting |
-| **[Docs/Implementation/current_state.md](Docs/Implementation/current_state.md)** | Pointer hub → LIVE_ARCHITECTURE + deep dives |
-| **[Docs/Implementation/road_map.md](Docs/Implementation/road_map.md)** | Governance one-pager (Tier A / Tier B) |
-| **[Docs/modules/README.md](Docs/modules/README.md)** | Per-package **README** + **DEVELOPER.md** |
-
-Dependency notes: **[Docs/dependency_lock.md](Docs/dependency_lock.md)** · Runbooks: **`Docs/Runbooks/`**.
+src/tyrex_pm/
+  core/           # events, models, ids, time, errors, reason codes
+  ingestion/      # guru poll, market WS, user WS, historical backfill
+  signals/        # reusable signal building blocks
+  strategies/     # guru_follow (composition only)
+  risk/           # RiskEngine + per-policy modules (fail-closed)
+  execution/      # OMS (single-writer), order builder, lifecycle
+  state/          # wallet/order/market/strategy stores + reconcile
+  runtime/        # app entrypoint, config, supervisors, coordinator
+  reporting/      # fact schema, sinks, summarizer
+  venue/polymarket/   # CLOB bridge, WS, REST, normalizers, auth
+config/
+  risk/default.yaml             # global risk policy
+  runtime/default.yaml          # supervisors, reporting, mode
+  strategies/guru_follow.yaml   # strategy knobs
+  scenarios/                    # shadow_guru, live_guru, live_attest
+tests/                          # pytest suites (179+ cases)
+Docs/                           # documentation root
+```

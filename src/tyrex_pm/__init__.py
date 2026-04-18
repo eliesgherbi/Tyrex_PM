@@ -1,3 +1,3 @@
-"""Tyrex_PM — modular Polymarket / NautilusTrader base (package name avoids stdlib `platform`)."""
+"""Tyrex_PM — Polymarket-native trading stack (parity rebuild)."""
 
-__all__: list[str] = []
+__version__ = "0.2.0"

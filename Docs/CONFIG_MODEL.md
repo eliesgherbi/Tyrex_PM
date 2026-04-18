@@ -1,222 +1,240 @@
-# Config model (v1 operational split)
+# Configuration model
 
-Secrets stay in **`.env`** (or exported env vars). All YAML is non-secret.
+**Hub:** [README.md](README.md) · **Architecture:** [Architecture.md](Architecture.md) · **Operations:** [OPERATIONS.md](OPERATIONS.md)
 
-**Navigation:** [README.md](README.md) · **Context:** [Architecture.md](Architecture.md) · **Config module:** [modules/config/README.md](modules/config/README.md)
+Tyrex_PM has **three** YAML files that get merged in a fixed order, plus environment variables for secrets and a few runtime overrides. Everything is parsed by `runtime/config.py` into the immutable `AppConfig(strategy, risk, runtime, raw)` dataclass.
 
-**Tier A vs Tier B (read once):** On **live** with **`wallet_sync_enabled: true`** (default), **deployment-budget** inputs and Tier A read boundaries prefer **`VenueState`** (HTTP snapshots + WalletSync) via **`state_readers`** / **`NautilusDeploymentBudget`**. **Pending** rests use venue-listed orders when wired; **filled** deployment uses venue position size × mark (see **`LIVE_ARCHITECTURE.md`**). **Shadow** or live with **`wallet_sync_enabled: false`** falls back to Nautilus **`Cache` + `Portfolio`** inside the same classes — for **capital gate**, **`DefaultCapitalStateProvider`** merges account / CLOB as documented; venue collateral is preferred when VenueState is wired. Operators: **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)** · **[OPERATIONS.md](OPERATIONS.md)**.
+---
 
-## Repository layout (files on disk)
+## 1. File layout & merge order
 
-| Location | Purpose |
+```
+config/
+  risk/default.yaml                # global risk policy            ── base
+  runtime/default.yaml             # supervisors, reporting, mode  ── base
+  strategies/<name>.yaml           # strategy knobs                ── base
+  scenarios/<name>.yaml            # overlay (deep-merged on top)  ── overlay
+```
+
+Resolution (see `load_app_config`):
+
+1. Always loads `config/risk/default.yaml` and `config/runtime/default.yaml`.
+2. Loads the strategy YAML passed via `--strategy` (defaults to `config/strategies/guru_follow.yaml`).
+3. If `--scenario <name>` is given, resolves to `config/scenarios/<name>.yaml` and **deep-merges** these overlay sections:
+   - top-level: `execution_mode`, `reporting`, `supervisors`, `logging` → into `runtime`
+   - top-level: `guru`, `filters`, `sizing`, `exits` → into `strategy`
+   - blocks: `risk`, `runtime`, `strategy` → into their respective base dicts
+4. Hands the merged dicts to `parse_app_config(...)`, which produces `AppConfig`.
+5. Environment variables override a tiny subset of supervisor knobs at run start (see §5).
+
+All money / size / price values **must be quoted strings** in YAML; they are parsed via `Decimal(str(v))`.
+
+---
+
+## 2. `risk/` block
+
+Defaults from `config/risk/default.yaml`:
+
+```yaml
+notional:
+  min_usd: "1"           # reject below this
+  max_usd: "4"           # cap or reject above this
+  max_policy: cap        # cap | deny
+
+venue_min_size:
+  enabled: true
+  policy: deny           # deny | bump
+  default_min_size: "5"  # Polymarket hard floor (shares)
+
+deployment:
+  token_cap_usd: "5"
+  portfolio_cap_usd: "15"
+
+capital:
+  enabled: true
+  max_wallet_age_s: 120
+
+inventory:
+  sell_requires_venue_position: true
+
+kill_switch:
+  enabled: false
+
+concurrency:
+  max_orders_in_flight: 8
+
+readiness:
+  require_wallet_sync: true
+  max_wallet_age_s_live: 60
+  require_heartbeat_live: true
+  require_user_ws_live: true
+```
+
+| Key | Type | Meaning | Reason code on deny |
+|-----|------|---------|---------------------|
+| `notional.min_usd` | Decimal | Hard floor on order USD notional | `notional_below_min` |
+| `notional.max_usd` | Decimal | Cap on order USD notional | `notional_above_max` (deny) or silent clip (cap) |
+| `notional.max_policy` | `cap`\|`deny` | Behavior when above max | — |
+| `venue_min_size.enabled` | bool | Run the final pre-submit min-size guard | — |
+| `venue_min_size.policy` | `deny`\|`bump` | Below `default_min_size`: block, or raise to floor and re-validate | `below_venue_min_size` |
+| `venue_min_size.default_min_size` | Decimal | Venue floor in **shares** (Polymarket = 5) | — |
+| `deployment.token_cap_usd` | Decimal | Per-token long-side cap (positions + open BUYs + in-flight) | `token_deployment_cap` |
+| `deployment.portfolio_cap_usd` | Decimal | Total long-side cap across all tokens | `portfolio_deployment_cap` |
+| `capital.enabled` | bool | Pre-submit balance/allowance gate (BUYs only) | `insufficient_capital` / `insufficient_allowance` |
+| `capital.max_wallet_age_s` | int | Wallet snapshot must be fresher than this for capital gate | `stale_wallet_snapshot` |
+| `inventory.sell_requires_venue_position` | bool | SELL is gated on a non-zero venue position | `naked_sell` / `insufficient_inventory` |
+| `kill_switch.enabled` | bool | Operator-flipped global block | `kill_switch` |
+| `concurrency.max_orders_in_flight` | int | Max simultaneous unacked submits | `concurrency_limit` |
+| `readiness.require_wallet_sync` | bool | Wallet must have synced once before live trading | `not_ready` |
+| `readiness.max_wallet_age_s_live` | int | Max age for wallet truth in live mode | `stale_wallet_snapshot` |
+| `readiness.require_heartbeat_live` | bool | CLOB heartbeat must be healthy in live | `heartbeat_failed` |
+| `readiness.require_user_ws_live` | bool | User-WS must be fresh in live | `venue_truth_stale` |
+
+Gate order is documented in [Architecture.md §7](Architecture.md#7-the-riskengine-gate-sequence).
+
+---
+
+## 3. `strategy/` block (`guru_follow`)
+
+Defaults from `config/strategies/guru_follow.yaml`:
+
+```yaml
+guru:
+  wallet: "0x...."                      # required for live polling
+  data_api_poll_interval_s: 5
+  data_api_limit: 50
+
+filters:
+  exclude_untradeable_markets: false
+  token_allowlist: []                   # empty = no allowlist filter
+  min_notional_usd: "700"
+  significance_min_notional_usd: "0"
+  min_conviction_score: "0"
+
+sizing:
+  static_enabled: true                  # BUY uses static_amount_usd, ignores copy_scale + conviction
+  static_amount_usd: "5"
+  copy_scale: "1.0"
+  conviction:
+    enabled: false
+    score_min: "0"
+    score_max: "1"
+    min_multiplier: "0.5"
+    max_multiplier: "2.0"
+
+exits:
+  dust_notional_usd: "0.5"
+  sell_mode: proportional_to_guru       # proportional_to_guru | full_bot_position
+```
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `guru.wallet` | str | Polymarket address being copied (Data API user filter) |
+| `guru.data_api_poll_interval_s` | float | Poll interval for `data-api/activity` |
+| `guru.data_api_limit` / `data_api_max_pages_per_poll` | int | Pagination |
+| `filters.token_allowlist` | list[str] | If non-empty, only these `token_id`s are allowed |
+| `filters.min_notional_usd` | Decimal | Skip guru trades smaller than this notional |
+| `filters.significance_min_notional_usd` | Decimal | "Significant" threshold for proportional sells |
+| `filters.min_conviction_score` | Decimal | Skip below this conviction |
+| `filters.exclude_untradeable_markets` | bool | Calls Gamma to verify market tradeability before submit |
+| `sizing.static_enabled` | bool | If true, BUYs use `static_amount_usd` notional; otherwise mirror guru with `copy_scale * conviction` |
+| `sizing.static_amount_usd` | Decimal | Fixed BUY notional when static |
+| `sizing.copy_scale` | Decimal | Multiplier on guru notional |
+| `sizing.conviction.*` | various | Linear interp between `min_multiplier` and `max_multiplier` over `[score_min, score_max]` |
+| `exits.dust_notional_usd` | Decimal | Suppress dust SELLs |
+| `exits.sell_mode` | str | `proportional_to_guru` mirrors guru's exit fraction; `full_bot_position` always exits the whole local position |
+
+---
+
+## 4. `runtime/` block
+
+Defaults from `config/runtime/default.yaml`:
+
+```yaml
+execution_mode: shadow                  # shadow | live  (set by scenarios)
+shadow_bootstrap:
+  usdc_balance: "1000000"
+  usdc_allowance: "1000000"
+reporting:
+  enabled: true
+  runs_dir: var/reporting/runs
+supervisors:
+  reconcile_interval_s: 30
+  submit_grace_s: 15
+  provisional_unknown_terminal_timeout_s: 60
+  venue_confirm_provisional_timeout_s: 60   # back-compat alias for above
+  adoption_grace_s: 5
+logging:
+  level: INFO
+```
+
+| Key | Meaning |
+|-----|---------|
+| `execution_mode` | `shadow` (synthetic fills via `apply_shadow_fill`) or `live` (real CLOB) |
+| `shadow_bootstrap.*` | Synthetic USDC seed for shadow runs (no venue sync) |
+| `reporting.enabled` / `runs_dir` | Toggle and root for `var/reporting/runs/<run_id>/` |
+| `supervisors.reconcile_interval_s` | Cadence of REST refresh + reconcile in `live_supervisor.venue_refresh_loop` |
+| `supervisors.submit_grace_s` | Provisional age below which a missing-from-venue local row is non-blocking (`provisional_pending_venue`) |
+| `supervisors.provisional_unknown_terminal_timeout_s` | Provisional age past which an absent row drops as `UNKNOWN_TERMINAL` (when WS fresh and no venue restart) |
+| `supervisors.adoption_grace_s` | Window in which a fresh venue order id with no local row is allowed to adopt onto a no-vid provisional submit |
+| `logging.level` | Python logging level for the process |
+
+See [LIVE_ARCHITECTURE.md §3](LIVE_ARCHITECTURE.md#3-reconcile-state-machine) for how these knobs interact.
+
+---
+
+## 5. Environment variables
+
+Secrets live in `.env`; they are loaded by `python-dotenv` in `runtime/app.py`.
+
+| Variable | Purpose |
 |----------|---------|
-| `config/strategy/` | Default **strategy** template (`guru_follow.yaml`) — semantic sections in-file. |
-| `config/risk/` | Default **risk** (`guru_follow_risk.yaml`) plus optional **validation profiles** (`guru_follow_risk_phaseb_*.yaml`). |
-| `config/runtime/` | **Runtime** templates — `live_polymarket.yaml`, `rtds_shadow.yaml`, `live_polymarket_phaseb_validate.yaml`. |
-| `config/scenarios/shadow_validation/` | Bundled strategy + risk + **shadow** runtime for smoke runs and report checks; see `README.md` there. |
-| `config/scenarios/live_validation/` | Bundled strategy + risk + **live** runtime for controlled live checks; see `README.md` there. |
-| `config/scenarios/bot_sell_validate/` | **Scenario A** — guru follow + `bot_sell_validate` block for bot-originated sell validation (isolated state paths); see [Implementation/validate_bot_originated_sell_scenario_a.md](Implementation/validate_bot_originated_sell_scenario_a.md). |
-| `config/scenarios/layer_a_follow/` | **Layer A demo** — `filters:` with significance gates on (see folder `README.md`); isolated `var/scenarios/layer_a_follow/` state. |
-| `config/scenarios/venue_state_live/` | **Current live validation** — WalletSync + VenueState explicit keys; isolated `var/scenarios/venue_state_live/` (see folder `README.md`). |
-| `config/scenarios/virtual_tp_sl_live/` | **Small live drill** — virtual TP/SL enabled; isolated state under `var/scenarios/virtual_tp_sl_live/` (see folder `README.md`). |
-| `config/scenarios/position_reconciliation_validation/` | **Obsolete** scenario name — reconciliation removed; do not use for new runs (see folder `README.md`). |
+| `TYREX_PRIVATE_KEY` (or `POLYMARKET_PK`) | EVM private key for CLOB signing |
+| `TYREX_FUNDER` (or `POLYMARKET_FUNDER`) | Proxy / funder address (required when `signature_type=1`) |
+| `TYREX_SIGNATURE_TYPE` (or `POLYMARKET_SIGNATURE_TYPE`) | `0` (EOA) or `1` (proxy / email-wallet) |
+| `TYREX_CLOB_HOST` | Override CLOB endpoint (default `https://clob.polymarket.com`) |
+| `TYREX_CHAIN_ID` | Override chain id (default `137` Polygon) |
+| `TYREX_HEARTBEAT_ID` (or `POLYMARKET_HEARTBEAT_ID`) | Optional heartbeat client id |
+| `POLYMARKET_API_KEY` / `_API_SECRET` / `_PASSPHRASE` | Optional pre-derived API creds; otherwise derived from the key |
 
-YAML is **flat** at the top level (except `token_filter` and optional nested `filters`): grouping is by **comments and key order** only. Loaders: `load_strategy_settings`, `load_risk_settings`, `load_runtime_settings`.
+Operator overrides (mirror `runtime.supervisors.*`):
 
-## Strategy (`StrategySettings` → `load_strategy_settings`)
+| Variable | Mirrors |
+|----------|---------|
+| `TYREX_SUBMIT_GRACE_S` | `submit_grace_s` |
+| `TYREX_PROVISIONAL_UNKNOWN_TERMINAL_TIMEOUT_S` | `provisional_unknown_terminal_timeout_s` |
+| `TYREX_ADOPTION_GRACE_S` | `adoption_grace_s` |
+| `TYREX_VENUE_CONFIRM_GRACE_S` | back-compat alias for `submit_grace_s` |
+| `TYREX_VENUE_CONFIRM_PROVISIONAL_TIMEOUT_S` | back-compat alias for `provisional_unknown_terminal_timeout_s` |
 
-| Field | Required | Default | Notes |
-|-------|----------|---------|--------|
-| `guru_wallet_address` | yes | — | `0x` + 40 hex chars |
-| `token_filter` | yes | — | Mapping (see below); **explicit** filtered vs unfiltered mode |
-| `copy_scale` | no | `1.0` | `>= 0`; base scale for sizing (`base_scale` in logs) |
-| **`conviction_sizing_enabled`** | no | **`false`** | When **true**, follow **entry** quantity uses conviction-weighted `effective_scale` vs rolling average guru size. **false** = proportional sizing only. |
-| **`conviction_sizing_cap`** | no | `2.0` | Upper bound on `trade_size / rolling_avg` multiplier; must be **`> 0`** when conviction enabled. |
-| **`conviction_sizing_lookback_trades`** | no | `20` | Rolling window length (guru **BUY** sizes that passed entry policy only). Must be **`>= 1`** when conviction enabled. |
-| `strategy_dedup_state_path` | no | `null` | If set, overrides runtime dedup path for `GuruMonitorActor` only |
-| **`filters`** | no | *(all off)* | Optional **Layer A** rules — see below. Omitted = legacy behavior (mirror exit, no significance gates). **`token_filter` stays top-level** (not moved under `filters`). |
+When set, env values are read **per reconcile** by `pipeline._reconcile_kw` so live tweaks don't require a restart.
 
-### `filters` (optional Layer A)
+---
 
-Parsed into `StrategySettings.layer_a`. Implementation: `src/tyrex_pm/signal/layer_a/`.
+## 6. Scenarios
 
-| Block | Purpose |
-|-------|---------|
-| `exit_filter` | `enabled`, `exit_method` (`mirror_guru` \| `full_exit`). **`full_exit`** uses Nautilus `Portfolio` via `runtime/layer_a_context.py` (fail-closed if no position / unresolved). |
-| `significance_filter.static_amount` | Entry USD floor: `enabled`, `amount_usd` (`> 0` when enabled). |
-| `significance_filter.significance_conviction` | Entry median gate on prior **BUY** notionals: `enabled`, `lookback_trades` (≥ 1), `threshold_method` (**`median`** only in v1). |
+Built-in scenarios in `config/scenarios/`:
 
-Significance conviction history is **in-memory** only (restart clears). Reporting: `layer_a_filter` facts + `strategy_decision`. See `Docs/Implementation/LayerA_Filters/`.
+| File | Purpose | Notable overrides |
+|------|---------|-------------------|
+| `shadow_guru.yaml` | Default development / golden-test mode | `execution_mode: shadow`, fast guru poll (`1 s`), large synthetic USDC bootstrap |
+| `live_guru.yaml` | Live guru-follow on Polymarket | `execution_mode: live`, raises `deployment.token_cap_usd` to `100` |
+| `live_attest.yaml` | One-shot post + cancel attestation | `capital.enabled: false`, `venue_min_size.enabled: false`, relaxed `notional` band, `require_user_ws_live: false` |
 
-### `token_filter` (required block)
+Add new scenarios as small overlays — never duplicate the defaults wholesale.
 
-| Key | Required | Notes |
-|-----|----------|--------|
-| `enabled` | yes | `true` = **filtered**: only listed tokens; `false` = **unfiltered**: all guru tokens pass the strategy gate |
-| `allowlisted_token_ids` | yes | List (may be empty when `enabled: false`). When `enabled: true`, must be **non-empty**, unique decimal CLOB token strings. When `enabled: false`, **ignored** for filtering (risk / execution unchanged). |
+---
 
-Empty list does **not** implicitly mean “all tokens” — use `enabled: false` for iteration / shadow testing; use `enabled: true` + explicit ids for controlled follow.
+## 7. How scope discovers config
 
-### `virtual_exit` (optional — Tyrex-owned TP/SL)
+```
+runtime/app.py::cmd_run
+  └─ load_app_config(repo_root, strategy_file, scenario_file)
+       └─ deep-merges YAML, then parse_app_config(...)
+            ├─ StrategyConfig → strategies/guru_follow/strategy.py
+            ├─ RiskConfig     → risk/engine.py + per-policy modules
+            ├─ RuntimeConfig  → runtime/coordinator.py + supervisors
+            └─ raw            → kept for forensic dumps in manifest.json
+```
 
-Parsed into `StrategySettings.virtual_exit`. **v1:** long-only, post-entry monitoring, no native OCO. **Default:** `enabled: false` (no manager wired). When enabled on **live** `CopyStrategy` (not `bot_sell_validate`), compose wires `VirtualExitManager` + `VirtualExitStore` (`runtime.virtual_exit.state_path`).
-
-| Key | Default | Notes |
-|-----|---------|--------|
-| `enabled` | `false` | Master switch for policy + compose wiring. |
-| `take_profit_pct` | `10.0` | TP trigger vs entry VWAP: `vwap × (1 + pct/100)`. Must be **> 0**. |
-| `stop_loss_pct` | `5.0` | SL trigger: `vwap × (1 − pct/100)`. Must be **> 0**. |
-| `adopt_existing_positions` | **`false`** | **v1:** only lots opened by this run (Tyrex entry fills) are protected when `false`. |
-
-## Risk (`RiskSettings` → `load_risk_settings`)
-
-**Deployment budget (one model):** Caps compare **USD deployed**, not marked-to-market portfolio value. **Per-order:** `order_deploy = price_ref × quantity` vs `max_notional_usd_per_order`. **Per-token:** `token_deploy` (pending + filled on that token) + `order_deploy` vs `max_token_notional_usd_open`. **Portfolio:** sum of pending + filled across Polymarket + `order_deploy` vs `max_portfolio_notional_usd_open`. **Live + WalletSync:** **pending** and **filled** inputs are **venue-backed** when **`VenueState`** is composed; **filled** uses venue size × mark (fallback + fact on missing mark). **Without** VenueState (shadow / no wallet sync), **filled** reverts to Nautilus position cost basis and **pending** to cache-backed order lists. Implementation: `risk/configured.py`, `runtime/deployment_budget.py`. See **[LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)**.
-
-| Field | Required | Default | Notes |
-|-------|----------|---------|-------|
-| `max_notional_usd_per_order` | yes | — | Per-order deploy cap vs **order_deploy** (`price_ref × qty`). Behavior: see **`max_notional_policy`**. |
-| **`max_notional_policy`** | no | **`cap`** | **`deny`** \| **`cap`**. **`deny`:** reject when **order_deploy** &gt; cap (legacy hard deny). **`cap`:** clip quantity down so deploy ≤ cap (when feasible). |
-| **`min_notional_usd_per_order`** | no | **`0`** | **BUY** only: compares **order_deploy** to this USD floor. **`0`** disables the check. Operator policy — **not** venue `min_quantity` (execution snaps to tick/step internally; size USD is risk). Behavior: see **`min_notional_policy`**. |
-| **`min_notional_policy`** | no | **`deny`** | **`deny`** \| **`cap`**. **`deny`:** reject when **order_deploy** &lt; min (and min &gt; 0). **`cap`:** bump quantity up so deploy ≥ min (still subject to max/token/portfolio; infeasible bump → `RISK_ORDER_DEPLOYMENT_INFEASIBLE`). |
-| `max_token_notional_usd_open` | no | unlimited (`null`) | Reject if **token_deploy** + order would exceed |
-| `kill_switch` | no | `false` | If true, all intents rejected |
-| `fail_on_missing_price_for_notional` | no | `true` | Fail closed when `price_ref` missing for notional math |
-| `capital_gate_enabled` | no | `false` | If **true**, risk requires fresh **capital state** from `DefaultCapitalStateProvider` (Nautilus account + optional CLOB merge inside the provider; live). |
-| `max_account_snapshot_age_seconds` | no | `30` | Max age before the provider refreshes the **account** leg (`Portfolio.account` snapshot). |
-| `max_allowance_snapshot_age_seconds` | no | `120` | Max age before the provider refreshes the **CLOB** leg when that leg is used (mins, reserve, or observability). |
-| `min_collateral_balance_usd` | no | `null` | If set, compare to **canonical free collateral** from the provider (prefers Nautilus USDC `free`, else CLOB balance). Values are normalized in **`runtime/clob_collateral_money.py`** when sourced from CLOB: integer strings = **USDC 1e-6 atoms**; strings with a decimal point = human USD. |
-| `min_allowance_usd` | no | `null` | If set, compare to **allowance** from the merged capital snapshot (CLOB-sourced today). |
-| `fail_on_unresolved_token_deployment` | no | `false` | If **true** and per-token cap finite, deny when token **filled** deployment cannot be parsed; if **false**, treat missing leg as **0** (underestimate). |
-| `max_portfolio_notional_usd_open` | no | unlimited (`null`/omitted) | Reject if **portfolio_deploy** + order would exceed. **Live-only** (compose rejects finite cap in shadow). |
-| `fail_on_unresolved_portfolio_deployment` | no | `true` | If **true** and portfolio cap finite, deny when total deployment cannot be summed cleanly; if **false**, unresolvable filled legs count as **0** in the sum. |
-| `max_concurrent_guru_resting_orders` | no | `null` (off) | Deny when open guru-origin rests (Polymarket) are already at ``>=`` this limit. Identity: ``state_readers.is_guru_resting_order`` (tags ``guru_cid=``, else ``TX``+26 hex). **Virtual TP/SL** orders use ``VE…`` COIDs and ``virt_exit_*`` tags — they **do not** count toward this cap, and **virtual exit** intents **skip** this gate so exits are not blocked when the guru mirror is already at the limit. **Live-only** (compose). |
-| `collateral_reserve_usd` | no | `0` | **BUY** intents require **canonical free collateral ≥ reserve + n** when enabled (same provider snapshot as ``min_*``). Breach: ``RISK_INSUFFICIENT_FREE_COLLATERAL_AFTER_RESERVE``. Missing/unparsable fields: fail-closed (``RISK_ALLOWANCE_UNAVAILABLE``). Requires **`capital_gate_enabled: true`**. Invalid when **`execution_mode: shadow`** (compose). |
-| **`tradable_state_health_gate_enabled`** | no | **`false`** | When **true**, risk applies **TradableStateHealth** §10 before deploy adjust; compose wires **`NautilusLiveExecutionHealthSource`** (Nautilus ``LiveExecutionEngine`` startup reconciliation latch). Requires a live-shaped exec engine; see **`Implementation/refactor_lifecycle/tradable_state_health.md`**. **Misconfiguration / missing producer at evaluate:** policy still fail-closes the same way; reporting emits a synthetic **`tradable_state_health`** row (`reason_code=health_source_missing`, `reporting_only_synthetic`) so operators can join the deny path. |
-| **`allow_exit_when_degraded_oms`** | no | **`false`** | §10 — when **true**, SELL may pass under `DEGRADED_OMS` (inventory gates still apply). |
-
-**Obsolete YAML (loader raises):** `max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, `fail_on_unresolved_position_for_token_cap` — removed with the marked-exposure / quantity-cap model; do not use in new configs.
-
-**Obsolete YAML (strategy — loader raises):** `min_follow_notional_usd` — order-size floors/ceilings are enforced only in **risk** (`min_notional_*`, `max_notional_*`, policies above).
-
-**Compose rules:** Unsupported combinations raise **`ValueError`** at YAML load (e.g. reserve vs capital gate) or at **`build_guru_trading_node`** (shadow vs live-only gates).
-
-**Operators:** Shadow vs live posture and reason codes — **`OPERATIONS.md`** § Deployment-budget risk. Live validation checklist — **`Implementation/phase_b_operational_validation.md`**.
-
-## Runtime (`RuntimeSettings` → `load_runtime_settings`)
-
-| Field | Required | Default | Notes |
-|-------|----------|---------|--------|
-| `trader_id` | yes | — | Must contain `-` (e.g. `TYREX-GURU-001`) |
-| `execution_mode` | no | `shadow` | `shadow` or `live` |
-| `guru_poll_interval_seconds` | no | `30` | Data API poll interval |
-| `data_api_base_url` | no | `https://data-api.polymarket.com` | Trailing slash stripped |
-| `guru_state_path` | no | `var/guru_watermark.json` | **Watermark** JSON (`last_seen_ts_ms`) for incremental `/activity` polling |
-| `guru_dedup_state_path` | no | `var/guru_dedup.json` | Secondary dedup LRU for trade ids (replays / reorder) |
-| `guru_activity_limit` | no | `200` | Page size for `/activity` (1–500) |
-| `guru_max_activity_pages_per_poll` | no | `4` | Max pages per poll (bounds work per tick) |
-| `guru_startup_backfill_seconds` | no | `0` | Cold start: watermark = now − this many seconds (`0` = only trades **after** boot) |
-| **`guru_ingest_mode`** | no | **`poll_only`** | **`rtds_primary`** (recommended for production timing) · **`rtds_shadow`** (validation: poll publishes, stream logs only) · **`poll_only`** (REST only). See [OPERATIONS.md](OPERATIONS.md) § Guru ingestion. |
-| `guru_ingest_phase` | no | `"0"` | Optional rollout tag for ops/logging. |
-| `guru_rtds_url` | no | `wss://ws-live-data.polymarket.com` | Polymarket RTDS WebSocket URL (`GuruStreamActor`). |
-| `guru_rtds_liveness_timeout_seconds` | no | `120` | Force reconnect if no RTDS traffic within this window. |
-| `guru_rtds_reconnect_retry_initial_seconds` | no | `1` | First reconnect backoff (seconds). |
-| `guru_rtds_reconnect_retry_max_seconds` | no | `60` | Reconnect backoff cap. |
-| `guru_rtds_ping_interval_seconds` | no | `5` | RTDS ping interval. |
-| `guru_poll_fallback_enabled` | no | `true` | If **true**, `rtds_primary` can switch to **poll** as publisher on stall/reconnect (when implemented path activates fallback). |
-| `guru_poll_fallback_interval_seconds` | no | — | Poll interval while fallback active; defaults to `guru_poll_interval_seconds` if omitted. |
-| `guru_gap_fill_enabled` | no | `true` | After reconnect, REST `/activity` gap-fill (`GuruStreamActor`). |
-| `guru_gap_fill_lookback_seconds` | no | `60` | Gap-fill lookback window. |
-| `guru_proxy_wallet_validation_required` | no | `false` | If **true**, stricter guru wallet format checks at startup when enabled in YAML. |
-| `guru_stream_queue_drain_interval_ms` | no | `50` | Timer interval draining RTDS queue into the ingest pipeline. |
-| `logging_level` | no | `INFO` | Nautilus `LoggingConfig.log_level` |
-| `clob_host` | no | `https://clob.polymarket.com` | Used for live `ClobClient` when composing |
-| `chain_id` | no | `137` | Polygon mainnet default |
-| `polymarket_instrument_ids` | no | `[]` | Nautilus `InstrumentId` strings for `load_ids`. **Live:** **empty** ⇒ zero-bootstrap (implicit `polymarket_dynamic_instruments`). |
-| `polymarket_dynamic_instruments` | no | `false` | Opt-in when id list non-empty; **shadow** must not set **true**. **Live** + empty ids ⇒ coerced **true**. |
-| `polymarket_dynamic_max_activations` | no | `32` | Cap on **new** dynamic `Cache` inserts per process. |
-| `polymarket_gamma_base_url` | no | `https://gamma-api.polymarket.com` | Gamma HTTP API for condition lookup. |
-| `polymarket_gamma_http_timeout_seconds` | no | `15` | Gamma client timeout. |
-| `polymarket_startup_token_warmup_max` | no | `32` | Max guru activity tokens to pre-resolve at compose when list empty (`0` = off). |
-| **`exec_position_check_interval_seconds`** | no | **`45`** (live) / omitted (shadow) | Nautilus **live** execution engine: interval in seconds for **position reconciliation** (venue vs cache). Polymarket runs with `use_data_api: false` still only emit position reports for instruments **already in Cache** — pair with **`polymarket_wallet_position_warmup_max`**. `null` disables periodic position checks (Nautilus default). |
-| **`exec_open_check_interval_seconds`** | no | **`20`** (live) / omitted (shadow) | Same engine: **open-order / venue order** reconciliation interval (Nautilus `open_check_interval_secs`). **`null`** disables (Nautilus default: no periodic open check). **Shadow** does not run a live exec engine; the loader keeps this **`null`** so it does not imply shadow behavior. Conservative default trades a little extra venue traffic for faster order-cache catch-up (see **`OPERATIONS.md`**). |
-| **`polymarket_wallet_position_warmup_max`** | no | **`128`** (live) / **`0`** (shadow) | At compose, fetch Data API **`/positions`** (**current** holdings only) for **`positions_user`** ( **`POLYMARKET_FUNDER`** if set, else signer address — same as Nautilus `user_address`) and resolve up to this many distinct outcome **token** rows into **`Cache`**, **without** counting against `polymarket_dynamic_max_activations`. Row shape: **`conditionId`** + **`asset`** + **`size`** (aliases **`tokenId`**, **`clobTokenId`**, **`condition_id`**). Summary log **`warmup_outcome=`** classifies empty wallet vs success vs failure (**`OPERATIONS.md`**). If Gamma lookup by token fails but the row includes **`conditionId`**, Tyrex retries the same **CLOB `get_market` + `parse_polymarket_instrument`** path (no alternate `InstrumentId` scheme). `0` = off. |
-| **`execution_entry_guard_enabled`** | no | **`false`** | Skip if top-of-book moved worse than slippage ticks vs guru reference (**live**). |
-| **`execution_max_entry_slippage_ticks`** | no | `0` | Max **ticks** (`instrument.price_increment`) against reference; **required &gt; 0** when guard enabled. |
-| **`execution_book_depth_clip_enabled`** | no | **`false`** | Clip qty to `cap ×` best bid/ask size (single-level MVP). |
-| **`execution_book_depth_utilization_cap`** | no | `1.0` | **(0, 1]** when depth clip enabled. |
-| **`execution_book_rest_snapshot_enabled`** | no | **`false`** | If no `Cache` L2, allow one **REST** `get_order_book` snapshot for guard/clip. |
-| **`execution_book_strict`** | no | **`false`** | If **true**, missing book when guard/clip need it → **skip** (`exec_book_unavailable_skip`). |
-| **`execution_limit_timeout_enabled`** | no | **`false`** | `clock` timer + `cancel_order` after timeout (**live**). |
-| **`execution_limit_timeout_seconds`** | no | `30` | Must be **&gt; 0** when timeout enabled. |
-| **`reporting_enabled`** | no | **`false`** | When **true**, compose opens `var/reporting/runs/<run_id>/` and emits structured facts (see [**reporting_fact_model.md**](reporting_fact_model.md)). |
-| **`reporting_base_dir`** | no | `var/reporting/runs` | Root for per-run directories (no `..`). |
-| **`reporting_sink_max_queue`** | no | `50000` | Bounded queue for fact writer. |
-| **`reporting_sink_batch_size`** | no | `128` | JSONL batch size. |
-| **`reporting_capital_observability_enabled`** | no | **`true`** | When **true** with reporting on, record **wallet/CLOB** snapshots and capital fields on `risk_decision` even if **`capital_gate_enabled: false`**. |
-| **`reporting_capital_snapshot_period_seconds`** | no | **`300`** | Minimum interval (seconds) for extra `account_snapshot` rows with `snapshot_trigger=periodic` (checked around risk evaluations). **`0`** disables periodic-only snapshots. |
-| **`startup_readiness_timeout_seconds`** | no | **`120`** | Phase 3 — `deadline_mono = T0 + this` after `node.build()` (`startup_readiness.md` §8.5.1). |
-| **`startup_strict_shadow`** | no | **`false`** | When **true**, shadow runs the full readiness gate instead of immediate READY (§8.3). |
-| **`startup_allow_degraded_live`** | no | **`false`** | Live only — allow `DEGRADED` / `NO_NEW_ENTRIES` when tradable health is `DEGRADED_OMS` (§8.2.4). |
-| **`startup_not_ready_behavior`** | no | **`exit`** | After deadline still `NOT_READY`: **`exit`** → `node.stop()` + non-zero process exit; **`no_trade`** → keep process up, block all submits. |
-| **`wallet_sync_enabled`** | no | **`true` when `execution_mode` is `live`** | **`false`** in YAML forces off. If **`true`**, **`execution_mode`** must be **`live`**. Drives **`WalletSyncActor`** → **`VenueState`**. |
-| **`wallet_sync_poll_interval_seconds`** | no | **`15.0`** | Seconds between polls; must be **≥ 5.0**. |
-| **`wallet_sync_startup_deadline_seconds`** | no | **`120.0`** | Startup budget for first successful sync; must be **≥ 30.0**. |
-| **`wallet_sync_per_instrument_max_retries`** | no | **`3`** | Instrument resolution retries per cycle; must be **≥ 1**. |
-| **`venue_state_ttl_seconds`** | no | **`30.0`** | Staleness horizon for VenueState refresh; must be **> 0**. |
-| **`venue_state_cash_poll_interval_seconds`** | no | **`10.0`** | CLOB collateral poll cadence; must be **≥ 3.0**. |
-| **`venue_state_refresh_force_max_ms`** | no | **`500`** | Max blocking time when forcing cache price reads for marks; must be **≥ 1**. |
-
-### `virtual_exit` (optional — runtime / engine)
-
-Parsed into `RuntimeSettings.virtual_exit`. Operational controls for evaluation, persistence, Tier A stale hold, drift, and exit order styles. Ignored when strategy `virtual_exit.enabled` is `false` (store path may still default).
-
-| Key | Default | Notes |
-|-----|---------|--------|
-| `state_path` | `var/virtual_exit_state.json` | Atomic JSON for protected lots; use a **dedicated path** per scenario/run. No `..`. |
-| `evaluate_interval_seconds` | `1.0` | Strategy timer cadence for trigger evaluation. |
-| `trigger_price_source` | `book_bid` | `book_bid` or `last` — executable bias for long exit triggers. |
-| `max_venue_staleness_seconds` | `45.0` | When **> 0** and `VenueState.is_stale()`, hold triggers; emit `virtual_exit_hold`. |
-| `exit_take_profit_style` | `aggressive_limit` | `aggressive_limit` or `market`. |
-| `exit_stop_loss_style` | `market` | `market` (FOK, base qty) or `aggressive_limit`. |
-| `aggressive_limit_ticks` | `2` | SELL limit price: bid minus this many tick steps. |
-| `exit_retry_max` | `5` | Max exit submit attempts per lot (counter in store). |
-| `exit_retry_cooldown_seconds` | `2.0` | Min ms between triggers per lot. |
-| `drift_policy` | `clamp_to_venue` | `clamp_to_venue` (Tier A qty clamps `qty_open`) or `disarm` (terminal disarm on drift). |
-| `tier_a_flat_disarm_grace_seconds` | `2.0` | After arming, wait this long before allowing ``DISARMED_EXTERNAL_FLAT`` when Tier A long qty is still zero (sync lag after Tier B fills). `0` disables the grace (testing / aggressive). |
-| `min_entry_qty_to_arm` | `0.0` | Require cumulative entry fill **≥** this before arming. |
-| `execution_book_rest_for_triggers` | `true` | Allow REST book for trigger/exit pricing when cache L2 thin. |
-| `market_sl_fallback_to_limit` | `true` | After **market** SL `OrderRejected`, one aggressive-limit retry. |
-
-**Derived (not YAML):** `polymarket_token_to_instrument` — built from non-empty `polymarket_instrument_ids`.
-
-**Live submit:** `src/tyrex_pm/execution/nautilus_guru_exec.py` — resolves instrument, optionally runs **book** hooks (guard / depth clip / limit timeout from YAML), then always applies **internal** price/qty grid fit (`c3_normalize.quantize_limit_order_for_instrument`, not configurable).
-
-**Obsolete YAML (runtime — loader raises):** `venue_size_alignment_mode`, `execution_venue_normalize_enabled` — removed; order-size policy is risk YAML only; execution quantizes to instrument tick/step internally.
-
-**Removed keys (runtime YAML):** `polymarket_nautilus_live`, `polymarket_framework_submit` — **`live`** always uses Nautilus data/exec + framework submit; loader errors if these appear in YAML.
-
-**Removed keys (reconciliation / migration — do not use):** `position_reconciliation_enabled`, `position_reconciliation_shadow_mode`, `position_reconciliation_deferral_max`, `venue_state_reads_enabled`, `reconcile_venue_has_more`, `recently_reconciled_ttl_seconds`, `data_api_lag_tolerance_seconds` — stripped from loaders; see **LIVE_ARCHITECTURE.md** § obsolete settings.
-
-**Removed keys (risk YAML):** `max_order_quantity`, `portfolio_sizing_mode`, `fail_on_unresolved_portfolio_exposure`, `fail_on_unresolved_position_for_token_cap` — replaced by the deployment-budget model (`CONFIG_MODEL.md` § Risk, `load_risk_settings` raises if present).
-
-## `.env` (secrets only)
-
-See `Docs/Runbooks/polymarket_operator_v1_00.md`:
-
-- `POLYMARKET_PK`
-- `POLYMARKET_FUNDER` (if needed for signature type)
-- `POLYMARKET_SIGNATURE_TYPE`
-- `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_PASSPHRASE` (L2 trio or derive)
-
-Optional: `TYREX_PM_DOTENV` — path to alternate env file for `scripts/run_guru.py`.
-
-Minimum **BUY** trade size in USD for Tyrex is **`min_notional_usd_per_order`** in **risk** YAML (`0` = off), not an env var on the execution path.
-
-## Example files
-
-Repo templates (replace guru wallet / tokens before production):
-
-- `config/strategy/guru_follow.yaml`
-- `config/risk/guru_follow_risk.yaml`
-- `config/runtime/live_polymarket.yaml` — set **`guru_ingest_mode: rtds_primary`** for production-shaped RTDS ingestion (see [OPERATIONS.md](OPERATIONS.md)).
-- `config/runtime/rtds_shadow.yaml` — **isolated** watermark/dedup paths for RTDS shadow validation without touching normal `var/guru_*.json` state.
+The parsed `AppConfig` is **frozen**; nothing mutates it after `cmd_run` starts. New runtime parameters must therefore land in `config.py` and be threaded explicitly through the coordinator.

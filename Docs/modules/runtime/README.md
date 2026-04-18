@@ -1,50 +1,60 @@
-# Module: `tyrex_pm.runtime`
+# `runtime/`
 
-[← Back to module index](../README.md) · [Architecture](../../Architecture.md) · **[LIVE_ARCHITECTURE](../../LIVE_ARCHITECTURE.md)** · **[Current state](../../Implementation/current_state.md)** · **[DEVELOPER.md](DEVELOPER.md)**
+Wires everything together. The only module allowed to import freely across layers.
 
-## A. Role
+## Files
 
-**Wire** configuration and Tyrex components into a runnable **Nautilus `TradingNode`**: guru actor + copy strategy + risk + execution ports. Provide **canonical read boundaries** for risk (`state_readers.py`) — **Tier A** **`VenueState`** when live + wallet sync, else Nautilus cache/portfolio fallbacks inside the same classes. Build **`ClobClient`** from environment when needed for **dynamic instrument resolution**, **allowance/balance** snapshots, and **optional REST** book snapshots for execution hooks — **not** for parallel guru order submit (live guru orders go through **`NautilusGuruExecutionPort`** only).
+| File | Role |
+|------|------|
+| `app.py` | CLI entrypoint (`tyrex-pm`). `cmd_run`, `cmd_live_attest`, `cmd_summarize`. Loads config, builds stores, starts supervisors, drives the guru loop |
+| `config.py` | YAML loader + `AppConfig` parsing (see [CONFIG_MODEL.md](../../CONFIG_MODEL.md)) |
+| `coordinator.py` | `RuntimeCoordinator` — holds `WalletStore`, `OrderStore`, `HealthRuntime`, runtime knobs (`submit_grace_s`, `adoption_grace_s`, `provisional_unknown_terminal_timeout_s`), dedup signatures (`last_reconcile_signature`, `last_wallet_sync_signature`). Builds `RiskContext` per call (including derived in-flight reservations) |
+| `pipeline.py` | The synchronous business pipeline: guru signal → strategy → risk → OMS → reconcile + fact emission for each step. Owns `reconcile_coordinator` and `emit_wallet_sync` (with dedup signatures) |
+| `live_supervisor.py` | Background async loops for live mode: `supervised_heartbeat_loop`, `venue_refresh_loop`, `provisional_repair_probe_loop`, `user_ws_staleness_loop` |
+| `live_attest.py` | Standalone `tyrex-pm live-attest` command — minimal post + cancel against real CLOB |
+| `health_runtime.py` | `HealthRuntime` — heartbeat, user-WS staleness, reconcile-drift, venue-restart-suspected flags. Read-only into `RiskContext` |
+| `healthchecks.py` / `risk_contexts.py` | Helpers used by `coordinator.py` and the live supervisor |
+| `dependency_graph.py` / `modes.py` / `supervisors.py` | Small helper modules (mode enums, dependency graph utilities) |
 
-## B. Boundaries
+## How a single guru tick flows
 
-**Belongs here:** Composition roots, `build_guru_trading_node`, **`GuruTradingAssembly`**, instrument dynamic controller wiring, optional guru cache warmup, L2 env helper for Nautilus factories.
+```
+cmd_run(args)
+ ├─ load_app_config(...)              # CONFIG_MODEL.md
+ ├─ WalletStore() / OrderStore()      # state/
+ ├─ HealthRuntime() + RuntimeCoordinator(...)
+ ├─ JsonlSink(<runs_dir>/<rid>/facts.jsonl)
+ ├─ ShadowOMS or LiveOMS              # execution/
+ ├─ SingleWriterOMS(backend)
+ ├─ Optional: live supervisors started (live_supervisor.*)
+ ├─ Loop:
+ │   ├─ poll_guru_incremental         # ingestion/
+ │   ├─ ingest_guru_signals           # state/strategy_store dedup + watermark
+ │   └─ process_new_guru_signals      # pipeline.py
+ │        ├─ guru_signal fact
+ │        ├─ strategy.on_guru_signal  # strategies/
+ │        ├─ risk.evaluate_intent     # risk/
+ │        ├─ register_submit / oms.submit / ack_submit  # execution/
+ │        ├─ apply_shadow_fill  (shadow only)
+ │        └─ reconcile_coordinator    # state/reconcile
+ └─ summarize_run -> run_summary.json # reporting/
+```
 
-**Does not belong here:** Signal/risk **policy** formulas, Data API row parsing, strategy orchestration.
+## Live supervisors
 
-## C. Internal structure (implemented)
+| Loop | Cadence | Updates |
+|------|---------|---------|
+| `supervised_heartbeat_loop` | `interval_s` (≥5 s clamp) | `health.heartbeat_ok` + `health` fact on transition |
+| `venue_refresh_loop` | `reconcile_interval_s` | REST wallet refresh → optional positions refresh → local OMS sync → `wallet_sync` fact (deduped) → `reconcile_coordinator` |
+| `provisional_repair_probe_loop` | tighter probe | Refresh + reconcile when there are provisional rows; emits a `health` fact on first error |
+| `user_ws_staleness_loop` | per-second | Marks `user_ws_stale` after no message for `stale_threshold_s` |
 
-| File | Contents |
-|------|----------|
-| `guru_compose.py` | **`build_guru_trading_node`** — `TradingNode`, readers → risk, execution port branch, **`GuruMonitorActor`** + optional **`GuruStreamActor`** (when `guru_ingest_mode` is `rtds_shadow` or `rtds_primary`) + strategy; **`VenueState`** + **`WalletSyncActor`** when **live** + **`wallet_sync_enabled`**; **`GuruTradingAssembly.deployment_budget`** when **`execution_mode == live`**; INFO log (`tyrex_pm phase_b:` compose summary); `guru_rtds_wallet_identity` INFO when RTDS modes enabled. |
-| `phase_b_startup.py` | `phase_b_startup_summary_line` — formatted gate settings for the compose summary log line. |
-| `deployment_budget.py` | **`NautilusDeploymentBudget`** — pending + filled **USD deployed** per token / portfolio; **Tier A** venue size × mark when **`VenueState`** wired (see **LIVE_ARCHITECTURE**). |
-| `state_readers.py` | **`NautilusExecutionStateReader`** (+ **B3** ``count_guru_resting_orders_open``, ``is_guru_resting_order``), **`NautilusAccountSnapshotProvider`**, **`ClobAllowanceStateProvider`**, **`NautilusPositionStateReader`**, `instrument_id_for_outcome_token` — **Tier A** paths when `venue_state` is passed. |
-| `venue_state.py` | **`VenueState`** — aggregate for positions, resting orders, collateral freshness; **not** a duplicate of Nautilus `Cache`. |
-| `wallet_sync.py` | **`WalletSyncActor`** — Data API + CLOB polls → **`VenueState`** (live when enabled). |
-| `layer_a_context.py` | **`NautilusLayerAContext`** — Layer A `full_exit` long qty from **`VenueState`** if set, else **`Portfolio`**. |
-| `tradable_state/nautilus_live_health.py` | Live execution health / tradable-state gate for risk (`DEGRADED_OMS`, etc.). |
-| `capital/` | **`DefaultCapitalStateProvider`** — merged account + CLOB; prefers venue collateral when **`VenueState`** wired. |
-| `guru_instrument_dynamic.py` | **`GuruInstrumentDynamicController`** — Gamma + CLOB + `Cache` activation. |
-| `guru_cache_warmup.py` | Optional **`warm_polymarket_cache_from_guru_activity`**. |
-| `polymarket_nautilus_env.py` | L2 env for Nautilus factories. |
-| `clob_factory.py` | **`build_clob_client_from_env`**. |
-| `live_stub.py` | Legacy smoke placeholder. |
+All loops share an `asyncio.Event stop` and use `asyncio.wait_for(stop.wait(), timeout=...)` instead of `asyncio.sleep` so shutdown is prompt.
 
-## D. Main interactions
+## Run artifacts
 
-- **config:** three settings types.
-- **data:** `GuruMonitorActor`, `GuruStreamActor` (RTDS), shared dedup/watermark wiring.
-- **Tier A:** `WalletSyncActor` + `VenueState` are **not** in `data/` — they live here (`wallet_sync.py`, `venue_state.py`).
-- **strategy / risk / execution:** compose + inject.
+`var/reporting/runs/<run_id_or_name>/`:
 
-## E. Status
-
-**Operational:** **`execution_mode: live`** = Polymarket Nautilus data/exec + **`NautilusGuruExecutionPort`** + **zero-bootstrap** per runtime YAML; guru ingest modes on runtime YAML (`guru_ingest_mode`). See **`OPERATIONS.md`** § Deployment-budget risk & § Guru ingestion, **`Implementation/phase_b_operational_validation.md`**, and **[DEVELOPER.md](DEVELOPER.md)**.
-
-**Soak reports:** `scripts/guru_shadow_report.py`, `scripts/guru_primary_report.py` (Nautilus log file from `run_guru.py`).
-
-## F. Extension guidance
-
-- New runners: new compose functions; keep `TradingNodeConfig` differences explicit.
-- Do not move **`Cache`/`Portfolio` / `VenueState` reads** into `CopyStrategy`; use **readers** + risk injection.
+- `manifest.json` — parsed `AppConfig.raw`, git SHA, scenario name, args.
+- `facts.jsonl` — every operator-relevant decision (one per line). See [reporting_fact_model.md](../../reporting_fact_model.md).
+- `run_summary.json` — per-fact counts, top reason codes, last reconcile severity, runtime seconds.

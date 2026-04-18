@@ -1,130 +1,146 @@
-# Developer guide — Tyrex_PM
+# Developer guide
 
-**Architecture:** [Architecture.md](Architecture.md) · **Doc index:** [README.md](README.md) · **Module map:** [modules/README.md](modules/README.md) · **Config fields:** [CONFIG_MODEL.md](CONFIG_MODEL.md)
+**Hub:** [README.md](README.md) · **Architecture:** [Architecture.md](Architecture.md) · **Modules:** [modules/README.md](modules/README.md) · **Setup:** [DEVELOPMENT.md](DEVELOPMENT.md)
 
----
-
-## 1. Mental model
-
-Tyrex_PM is a **guru-following** stack on **NautilusTrader**: ingest publishes **`GuruTradeSignal`** on the message bus; **`CopyStrategy`** turns signals into **`OrderIntent`** after **policy + sizing**, then **risk** (may clip/bump per-order deploy), then **execution**.
-
-Think in **four ownership layers** (do not collapse them):
-
-1. **`signal/`** — *Should we take this signal? How many shares at policy baseline (scale / optional conviction)?* Pure functions / small classes; **no** bus, HTTP, or `Cache`. **Not** “too small to trade” in USD — that is **`risk/`**.
-2. **`risk/`** — *Is this intent allowed given per-order min/max deploy (**deny** vs **cap**), token/portfolio deployment caps, capital gate, concurrent rests, reserve?* **`ConfiguredRiskPolicy`**; readers injected from **`runtime/guru_compose`** — **never** import `Cache` inside policy implementations; use injected readers.
-3. **`execution/`** — *How do we express this **approved** intent at the venue?* Ports: **`NoOpExecutionPort`**, **`NautilusGuruExecutionPort`** (live). Optional **book hooks** (guard / depth / limit timeout) + internal grid quantize live in **`nautilus_guru_exec`**.
-4. **`data/`** + **`runtime/`** — Ingest (poll / RTDS / gap-fill), compose, wiring, **`state_readers`**, dynamic instruments.
-
-**Session vs venue (live):** Nautilus **`Cache`** / **`Portfolio`** hold **Tier B** session state (this bot’s orders, fills, adapter-driven convergence). **Tier A** wallet-level deployment and reads use **`VenueState`** when **live** + **`wallet_sync_enabled`** — see [**LIVE_ARCHITECTURE.md**](LIVE_ARCHITECTURE.md). Restart semantics: **`load_state=False`** on the node; see [**Architecture.md**](Architecture.md) § Runtime flow and [**Implementation/current_state.md**](Implementation/current_state.md).
+How code is organized, what each layer is allowed to do, and how to extend the system without breaking the contracts.
 
 ---
 
-## 2. End-to-end flow (current)
+## 1. Ownership boundaries
 
+| Layer | May import | Must not import |
+|-------|------------|-----------------|
+| `strategies/` | `signals/`, `core/`, `runtime.config` (typed dataclasses only) | `venue/*`, HTTP/WS clients, `state/*` (read holdings via the value passed in) |
+| `risk/` | `core/`, `runtime.config`, `risk/*` | `venue/*`, `strategies/*`, `execution/*` |
+| `execution/` | `core/`, `state/*`, `venue/polymarket/*` (live OMS only) | `strategies/*`, `risk/*` |
+| `state/` | `core/` | `venue/*`, `risk/*`, `strategies/*` |
+| `ingestion/` | `core/`, `state/*` (single-writer per loop), `venue/polymarket/*` | `strategies/*`, `risk/*` |
+| `venue/polymarket/` | HTTP/WS libs, `core/` DTOs | `risk/`, `strategies/`, `state/` (the adapter returns DTOs; `state` is mutated by callers) |
+| `runtime/` | everything else (this is the wiring layer) | — |
+| `reporting/` | `core/` | nothing else (sinks must be side-effect free of business logic) |
+
+The pyramid: **`runtime` wires; `risk` decides; `state` remembers; `venue` speaks; `core` defines the language.**
+
+---
+
+## 2. Code conventions
+
+### 2.1 Decimal arithmetic
+
+Money, sizes, prices, allowances — always `decimal.Decimal`. Never `float`. The risk evidence formatter (`risk/evidence_format.py::s_usd`) quantizes to 6 decimals for fact emission; **don't** quantize in business logic itself.
+
+### 2.2 Time
+
+```python
+from tyrex_pm.core.time import utc_now, monotonic_s
 ```
-GuruMonitorActor / GuruStreamActor (+ pipeline, dedup)
-  → MessageBus GURU_TRADE_TOPIC
-  → CopyStrategy
-       → entry/exit policies (signal)
-       → sizing + record_accepted_entry_size (signal; optional conviction)
-       → OrderIntent
-       → RiskPolicy.evaluate (per-order clip/bump + caps)
-       → ExecutionPort.submit_intent
-            → NautilusGuruExecutionPort (optional book hooks + limit + timer)
+
+Never `datetime.utcnow()` or `time.monotonic()` directly — those bypass the centralized clock and break tests that fake time.
+
+### 2.3 Ids
+
+```python
+from tyrex_pm.core.ids import ClientOrderId, VenueOrderId, IntentId, RunId, TokenId
 ```
 
-**Thin strategy rule:** `CopyStrategy` orchestrates and logs; it does **not** implement risk rules, venue normalization, or order-book logic. The only **execution** touch is **`on_order_event`** forwarding to the port for **limit-order timeout** cleanup — no order interpretation beyond that.
+These are `NewType`-style wrappers around `str` (see `core/ids.py`). Always wrap raw strings before passing them across module boundaries; never `str(some_id)` in business logic except at the reporting / log boundary.
+
+### 2.4 Reason codes
+
+Every risk denial, strategy skip, and pipeline reject **must** carry a stable code from `core/reason_codes.py`. Add new ones there with a docstring explaining when they are emitted; tests grep by code so don't change spellings lightly.
+
+### 2.5 Facts
+
+Every fact type is declared in `reporting/schema_v2.py`. To add a new fact:
+
+1. Add `FACT_TYPE_<NAME> = "<snake_name>"` in `schema_v2.py`.
+2. Decide what payload fields are stable join keys vs operator evidence.
+3. Decide whether the fact should be deduped by signature (like `reconcile` and `wallet_sync`); if so, the producer must compute the signature deterministically and skip when it equals the last one.
+4. Update `reporting_fact_model.md`.
+
+### 2.6 Async style
+
+- Background loops live under `runtime/live_supervisor.py`; they all take a `stop: asyncio.Event` and use `asyncio.wait_for(stop.wait(), timeout=...)` instead of `asyncio.sleep` so shutdown is prompt.
+- HTTP calls go through `httpx.AsyncClient` constructed once per loop.
+- Sync `py-clob-client` calls are wrapped in `asyncio.to_thread` (`venue.polymarket.clob_bridge.PyClobBridge`).
 
 ---
 
-## 3. Where to add behavior
+## 3. The contract for `Strategy` implementations
 
-| You want to… Put it in… |
-|------|------------|
-| Change token allow / BUY vs SELL accept | `signal/entry.py` |
-| Change follower size vs guru (flat scale, conviction, rolling avg) | `signal/sizing.py` |
-| Economic “too small / too large” per-order USD deploy | `risk/configured.py` — `min_*` / `max_*` + policies |
-| Caps, portfolio deployment, concurrent orders, reserve | `risk/configured.py` |
-| Tick rounding, slippage guard vs book, depth clip, limit timeout | `execution/` helpers + **`NautilusGuruExecutionPort`**; **not** in strategy |
-| New ingest source (still guru trades) | `data/` — publish same **`GuruTradeSignal`** / topic |
-| Wire readers / choose execution port | `runtime/guru_compose.py` (and loaders) |
-| Emit structured run facts (risk/strategy/execution hooks) | `reporting/` + emit sites in `risk/configured.py`, `copy_strategy.py`, etc.; [**reporting_fact_model.md**](reporting_fact_model.md) |
-| New YAML knobs | `config/loaders.py` + **CONFIG_MODEL.md** |
+```python
+class Strategy:                               # de facto interface; see strategies/base.py
+    def on_guru_signal(
+        self,
+        sig: GuruCopySignal,
+        holdings: dict[TokenId, Decimal],
+    ) -> tuple[list[Intent], str | None, dict[str, str] | None]:
+        ...
+```
 
----
+Returns:
 
-## 4. Anti-patterns (explicit)
+- a list of `Intent`s (empty when filtered out),
+- an optional **skip reason code** (constant in `core/reason_codes.py`),
+- optional sizing **metadata** merged into the `intent_created` fact (e.g. `{"sizing_mode": "static"}`).
 
-- **Don’t** put **`Cache` / order-book / venue tick** logic in **`CopyStrategy`** (execution-owned).
-- **Don’t** move **deployment-budget / kill-switch** semantics into **`signal/`**.
-- **Don’t** treat **venue rejects** as the primary control — pre-trade quantize, optional book checks, and risk gates are first-class; rejects are still signals to monitor.
-- **Don’t** add operator-facing **venue alignment** knobs or sizing policy in execution — risk owns size; execution resolves instrument, applies instrument grid fit, submits, and reports lifecycle.
-- **Don’t** implement a parallel **guru submit** path outside **`NautilusGuruExecutionPort`** for live runs.
+A strategy must **not**:
 
----
-
-## 5. Repository layout (`src/tyrex_pm/`)
-
-| Package | Role |
-|---------|------|
-| `core/` | `GuruTradeSignal`, `OrderIntent`, **`ReasonCode`**, shared helpers |
-| `config/` | `StrategySettings`, `RiskSettings`, `RuntimeSettings` + loaders |
-| `data/` | Data API client, **RTDS** stream actor, poll actor, parse/dedup, pipeline |
-| `signal/` | Entry/exit, sizing (optional conviction) |
-| `risk/` | `RiskPolicy`, **`ConfiguredRiskPolicy`** |
-| `execution/` | Ports, book/grid helpers (`c3_*.py`), `nautilus_guru_exec.py` |
-| `strategy/` | **`CopyStrategy`**, `BaseComposableStrategy` |
-| `runtime/` | **`build_guru_trading_node`**, readers, dynamic instruments, clob factory, **CLOB collateral parsing** (`clob_collateral_money.py`), **Nautilus cash extract** |
-| `reporting/` | **`RunContext`**, JSONL sink, schema, **`summarize`**, order-event mapping (optional; `reporting_enabled`) |
+- read venue state directly (use `holdings` argument; that's all you get for live correctness),
+- emit log lines that duplicate what facts will already record,
+- mutate any store (the pipeline owns lifecycle calls).
 
 ---
 
-## 6. Config flow
+## 4. Extension recipes
 
-1. **`scripts/run_guru.py`** loads `.env`, then three YAML paths → **`load_strategy_settings`**, **`load_risk_settings`**, **`load_runtime_settings`**.
-2. **`build_guru_trading_node(strategy, risk, runtime)`** constructs the node, injects risk readers, sets **`CopyStrategyConfig`** from strategy + runtime (including conviction fields), chooses **`ExecutionPort`** from **`execution_mode`** (shadow vs live Nautilus).
+### 4.1 Add a new risk policy
 
-**Secrets:** only **`.env`** / environment — never strategy or runtime YAML.
+1. Add `risk/<topic>.py` with a function returning `(ok: bool, reason: str | None, evidence: dict)` or a result dataclass like `evaluate_capital_buy`.
+2. Wire it into `risk/engine.py::evaluate_intent` at the right point in the gate sequence (see [Architecture.md §7](Architecture.md#7-the-riskengine-gate-sequence)). New gates that depend on size or price must run **after** `pretrade.apply_notional_min_max` and **before** `venue_min_size.evaluate_venue_min_size`.
+3. Expose any operator knobs in `runtime/config.py` and `config/risk/default.yaml`.
+4. Add a `tests/test_risk_<topic>.py` golden test.
+5. Document the reason code(s) in `core/reason_codes.py` and the policy in [modules/risk/README.md](modules/risk/README.md).
 
----
+### 4.2 Add a new strategy
 
-## 7. Tests & debugging
+1. Create `strategies/<name>/` with `strategy.py`, `filters.py`, `sizing.py` (and `exits.py` if SELL behavior differs).
+2. Wire it in `runtime/app.py::cmd_run` (or factor a registry — current code is hand-wired to `GuruFollowStrategy`).
+3. Add a strategy YAML under `config/strategies/<name>.yaml` and a scenario under `config/scenarios/`.
+4. Add a `tests/test_<name>_strategy_*.py` golden test that exercises filter rejects + sizing math.
 
-**Run:** `pytest tests/ -q` from repo root after `pip install -e ".[dev]"`.
+### 4.3 Add a new venue
 
-**High-signal suites:**
+Drop a sibling package under `venue/<name>/` mirroring `venue/polymarket/` (REST clients, WS handlers, normalizers, auth, env helpers). Replace `clob_bridge.PyClobBridge` with the new venue's bridge in `LiveOMS`. The `OMSBackend` Protocol in `execution/adapters.py` is intentionally tiny so any `submit / cancel` backend plugs in.
 
-| Area | Tests |
-|------|--------|
-| Policy / conviction sizing | `tests/unit/test_c2_capital_allocation.py`, `tests/unit/test_copy_strategy_shadow.py` |
-| Execution / book hooks | `tests/unit/test_c3_execution.py`, `tests/test_nautilus_guru_exec.py` |
-| Risk / deployment budget | `tests/unit/test_configured_risk.py`, `tests/test_phase_b_*.py` |
-| Config | `tests/test_split_config_loaders.py` |
-| Compose | `tests/test_guru_compose_build.py` |
-| Copy strategy architecture guard | `tests/test_copy_strategy_architecture.py` |
+### 4.4 Add a new fact
 
-**Debugging order:**
-
-1. **`guru_signal_emitted`** present? (ingest / wallet / mode)  
-2. **`copy_skip`** reason? (token, zero qty, **risk_denied**, …)  
-3. **`live_order_intent`** / **`shadow_order_intent`** then **`LIVE_ORDER_SUBMIT`** or **exec skip** (`exec_*`)?  
-4. For risk: **`tyrex_risk_ops`** alongside **`copy_skip`**
-
-Log files: **`logs/<execution_mode>/run_tyrex.log`** vs **`run_nautilus.log`** — see [logging_system_guide.md](logging_system_guide.md).
+See §2.5 above. Adding a fact is cheaper than adding a log line — prefer facts whenever an operator might want to grep, count, or correlate.
 
 ---
 
-## 8. Path truth table (for contributors)
+## 5. Testing patterns to copy
 
-| Mode / path | Notes |
-|-------------|--------|
-| **`guru_ingest_mode`** | `poll_only` · `rtds_shadow` (poll publishes, stream compares) · **`rtds_primary`** (stream publishes when healthy). |
-| **`execution_mode`** | `shadow` → **`NoOpExecutionPort`**; `live` → **`NautilusGuruExecutionPort`** (optional book hooks on live). |
+| Pattern | Example |
+|---------|---------|
+| Golden risk-engine deny → exact reason code + evidence shape | `tests/test_risk_engine.py`, `tests/test_venue_min_size.py` |
+| Reconcile state machine — provisional / adoption / tombstone | `tests/test_reconcile_store.py`, `tests/test_venue_adoption_reconcile.py`, `tests/test_inverse_race_tombstone.py` |
+| Pipeline end-to-end — facts.jsonl assertions | `tests/test_shadow_e2e.py`, `tests/test_pipeline_dedup_and_wallet_sync.py` |
+| Venue/REST normalizer — fixture-driven | `tests/test_data_api_normalize.py`, `tests/test_clob_env_aliases.py` |
+| Auto-redirect run dir to `tmp_path` | `tests/test_live_attest_unit.py::_redirect_runs_dir_to_tmp` |
+
+When a bug is fixed, add a regression test that would have caught it. The dedup-broken-by-timestamps fix in `_wallet_sync_signature` is a textbook example: the regression is `test_wallet_sync_signature_ignores_refresh_timestamps` + `test_wallet_sync_dedups_across_refresh_ticks`.
 
 ---
 
-## 9. Further reading
+## 6. Pull-request checklist
 
-- **Implementation hub:** [Implementation/current_state.md](Implementation/current_state.md) · **Live truth model:** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md)  
-- **Module deep dives:** [modules/README.md](modules/README.md) (`DEVELOPER.md` per package)  
-- **Archived roadmap:** [Implementation/road_map.md](Implementation/road_map.md)
+- [ ] All new public functions / dataclasses have a docstring explaining **why** the function exists, not just what it does.
+- [ ] Every new risk denial / strategy skip / pipeline reject has a constant in `core/reason_codes.py`.
+- [ ] New facts are declared in `reporting/schema_v2.py` and listed in `reporting_fact_model.md`.
+- [ ] Money/sizes use `Decimal`; USD evidence uses `s_usd()` from `risk/evidence_format.py`.
+- [ ] Tests pass (`pytest`); new behavior has at least one golden test.
+- [ ] No new top-level scripts; no `print(...)` for operator output (use facts or `logging`).
+- [ ] No imports from `risk/` or `strategies/` into `venue/`, `state/`, or each other (see §1).
+- [ ] If you touched configuration: updated [CONFIG_MODEL.md](CONFIG_MODEL.md) and the relevant YAML defaults.
+- [ ] If you touched the runtime / live wiring: updated [OPERATIONS.md](OPERATIONS.md) and/or [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md).

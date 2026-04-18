@@ -1,0 +1,31 @@
+# Minimal live CLOB attestation: use with `tyrex-pm live-attest`.
+# Relaxes user-WS freshness gate so post+cancel can complete without waiting on WS
+# (heartbeat + REST wallet sync remain required). Tight notional for small test orders.
+
+execution_mode: live
+
+risk:
+  # Intentionally off: attest uses minimal notional; avoids blocking on strict wallet/allowance reads in test setups.
+  capital:
+    enabled: false
+  notional:
+    min_usd: "0.01"
+    max_usd: "25"
+  deployment:
+    token_cap_usd: "500"
+    portfolio_cap_usd: "5000"
+  concurrency:
+    max_orders_in_flight: 4
+  readiness:
+    require_user_ws_live: false
+    require_heartbeat_live: true
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+  # Attest deliberately uses 1-share orders for cheap end-to-end collateral signing;
+  # the global default 5-share floor would otherwise block the attest path.
+  venue_min_size:
+    enabled: false
+
+strategy:
+  guru:
+    wallet: "0x0000000000000000000000000000000000000000"

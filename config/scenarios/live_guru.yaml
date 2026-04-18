@@ -1,0 +1,4 @@
+execution_mode: live
+risk:
+  deployment:
+    token_cap_usd: "100"

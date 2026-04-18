@@ -1,9 +1,11 @@
-# Implementation hub (pointer)
+# Implementation hub (v2 branch)
 
-**Permanent architecture and operator truth model:** **[LIVE_ARCHITECTURE.md](../LIVE_ARCHITECTURE.md)** — Tier A (**VenueState** / **WalletSync**) vs Tier B (Nautilus session), guarantees, live caveats, current scenarios.
+**Status:** repository reset for **v2**; implementation under `src/tyrex_pm/` is **not yet present** in this branch snapshot.
 
-**Also read:** [Architecture.md](../Architecture.md) · [OPERATIONS.md](../OPERATIONS.md) · [CONFIG_MODEL.md](../CONFIG_MODEL.md) · [road_map.md](road_map.md) (governance one-pager).
+**Read next:**
 
-**Deep dives:** [end_to_end_review_logic.md](end_to_end_review_logic.md) (signal → risk → execution trace) · validation notes under this folder for greps and checklists — subordinate to **LIVE_ARCHITECTURE** when they conflict on the truth model.
+- **Native PM rebuild (final plan + architecture):** [native_pm_rebuild/IMPLEMENTATION_PLAN.md](native_pm_rebuild/IMPLEMENTATION_PLAN.md) · [native_pm_rebuild/ARCHITECTURE.md](native_pm_rebuild/ARCHITECTURE.md) · [native_pm_rebuild/EVENT_CATALOG.md](native_pm_rebuild/EVENT_CATALOG.md)
+- **Architecture (overview):** [Architecture.md](../Architecture.md)
+- **Live truth model:** [LIVE_ARCHITECTURE.md](../LIVE_ARCHITECTURE.md)
 
-**Virtual TP/SL (v1 shipped):** `src/tyrex_pm/runtime/virtual_exit/` + compose wiring; operator/config: [CONFIG_MODEL.md](../CONFIG_MODEL.md) · scenario `config/scenarios/virtual_tp_sl_live/`. Design history: [virtual_tp_sl/](virtual_tp_sl/README.md).
+Historical v1 validation and Nautilus-specific runbooks were removed with the codebase. **Authoritative rebuild guidance** is under `Docs/Implementation/native_pm_rebuild/`.
