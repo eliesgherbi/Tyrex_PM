@@ -40,7 +40,7 @@ from decimal import Decimal
 from typing import Any
 
 from tyrex_pm.core import reason_codes as rc
-from tyrex_pm.core.models import EnterIntent, ExitIntent, ReduceIntent
+from tyrex_pm.core.models import EnterIntent, ExitIntent, ReduceIntent, RiskContext
 from tyrex_pm.risk.evidence_format import s_usd
 from tyrex_pm.runtime.config import VenueMinSizeConfig
 
@@ -61,19 +61,41 @@ class VenueMinSizeEvaluation:
     evidence: dict[str, Any]
 
 
-def _resolve_min_size(cfg: VenueMinSizeConfig, intent: EnterIntent | ExitIntent | ReduceIntent) -> Decimal:
-    """Per-token overrides could be wired here later; today we use the global default.
+def _resolve_min_size(
+    cfg: VenueMinSizeConfig,
+    intent: EnterIntent | ExitIntent | ReduceIntent,
+    ctx: RiskContext | None,
+) -> tuple[Decimal, str]:
+    """Resolve the minimum size to apply, with provenance.
 
-    Kept as a function so the call-site contract is explicit and the evidence payload
-    always reports the value that *was actually used*, not just the config default.
+    Order of precedence (Phase 5 onwards):
+
+    1. **Venue truth** — when ``ctx.market_info[token_id]`` is populated by
+       :class:`MarketInfoCache`, use ``min_order_size`` from
+       ``/clob-markets/<condition_id>``. This is the *only* value the venue
+       will accept; any other floor risks either over-rejecting (bot-side)
+       or under-rejecting (venue-side) live orders.
+    2. **YAML default** — ``cfg.default_min_size``. Used in shadow mode and
+       in unit tests where no live cache is wired.
+
+    Returns ``(value, source)`` where ``source`` is ``"venue"`` or
+    ``"config_default"``; the source is propagated into the evidence payload
+    so an operator inspecting facts.jsonl sees *which* truth gated the
+    intent.
     """
-    del intent  # placeholder for future per-token resolution
-    return cfg.default_min_size
+    if ctx is not None and ctx.market_info:
+        info = ctx.market_info.get(intent.token_id)
+        if info is not None:
+            mos = getattr(info, "min_order_size", None)
+            if isinstance(mos, Decimal) and mos > 0:
+                return mos, "venue"
+    return cfg.default_min_size, "config_default"
 
 
 def evaluate_venue_min_size(
     intent: EnterIntent | ExitIntent | ReduceIntent,
     cfg: VenueMinSizeConfig,
+    ctx: RiskContext | None = None,
 ) -> VenueMinSizeEvaluation:
     """Evaluate the venue minimum-size gate for an already-clipped intent.
 
@@ -85,11 +107,12 @@ def evaluate_venue_min_size(
     responsibility (see :func:`tyrex_pm.risk.engine.evaluate_intent`) so this module stays
     a pure size-policy helper with no knowledge of deployment / capital wiring.
     """
-    floor = _resolve_min_size(cfg, intent)
+    floor, floor_source = _resolve_min_size(cfg, intent, ctx)
     evidence: dict[str, Any] = {
         "venue_min_size_check": cfg.enabled,
         "venue_min_size_policy": cfg.policy,
         "venue_min_size": str(floor),
+        "venue_min_size_source": floor_source,
         "venue_min_size_token_id": str(intent.token_id),
         "venue_min_size_limit_price": (
             str(intent.limit_price) if intent.limit_price is not None else None

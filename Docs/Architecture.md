@@ -205,7 +205,7 @@ See [modules/risk/README.md](modules/risk/README.md) for per-policy detail.
 | Mode | Backend | Side effects |
 |------|---------|--------------|
 | **shadow** | `ShadowOMS` returns `"shadow_ack"`/`"shadow_cancel_ack"` immediately. | A synthetic fill is applied to `WalletStore` (`apply_local_shadow_fill=True`) so downstream risk sees the new position. |
-| **live** | `LiveOMS` wraps `PyClobBridge` (sync `py-clob-client.create_and_post_order` run on a thread). | Real submit; positions/balance update via user-WS + REST refresh loop; no synthetic fill. |
+| **live** | `LiveOMS` wraps `PyClobBridge` (sync `py-clob-client-v2.create_and_post_order` run on a thread). | Real submit; positions/balance update via user-WS + REST refresh loop; no synthetic fill. |
 
 Both backends are wrapped by `SingleWriterOMS` so submits and cancels never overlap for the same wallet.
 

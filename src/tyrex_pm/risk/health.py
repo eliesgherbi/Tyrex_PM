@@ -36,7 +36,9 @@ def check_aggressive_readiness(
     runtime: RuntimeConfig,
     readiness: ReadinessConfig,
 ) -> tuple[bool, str | None]:
-    """Live new-order path: readiness + user-stream freshness (when required)."""
+    """Live new-order path: readiness + user-stream freshness + V2 bootstrap gate."""
+    if runtime.execution_mode == ExecutionMode.LIVE and not ctx.first_v2_sync_complete:
+        return False, rc.BOOTSTRAP_NOT_COMPLETE
     ok, reason = check_readiness(ctx, runtime=runtime, readiness=readiness)
     if not ok:
         return False, reason

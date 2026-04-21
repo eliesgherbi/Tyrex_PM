@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from py_clob_client.exceptions import PolyApiException
+from py_clob_client_v2.exceptions import PolyApiException
 
 from tyrex_pm.core import reason_codes as rc
 from tyrex_pm.core.enums import ExecutionMode, OrderStyle, Side

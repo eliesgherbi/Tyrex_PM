@@ -1,6 +1,6 @@
 notional:
   min_usd: "1"
-  max_usd: "4"
+  max_usd: "2"
   # cap: clip order size so notional <= max_usd | deny: reject when notional > max_usd
   max_policy: cap
 
@@ -10,8 +10,8 @@ venue_min_size:
   default_min_size: "5"
 
 deployment:
-  token_cap_usd: "5"
-  portfolio_cap_usd: "15"
+  token_cap_usd: "2"
+  portfolio_cap_usd: "2"
   # LOCKED rule documented in tyrex_pm.risk.deployment
 
 # Live guru-follow: keep enabled so risk blocks BUYs before OMS when balance/allowance insufficient.

@@ -27,6 +27,12 @@ class HealthRuntime:
     #: provisional auto-resolution (UNKNOWN_TERMINAL) until cleared.
     venue_restart_suspected: bool = False
     venue_restart_last_ts: datetime | None = None
+    #: Set to True after the first successful V2 venue truth rebuild
+    #: (``refresh_wallet_from_clob`` ok). Until then, ``check_aggressive_readiness``
+    #: denies live order evaluation with reason ``bootstrap_not_complete``.
+    #: Defaults to False so a freshly constructed live ``HealthRuntime`` cannot
+    #: accidentally let pre-bootstrap intents through.
+    first_v2_sync_complete: bool = False
 
     def apply_reconcile(self, res: ReconcileResult) -> None:
         #: Fail-closed for **blocking** venue drift only (provisional grace is non-blocking).
@@ -51,3 +57,11 @@ class HealthRuntime:
 
     def clear_venue_restart_suspected(self) -> None:
         self.venue_restart_suspected = False
+
+    def mark_first_v2_sync_complete(self) -> None:
+        """Set after the first successful V2 venue truth rebuild.
+
+        Idempotent. Called from ``live_supervisor.venue_refresh_loop`` once
+        ``refresh_wallet_from_clob`` returns without raising.
+        """
+        self.first_v2_sync_complete = True

@@ -6,11 +6,11 @@ Adapter layer that translates between Tyrex's canonical types and Polymarket's w
 
 | File | Role |
 |------|------|
-| `clob_bridge.py` | `PyClobBridge` — wraps `py-clob-client` (sync) behind `asyncio.to_thread`. Provides `submit_order`, `cancel_order`, `get_open_orders`, `get_balance_allowance`, etc. + `parse_venue_order_id` |
-| `clob_env.py` | `try_create_clob_client(...)` — builds a `ClobClient` from env (`TYREX_*` / `POLYMARKET_*` aliases), derives API creds if not provided, resolves proxy/funder + signature type. Also `resolve_positions_wallet_address` for the data-api positions URL |
-| `clob_execution.py` | Submit/cancel implementations (called from `LiveOMS`) |
-| `clob_wallet_sync.py` | `refresh_wallet_from_clob(wallet, client)` — REST refresh of open orders + balance/allowance |
+| `clob_bridge.py` | `PyClobBridge` — wraps `py-clob-client-v2` (sync) behind `asyncio.to_thread`. Builds `OrderArgsV2`, posts via `create_and_post_order`, cancels via `OrderPayload`. Provides `parse_venue_order_id`. |
+| `clob_env.py` | `try_create_clob_client(...)` — builds a V2 `ClobClient` from env (`TYREX_*` / `POLYMARKET_*` aliases), derives L2 API creds via `create_or_derive_api_key()`, resolves proxy/funder + signature type, plumbs optional `BuilderConfig`. Also `resolve_positions_wallet_address` for the data-api positions URL. Default host: `https://clob-v2.polymarket.com` (V2 staging). |
+| `clob_wallet_sync.py` | `refresh_wallet_from_clob(wallet, client)` — REST refresh of open orders + balance/allowance via V2 `BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)`. Scales raw 6-decimal token units; takes the per-exchange `min` for binding allowance. |
 | `clob_heartbeat.py` | Heartbeat client + `post_heartbeat_with_recovery` (handles server-id rotation that briefly returns 400) |
+| `exceptions.py` | Re-exports `py_clob_client_v2.exceptions.PolyApiException` so non-venue modules consume V2 exception types via the adapter boundary (enforced by `tests/test_v2_import_isolation.py`). |
 | `heartbeat.py` | Pure heartbeat helpers (used by `clob_heartbeat.py`) |
 | `data_api_client.py` | `DataApiClient` — async `httpx` client for `data-api/activity` (guru polling) and `data-api/positions` |
 | `gamma_client.py` | `GammaClient` — `is_token_tradeable(...)` for the optional pre-submit market gate |
@@ -23,7 +23,8 @@ Adapter layer that translates between Tyrex's canonical types and Polymarket's w
 
 ## What this layer does
 
-- Wraps every blocking `py-clob-client` call so `asyncio` loops aren't blocked.
+- Wraps every blocking `py-clob-client-v2` call so `asyncio` loops aren't blocked.
+- Owns the **only** direct `py_clob_client_v2` imports in the codebase (enforced by `tests/test_v2_import_isolation.py`); other layers consume V2 types via re-exports here.
 - Normalizes wire dicts into `core/models.py` dataclasses (`OpenOrderView`, `WalletPosition`, `TradeFillRecord`, `GuruTradeSignal`).
 - Translates HTTP errors / WS reconnect events into `HealthRuntime` flags (heartbeat ok, venue-restart-suspected on HTTP 425, user-ws-stale).
 

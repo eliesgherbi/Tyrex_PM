@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 import httpx
-from py_clob_client.exceptions import PolyApiException
+
+from tyrex_pm.venue.polymarket.exceptions import PolyApiException
 
 from tyrex_pm.core.enums import ExecutionMode
 from tyrex_pm.core.ids import RunId
@@ -330,6 +331,31 @@ async def process_new_guru_signals(
                 continue
 
         copy_sig = to_copy_signal(sig)
+        # Phase 5: resolve venue-truth market info (tick_size, min_order_size,
+        # neg_risk, fee_rate_bps) for the signal's token *before* we build the
+        # risk context. The cache snapshots into RiskContext.market_info so
+        # the venue-min-size gate uses ``mos`` from /clob-markets instead of
+        # the YAML default. Failure to resolve is non-fatal: we skip the
+        # signal with ``market_metadata_unavailable`` so an unreachable
+        # venue endpoint doesn't strand the rest of the loop.
+        if coord.market_info_cache is not None:
+            try:
+                await coord.market_info_cache.get(sig.token_id)
+            except Exception as mi_err:  # noqa: BLE001
+                sink.write(
+                    make_fact(
+                        FACT_TYPE_STRATEGY_SKIP,
+                        rid,
+                        {
+                            "reason": rc.MARKET_METADATA_UNAVAILABLE,
+                            "dedup_key": sig.dedup_key,
+                            "market_info_error": repr(mi_err),
+                        },
+                        correlation_id=corr,
+                    )
+                )
+                reconcile_coordinator(coord, sink, rid)
+                continue
         risk_ctx = coord.build_risk_context(app)
         intents, skip_reason, sizing_meta = strategy.on_guru_signal(copy_sig, coord.holdings())
         if skip_reason:
@@ -431,8 +457,24 @@ async def process_new_guru_signals(
                     reconcile_coordinator(coord, sink, rid)
                     continue
                 register_submit(coord.orders, ap)
+                # Phase 5: pass the resolved market info (if any) into the OMS
+                # so the order builder tick-quantizes the limit price at the
+                # last possible moment. The same MarketInfo is also used to
+                # build the ``tick_quantize_*`` evidence on the OMS submit fact.
+                # The kwarg is only forwarded when truly present so legacy
+                # OMSBackend implementations (test doubles, ``ShadowOMS`` in
+                # older fixtures) that haven't yet adopted the Phase 5 protocol
+                # extension keep working unchanged.
+                mi = (
+                    coord.market_info_cache.snapshot().get(ap.intent.token_id)
+                    if coord.market_info_cache is not None
+                    else None
+                )
                 try:
-                    res = await oms.submit(ap)
+                    if mi is not None:
+                        res = await oms.submit(ap, market_info=mi)
+                    else:
+                        res = await oms.submit(ap)
                 except PolyApiException as e:
                     release_after_ack(coord.orders, ap.client_order_id)
                     err_body = e.error_msg
@@ -478,14 +520,21 @@ async def process_new_guru_signals(
                     await refresh_wallet_coordinated_after_live_submit(coord, live_clob_client)
                 if apply_local_shadow_fill:
                     apply_shadow_fill(coord.wallet, ap)
+                # Phase 7M: tick-quantize evidence on every oms_submit fact so
+                # operators can audit whether the bot rounded the price and
+                # by how much. Always present (even when no quantization
+                # occurred) so the schema is stable across shadow/live.
+                from tyrex_pm.execution.order_builder import build_quantize_evidence
+                submit_payload: dict = {
+                    "client_order_id": str(ap.client_order_id),
+                    "oms_result": res,
+                    **build_quantize_evidence(ap, mi),
+                }
                 sink.write(
                     make_fact(
                         FACT_TYPE_OMS_SUBMIT,
                         rid,
-                        {
-                            "client_order_id": str(ap.client_order_id),
-                            "oms_result": res,
-                        },
+                        submit_payload,
                         correlation_id=corr,
                     )
                 )

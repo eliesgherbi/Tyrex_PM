@@ -8,12 +8,13 @@ How to run, configure, and observe Tyrex_PM in shadow and live modes.
 
 ## 1. CLI
 
-Two subcommands, both backed by `tyrex_pm.runtime.app`:
+Three subcommands, all backed by `tyrex_pm.runtime.app`:
 
 ```bash
 tyrex-pm run [...]            # full guru-follow loop (shadow or live)
 tyrex-pm live-attest [...]    # one-shot live submit + cancel attestation
-# Equivalent: python -m tyrex_pm.runtime.app run/live-attest [...]
+tyrex-pm reset-state [...]    # clear local on-disk state (V2 cutover hygiene)
+# Equivalent: python -m tyrex_pm.runtime.app <cmd> [...]
 ```
 
 ### 1.1 `tyrex-pm run`
@@ -52,6 +53,22 @@ tyrex-pm live-attest \
 
 **SELL attest** requires venue inventory or risk denies with `naked_sell`; prefer **BUY** for first attestation.
 
+### 1.3 `tyrex-pm reset-state`
+
+Clears local on-disk state files that a future `tyrex-pm run` would consume. Reporting artifacts under `var/reporting/runs/` are **never** touched (immutable history). Idempotent: a clean tree is a no-op.
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--state-dir` | `var/state` | directory whose documented state files will be deleted |
+| `--repo-root` | auto | resolve `--state-dir` relative to this root |
+
+```bash
+tyrex-pm reset-state                          # default: var/state
+tyrex-pm reset-state --state-dir var/state    # explicit
+```
+
+Currently removes: `guru_strategy_store.json` (guru watermark + dedup ledger). Run this before the first live process on a fresh V2 environment so no V1-era guru cursor leaks into the V2 startup. Bootstrap is also enforced in code: until the first successful V2 venue truth rebuild, `check_aggressive_readiness` denies with `bootstrap_not_complete`.
+
 ---
 
 ## 2. Configuration
@@ -87,9 +104,10 @@ Authoritative reference for every key: [CONFIG_MODEL.md](CONFIG_MODEL.md).
 |----------|-------|
 | `TYREX_PRIVATE_KEY` | Required for live / `live-attest`. **`POLYMARKET_PK`** is accepted as fallback. |
 | `TYREX_FUNDER` | Optional proxy/funder address. **`POLYMARKET_FUNDER`** fallback. |
-| `TYREX_CLOB_HOST` | Default `https://clob.polymarket.com`. |
+| `TYREX_CLOB_HOST` | Default `https://clob-v2.polymarket.com` (V2 staging; flipped to `https://clob.polymarket.com` on V2 cutover day). |
 | `TYREX_CHAIN_ID` | Default `137`. |
-| `TYREX_SIGNATURE_TYPE` | Default `0` (EOA). Use `1` (proxy / email-wallet) **with** `TYREX_FUNDER` = proxy address if orders fail with `invalid signature`. **`POLYMARKET_SIGNATURE_TYPE`** fallback. |
+| `TYREX_SIGNATURE_TYPE` | Default `0` (EOA). `1=POLY_PROXY`, `2=POLY_GNOSIS_SAFE`, `3=POLY_1271`. Use a non-EOA value **with** `TYREX_FUNDER` = proxy/Safe address if orders fail with `invalid signature`. **`POLYMARKET_SIGNATURE_TYPE`** fallback. |
+| `TYREX_BUILDER_CODE` / `TYREX_BUILDER_ADDRESS` | Optional V2 builder attribution (32-byte hex code + 20-byte address). Both required when set; malformed values fail fast. |
 
 ### 3.2 Heartbeat / venue refresh
 

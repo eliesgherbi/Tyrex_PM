@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from py_clob_client.exceptions import PolyApiException
+from py_clob_client_v2.exceptions import PolyApiException
 
 from tyrex_pm.runtime.health_runtime import HealthRuntime
 from tyrex_pm.venue.polymarket.clob_heartbeat import (

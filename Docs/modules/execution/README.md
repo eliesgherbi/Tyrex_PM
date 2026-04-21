@@ -8,8 +8,8 @@ Turns approved intents into venue submits / cancels and keeps the local OMS stat
 |------|---------|
 | `oms.py` | `SingleWriterOMS` — serializes submits and cancels for one wallet onto a single asyncio queue, then awaits the backend. Eliminates double-submit races between concurrent guru signals |
 | `adapters.py` | `OMSBackend` Protocol + `ShadowOMS` (returns `"shadow_ack"` / `"shadow_cancel_ack"`) |
-| `live_oms.py` | `LiveOMS` — real Polymarket backend that delegates to `venue.polymarket.clob_execution` |
-| `order_builder.py` | Build the venue-side payload (price, size, side, order style) for a `py-clob-client` post |
+| `live_oms.py` | `LiveOMS` — real Polymarket backend that delegates to `venue.polymarket.clob_bridge.PyClobBridge` (V2 SDK) |
+| `order_builder.py` | Build the venue-side payload (price, size, side, order style) for a `py-clob-client-v2` post (V2 `OrderArgsV2`) |
 | `order_lifecycle.py` | Local OMS state transitions: `register_submit`, `ack_submit`, `release_after_ack`, `remove_resting_order`, `submit_fingerprint_for_intent`, `sync_local_open_orders_from_venue_wallet` |
 | `cancel_manager.py` | Cancel helpers (best-effort idempotent) |
 | `liquidity_guard.py` | Pre-submit microprice / book-depth sanity checks (currently advisory) |
@@ -47,7 +47,7 @@ The `submit_fingerprint` (sha1 of `token|side|size|price`) blocks duplicate subm
 ## Live submit flow (live mode)
 
 1. Pipeline calls `SingleWriterOMS.submit(approved_intent)`.
-2. `LiveOMS` builds the payload via `order_builder` and posts through `clob_execution.submit_via_py_clob_client` (lazy `py-clob-client` import).
+2. `LiveOMS` builds the payload via `order_builder`, then `PyClobBridge.create_and_post_limit` constructs a V2 `OrderArgsV2` and calls `client.create_and_post_order` on a thread (`asyncio.to_thread`).
 3. Successful POST returns the venue JSON; `parse_venue_order_id` extracts the `venue_order_id`; `ack_submit` links it locally.
 4. Pipeline triggers a coordinated REST refresh (`refresh_wallet_coordinated_after_live_submit`) so the new resting order is visible to the next risk evaluation.
 

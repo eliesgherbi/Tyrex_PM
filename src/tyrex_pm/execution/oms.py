@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Any
 
 from tyrex_pm.core.models import ApprovedCancel, ApprovedIntent
 from tyrex_pm.execution.adapters import OMSBackend
@@ -10,6 +11,11 @@ from tyrex_pm.execution.adapters import OMSBackend
 @dataclass(frozen=True)
 class _Place:
     ap: ApprovedIntent
+    #: Phase 5: optional resolved :class:`MarketInfo` for ``ap.intent.token_id``,
+    #: passed through to the backend so the order builder can tick-quantize the
+    #: limit price. Carried on the queue item rather than as a side-channel so
+    #: the single-writer ordering still applies (no out-of-band state).
+    market_info: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +51,10 @@ class SingleWriterOMS:
             item, fut = await self._q.get()
             try:
                 if isinstance(item, _Place):
-                    res = await self._backend.submit(item.ap)
+                    if item.market_info is not None:
+                        res = await self._backend.submit(item.ap, market_info=item.market_info)
+                    else:
+                        res = await self._backend.submit(item.ap)
                 else:
                     res = await self._backend.cancel(item.ac)
                 if not fut.done():
@@ -56,9 +65,14 @@ class SingleWriterOMS:
             finally:
                 self._q.task_done()
 
-    async def submit(self, ap: ApprovedIntent) -> str:
+    async def submit(
+        self,
+        ap: ApprovedIntent,
+        *,
+        market_info: Any | None = None,
+    ) -> str:
         fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        await self._q.put((_Place(ap), fut))
+        await self._q.put((_Place(ap, market_info=market_info), fut))
         return await fut
 
     async def cancel(self, ac: ApprovedCancel) -> str:

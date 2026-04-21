@@ -30,6 +30,12 @@ STALE_WALLET_SNAPSHOT = "stale_wallet_snapshot"
 RECONCILE_DRIFT = "reconcile_drift"
 HEARTBEAT_FAILED = "heartbeat_failed"
 VENUE_TRUTH_STALE = "venue_truth_stale"
+#: Live mode only: blocks the very first risk evaluation until the V2 venue truth
+#: has been rebuilt at least once (first successful ``refresh_wallet_from_clob`` +
+#: heartbeat ok + user-WS first message or stale-grace elapsed). Prevents a stale
+#: in-memory or on-disk state snapshot from seeding the first V2 process. Cleared
+#: by ``HealthRuntime.mark_first_v2_sync_complete()`` from ``venue_refresh_loop``.
+BOOTSTRAP_NOT_COMPLETE = "bootstrap_not_complete"
 
 # Guru / strategy filters
 TOKEN_NOT_ALLOWLISTED = "token_not_allowlisted"

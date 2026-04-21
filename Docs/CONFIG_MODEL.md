@@ -192,7 +192,7 @@ Secrets live in `.env`; they are loaded by `python-dotenv` in `runtime/app.py`.
 | `TYREX_PRIVATE_KEY` (or `POLYMARKET_PK`) | EVM private key for CLOB signing |
 | `TYREX_FUNDER` (or `POLYMARKET_FUNDER`) | Proxy / funder address (required when `signature_type=1`) |
 | `TYREX_SIGNATURE_TYPE` (or `POLYMARKET_SIGNATURE_TYPE`) | `0` (EOA) or `1` (proxy / email-wallet) |
-| `TYREX_CLOB_HOST` | Override CLOB endpoint (default `https://clob.polymarket.com`) |
+| `TYREX_CLOB_HOST` | Override CLOB endpoint (default `https://clob-v2.polymarket.com` — V2 staging; flipped to `https://clob.polymarket.com` on V2 cutover day) |
 | `TYREX_CHAIN_ID` | Override chain id (default `137` Polygon) |
 | `TYREX_HEARTBEAT_ID` (or `POLYMARKET_HEARTBEAT_ID`) | Optional heartbeat client id |
 | `POLYMARKET_API_KEY` / `_API_SECRET` / `_PASSPHRASE` | Optional pre-derived API creds; otherwise derived from the key |

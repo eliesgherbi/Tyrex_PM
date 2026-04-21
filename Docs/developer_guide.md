@@ -62,7 +62,7 @@ Every fact type is declared in `reporting/schema_v2.py`. To add a new fact:
 
 - Background loops live under `runtime/live_supervisor.py`; they all take a `stop: asyncio.Event` and use `asyncio.wait_for(stop.wait(), timeout=...)` instead of `asyncio.sleep` so shutdown is prompt.
 - HTTP calls go through `httpx.AsyncClient` constructed once per loop.
-- Sync `py-clob-client` calls are wrapped in `asyncio.to_thread` (`venue.polymarket.clob_bridge.PyClobBridge`).
+- Sync `py-clob-client-v2` calls are wrapped in `asyncio.to_thread` (`venue.polymarket.clob_bridge.PyClobBridge`).
 
 ---
 

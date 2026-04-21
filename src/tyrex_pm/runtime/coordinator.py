@@ -11,6 +11,7 @@ from tyrex_pm.runtime.config import AppConfig
 from tyrex_pm.runtime.health_runtime import HealthRuntime
 from tyrex_pm.state.order_store import OrderStore
 from tyrex_pm.state.wallet_store import WalletStore
+from tyrex_pm.venue.polymarket.market_info import MarketInfoCache
 
 
 @dataclass
@@ -40,6 +41,14 @@ class RuntimeCoordinator:
     #: last_positions_sync_ts, position_count, open_order_count, mark_count)`` so refresh
     #: ticks that didn't move any of those numbers do not flood the report.
     last_wallet_sync_signature: tuple | None = None
+    #: Live mode only: per-token venue-truth metadata cache (tick_size,
+    #: min_order_size, neg_risk, fee_rate_bps, outcomes). Resolved on demand
+    #: by the live pipeline before risk evaluation; ``build_risk_context``
+    #: snapshots it into ``RiskContext.market_info`` so the venue-min-size
+    #: gate uses *venue truth* instead of the YAML default. Shadow mode and
+    #: unit tests pass ``None`` and the gate falls back to the YAML default
+    #: (see :mod:`tyrex_pm.risk.venue_min_size`).
+    market_info_cache: MarketInfoCache | None = None
 
     def holdings(self) -> dict[TokenId, Decimal]:
         return {tid: p.qty for tid, p in self.wallet.positions.items()}
@@ -85,4 +94,14 @@ class RuntimeCoordinator:
                 else self.health.venue_truth_stale
             ),
             in_flight_buy_reservations=in_flight.reservations,
+            first_v2_sync_complete=(
+                True
+                if app.runtime.execution_mode == ExecutionMode.SHADOW
+                else self.health.first_v2_sync_complete
+            ),
+            market_info=(
+                self.market_info_cache.snapshot()
+                if self.market_info_cache is not None
+                else {}
+            ),
         )

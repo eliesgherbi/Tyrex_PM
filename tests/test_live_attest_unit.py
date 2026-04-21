@@ -102,6 +102,39 @@ async def test_live_attest_success_path_mocked(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr("tyrex_pm.runtime.live_attest.run_user_ws_ingest", _noop)
     monkeypatch.setattr("tyrex_pm.runtime.live_attest.user_ws_staleness_loop", _noop)
 
+    # Phase 5: ``cmd_live_attest`` resolves market info via ``MarketInfoCache``
+    # which hits the real venue. Replace with a fake that returns a fixed
+    # :class:`MarketInfo` so this unit test can run fully offline.
+    from datetime import datetime, timezone
+    from decimal import Decimal as _Dec
+
+    from tyrex_pm.core.ids import TokenId
+    from tyrex_pm.venue.polymarket.market_info import MarketInfo
+
+    class _FakeMarketInfoCache:
+        def __init__(self, *_a, **_k) -> None:
+            self._mi = MarketInfo(
+                token_id=TokenId("1234567890"),
+                condition_id="0xfake",
+                tick_size=_Dec("0.01"),
+                min_order_size=_Dec("1"),
+                neg_risk=False,
+                fee_rate_bps=0,
+                outcomes={"1234567890": "Yes"},
+                fetched_ts=datetime.now(timezone.utc),
+                raw={},
+            )
+
+        async def get(self, _tid):
+            return self._mi
+
+        def snapshot(self):
+            return {self._mi.token_id: self._mi}
+
+    monkeypatch.setattr(
+        "tyrex_pm.runtime.live_attest.MarketInfoCache", _FakeMarketInfoCache
+    )
+
     bridge = MagicMock()
     bridge.post_heartbeat = AsyncMock(return_value={"ok": True})
     bridge.create_and_post_limit = AsyncMock(return_value={"orderID": "0xvenue1", "status": "live"})

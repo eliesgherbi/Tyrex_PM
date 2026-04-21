@@ -41,10 +41,15 @@ from tyrex_pm.state.strategy_store import load_strategy_store, save_strategy_sto
 from tyrex_pm.state.wallet_store import WalletStore
 from tyrex_pm.strategies.guru_follow.strategy import GuruFollowStrategy
 from tyrex_pm.venue.polymarket.clob_bridge import PyClobBridge
-from tyrex_pm.venue.polymarket.clob_env import resolve_positions_wallet_address, try_create_clob_client
+from tyrex_pm.venue.polymarket.clob_env import (
+    DEFAULT_CLOB_HOST_V2,
+    resolve_positions_wallet_address,
+    try_create_clob_client,
+)
 from tyrex_pm.venue.polymarket.clob_wallet_sync import refresh_wallet_from_clob
 from tyrex_pm.venue.polymarket.data_api_client import DEFAULT_DATA_API_BASE, DataApiClient
 from tyrex_pm.venue.polymarket.gamma_client import GammaClient
+from tyrex_pm.venue.polymarket.market_info import MarketInfoCache
 from tyrex_pm.venue.polymarket.positions_sync import refresh_positions_from_data_api
 
 log = logging.getLogger(__name__)
@@ -57,6 +62,10 @@ def _maybe_load_dotenv(repo_root: Path) -> None:
 
     Prefers `./.env` (cwd) so runs from the project root work with editable or global installs;
     falls back to `<repo_root>/.env` when that matches the packaged layout (e.g. src checkout).
+
+    Uses ``override=True`` so the on-disk ``.env`` always wins over stale shell env vars left
+    over from a previous ``set -a && source .env && set +a``. Without override, editing ``.env``
+    has no effect on a process whose parent shell pre-loaded the old values.
     """
     try:
         from dotenv import load_dotenv
@@ -64,11 +73,11 @@ def _maybe_load_dotenv(repo_root: Path) -> None:
         return
     cwd_env = Path.cwd() / ".env"
     if cwd_env.is_file():
-        load_dotenv(cwd_env)
+        load_dotenv(cwd_env, override=True)
         return
     p = repo_root / ".env"
     if p.is_file():
-        load_dotenv(p)
+        load_dotenv(p, override=True)
 
 
 def _guru_wallet_configured(wallet: str) -> bool:
@@ -122,6 +131,21 @@ def main() -> None:
         default=None,
         help="optional label; artifacts go under runs_dir/{sanitized_name} (facts run_id is still a UUID in each row)",
     )
+    p_rs = sub.add_parser(
+        "reset-state",
+        help="clear local on-disk state (V2 cutover hygiene; never touches reporting/runs/)",
+    )
+    p_rs.add_argument(
+        "--state-dir",
+        default="var/state",
+        help="directory whose documented state files will be deleted (default: var/state)",
+    )
+    p_rs.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="resolve --state-dir relative to this root (default: detected repo root)",
+    )
     p_la = sub.add_parser(
         "live-attest",
         help="minimal live post+cancel via native OMS (designated wallet; not guru copy)",
@@ -131,14 +155,40 @@ def main() -> None:
     p_la.add_argument("--scenario", default="live_attest")
     p_la.add_argument(
         "--token-id",
-        required=True,
-        help="numeric Polymarket CLOB outcome token id for the market",
+        default=os.environ.get("TYREX_SMOKE_TOKEN_ID"),
+        help="numeric Polymarket CLOB outcome token id for the market "
+             "(falls back to env TYREX_SMOKE_TOKEN_ID)",
     )
-    p_la.add_argument("--size", required=True)
-    p_la.add_argument("--price", required=True)
-    p_la.add_argument("--side", default="BUY", choices=("BUY", "SELL"))
+    p_la.add_argument(
+        "--size",
+        default=os.environ.get("TYREX_SMOKE_SIZE"),
+        help="order size (falls back to env TYREX_SMOKE_SIZE)",
+    )
+    p_la.add_argument(
+        "--price",
+        default=os.environ.get("TYREX_SMOKE_PRICE"),
+        help="limit price (falls back to env TYREX_SMOKE_PRICE)",
+    )
+    p_la.add_argument(
+        "--side",
+        default=os.environ.get("TYREX_SMOKE_SIDE", "BUY"),
+        choices=("BUY", "SELL"),
+        help="order side (falls back to env TYREX_SMOKE_SIDE, then BUY)",
+    )
     p_la.add_argument("--readiness-timeout-s", type=float, default=120.0)
     args = parser.parse_args()
+    if args.cmd == "live-attest":
+        missing = [
+            f"--{n}" for n, v in
+            (("token-id", args.token_id), ("size", args.size), ("price", args.price))
+            if not v
+        ]
+        if missing:
+            parser.error(
+                f"missing required value(s) for: {', '.join(missing)} "
+                f"(set on the command line or in .env via TYREX_SMOKE_TOKEN_ID / "
+                f"TYREX_SMOKE_SIZE / TYREX_SMOKE_PRICE)"
+            )
 
     if args.cmd == "run":
         asyncio.run(cmd_run(args))
@@ -146,6 +196,29 @@ def main() -> None:
         from tyrex_pm.runtime.live_attest import cmd_live_attest
 
         raise SystemExit(asyncio.run(cmd_live_attest(args)))
+    elif args.cmd == "reset-state":
+        cmd_reset_state(args)
+
+
+def cmd_reset_state(args: argparse.Namespace) -> None:
+    """Clear documented local state files. Idempotent.
+
+    See ``tyrex_pm.runtime.reset_state.reset_local_state`` for the file list.
+    Reporting artifacts under ``var/reporting/`` are intentionally preserved.
+    """
+    from tyrex_pm.runtime.reset_state import reset_local_state, resettable_file_names
+
+    root = args.repo_root or _repo_root()
+    state_dir = Path(args.state_dir)
+    if not state_dir.is_absolute():
+        state_dir = (root / state_dir).resolve()
+    removed = reset_local_state(state_dir)
+    if removed:
+        for p in removed:
+            print(f"removed {p}")
+    else:
+        names = ", ".join(resettable_file_names())
+        print(f"no state to clear under {state_dir} (looked for: {names})")
 
 
 async def cmd_run(args: argparse.Namespace) -> None:
@@ -191,13 +264,14 @@ async def cmd_run(args: argparse.Namespace) -> None:
     if app.runtime.execution_mode == ExecutionMode.LIVE:
         live_clob = try_create_clob_client()
         if live_clob is None:
-            log.error("Live mode needs TYREX_PRIVATE_KEY and `pip install tyrex-pm[live]` (py-clob-client)")
+            log.error("Live mode needs TYREX_PRIVATE_KEY and `pip install tyrex-pm[live]` (py-clob-client-v2)")
             return
         live_bridge = PyClobBridge(live_clob)
         live_oms_writer = SingleWriterOMS(LiveOMS(live_bridge))
         live_oms_writer.start()
         oms_backend = live_oms_writer
         apply_local_fill = False
+        clob_host = os.environ.get("TYREX_CLOB_HOST", DEFAULT_CLOB_HOST_V2)
         coord = RuntimeCoordinator(
             wallet=WalletStore(),
             orders=OrderStore(),
@@ -206,6 +280,7 @@ async def cmd_run(args: argparse.Namespace) -> None:
             provisional_unknown_terminal_timeout_s=float(app.runtime.provisional_unknown_terminal_timeout_s),
             venue_confirm_provisional_timeout_s=float(app.runtime.provisional_unknown_terminal_timeout_s),
             adoption_grace_s=float(app.runtime.adoption_grace_s),
+            market_info_cache=MarketInfoCache(live_clob, host=clob_host),
         )
         res0 = reconcile_open_orders(coord.wallet, coord.orders, **_reconcile_kw(coord))
         coord.health.apply_reconcile(res0)
@@ -265,6 +340,11 @@ async def cmd_run(args: argparse.Namespace) -> None:
                             coord.wallet, positions_data_client, positions_addr
                         )
                     sync_local_open_orders_from_venue_wallet(coord.orders, coord.wallet)
+                    # V2 cutover hygiene: open the new-order risk gate as soon
+                    # as the first live venue truth rebuild succeeds. Until
+                    # this flips, ``check_aggressive_readiness`` denies with
+                    # ``bootstrap_not_complete`` (see runtime/health_runtime).
+                    coord.health.mark_first_v2_sync_complete()
                 except Exception:
                     log.exception("initial live bootstrap (wallet sync) failed")
                     coord.health.mark_heartbeat(ok=False)

@@ -16,7 +16,7 @@ guru / market data ──► signals ──► strategies ──► RiskEngine �
 
 ```bash
 pip install -e .[dev]            # development
-pip install -e .[live]           # add live CLOB deps (py-clob-client, websockets, dotenv)
+pip install -e .[live]           # add live CLOB deps (py-clob-client-v2, websockets, dotenv)
 
 # shadow run (no real submits, synthetic USDC bootstrap)
 python -m tyrex_pm.runtime.app run --strategy config/strategies/guru_follow.yaml \

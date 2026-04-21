@@ -10,7 +10,7 @@ How to install, run, test, and iterate on Tyrex_PM locally.
 
 - **Python 3.11+** (CI / pyproject pin: `requires-python = ">=3.11"`).
 - **git** (the runtime stamps the current SHA into `manifest.json`).
-- For live mode: `pip install -e .[live]` adds `py-clob-client`, `websockets`, `python-dotenv`.
+- For live mode: `pip install -e .[live]` adds `py-clob-client-v2`, `websockets`, `python-dotenv`.
 
 ---
 

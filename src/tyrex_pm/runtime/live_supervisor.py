@@ -88,6 +88,17 @@ async def venue_refresh_loop(
             # appears chronologically alongside the reconcile that consumed it.
             emit_wallet_sync(coord, sink, run_id)
             reconcile_coordinator(coord, sink, run_id)
+            # V2 bootstrap gate: open the door for new-order risk evaluation
+            # only after the first venue truth rebuild completes successfully.
+            if not coord.health.first_v2_sync_complete:
+                coord.health.mark_first_v2_sync_complete()
+                sink.write(
+                    make_fact(
+                        FACT_TYPE_HEALTH,
+                        run_id,
+                        {"event": "first_v2_sync_complete"},
+                    )
+                )
         except Exception:
             log.exception("venue refresh failed")
         try:

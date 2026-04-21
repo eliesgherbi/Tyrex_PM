@@ -136,7 +136,7 @@ def evaluate_intent(
         # capital/inventory so it sees the *final* size that would otherwise reach the OMS.
         # Without this gate, a clipped order such as 4.54 shares hits the venue's hard
         # 5-share floor and is rejected with "Size lower than the minimum: 5".
-        vms = venue_min_size.evaluate_venue_min_size(work, r.venue_min_size)
+        vms = venue_min_size.evaluate_venue_min_size(work, r.venue_min_size, ctx)
         ext = {**ext, **vms.evidence}
         if not vms.ok:
             return RiskDecision(

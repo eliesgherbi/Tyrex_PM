@@ -165,6 +165,19 @@ class RiskContext:
     #: and the USDC capital gate would otherwise approve orders the venue has already locked
     #: collateral for. Derived (not stored): see :func:`tyrex_pm.risk.in_flight.derive_in_flight_buy_reservations`.
     in_flight_buy_reservations: tuple[OpenOrderView, ...] = ()
+    #: Live mode only: True once the first V2 venue truth rebuild has succeeded
+    #: (see ``HealthRuntime.first_v2_sync_complete``). Defaults to True so
+    #: shadow mode and unit tests are not affected. ``check_aggressive_readiness``
+    #: denies with ``bootstrap_not_complete`` while False in live mode.
+    first_v2_sync_complete: bool = True
+    #: Per-token venue-truth metadata (tick_size, min_order_size, neg_risk,
+    #: fee_rate_bps, outcomes) populated from
+    #: :class:`tyrex_pm.venue.polymarket.market_info.MarketInfoCache`. The
+    #: value type is ``MarketInfo`` (kept as ``Any`` here to avoid a circular
+    #: import: ``core.models`` must stay venue-agnostic). Empty when the
+    #: live cache is not wired (shadow mode, unit tests) — risk gates fall
+    #: back to YAML defaults in that case.
+    market_info: dict[TokenId, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
