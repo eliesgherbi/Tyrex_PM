@@ -9,11 +9,13 @@ from tyrex_pm.core.models import Intent
 from tyrex_pm.signals.base import GuruCopySignal
 from tyrex_pm.runtime.config import StrategyConfig
 from tyrex_pm.strategies.guru_follow import exits, filters, sizing
+from tyrex_pm.strategies.guru_follow.scheduled_exit_demo import ScheduledExitDemoState
 
 
 class GuruFollowStrategy:
     def __init__(self, cfg: StrategyConfig) -> None:
         self._cfg = cfg
+        self.scheduled_exit_demo = ScheduledExitDemoState(cfg.exits)
 
     def on_guru_signal(
         self,

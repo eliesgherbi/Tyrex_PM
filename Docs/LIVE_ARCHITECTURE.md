@@ -16,7 +16,7 @@ What Polymarket says **right now**. Owned by `state.WalletStore`, populated from
 |--------|--------|---------|
 | **User WebSocket** (primary live truth) | `ingestion.user_stream.run_user_ws_ingest` | event-driven |
 | **REST `/data/orders`** (resting orders backstop) | `venue.polymarket.clob_wallet_sync.refresh_wallet_from_clob` | every `TYREX_VENUE_REFRESH_S` (default = `runtime.reconcile_interval_s`, 30 s) |
-| **REST `/balance-allowance`** (USDC + allowance) | `clob_wallet_sync.refresh_wallet_from_clob` | with the open-orders refresh |
+| **REST `/balance-allowance`** (Polymarket USD + per-exchange allowances) | `clob_wallet_sync.refresh_wallet_from_clob` | with the open-orders refresh |
 | **REST `/data-api/positions`** (position safety net) | `venue.polymarket.positions_sync.refresh_positions_from_data_api` | with the venue refresh loop, when a wallet address is resolvable |
 | **Market WebSocket** (books / trades) | `ingestion.market_stream` (scaffolded; not consumed by current strategies) | event-driven |
 
@@ -134,8 +134,11 @@ Releases are implicit (no separate ledger):
 | `user_ws_rest_only` | Set when user WS is disabled (`TYREX_USER_WS_DISABLE=1` or no API creds). |
 | `venue_restart_suspected` | Bumped on a 425 `submit`/`cancel`; suppresses `unknown_terminal` auto-resolution. |
 | `user_ws_last_msg_ts` | Touched by every user-WS message. |
+| `first_v2_sync_complete` | Flipped by the first successful `refresh_wallet_from_clob` in live mode (`cmd_run`, `cmd_live_attest`, `venue_refresh_loop`). Defaults to True for shadow + tests. |
 
-`risk.health.check_aggressive_readiness(ctx, runtime, readiness)` is the single readiness gate: it requires `usdc_balance` set + recent `last_wallet_sync_ts` (when configured) + heartbeat (when live + `require_heartbeat_live`) + user-WS not stale (when live + `require_user_ws_live`) + no `reconcile_drift`. Any failure denies with a stable reason code.
+`risk.health.check_aggressive_readiness(ctx, runtime, readiness)` is the single readiness gate: it requires `usdc_balance` set + recent `last_wallet_sync_ts` (when configured) + heartbeat (when live + `require_heartbeat_live`) + user-WS not stale (when live + `require_user_ws_live`) + no `reconcile_drift` + (in live mode) `first_v2_sync_complete = True` (else denies with `bootstrap_not_complete`). Any failure denies with a stable reason code.
+
+**Per-market venue truth (Phase 5):** alongside the wallet/order truths above, `runtime.coordinator.RuntimeCoordinator` owns an optional `market_info_cache: MarketInfoCache | None` (live mode only). It resolves `tick_size`, `min_order_size`, `neg_risk`, `fee_rate_bps`, and `outcomes` per token from `/markets-by-token` + `/clob-markets` + V2 SDK helpers (`venue/polymarket/market_info.py`, TTL = 300 s, fail-closed). The snapshot is plumbed into `RiskContext.market_info`, which `risk.venue_min_size` reads to prefer venue truth over the YAML default and which `execution.order_builder` reads to floor-quantize `limit_price` to the venue tick before submit. Shadow mode passes `None` and the same code paths fall back to YAML defaults.
 
 ### 4.1 Background supervisors (`runtime.live_supervisor`)
 

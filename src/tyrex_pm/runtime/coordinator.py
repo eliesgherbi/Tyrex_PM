@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -49,6 +50,9 @@ class RuntimeCoordinator:
     #: unit tests pass ``None`` and the gate falls back to the YAML default
     #: (see :mod:`tyrex_pm.risk.venue_min_size`).
     market_info_cache: MarketInfoCache | None = None
+    #: When set, called after user-WS or REST updates that may change positions — used to arm
+    #: live scheduled demo exits once sellable inventory is visible (see ``scheduled_exit_demo``).
+    scheduled_exit_demo_try_arm: Callable[[], None] | None = None
 
     def holdings(self) -> dict[TokenId, Decimal]:
         return {tid: p.qty for tid, p in self.wallet.positions.items()}

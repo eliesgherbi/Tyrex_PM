@@ -1,6 +1,6 @@
 notional:
   min_usd: "1"
-  max_usd: "2"
+  max_usd: "4"
   # cap: clip order size so notional <= max_usd | deny: reject when notional > max_usd
   max_policy: cap
 
@@ -10,8 +10,8 @@ venue_min_size:
   default_min_size: "5"
 
 deployment:
-  token_cap_usd: "2"
-  portfolio_cap_usd: "2"
+  token_cap_usd: "10"
+  portfolio_cap_usd: "20"
   # LOCKED rule documented in tyrex_pm.risk.deployment
 
 # Live guru-follow: keep enabled so risk blocks BUYs before OMS when balance/allowance insufficient.
@@ -33,6 +33,9 @@ readiness:
   require_wallet_sync: true
   max_wallet_age_s_live: 60
   require_heartbeat_live: true
+  # User WebSocket is ON by default in live (omit env TYREX_USER_WS_DISABLE).
+  # Set TYREX_USER_WS_DISABLE=1 only for REST-only debugging or WS-blocked networks,
+  # and use a scenario with require_user_ws_live: false so readiness does not fail-closed.
   require_user_ws_live: true
 
 # Pre-submit guard: notional caps can shrink a BUY below Polymarket's hard 5-share floor.

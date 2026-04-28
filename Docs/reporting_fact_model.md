@@ -46,7 +46,7 @@ Constants live in `src/tyrex_pm/reporting/schema_v2.py`. Adding a fact starts th
 | `oms_result` | reserved | — | Reserved for richer post-submit lifecycle (currently `oms_submit/cancel` carry the result inline) |
 | `reconcile` | `pipeline.reconcile_coordinator` | none | Drift flags, severity, repair / adoption decisions, suppressed REST ids |
 | `wallet_sync` | `pipeline.emit_wallet_sync` | none | Snapshot of balance, allowance, position count, open-order count after a REST refresh |
-| `live_attest` | `runtime/live_attest.py` | none | Attestation milestones (`auth_ok`, `submit_ok`, `cancel_ok`, ...) |
+| `live_attest` | `runtime/live_attest.py` | none | Attestation milestones (`auth_ok`, `submit_ok`, `cancel_ok`, ...) plus V2 evidence phases: `v2_environment` (SDK module + version, host, chain, signature_type, builder code presence), `collateral_check` (post-bootstrap pUSD balance + per-exchange allowances), `market_info` (resolved tick/min-size/neg-risk/fee/outcomes), and `outcome_validation` on `complete` (post-cancel order id resolution + outcomes map). |
 
 ---
 
@@ -119,7 +119,15 @@ Reason codes are stable strings from `core/reason_codes.py`. Always extend that 
   "oms_result":       "<raw venue JSON or shadow ack string>",
   "status_code":      400,                       // reject only
   "error_msg":        "not enough balance / allowance",
-  "venue_restart_suspected": false               // true on HTTP 425
+  "venue_restart_suspected": false,              // true on HTTP 425
+
+  // V2 / Phase 5 — tick quantization evidence (always present; only the
+  // ``_applied=true`` branch carries the rest of the keys).
+  "tick_quantize_applied":   true,
+  "tick_size":               "0.01",
+  "original_price":          "0.5523",
+  "quantized_price":         "0.55",
+  "price_was_quantized":     true
 }
 ```
 

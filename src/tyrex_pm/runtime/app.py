@@ -32,7 +32,21 @@ from tyrex_pm.runtime.live_supervisor import (
     user_ws_staleness_loop,
     venue_refresh_loop,
 )
-from tyrex_pm.runtime.pipeline import _reconcile_kw, process_new_guru_signals, reconcile_coordinator
+from tyrex_pm.runtime.config import SELL_TEST_PRICING_AUTO
+from tyrex_pm.strategies.guru_follow.scheduled_exit_demo import try_arm_scheduled_exit_demos
+from tyrex_pm.strategies.sell_test.pricing import resolve_marketable_price_via_client
+from tyrex_pm.strategies.sell_test.strategy import (
+    SellTestStrategy,
+    try_arm_sell_test_pending,
+)
+from tyrex_pm.runtime.pipeline import (
+    _reconcile_kw,
+    process_intent_work_unit,
+    process_new_guru_signals,
+    process_scheduled_exit_demo_due,
+    reconcile_coordinator,
+    scheduled_exit_demo_due_loop,
+)
 from tyrex_pm.execution.order_lifecycle import sync_local_open_orders_from_venue_wallet
 from tyrex_pm.state.order_store import OrderStore
 from tyrex_pm.state.reconcile import reconcile_open_orders
@@ -221,6 +235,167 @@ def cmd_reset_state(args: argparse.Namespace) -> None:
         print(f"no state to clear under {state_dir} (looked for: {names})")
 
 
+async def _wait_sell_test_live_readiness(
+    coord: RuntimeCoordinator,
+    app,
+    *,
+    timeout_s: float,
+) -> tuple[bool, str]:
+    """Block until ``check_aggressive_readiness`` + heartbeat + CLOB session all flip green.
+
+    The sell_test loop emits its single BUY immediately after live bootstrap, before
+    the background heartbeat task has had a chance to send its first ping. Without
+    this wait, the BUY's ``risk_decision`` is denied with ``heartbeat_failed`` (see
+    var/reporting/runs/sell_test_live_1). Mirrors :func:`live_attest._wait_aggressive_readiness`.
+    """
+    from tyrex_pm.risk.health import check_aggressive_readiness
+
+    deadline = monotonic_s() + timeout_s
+    last_reason = "timeout"
+    while monotonic_s() < deadline:
+        ctx = coord.build_risk_context(app)
+        ok, reason = check_aggressive_readiness(
+            ctx, runtime=app.runtime, readiness=app.risk.readiness
+        )
+        if ok and ctx.heartbeat_ok and ctx.clob_session_ok:
+            return True, "ok"
+        last_reason = reason or "not_ready"
+        await asyncio.sleep(0.5)
+    return False, last_reason or "readiness_timeout"
+
+
+async def _run_sell_test_loop(
+    *,
+    args: argparse.Namespace,
+    app,
+    run_id: RunId,
+    strat: SellTestStrategy,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms_backend,
+    apply_local_fill: bool,
+    live_clob,
+    stop_live: asyncio.Event,
+) -> int:
+    """Drive the standalone SELL test: emit one BUY, wait for the SELL to drain.
+
+    The loop re-uses :func:`process_intent_work_unit` for the BUY and lets the
+    background ``scheduled_exit_demo_due_loop`` task drain the SELL once the
+    sell_test state arms it. In live mode, waits for aggressive readiness
+    (heartbeat + CLOB session + first venue truth rebuild) before the initial
+    BUY so risk does not deny it with ``heartbeat_failed`` on a cold start.
+    Exits when ``run_once=True`` and the strategy is done, when ``--once`` is
+    passed, or when ``--max-iterations`` is reached.
+    """
+    iterations = 0
+    if app.runtime.execution_mode == ExecutionMode.LIVE:
+        readiness_timeout = float(os.environ.get("TYREX_SELL_TEST_READINESS_S", "60"))
+        ok_r, rsn = await _wait_sell_test_live_readiness(
+            coord, app, timeout_s=readiness_timeout
+        )
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                str(run_id),
+                {"event": "sell_test_readiness", "ok": ok_r, "detail": rsn},
+            )
+        )
+        if not ok_r:
+            log.error(
+                "sell_test live readiness failed after %.1fs: %s — aborting before BUY",
+                readiness_timeout,
+                rsn,
+            )
+            return iterations
+    # Auto-pricing: if buy.pricing_mode=auto and we are live, fetch the venue
+    # book once and override the BUY limit_price with a marketable value
+    # (best_ask + aggression_ticks * tick). On failure / guardrail trip we
+    # fall back to cfg.buy.limit_price so the strategy still tries to place
+    # an order; both outcomes emit a fact so the operator can audit it.
+    buy_cfg = strat.cfg.buy
+    if (
+        buy_cfg.enabled
+        and buy_cfg.pricing_mode == SELL_TEST_PRICING_AUTO
+        and app.runtime.execution_mode == ExecutionMode.LIVE
+        and live_clob is not None
+    ):
+        market_info = None
+        if coord.market_info_cache is not None:
+            try:
+                market_info = await coord.market_info_cache.get(strat.cfg.token_id)
+            except Exception:  # noqa: BLE001 — pricing falls back regardless
+                market_info = None
+        resolved = await resolve_marketable_price_via_client(
+            client=live_clob,
+            market_info=market_info,
+            token_id=strat.cfg.token_id,
+            side="BUY",
+            aggression_ticks=buy_cfg.aggression_ticks,
+            fallback_price=buy_cfg.limit_price,
+            max_price=buy_cfg.max_price,
+        )
+        evidence = resolved.to_evidence()
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                str(run_id),
+                {
+                    "event": "sell_test_pricing",
+                    "side": "BUY",
+                    "token_id": strat.cfg.token_id,
+                    **evidence,
+                },
+            )
+        )
+        if resolved.source == "auto_book" and resolved.price > 0:
+            strat.set_resolved_buy_price(resolved.price, evidence=evidence)
+            log.info(
+                "sell_test auto-pricing BUY: best_ask=%s tick=%s aggression=%s -> price=%s",
+                resolved.best_ask,
+                resolved.tick_size,
+                resolved.aggression_ticks,
+                resolved.price,
+            )
+        else:
+            log.warning(
+                "sell_test auto-pricing BUY fell back: %s (using cfg.buy.limit_price=%s)",
+                resolved.error,
+                buy_cfg.limit_price,
+            )
+    for wu in strat.initial_buy_work_units():
+        await process_intent_work_unit(
+            wu,
+            app=app,
+            run_id=run_id,
+            strategy=strat,
+            coord=coord,
+            sink=sink,
+            oms=oms_backend,
+            apply_local_shadow_fill=apply_local_fill,
+            live_clob_client=live_clob,
+        )
+        iterations += 1
+    if args.once or (args.max_iterations is not None and iterations >= args.max_iterations):
+        return iterations
+    next_reconcile_at = monotonic_s()
+    while not stop_live.is_set():
+        now = monotonic_s()
+        if now >= next_reconcile_at:
+            reconcile_coordinator(coord, sink, str(run_id))
+            next_reconcile_at = now + float(app.runtime.reconcile_interval_s)
+        if strat.is_done():
+            log.info("sell_test strategy reports is_done; exiting run loop")
+            break
+        try:
+            await asyncio.wait_for(stop_live.wait(), timeout=0.5)
+            break
+        except asyncio.TimeoutError:
+            iterations += 1
+            if args.max_iterations is not None and iterations >= args.max_iterations:
+                break
+    return iterations
+
+
 async def cmd_run(args: argparse.Namespace) -> None:
     root = args.repo_root or _repo_root()
     app = load_app_config(
@@ -248,7 +423,21 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     state_path = (root / args.state_dir).resolve() / "guru_strategy_store.json"
     strategy_store = load_strategy_store(state_path)
-    strat = GuruFollowStrategy(app.strategy)
+    sell_test_mode = app.sell_test is not None
+    strat: GuruFollowStrategy | SellTestStrategy
+    if sell_test_mode:
+        assert app.sell_test is not None  # for type checker
+        strat = SellTestStrategy(app.sell_test)
+        log.info(
+            "Loaded sell_test strategy: token_id=%s buy.notional=%s buy.limit=%s sell.delay_s=%s run_once=%s",
+            app.sell_test.token_id,
+            app.sell_test.buy.notional_usd,
+            app.sell_test.buy.limit_price,
+            app.sell_test.sell.delay_s,
+            app.sell_test.run_once,
+        )
+    else:
+        strat = GuruFollowStrategy(app.strategy)
     shadow_oms = ShadowOMS()
 
     coord: RuntimeCoordinator | None = None
@@ -306,6 +495,19 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     assert coord is not None
 
+    if sell_test_mode:
+
+        def _sell_test_try_arm() -> None:
+            try_arm_sell_test_pending(strat, coord)
+
+        coord.scheduled_exit_demo_try_arm = _sell_test_try_arm
+    elif app.strategy.exits.demo_forced_exit_enabled:
+
+        def _scheduled_exit_try_arm() -> None:
+            try_arm_scheduled_exit_demos(strat, coord)
+
+        coord.scheduled_exit_demo_try_arm = _scheduled_exit_try_arm
+
     facts_path = runs_dir / "facts.jsonl"
     iterations = 0
     last_guru_poll: dict | None = None
@@ -345,6 +547,8 @@ async def cmd_run(args: argparse.Namespace) -> None:
                     # this flips, ``check_aggressive_readiness`` denies with
                     # ``bootstrap_not_complete`` (see runtime/health_runtime).
                     coord.health.mark_first_v2_sync_complete()
+                    if coord.scheduled_exit_demo_try_arm is not None:
+                        coord.scheduled_exit_demo_try_arm()
                 except Exception:
                     log.exception("initial live bootstrap (wallet sync) failed")
                     coord.health.mark_heartbeat(ok=False)
@@ -425,8 +629,39 @@ async def cmd_run(args: argparse.Namespace) -> None:
                     )
                 )
 
+            if sell_test_mode or app.strategy.exits.demo_forced_exit_enabled:
+                live_tasks.append(
+                    asyncio.create_task(
+                        scheduled_exit_demo_due_loop(
+                            strategy=strat,
+                            app=app,
+                            run_id=run_id,
+                            coord=coord,
+                            sink=sink,
+                            oms=oms_backend,
+                            apply_local_shadow_fill=apply_local_fill,
+                            live_clob_client=live_clob,
+                            stop=stop_live,
+                        )
+                    )
+                )
+
             fixture_path: Path | None = args.fixture
-            if fixture_path is not None:
+            if sell_test_mode:
+                assert isinstance(strat, SellTestStrategy)
+                iterations = await _run_sell_test_loop(
+                    args=args,
+                    app=app,
+                    run_id=run_id,
+                    strat=strat,
+                    coord=coord,
+                    sink=sink,
+                    oms_backend=oms_backend,
+                    apply_local_fill=apply_local_fill,
+                    live_clob=live_clob,
+                    stop_live=stop_live,
+                )
+            elif fixture_path is not None:  # noqa: E701 — keep elif chain readable
                 if app.runtime.execution_mode == ExecutionMode.LIVE:
                     log.error("Fixture replay is only supported in shadow mode")
                 else:
@@ -462,6 +697,8 @@ async def cmd_run(args: argparse.Namespace) -> None:
                         http_client=None,
                         gamma_client=gamma,
                     )
+                    if app.strategy.exits.demo_forced_exit_enabled:
+                        await asyncio.sleep(float(app.strategy.exits.demo_forced_exit_delay_s) + 0.2)
                     save_strategy_store(state_path, strategy_store)
                     iterations = 1
             else:

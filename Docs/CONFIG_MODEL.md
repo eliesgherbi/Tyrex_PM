@@ -77,7 +77,7 @@ readiness:
 | `notional.max_policy` | `cap`\|`deny` | Behavior when above max | — |
 | `venue_min_size.enabled` | bool | Run the final pre-submit min-size guard | — |
 | `venue_min_size.policy` | `deny`\|`bump` | Below `default_min_size`: block, or raise to floor and re-validate | `below_venue_min_size` |
-| `venue_min_size.default_min_size` | Decimal | Venue floor in **shares** (Polymarket = 5) | — |
+| `venue_min_size.default_min_size` | Decimal | Venue floor in **shares** used as the fallback when `RiskContext.market_info` has no entry for the token (shadow mode + tests). Live mode prefers the venue's `MarketInfo.min_order_size`; the evidence row always carries `venue_min_size_source = "venue" \| "config_default"`. | — |
 | `deployment.token_cap_usd` | Decimal | Per-token long-side cap (positions + open BUYs + in-flight) | `token_deployment_cap` |
 | `deployment.portfolio_cap_usd` | Decimal | Total long-side cap across all tokens | `portfolio_deployment_cap` |
 | `capital.enabled` | bool | Pre-submit balance/allowance gate (BUYs only) | `insufficient_capital` / `insufficient_allowance` |

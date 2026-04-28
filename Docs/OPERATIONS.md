@@ -223,10 +223,11 @@ Either nothing new arrived (watermark + dedup absorbed all rows) or the guru wal
 | Reason | Where to look |
 |--------|---------------|
 | `not_ready` | check `wallet_sync` cadence, heartbeat, user-WS staleness facts |
+| `bootstrap_not_complete` (live only) | first `refresh_wallet_from_clob` hasn't succeeded yet — wait one `TYREX_VENUE_REFRESH_S` cycle or inspect `wallet_sync` for failures |
 | `portfolio_deployment_cap` / `token_deployment_cap` | check `per_token_deployed_usd`, `portfolio_deployed_usd`, `in_flight_reserved_usd_total` in the same fact |
-| `insufficient_capital` / `insufficient_allowance` | check `wallet_usdc_balance`, `wallet_usdc_allowance`, `effective_free_balance_usd` |
+| `insufficient_capital` / `insufficient_allowance` | check `wallet_usdc_balance`, `wallet_usdc_allowance`, `effective_free_balance_usd` (these field names hold Polymarket USD post-V2; the schema kept the V1-era ``usdc_*`` names) |
 | `naked_sell` | `inventory.sell_requires_venue_position: true` and we don't see the position yet |
-| `below_venue_min_size` | strategy sized below 5 shares; switch policy to `bump` if appropriate |
+| `below_venue_min_size` | sized below the venue's `min_order_size` (live: from `MarketInfoCache` per token; shadow: `cfg.default_min_size`, default 5). Inspect `venue_min_size_source` in the evidence; switch policy to `bump` if the strategy is fine bumping size up. |
 | `kill_switch` | `risk.kill_switch.enabled: true` |
 | `duplicate_submit_blocked` | provisional row with same fingerprint still in repair |
 

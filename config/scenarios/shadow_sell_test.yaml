@@ -1,0 +1,21 @@
+# Shadow scenario for the standalone sell_test strategy.
+#
+# Loosens the production-tight notional cap so a $5 BUY/SELL test can flow
+# through risk -> shadow OMS without being clipped below ``venue_min_size``.
+# Live runs should use ``--scenario live_guru`` (or a sell-test-specific live
+# scenario) — those still enforce real venue gates.
+
+execution_mode: shadow
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "100"
+  deployment:
+    token_cap_usd: "500"
+    portfolio_cap_usd: "5000"
+
+runtime:
+  shadow_bootstrap:
+    usdc_balance: "1000000"
+    usdc_allowance: "1000000"

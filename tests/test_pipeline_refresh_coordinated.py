@@ -15,7 +15,14 @@ from tyrex_pm.state.wallet_store import WalletStore
 
 
 class _FlakyOrdersClob:
-    """First REST snapshot empty; second includes the resting order (simulates post-submit lag)."""
+    """First REST snapshot empty; second includes the resting order (simulates post-submit lag).
+
+    Note on V2 method naming
+    ------------------------
+    The V2 SDK exposes ``get_open_orders()`` (V1 was ``get_orders()``); the
+    counter is named ``get_orders_calls`` for historical readability only —
+    it counts ``get_open_orders`` invocations now.
+    """
 
     def __init__(self) -> None:
         self.get_orders_calls = 0
@@ -23,7 +30,7 @@ class _FlakyOrdersClob:
     def get_balance_allowance(self, params: object) -> dict:
         return {"balance": "1000", "allowance": "1000000"}
 
-    def get_orders(self) -> list[dict]:
+    def get_open_orders(self) -> list[dict]:
         self.get_orders_calls += 1
         if self.get_orders_calls == 1:
             return []
@@ -80,7 +87,7 @@ async def test_coordinated_refresh_aligns_local_remaining_from_venue_one_fetch()
         def get_balance_allowance(self, params: object) -> dict:
             return {"balance": "1000", "allowance": "1000000"}
 
-        def get_orders(self) -> list[dict]:
+        def get_open_orders(self) -> list[dict]:
             self.get_orders_calls += 1
             return [
                 {
@@ -113,7 +120,7 @@ async def test_coordinated_refresh_does_not_retry_when_venue_has_extra_untracked
         def get_balance_allowance(self, params: object) -> dict:
             return {"balance": "1000", "allowance": "1000000"}
 
-        def get_orders(self) -> list[dict]:
+        def get_open_orders(self) -> list[dict]:
             self.get_orders_calls += 1
             return [
                 {

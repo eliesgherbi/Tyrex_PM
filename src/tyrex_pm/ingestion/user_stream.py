@@ -183,6 +183,8 @@ async def run_user_ws_ingest(
                             continue
                         if isinstance(msg, dict):
                             apply_user_ws_message(coord.wallet, msg, coord.orders)
+                            if coord.scheduled_exit_demo_try_arm is not None:
+                                coord.scheduled_exit_demo_try_arm()
                 finally:
                     ping_task.cancel()
                     try:

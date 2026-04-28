@@ -8,8 +8,18 @@ from typing import Any
 
 import yaml
 
-from tyrex_pm.core.enums import ExecutionMode
+from tyrex_pm.core.enums import ExecutionMode, OrderStyle
 from tyrex_pm.core.errors import ConfigError
+
+
+STRATEGY_KIND_GURU_FOLLOW = "guru_follow"
+STRATEGY_KIND_SELL_TEST = "sell_test"
+_VALID_STRATEGY_KINDS = (STRATEGY_KIND_GURU_FOLLOW, STRATEGY_KIND_SELL_TEST)
+
+
+SELL_TEST_PRICING_FIXED = "fixed"
+SELL_TEST_PRICING_AUTO = "auto"
+_VALID_SELL_TEST_PRICING_MODES = (SELL_TEST_PRICING_FIXED, SELL_TEST_PRICING_AUTO)
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -69,6 +79,9 @@ class SizingConfig:
 class ExitsConfig:
     dust_notional_usd: Decimal
     sell_mode: str  # proportional_to_guru | full_bot_position
+    #: Validation: after a copied guru BUY, schedule a demo SELL (see ``scheduled_exit_demo``).
+    demo_forced_exit_enabled: bool = False
+    demo_forced_exit_delay_s: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -77,6 +90,74 @@ class StrategyConfig:
     filters: FiltersConfig
     sizing: SizingConfig
     exits: ExitsConfig
+
+
+@dataclass(frozen=True)
+class SellTestBuyConfig:
+    """One BUY leg the sell_test strategy should emit at startup.
+
+    ``pricing_mode``:
+
+    * ``fixed`` (default, backward compatible) — submit at ``limit_price`` exactly.
+      The order rests on the book unless ``limit_price`` already crosses the ask.
+    * ``auto`` — at run time, fetch the venue order book for ``token_id`` and pick
+      ``best_ask + aggression_ticks * tick_size`` so the BUY is marketable. When
+      ``limit_price`` is set under ``auto`` it is used as a *fallback* if the book
+      lookup fails (e.g. transient venue error). ``max_price`` is an optional
+      upper guardrail: if the resolved aggressive price would exceed it, the
+      strategy falls back instead of paying through the cap.
+    """
+
+    enabled: bool
+    notional_usd: Decimal
+    #: ``fixed``: required and used verbatim. ``auto``: optional fallback.
+    limit_price: Decimal | None
+    order_style: OrderStyle
+    pricing_mode: str = SELL_TEST_PRICING_FIXED
+    aggression_ticks: int = 1
+    max_price: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class SellTestSellConfig:
+    """SELL leg fired ``delay_s`` after the BUY becomes sellable inventory.
+
+    ``pricing_mode``:
+
+    * ``fixed`` (default) — submit at ``limit_price`` if set, otherwise re-use the
+      BUY's limit price (mirrors the guru-follow demo exit; deliberately simple
+      and observable).
+    * ``auto`` — at SELL emission time, fetch the venue book and pick
+      ``best_bid - aggression_ticks * tick_size`` so the SELL is marketable.
+      ``limit_price`` is the fallback when the lookup fails. ``min_price`` is an
+      optional lower guardrail: the strategy refuses to dump below it and falls
+      back to ``limit_price`` instead.
+    """
+
+    enabled: bool
+    delay_s: float
+    order_style: OrderStyle
+    limit_price: Decimal | None
+    pricing_mode: str = SELL_TEST_PRICING_FIXED
+    aggression_ticks: int = 1
+    min_price: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class SellTestStrategyConfig:
+    """Standalone strategy used to validate the V2 SELL / exit path end-to-end.
+
+    See ``Docs/Implementation/sell_feature/`` for design context. This strategy
+    does not poll guru activity; it emits one BUY for ``token_id`` then schedules
+    one SELL after sellable inventory is observed (live) or after the synthetic
+    fill (shadow). Intended for debugging — not production alpha.
+    """
+
+    enabled: bool
+    token_id: str
+    buy: SellTestBuyConfig
+    sell: SellTestSellConfig
+    run_once: bool
 
 
 @dataclass(frozen=True)
@@ -189,6 +270,11 @@ class AppConfig:
     risk: RiskConfig
     runtime: RuntimeConfig
     raw: dict[str, Any]
+    #: Populated only when the loaded strategy YAML declares ``kind: sell_test``.
+    #: Mutually exclusive with normal guru-follow operation; ``strategy`` then
+    #: holds default placeholder values so risk gates and other code paths that
+    #: read ``app.strategy.*`` remain stable.
+    sell_test: SellTestStrategyConfig | None = None
 
 
 def _dec(d: dict[str, Any], key: str, default: str = "0") -> Decimal:
@@ -230,41 +316,90 @@ def _parse_conviction(d: dict[str, Any]) -> ConvictionConfig:
     )
 
 
-def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime: dict[str, Any]) -> AppConfig:
-    g = strategy.get("guru") or {}
-    f = strategy.get("filters") or {}
-    sz = strategy.get("sizing") or {}
-    ex = strategy.get("exits") or {}
+def _parse_order_style(raw: Any, default: OrderStyle = OrderStyle.GTC) -> OrderStyle:
+    """Coerce a YAML ``order_style`` field to the enum (case-insensitive, fail-closed to default)."""
+    if isinstance(raw, OrderStyle):
+        return raw
+    s = str(raw or "").strip().upper()
+    if s in OrderStyle.__members__:
+        return OrderStyle[s]
+    return default
 
-    allow = f.get("token_allowlist") or []
-    if not isinstance(allow, list):
-        allow = []
-    strat = StrategyConfig(
-        guru=GuruConfig(
-            wallet=str(g.get("wallet", "")),
-            data_api_poll_interval_s=float(g.get("data_api_poll_interval_s", 5)),
-            data_api_limit=int(g.get("data_api_limit", 50)),
-            data_api_max_pages_per_poll=int(g.get("data_api_max_pages_per_poll", 5)),
-        ),
-        filters=FiltersConfig(
-            token_allowlist=frozenset(str(x) for x in allow),
-            min_notional_usd=_dec(f, "min_notional_usd", "0"),
-            significance_min_notional_usd=_dec(f, "significance_min_notional_usd", "0"),
-            min_conviction_score=_dec(f, "min_conviction_score", "-1000000000"),
-            exclude_untradeable_markets=bool(f.get("exclude_untradeable_markets", False)),
-        ),
-        sizing=SizingConfig(
-            copy_scale=_dec(sz, "copy_scale", "1"),
-            conviction=_parse_conviction(sz.get("conviction") or {}),
-            static_enabled=bool(sz.get("static_enabled", False)),
-            static_amount_usd=_dec(sz, "static_amount_usd", "0"),
-        ),
-        exits=ExitsConfig(
-            dust_notional_usd=_dec(ex, "dust_notional_usd", "0.5"),
-            sell_mode=str(ex.get("sell_mode", "proportional_to_guru")),
-        ),
+
+def _parse_pricing_mode(raw: Any, *, where: str) -> str:
+    """Validate a ``pricing_mode`` field; default to ``fixed`` when missing/blank."""
+    if raw in (None, ""):
+        return SELL_TEST_PRICING_FIXED
+    s = str(raw).strip().lower()
+    if s not in _VALID_SELL_TEST_PRICING_MODES:
+        raise ConfigError(
+            f"sell_test {where}.pricing_mode '{raw}' is not supported "
+            f"(valid: {', '.join(_VALID_SELL_TEST_PRICING_MODES)})"
+        )
+    return s
+
+
+def _parse_sell_test_strategy(strategy: dict[str, Any]) -> SellTestStrategyConfig:
+    """Parse a ``kind: sell_test`` strategy YAML.
+
+    Required: ``token_id`` (canonical CLOB outcome token id). When
+    ``buy.pricing_mode == "fixed"`` (the default) ``buy.limit_price`` is also
+    required. Under ``buy.pricing_mode == "auto"`` ``limit_price`` is optional
+    and used as a fallback if the venue book lookup fails.
+    """
+    enabled = bool(strategy.get("enabled", True))
+    token_id = str(strategy.get("token_id", "")).strip()
+    if not token_id:
+        raise ConfigError("sell_test strategy requires non-empty top-level 'token_id'")
+    buy_raw = strategy.get("buy") or {}
+    sell_raw = strategy.get("sell") or {}
+
+    buy_enabled = bool(buy_raw.get("enabled", True))
+    buy_pricing_mode = _parse_pricing_mode(buy_raw.get("pricing_mode"), where="buy")
+    buy_aggression = int(buy_raw.get("aggression_ticks", 1))
+    if buy_aggression < 0:
+        raise ConfigError("sell_test buy.aggression_ticks must be >= 0")
+    buy_price_raw = buy_raw.get("limit_price")
+    buy_max_price_raw = buy_raw.get("max_price")
+    if buy_enabled and buy_pricing_mode == SELL_TEST_PRICING_FIXED and buy_price_raw in (None, ""):
+        raise ConfigError(
+            "sell_test buy.enabled with pricing_mode=fixed requires buy.limit_price"
+        )
+    buy_cfg = SellTestBuyConfig(
+        enabled=buy_enabled,
+        notional_usd=_dec(buy_raw, "notional_usd", "5"),
+        limit_price=Decimal(str(buy_price_raw)) if buy_price_raw not in (None, "") else None,
+        order_style=_parse_order_style(buy_raw.get("order_style"), OrderStyle.GTC),
+        pricing_mode=buy_pricing_mode,
+        aggression_ticks=buy_aggression,
+        max_price=Decimal(str(buy_max_price_raw)) if buy_max_price_raw not in (None, "") else None,
     )
 
+    sell_pricing_mode = _parse_pricing_mode(sell_raw.get("pricing_mode"), where="sell")
+    sell_aggression = int(sell_raw.get("aggression_ticks", 1))
+    if sell_aggression < 0:
+        raise ConfigError("sell_test sell.aggression_ticks must be >= 0")
+    sell_price_raw = sell_raw.get("limit_price")
+    sell_min_price_raw = sell_raw.get("min_price")
+    sell_cfg = SellTestSellConfig(
+        enabled=bool(sell_raw.get("enabled", True)),
+        delay_s=float(sell_raw.get("delay_s", 3)),
+        order_style=_parse_order_style(sell_raw.get("order_style"), OrderStyle.GTC),
+        limit_price=Decimal(str(sell_price_raw)) if sell_price_raw not in (None, "") else None,
+        pricing_mode=sell_pricing_mode,
+        aggression_ticks=sell_aggression,
+        min_price=Decimal(str(sell_min_price_raw)) if sell_min_price_raw not in (None, "") else None,
+    )
+    return SellTestStrategyConfig(
+        enabled=enabled,
+        token_id=token_id,
+        buy=buy_cfg,
+        sell=sell_cfg,
+        run_once=bool(strategy.get("run_once", True)),
+    )
+
+
+def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[RiskConfig, RuntimeConfig]:
     n = risk.get("notional") or {}
     d = risk.get("deployment") or {}
     c = risk.get("capital") or {}
@@ -287,7 +422,6 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
             portfolio_cap_usd=_dec(d, "portfolio_cap_usd"),
         ),
         capital=CapitalConfig(
-            # Default True when key omitted — live guru-follow should pre-check BUY vs wallet.
             enabled=bool(c.get("enabled", True)),
             max_wallet_age_s=int(c.get("max_wallet_age_s", 120)),
         ),
@@ -319,7 +453,6 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
         )
 
     submit_grace = float(sup.get("submit_grace_s", 15))
-    # New canonical field; old field is honored as alias if user has not migrated.
     unknown_terminal = sup.get("provisional_unknown_terminal_timeout_s")
     if unknown_terminal is None:
         unknown_terminal = sup.get("venue_confirm_provisional_timeout_s", 60)
@@ -339,9 +472,114 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
         log_level=str(log.get("level", "INFO")),
         shadow_bootstrap=shadow_boot,
     )
+    return rsk, rt
 
+
+def _finalize_app_config(
+    strat: StrategyConfig,
+    risk: dict[str, Any],
+    runtime: dict[str, Any],
+    strategy_raw: dict[str, Any],
+    sell_test: SellTestStrategyConfig | None,
+) -> AppConfig:
+    rsk, rt = _build_risk_runtime(risk, runtime)
+    raw = {"risk": risk, "strategy": strategy_raw, "runtime": runtime}
+    return AppConfig(strategy=strat, risk=rsk, runtime=rt, raw=raw, sell_test=sell_test)
+
+
+def _placeholder_guru_strategy_config() -> StrategyConfig:
+    """A neutral StrategyConfig used when the loaded YAML is sell_test-only.
+
+    Risk + pipeline code reads ``app.strategy.*`` (e.g. ``exits.demo_forced_exit_enabled``)
+    unconditionally. The sell_test path does not need any of it, so we synthesize a
+    no-op StrategyConfig so those code paths stay safe instead of branching on None.
+    """
+    return StrategyConfig(
+        guru=GuruConfig(
+            wallet="",
+            data_api_poll_interval_s=5.0,
+            data_api_limit=50,
+            data_api_max_pages_per_poll=5,
+        ),
+        filters=FiltersConfig(
+            token_allowlist=frozenset(),
+            min_notional_usd=Decimal("0"),
+            significance_min_notional_usd=Decimal("0"),
+            min_conviction_score=Decimal("-1000000000"),
+            exclude_untradeable_markets=False,
+        ),
+        sizing=SizingConfig(
+            copy_scale=Decimal("1"),
+            conviction=ConvictionConfig(
+                enabled=False,
+                score_min=Decimal("0"),
+                score_max=Decimal("1"),
+                min_multiplier=Decimal("1"),
+                max_multiplier=Decimal("1"),
+            ),
+            static_enabled=False,
+            static_amount_usd=Decimal("0"),
+        ),
+        exits=ExitsConfig(
+            dust_notional_usd=Decimal("0.5"),
+            sell_mode="proportional_to_guru",
+            demo_forced_exit_enabled=False,
+            demo_forced_exit_delay_s=3.0,
+        ),
+    )
+
+
+def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime: dict[str, Any]) -> AppConfig:
+    kind_raw = str(strategy.get("kind", STRATEGY_KIND_GURU_FOLLOW) or STRATEGY_KIND_GURU_FOLLOW).strip().lower()
+    if kind_raw not in _VALID_STRATEGY_KINDS:
+        raise ConfigError(
+            f"strategy.kind '{kind_raw}' is not supported (valid: {', '.join(_VALID_STRATEGY_KINDS)})"
+        )
+    sell_test_cfg: SellTestStrategyConfig | None = None
+    if kind_raw == STRATEGY_KIND_SELL_TEST:
+        sell_test_cfg = _parse_sell_test_strategy(strategy)
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(strat, risk, runtime, strategy, sell_test_cfg)
+
+    g = strategy.get("guru") or {}
+    f = strategy.get("filters") or {}
+    sz = strategy.get("sizing") or {}
+    ex = strategy.get("exits") or {}
+
+    allow = f.get("token_allowlist") or []
+    if not isinstance(allow, list):
+        allow = []
+    strat = StrategyConfig(
+        guru=GuruConfig(
+            wallet=str(g.get("wallet", "")),
+            data_api_poll_interval_s=float(g.get("data_api_poll_interval_s", 5)),
+            data_api_limit=int(g.get("data_api_limit", 50)),
+            data_api_max_pages_per_poll=int(g.get("data_api_max_pages_per_poll", 5)),
+        ),
+        filters=FiltersConfig(
+            token_allowlist=frozenset(str(x) for x in allow),
+            min_notional_usd=_dec(f, "min_notional_usd", "0"),
+            significance_min_notional_usd=_dec(f, "significance_min_notional_usd", "0"),
+            min_conviction_score=_dec(f, "min_conviction_score", "-1000000000"),
+            exclude_untradeable_markets=bool(f.get("exclude_untradeable_markets", False)),
+        ),
+        sizing=SizingConfig(
+            copy_scale=_dec(sz, "copy_scale", "1"),
+            conviction=_parse_conviction(sz.get("conviction") or {}),
+            static_enabled=bool(sz.get("static_enabled", False)),
+            static_amount_usd=_dec(sz, "static_amount_usd", "0"),
+        ),
+        exits=ExitsConfig(
+            dust_notional_usd=_dec(ex, "dust_notional_usd", "0.5"),
+            sell_mode=str(ex.get("sell_mode", "proportional_to_guru")),
+            demo_forced_exit_enabled=bool(ex.get("demo_forced_exit_enabled", False)),
+            demo_forced_exit_delay_s=float(ex.get("demo_forced_exit_delay_s", 3)),
+        ),
+    )
+
+    rsk, rt = _build_risk_runtime(risk, runtime)
     raw = {"risk": risk, "strategy": strategy, "runtime": runtime}
-    return AppConfig(strategy=strat, risk=rsk, runtime=rt, raw=raw)
+    return AppConfig(strategy=strat, risk=rsk, runtime=rt, raw=raw, sell_test=None)
 
 
 def _resolve_scenario_path(repo_root: Path, scenario_file: str | None) -> str | None:
@@ -386,7 +624,11 @@ def load_app_config(
         rt_overlay = {k: sc[k] for k in ("execution_mode", "reporting", "supervisors", "logging") if k in sc}
         if rt_overlay:
             runtime = _deep_merge(runtime, rt_overlay)
-        st_overlay = {k: sc[k] for k in ("guru", "filters", "sizing", "exits") if k in sc}
+        st_overlay = {
+            k: sc[k]
+            for k in ("kind", "guru", "filters", "sizing", "exits", "buy", "sell", "token_id", "run_once")
+            if k in sc
+        }
         if st_overlay:
             strategy = _deep_merge(strategy, st_overlay)
 

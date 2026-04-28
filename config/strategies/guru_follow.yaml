@@ -1,5 +1,5 @@
 guru:
-  wallet: "0x204f72f35326db932158cba6adff0b9a1da95e14" #"0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+  wallet: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea" #0x204f72f35326db932158cba6adff0b9a1da95e14
   data_api_poll_interval_s: 5
   data_api_limit: 50
 
@@ -23,5 +23,12 @@ sizing:
     max_multiplier: "2.0"
 
 exits:
+  # --- Guru SELL mirroring (when the copied wallet sells on data-api activity) ---
+  # Sizes an ExitIntent vs your holdings. Does NOT apply to demo forced exits below.
   dust_notional_usd: "0.5"
+  # proportional_to_guru: min(guru_scaled_sell, bot_qty) | full_bot_position: sell entire bot qty
   sell_mode: proportional_to_guru
+  # --- Optional: schedule a demo ExitIntent after each copied BUY (see Docs/Implementation/sell_feature/) ---
+  # Live: timer starts only once venue sellable inventory >= BUY size (REST positions +/or user-WS).
+  demo_forced_exit_enabled: true
+  demo_forced_exit_delay_s: 3

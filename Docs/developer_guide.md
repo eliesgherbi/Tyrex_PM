@@ -111,7 +111,7 @@ A strategy must **not**:
 
 ### 4.3 Add a new venue
 
-Drop a sibling package under `venue/<name>/` mirroring `venue/polymarket/` (REST clients, WS handlers, normalizers, auth, env helpers). Replace `clob_bridge.PyClobBridge` with the new venue's bridge in `LiveOMS`. The `OMSBackend` Protocol in `execution/adapters.py` is intentionally tiny so any `submit / cancel` backend plugs in.
+Drop a sibling package under `venue/<name>/` mirroring `venue/polymarket/` (REST clients, WS handlers, normalizers, auth, env helpers). Replace `clob_bridge.PyClobBridge` with the new venue's bridge in `LiveOMS`. The `OMSBackend` Protocol in `execution/adapters.py` is intentionally tiny so any `submit / cancel` backend plugs in. If the venue exposes per-market truth (tick / min-size / fees), mirror `venue/polymarket/market_info.py`: define a frozen dataclass + cache, surface a snapshot through `RiskContext.market_info`, and let the existing `risk.venue_min_size` and `execution.order_builder` boundaries consume it — V2-native code paths already handle the "no cache wired" fallback.
 
 ### 4.4 Add a new fact
 

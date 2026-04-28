@@ -69,9 +69,19 @@ def test_conviction_requires_score_when_enabled() -> None:
 
 
 def test_conviction_scales_enter_size() -> None:
+    """Conviction multiplier only applies when ``static_enabled`` is off.
+
+    The default ``config/strategies/guru_follow.yaml`` ships with
+    ``sizing.static_enabled: true`` (BUY entries use a fixed USD notional and
+    ignore both ``copy_scale`` and conviction). To exercise the proportional
+    path that conviction scales, the test must explicitly opt out of static
+    sizing in addition to enabling conviction.
+    """
+
     root = Path(__file__).resolve().parents[1]
     app = load_app_config(repo_root=root)
     strat = deepcopy(app.raw["strategy"])
+    strat["sizing"]["static_enabled"] = False
     strat["sizing"]["conviction"] = {
         "enabled": True,
         "score_min": "0",

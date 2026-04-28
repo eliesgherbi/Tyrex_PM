@@ -173,7 +173,10 @@ RiskContext(execution_mode, wallet_positions, open_orders,
             mark_prices, kill_switch, health_ok, heartbeat_ok,
             clob_session_ok, in_flight_order_count,
             orders_in_flight_by_token, reconcile_drift,
-            venue_truth_stale, in_flight_buy_reservations)
+            venue_truth_stale, in_flight_buy_reservations,
+            # V2-native additions:
+            first_v2_sync_complete,   # gates new-order risk eval until first venue truth rebuild
+            market_info)              # {token_id: MarketInfo} per-market venue truth (tick, mos, neg-risk, fee, outcomes)
 ```
 
 `RiskContext` is built by `RuntimeCoordinator.build_risk_context(app)` on every signal, so risk always sees the freshest store snapshot.
@@ -187,12 +190,12 @@ RiskContext(execution_mode, wallet_positions, open_orders,
 1. **Kill switch** — `kill_switch.check_kill_switch`.
 2. **Cancel intents** — short-circuit; need `venue_order_id` or `client_order_id`.
 3. **Concurrency** — `concurrency.check_concurrency` (max in-flight).
-4. **Aggressive readiness** — wallet sync freshness, heartbeat, user WS, reconcile drift (`health.check_aggressive_readiness`).
+4. **Aggressive readiness** — wallet sync freshness, heartbeat, user WS, reconcile drift, plus the V2 first-sync gate `bootstrap_not_complete` (denies new-order intents in live mode until the first successful `refresh_wallet_from_clob` flips `HealthRuntime.first_v2_sync_complete`) — see `health.check_aggressive_readiness`.
 5. **Notional** — min/max with `cap` or `deny` policy (`pretrade.apply_notional_min_max`). Always attaches the in-flight reservation totals to the decision.
 6. **Deployment caps** — token + portfolio USD caps, including in-flight BUY reservations and mark requirement (`deployment.evaluate_deployment_caps`).
-7. **Capital (BUY only)** — USDC balance + allowance net of in-flight reservations (`capital.evaluate_capital_buy`).
+7. **Capital (BUY only)** — Polymarket USD balance + allowance net of in-flight reservations (`capital.evaluate_capital_buy`).
 8. **Inventory (SELL/Reduce)** — venue position required when configured (`inventory.check_inventory_sell`).
-9. **Venue minimum size** — Polymarket's hard 5-share floor; `deny` or `bump` (then re-validate gates 6 + 7) (`venue_min_size.evaluate_venue_min_size`).
+9. **Venue minimum size** — venue's hard `min_order_size` (sourced from `MarketInfoCache` via `RiskContext.market_info` when live, falling back to `cfg.default_min_size` for shadow mode and tests); `deny` or `bump` (then re-validate gates 6 + 7) (`venue_min_size.evaluate_venue_min_size`). Evidence row records `venue_min_size_source = "venue" | "config_default"`.
 
 Approved intents get a fresh `ClientOrderId` and become `ApprovedIntent`. The decision's `extensions` field carries operator-visible evidence (notional policy, deployment numbers, in-flight reservations, capital math, venue-min-size policy) and is merged into the `risk_decision` fact.
 

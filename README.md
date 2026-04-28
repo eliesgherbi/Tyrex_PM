@@ -66,6 +66,6 @@ config/
   runtime/default.yaml          # supervisors, reporting, mode
   strategies/guru_follow.yaml   # strategy knobs
   scenarios/                    # shadow_guru, live_guru, live_attest
-tests/                          # pytest suites (179+ cases)
+tests/                          # pytest suites (268 cases, V2-native)
 Docs/                           # documentation root
 ```

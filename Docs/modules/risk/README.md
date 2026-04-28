@@ -24,13 +24,13 @@ For BUY/SELL/REDUCE intents (cancels skip to the cancel-only branch):
 
 1. **Kill switch** → `KILL_SWITCH`
 2. **Concurrency** → `CONCURRENCY_LIMIT`
-3. **Aggressive readiness** (wallet sync, heartbeat, user-WS) → `NOT_READY` / specifics
+3. **Aggressive readiness** (wallet sync, heartbeat, user-WS, plus `BOOTSTRAP_NOT_COMPLETE` in live mode until the first venue truth rebuild succeeds) → `NOT_READY` / specifics
 4. **Notional band** (`min_usd` ≤ N ≤ `max_usd`); `max_policy=cap` clips, `deny` rejects → `NOTIONAL_BELOW_MIN` / `NOTIONAL_ABOVE_MAX`
 5. **In-flight reservation evidence** — totals are *always* attached to the decision (approve or deny) so audits show what was already locked
 6. **Deployment caps** (per-token + portfolio, including in-flight) → `TOKEN_DEPLOYMENT_CAP` / `PORTFOLIO_DEPLOYMENT_CAP` / `DEPLOYMENT_MARK_UNKNOWN`
 7. **Capital** (BUY only): wallet balance + allowance vs. notional + in-flight → `INSUFFICIENT_CAPITAL` / `INSUFFICIENT_ALLOWANCE` / `STALE_WALLET_SNAPSHOT`
 8. **Inventory** (SELL only): non-zero venue position → `INSUFFICIENT_INVENTORY` / `NAKED_SELL`
-9. **Venue min-size** (last gate): if final `size < default_min_size`, either deny (`BELOW_VENUE_MIN_SIZE`) or bump and **re-validate** deployment + capital (still denying with `BELOW_VENUE_MIN_SIZE` if the bump would breach a higher gate, evidence flagged `venue_min_size_bump_unsafe`)
+9. **Venue min-size** (last gate): floor is `RiskContext.market_info[token].min_order_size` when populated by `MarketInfoCache` (live), else `cfg.default_min_size` (shadow / tests). If final `size < floor`, either deny (`BELOW_VENUE_MIN_SIZE`) or bump and **re-validate** deployment + capital (still denying with `BELOW_VENUE_MIN_SIZE` if the bump would breach a higher gate, evidence flagged `venue_min_size_bump_unsafe`). Evidence row carries `venue_min_size_source = "venue" \| "config_default"`.
 
 ## In-flight reservation lifecycle
 

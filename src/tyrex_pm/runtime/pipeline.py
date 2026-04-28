@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections import Counter
 from collections.abc import Sequence
@@ -11,9 +12,10 @@ import httpx
 
 from tyrex_pm.venue.polymarket.exceptions import PolyApiException
 
-from tyrex_pm.core.enums import ExecutionMode
+from tyrex_pm.core.enums import ExecutionMode, Side
 from tyrex_pm.core.ids import RunId
 from tyrex_pm.core.models import (
+    ApprovedIntent,
     CancelIntent,
     EnterIntent,
     ExitIntent,
@@ -48,13 +50,17 @@ from tyrex_pm.risk.engine import evaluate_intent
 from tyrex_pm.risk.evidence_format import s_usd
 from tyrex_pm.runtime.config import AppConfig
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
+from tyrex_pm.runtime.intent_work import IntentWorkUnit
 from tyrex_pm.signals.guru_copy_signal import to_copy_signal
 from tyrex_pm.state.reconcile import reconcile_open_orders
 from tyrex_pm.state.shadow_wallet import apply_shadow_fill
 from tyrex_pm.strategies.guru_follow.strategy import GuruFollowStrategy
+from tyrex_pm.strategies.sell_test.strategy import SellTestStrategy
 from tyrex_pm.venue.polymarket.clob_bridge import parse_venue_order_id
 from tyrex_pm.venue.polymarket.clob_wallet_sync import refresh_wallet_from_clob
 from tyrex_pm.venue.polymarket.gamma_client import GammaClient
+
+log = logging.getLogger(__name__)
 
 
 def _guru_payload(sig: GuruTradeSignal) -> dict:
@@ -259,6 +265,336 @@ def reconcile_coordinator(coord: RuntimeCoordinator, sink: JsonlSink, run_id: st
     )
 
 
+async def process_intent_work_unit(
+    work: IntentWorkUnit,
+    *,
+    app: AppConfig,
+    run_id: RunId,
+    strategy: GuruFollowStrategy | SellTestStrategy,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms: OMSBackend,
+    apply_local_shadow_fill: bool = True,
+    live_clob_client: object | None = None,
+) -> None:
+    """Risk → OMS for a single intent (guru-derived, scheduled exit, sell-test, …).
+
+    The ``strategy`` argument is duck-typed: if it exposes ``on_buy_submit_ack`` that
+    method is invoked after a successful BUY ack so the strategy can register a
+    follow-up exit (guru's scheduled demo, sell_test's SELL leg, etc.).
+    """
+    rid = str(run_id)
+    corr = work.correlation_id
+    intent = work.intent
+    intent_payload = _intent_payload(intent)
+    if work.intent_fact_extensions:
+        intent_payload = {**intent_payload, **work.intent_fact_extensions}
+    sink.write(
+        make_fact(
+            FACT_TYPE_INTENT,
+            rid,
+            intent_payload,
+            correlation_id=corr,
+        )
+    )
+    risk_ctx = coord.build_risk_context(app)
+    decision = evaluate_intent(intent, risk_ctx, app=app, run_id=run_id)
+    risk_payload: dict = {
+        "approved": decision.approved,
+        "reason_codes": list(decision.reason_codes),
+        "detail": decision.detail,
+    }
+    if decision.extensions:
+        risk_payload.update(decision.extensions)
+    sink.write(
+        make_fact(
+            FACT_TYPE_RISK,
+            rid,
+            risk_payload,
+            correlation_id=corr,
+        )
+    )
+    if decision.approved and decision.approved_cancel is not None:
+        ac0 = decision.approved_cancel
+        vid = ac0.venue_order_id
+        cid = ac0.client_order_id
+        if vid is None and cid is not None:
+            lo = coord.orders.orders.get(cid)
+            vid = lo.venue_order_id if lo else None
+        if vid is None:
+            sink.write(
+                make_fact(
+                    FACT_TYPE_OMS_CANCEL,
+                    rid,
+                    {"error": "missing_venue_order_id", "client_order_id": str(cid) if cid else None},
+                    correlation_id=corr,
+                )
+            )
+            reconcile_coordinator(coord, sink, rid)
+            return
+        ac = replace(ac0, venue_order_id=vid)
+        res = await oms.cancel(ac)
+        if cid is not None:
+            remove_resting_order(coord.orders, cid)
+        else:
+            for c, lo in list(coord.orders.orders.items()):
+                if lo.venue_order_id == vid:
+                    remove_resting_order(coord.orders, c)
+                    break
+        sink.write(
+            make_fact(
+                FACT_TYPE_OMS_CANCEL,
+                rid,
+                {"venue_order_id": str(vid), "oms_result": res},
+                correlation_id=corr,
+            )
+        )
+    elif decision.approved and decision.approved_intent:
+        ap = decision.approved_intent
+        fp = submit_fingerprint_for_intent(ap)
+        if coord.orders.has_pending_submit_fingerprint(fp):
+            sink.write(
+                make_fact(
+                    FACT_TYPE_OMS_REJECT,
+                    rid,
+                    {
+                        "client_order_id": str(ap.client_order_id),
+                        "status_code": None,
+                        "error_msg": rc.DUPLICATE_SUBMIT_BLOCKED,
+                        "error": (
+                            "duplicate_submit_blocked: equivalent provisional order is "
+                            "still in repair (matching submit_fingerprint)"
+                        ),
+                        "submit_fingerprint": fp,
+                    },
+                    correlation_id=corr,
+                )
+            )
+            reconcile_coordinator(coord, sink, rid)
+            return
+        register_submit(coord.orders, ap)
+        mi = (
+            coord.market_info_cache.snapshot().get(ap.intent.token_id)
+            if coord.market_info_cache is not None
+            else None
+        )
+        try:
+            if mi is not None:
+                res = await oms.submit(ap, market_info=mi)
+            else:
+                res = await oms.submit(ap)
+        except PolyApiException as e:
+            release_after_ack(coord.orders, ap.client_order_id)
+            err_body = e.error_msg
+            if e.status_code == 425:
+                coord.health.mark_venue_restart_suspected()
+            sink.write(
+                make_fact(
+                    FACT_TYPE_OMS_REJECT,
+                    rid,
+                    {
+                        "client_order_id": str(ap.client_order_id),
+                        "status_code": e.status_code,
+                        "error_msg": err_body,
+                        "error": str(e),
+                        "venue_restart_suspected": e.status_code == 425,
+                    },
+                    correlation_id=corr,
+                )
+            )
+            reconcile_coordinator(coord, sink, rid)
+            return
+        try:
+            parsed = json.loads(res)
+        except Exception:
+            parsed = {}
+        v_oid = parse_venue_order_id(parsed) if isinstance(parsed, dict) else None
+        ack_status = None
+        if isinstance(parsed, dict):
+            ack_status = parsed.get("status") or parsed.get("orderStatus")
+        ack_submit(
+            coord.orders,
+            ap,
+            v_oid,
+            shadow_instant_fill=apply_local_shadow_fill,
+            ack_status=str(ack_status) if ack_status is not None else None,
+        )
+        if (
+            v_oid is not None
+            and not apply_local_shadow_fill
+            and live_clob_client is not None
+            and app.runtime.execution_mode == ExecutionMode.LIVE
+        ):
+            await refresh_wallet_coordinated_after_live_submit(coord, live_clob_client)
+        if apply_local_shadow_fill:
+            apply_shadow_fill(coord.wallet, ap)
+        _dispatch_post_buy_ack_hook(
+            strategy=strategy,
+            coord=coord,
+            ap=ap,
+            parent_correlation_id=corr,
+            app=app,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+        )
+        from tyrex_pm.execution.order_builder import build_quantize_evidence
+
+        submit_payload: dict = {
+            "client_order_id": str(ap.client_order_id),
+            "oms_result": res,
+            **build_quantize_evidence(ap, mi),
+        }
+        sink.write(
+            make_fact(
+                FACT_TYPE_OMS_SUBMIT,
+                rid,
+                submit_payload,
+                correlation_id=corr,
+            )
+        )
+    reconcile_coordinator(coord, sink, rid)
+
+
+def _dispatch_post_buy_ack_hook(
+    *,
+    strategy: GuruFollowStrategy | SellTestStrategy,
+    coord: RuntimeCoordinator,
+    ap: ApprovedIntent,
+    parent_correlation_id: str,
+    app: AppConfig,
+    apply_local_shadow_fill: bool,
+) -> None:
+    """Route a successful BUY submit ack to whichever strategy hook is wired.
+
+    * ``SellTestStrategy`` exposes :meth:`on_buy_submit_ack` directly.
+    * ``GuruFollowStrategy`` (legacy) is handled inline against
+      ``app.strategy.exits.demo_forced_exit_enabled`` so the guru class does
+      not need to grow a new method just for this dispatch.
+    """
+    if not isinstance(ap.intent, EnterIntent) or ap.intent.side != Side.BUY:
+        return
+    sell_test_hook = getattr(strategy, "on_buy_submit_ack", None)
+    if sell_test_hook is not None and isinstance(strategy, SellTestStrategy):
+        sell_test_hook(
+            ap=ap,
+            parent_correlation_id=parent_correlation_id,
+            coord=coord,
+            execution_mode=app.runtime.execution_mode,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+        )
+        return
+    if not app.strategy.exits.demo_forced_exit_enabled:
+        return
+    if not isinstance(strategy, GuruFollowStrategy):
+        return
+    strategy.scheduled_exit_demo.register_after_successful_buy(
+        ap,
+        parent_correlation_id=parent_correlation_id,
+        execution_mode=app.runtime.execution_mode,
+        apply_shadow_fill=apply_local_shadow_fill,
+    )
+    if coord.scheduled_exit_demo_try_arm is not None:
+        coord.scheduled_exit_demo_try_arm()
+
+
+def _strategy_due_work_units(
+    strategy: GuruFollowStrategy | SellTestStrategy,
+) -> list[IntentWorkUnit]:
+    """Drain scheduled work from whichever strategy state is wired.
+
+    * ``GuruFollowStrategy.scheduled_exit_demo`` (the validation demo SELL).
+    * ``SellTestStrategy.sell_test_state``      (the standalone SELL test).
+    """
+    if isinstance(strategy, SellTestStrategy):
+        return strategy.sell_test_state.pop_due_work_units()
+    if isinstance(strategy, GuruFollowStrategy):
+        return strategy.scheduled_exit_demo.pop_due_work_units()
+    return []
+
+
+async def _due_work_units_for_strategy(
+    strategy: GuruFollowStrategy | SellTestStrategy,
+    *,
+    coord: RuntimeCoordinator,
+    live_clob_client: object | None,
+) -> list[IntentWorkUnit]:
+    """Async wrapper around :func:`_strategy_due_work_units`.
+
+    For ``SellTestStrategy`` this delegates to the async
+    :meth:`SellTestStrategy.resolve_due_work_units` so the SELL leg can pull
+    a marketable price from the venue book when ``sell.pricing_mode == "auto"``.
+    For all other strategies it falls through to the sync path.
+    """
+    if isinstance(strategy, SellTestStrategy):
+        return await strategy.resolve_due_work_units(
+            coord=coord,
+            live_clob_client=live_clob_client,
+        )
+    return _strategy_due_work_units(strategy)
+
+
+async def process_scheduled_exit_demo_due(
+    *,
+    strategy: GuruFollowStrategy | SellTestStrategy,
+    app: AppConfig,
+    run_id: RunId,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms: OMSBackend,
+    apply_local_shadow_fill: bool = True,
+    live_clob_client: object | None = None,
+) -> None:
+    """Process any scheduled exits whose delay has elapsed (guru demo or sell_test)."""
+    work_units = await _due_work_units_for_strategy(
+        strategy, coord=coord, live_clob_client=live_clob_client
+    )
+    for wu in work_units:
+        await process_intent_work_unit(
+            wu,
+            app=app,
+            run_id=run_id,
+            strategy=strategy,
+            coord=coord,
+            sink=sink,
+            oms=oms,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+            live_clob_client=live_clob_client,
+        )
+
+
+async def scheduled_exit_demo_due_loop(
+    *,
+    strategy: GuruFollowStrategy | SellTestStrategy,
+    app: AppConfig,
+    run_id: RunId,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms: OMSBackend,
+    apply_local_shadow_fill: bool,
+    live_clob_client: object | None,
+    stop: asyncio.Event,
+) -> None:
+    """Wake periodically so demo / sell_test exits fire near their due time without blocking the main loop."""
+    while not stop.is_set():
+        try:
+            await process_scheduled_exit_demo_due(
+                strategy=strategy,
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+            )
+        except Exception:
+            log.exception("scheduled_exit_demo_due_loop tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.25)
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
 async def refresh_wallet_coordinated_after_live_submit(
     coord: RuntimeCoordinator,
     live_clob_client: object,
@@ -370,172 +706,18 @@ async def process_new_guru_signals(
             reconcile_coordinator(coord, sink, rid)
             continue
         for intent in intents:
-            intent_payload = _intent_payload(intent)
+            ext: dict = {}
             if sizing_meta:
-                intent_payload = {**intent_payload, **sizing_meta}
-            sink.write(
-                make_fact(
-                    FACT_TYPE_INTENT,
-                    rid,
-                    intent_payload,
-                    correlation_id=corr,
-                )
+                ext.update(sizing_meta)
+            work = IntentWorkUnit(intent=intent, correlation_id=corr, intent_fact_extensions=ext)
+            await process_intent_work_unit(
+                work,
+                app=app,
+                run_id=run_id,
+                strategy=strategy,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
             )
-            risk_ctx = coord.build_risk_context(app)
-            decision = evaluate_intent(intent, risk_ctx, app=app, run_id=run_id)
-            risk_payload: dict = {
-                "approved": decision.approved,
-                "reason_codes": list(decision.reason_codes),
-                "detail": decision.detail,
-            }
-            if decision.extensions:
-                risk_payload.update(decision.extensions)
-            sink.write(
-                make_fact(
-                    FACT_TYPE_RISK,
-                    rid,
-                    risk_payload,
-                    correlation_id=corr,
-                )
-            )
-            if decision.approved and decision.approved_cancel is not None:
-                ac0 = decision.approved_cancel
-                vid = ac0.venue_order_id
-                cid = ac0.client_order_id
-                if vid is None and cid is not None:
-                    lo = coord.orders.orders.get(cid)
-                    vid = lo.venue_order_id if lo else None
-                if vid is None:
-                    sink.write(
-                        make_fact(
-                            FACT_TYPE_OMS_CANCEL,
-                            rid,
-                            {"error": "missing_venue_order_id", "client_order_id": str(cid) if cid else None},
-                            correlation_id=corr,
-                        )
-                    )
-                    reconcile_coordinator(coord, sink, rid)
-                    continue
-                ac = replace(ac0, venue_order_id=vid)
-                res = await oms.cancel(ac)
-                if cid is not None:
-                    remove_resting_order(coord.orders, cid)
-                else:
-                    for c, lo in list(coord.orders.orders.items()):
-                        if lo.venue_order_id == vid:
-                            remove_resting_order(coord.orders, c)
-                            break
-                sink.write(
-                    make_fact(
-                        FACT_TYPE_OMS_CANCEL,
-                        rid,
-                        {"venue_order_id": str(vid), "oms_result": res},
-                        correlation_id=corr,
-                    )
-                )
-            elif decision.approved and decision.approved_intent:
-                ap = decision.approved_intent
-                fp = submit_fingerprint_for_intent(ap)
-                if coord.orders.has_pending_submit_fingerprint(fp):
-                    sink.write(
-                        make_fact(
-                            FACT_TYPE_OMS_REJECT,
-                            rid,
-                            {
-                                "client_order_id": str(ap.client_order_id),
-                                "status_code": None,
-                                "error_msg": rc.DUPLICATE_SUBMIT_BLOCKED,
-                                "error": (
-                                    "duplicate_submit_blocked: equivalent provisional order is "
-                                    "still in repair (matching submit_fingerprint)"
-                                ),
-                                "submit_fingerprint": fp,
-                            },
-                            correlation_id=corr,
-                        )
-                    )
-                    reconcile_coordinator(coord, sink, rid)
-                    continue
-                register_submit(coord.orders, ap)
-                # Phase 5: pass the resolved market info (if any) into the OMS
-                # so the order builder tick-quantizes the limit price at the
-                # last possible moment. The same MarketInfo is also used to
-                # build the ``tick_quantize_*`` evidence on the OMS submit fact.
-                # The kwarg is only forwarded when truly present so legacy
-                # OMSBackend implementations (test doubles, ``ShadowOMS`` in
-                # older fixtures) that haven't yet adopted the Phase 5 protocol
-                # extension keep working unchanged.
-                mi = (
-                    coord.market_info_cache.snapshot().get(ap.intent.token_id)
-                    if coord.market_info_cache is not None
-                    else None
-                )
-                try:
-                    if mi is not None:
-                        res = await oms.submit(ap, market_info=mi)
-                    else:
-                        res = await oms.submit(ap)
-                except PolyApiException as e:
-                    release_after_ack(coord.orders, ap.client_order_id)
-                    err_body = e.error_msg
-                    if e.status_code == 425:
-                        coord.health.mark_venue_restart_suspected()
-                    sink.write(
-                        make_fact(
-                            FACT_TYPE_OMS_REJECT,
-                            rid,
-                            {
-                                "client_order_id": str(ap.client_order_id),
-                                "status_code": e.status_code,
-                                "error_msg": err_body,
-                                "error": str(e),
-                                "venue_restart_suspected": e.status_code == 425,
-                            },
-                            correlation_id=corr,
-                        )
-                    )
-                    reconcile_coordinator(coord, sink, rid)
-                    continue
-                try:
-                    parsed = json.loads(res)
-                except Exception:
-                    parsed = {}
-                v_oid = parse_venue_order_id(parsed) if isinstance(parsed, dict) else None
-                ack_status = None
-                if isinstance(parsed, dict):
-                    ack_status = parsed.get("status") or parsed.get("orderStatus")
-                ack_submit(
-                    coord.orders,
-                    ap,
-                    v_oid,
-                    shadow_instant_fill=apply_local_shadow_fill,
-                    ack_status=str(ack_status) if ack_status is not None else None,
-                )
-                if (
-                    v_oid is not None
-                    and not apply_local_shadow_fill
-                    and live_clob_client is not None
-                    and app.runtime.execution_mode == ExecutionMode.LIVE
-                ):
-                    await refresh_wallet_coordinated_after_live_submit(coord, live_clob_client)
-                if apply_local_shadow_fill:
-                    apply_shadow_fill(coord.wallet, ap)
-                # Phase 7M: tick-quantize evidence on every oms_submit fact so
-                # operators can audit whether the bot rounded the price and
-                # by how much. Always present (even when no quantization
-                # occurred) so the schema is stable across shadow/live.
-                from tyrex_pm.execution.order_builder import build_quantize_evidence
-                submit_payload: dict = {
-                    "client_order_id": str(ap.client_order_id),
-                    "oms_result": res,
-                    **build_quantize_evidence(ap, mi),
-                }
-                sink.write(
-                    make_fact(
-                        FACT_TYPE_OMS_SUBMIT,
-                        rid,
-                        submit_payload,
-                        correlation_id=corr,
-                    )
-                )
-            reconcile_coordinator(coord, sink, rid)

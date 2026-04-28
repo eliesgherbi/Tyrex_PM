@@ -87,6 +87,8 @@ async def venue_refresh_loop(
             # Emit wallet_sync BEFORE reconcile so the change-of-state evidence
             # appears chronologically alongside the reconcile that consumed it.
             emit_wallet_sync(coord, sink, run_id)
+            if coord.scheduled_exit_demo_try_arm is not None:
+                coord.scheduled_exit_demo_try_arm()
             reconcile_coordinator(coord, sink, run_id)
             # V2 bootstrap gate: open the door for new-order risk evaluation
             # only after the first venue truth rebuild completes successfully.
@@ -145,6 +147,8 @@ async def provisional_repair_probe_loop(
             try:
                 await refresh_wallet_from_clob(coord.wallet, clob_client)
                 sync_local_open_orders_from_venue_wallet(coord.orders, coord.wallet)
+                if coord.scheduled_exit_demo_try_arm is not None:
+                    coord.scheduled_exit_demo_try_arm()
                 reconcile_coordinator(coord, sink, run_id)
             except Exception:
                 log.exception("provisional repair probe failed")

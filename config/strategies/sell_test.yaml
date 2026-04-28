@@ -1,0 +1,76 @@
+# Standalone SELL-test strategy.
+#
+# Use this to validate the V2 SELL / exit path end-to-end without touching guru
+# logic. The strategy emits ONE BUY for the configured token_id, waits for the
+# venue to show sellable inventory (live) or for the synthetic shadow fill, and
+# then emits ONE SELL after `sell.delay_s` seconds.
+#
+# Flow: strategy -> risk -> OMS -> venue truth / facts (same path as production).
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run --strategy config/strategies/sell_test.yaml
+# Or with a scenario overlay (e.g. live):
+#   python -m tyrex_pm.runtime.app run --strategy config/strategies/sell_test.yaml \
+#       --scenario live_guru --run-name sell_test_$(date +%s)
+
+kind: sell_test
+enabled: true
+
+# Canonical Polymarket CLOB outcome token_id (same field the watcher prints
+# under the "BUY ..." line). Replace with the token you want to test against.
+token_id: "84642333691714643565297173746491564153024614047448062634299745792573646496695"
+
+buy:
+  enabled: true
+  # USD notional for the test BUY: size = notional_usd / effective_limit_price.
+  # The "effective" price is `limit_price` under pricing_mode=fixed, or the
+  # auto-resolved best-ask price under pricing_mode=auto.
+  notional_usd: "5"
+
+  # pricing_mode:
+  #   fixed (default) - submit at `limit_price` exactly. Order rests on the
+  #     book unless `limit_price` already crosses the ask.
+  #   auto            - at run time, fetch the venue order book and pick
+  #                     `best_ask + aggression_ticks * tick_size` so the BUY
+  #                     is marketable. `limit_price` becomes the FALLBACK used
+  #                     if the book lookup fails.
+  pricing_mode: auto
+  # How many ticks past best_ask we are willing to pay. 0 = exactly best_ask
+  # (passive crossing-the-spread); 1 = one tick above (defensive marketable).
+  aggression_ticks: 2
+  # Safety ceiling: if best_ask + aggression_ticks*tick > max_price, fall
+  # back to `limit_price` instead of paying through the cap. Leave commented
+  # to disable the guardrail.
+  max_price: "0.95"
+
+  # Used verbatim under pricing_mode=fixed. Used as a FALLBACK under
+  # pricing_mode=auto. Required when pricing_mode=fixed and buy.enabled.
+  limit_price: "0.50"
+
+  order_style: GTC
+
+sell:
+  enabled: true
+  # Seconds to wait after sellable inventory is visible (live) or after the
+  # shadow synthetic fill before emitting the SELL ExitIntent.
+  delay_s: 3
+
+  # pricing_mode:
+  #   fixed (default) - submit at `limit_price`; if `limit_price` is omitted
+  #     the SELL re-uses `buy.limit_price` (existing behavior).
+  #   auto            - at SELL emission time, fetch the venue book and pick
+  #                     `best_bid - aggression_ticks * tick_size`. `limit_price`
+  #                     becomes the FALLBACK used if the book lookup fails.
+  pricing_mode: auto
+  aggression_ticks: 1
+  # Safety floor (auto only): refuse to sell below this price; fall back to
+  # `limit_price` instead. Leave commented to disable.
+  # min_price: "0.05"
+
+  order_style: GTC
+  # Optional SELL fallback / fixed-mode price. Leave commented to reuse buy.limit_price.
+  # limit_price: "0.49"
+
+# Stop after one BUY/SELL cycle. Set to false to keep emitting (currently a
+# no-op past the first cycle since state is in-memory; reserved for future use).
+run_once: true
