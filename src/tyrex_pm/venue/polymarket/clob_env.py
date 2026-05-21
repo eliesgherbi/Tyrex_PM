@@ -30,14 +30,18 @@ def v2_sdk_version() -> str | None:
         return None
 
 
-DEFAULT_CLOB_HOST_V2 = "https://clob-v2.polymarket.com"
-"""Pre-cutover (staging) V2 CLOB host.
+DEFAULT_CLOB_HOST_V2 = "https://clob.polymarket.com"
+"""Post-cutover canonical V2 CLOB host.
 
-V2 endpoints are first served from ``clob-v2.polymarket.com``. On cutover day
-Polymarket promotes V2 to the canonical ``clob.polymarket.com`` and retires V1.
-At that point this default is flipped to ``https://clob.polymarket.com``.
-Operators can always override via ``TYREX_CLOB_HOST``.
+During the migration window V2 was validated on ``clob-v2.polymarket.com``.
+After Polymarket's production cutover, V2 lives at ``clob.polymarket.com`` and
+the old transition host redirects/301s auth endpoints. Operators can still set
+``TYREX_CLOB_HOST`` explicitly, but the historical transition host is rewritten
+with a warning by :func:`resolve_clob_host`.
 """
+
+PRE_CUTOVER_CLOB_HOST_V2 = "https://clob-v2.polymarket.com"
+"""Historical V2 transition host; kept only to normalize stale operator env."""
 
 _BUILDER_CODE_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -113,6 +117,95 @@ def _resolve_builder_config() -> Any | None:
     return BuilderConfig(builder_address=addr_raw, builder_code=code_raw)
 
 
+def _resolve_env_api_creds() -> Any | None:
+    """Return pre-created CLOB API credentials from env, if fully configured.
+
+    These are Polymarket CLOB API credentials, not Builder Relayer credentials.
+    Prefer them when present so production bootstrap does not need to call the
+    API-key creation endpoint, which may be Cloudflare-blocked post-cutover.
+    """
+    api_key = (os.environ.get("POLYMARKET_API_KEY") or "").strip()
+    api_secret = (os.environ.get("POLYMARKET_API_SECRET") or "").strip()
+    passphrase = (os.environ.get("POLYMARKET_PASSPHRASE") or "").strip()
+    present = [bool(api_key), bool(api_secret), bool(passphrase)]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ValueError(
+            "CLOB API credentials are partially configured; set all three "
+            "POLYMARKET_API_KEY, POLYMARKET_API_SECRET, and POLYMARKET_PASSPHRASE "
+            "or unset all three to derive credentials from POLYMARKET_PK"
+        )
+    from py_clob_client_v2 import ApiCreds
+
+    return ApiCreds(
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=passphrase,
+    )
+
+
+def _api_creds_usable(creds: Any) -> bool:
+    if creds is None:
+        return False
+    key = getattr(creds, "api_key", None)
+    return isinstance(key, str) and bool(key)
+
+
+def _derive_or_create_api_key(client: Any) -> Any | None:
+    """Return L2 ``ApiCreds`` using GET derive first, then POST create, then GET derive again.
+
+    ``py_clob_client_v2.ClobClient.create_or_derive_api_key`` always **POSTs**
+    ``/auth/api-key`` first. When a key already exists, Polymarket responds
+    **400** ``{"error":"Could not create api key"}``; the SDK HTTP helper logs
+    that at **ERROR** before catching the exception and falling back to **GET**
+    ``/auth/derive-api-key``. Tyrex prefers **derive → create → derive** so
+    existing keys avoid the noisy failed create — same outcomes as the SDK for
+    typical accounts.
+    """
+    try:
+        creds = client.derive_api_key()
+        if _api_creds_usable(creds):
+            return creds
+    except Exception:  # noqa: BLE001 — mirror SDK create_or_derive broad catch
+        pass
+    try:
+        creds = client.create_api_key()
+        if _api_creds_usable(creds):
+            return creds
+    except Exception:
+        pass
+    try:
+        creds = client.derive_api_key()
+        if _api_creds_usable(creds):
+            return creds
+    except Exception:
+        pass
+    return None
+
+
+def resolve_clob_host() -> str:
+    """Resolve the CLOB REST host for the post-cutover V2 runtime.
+
+    ``TYREX_CLOB_HOST`` remains an explicit operator override, but the old
+    pre-cutover host is no longer a valid production target after Polymarket's
+    V2 cutover. Rewriting that exact value avoids an immediate SDK bootstrap
+    301 while logging loudly enough for run logs / facts to explain why the
+    host changed.
+    """
+    raw = (os.environ.get("TYREX_CLOB_HOST") or DEFAULT_CLOB_HOST_V2).strip()
+    host = raw.rstrip("/")
+    if host == PRE_CUTOVER_CLOB_HOST_V2:
+        log.warning(
+            "TYREX_CLOB_HOST=%s is the pre-cutover V2 transition host and now "
+            "redirects auth endpoints; using post-cutover production host %s",
+            PRE_CUTOVER_CLOB_HOST_V2,
+            DEFAULT_CLOB_HOST_V2,
+        )
+        return DEFAULT_CLOB_HOST_V2
+    return host
+
+
 def try_create_clob_client() -> Any | None:
     """
     Build an authenticated ``py-clob-client-v2`` ``ClobClient`` from environment.
@@ -120,9 +213,9 @@ def try_create_clob_client() -> Any | None:
     Secrets stay env-only; nothing is persisted.
 
     Env:
-      TYREX_CLOB_HOST (default ``https://clob-v2.polymarket.com`` — pre-cutover
-        V2 staging host; on cutover day this default is flipped to
-        ``https://clob.polymarket.com``)
+      TYREX_CLOB_HOST (default ``https://clob.polymarket.com`` — post-cutover
+        V2 production host; stale ``https://clob-v2.polymarket.com`` values are
+        rewritten with a warning)
       TYREX_CHAIN_ID (default 137)
       TYREX_PRIVATE_KEY (required) — or ``POLYMARKET_PK`` as fallback
       TYREX_SIGNATURE_TYPE (default 0) — or ``POLYMARKET_SIGNATURE_TYPE`` fallback.
@@ -131,11 +224,16 @@ def try_create_clob_client() -> Any | None:
       TYREX_FUNDER (optional) — or ``POLYMARKET_FUNDER`` as fallback
       TYREX_BUILDER_CODE / TYREX_BUILDER_ADDRESS (optional) — when set, both
         are required and plumbed via V2 ``BuilderConfig``.
+      POLYMARKET_API_KEY / POLYMARKET_API_SECRET / POLYMARKET_PASSPHRASE
+        (optional) — pre-created CLOB API credentials. When all three are set,
+        they are used directly and the SDK's API-key creation/derive endpoint
+        is not called.
 
-    Phase 1 boundary: this function builds a V2 client, derives L2 API credentials
-    via the V2 ``create_or_derive_api_key()`` path, and returns the configured
-    client. It does *not* exercise V2 order submission (that belongs to Phase 2,
-    in ``clob_bridge.py``).
+    This function builds a V2 client, configures L2 API credentials from env or
+    via :func:`_derive_or_create_api_key` (derive-first; avoids spurious
+    ``create`` **400** logs from the stock SDK helper), and returns the
+    configured client. It does *not* exercise V2 order submission (that belongs
+    to ``clob_bridge.py``).
     """
     try:
         from py_clob_client_v2 import ClobClient
@@ -151,7 +249,7 @@ def try_create_clob_client() -> Any | None:
         log.warning("TYREX_PRIVATE_KEY (or POLYMARKET_PK) not set; live CLOB disabled")
         return None
 
-    host = os.environ.get("TYREX_CLOB_HOST", DEFAULT_CLOB_HOST_V2)
+    host = resolve_clob_host()
     chain_id = int(os.environ.get("TYREX_CHAIN_ID", "137"))
     sig_raw = (
         os.environ.get("TYREX_SIGNATURE_TYPE", "").strip()
@@ -163,6 +261,7 @@ def try_create_clob_client() -> Any | None:
     funder = funder_raw.strip() or None
 
     builder_config = _resolve_builder_config()
+    env_creds = _resolve_env_api_creds()
 
     client = ClobClient(
         host,
@@ -172,7 +271,7 @@ def try_create_clob_client() -> Any | None:
         funder=funder,
         builder_config=builder_config,
     )
-    creds = client.create_or_derive_api_key()
+    creds = env_creds if env_creds is not None else _derive_or_create_api_key(client)
     if creds is None:
         log.error("Could not derive CLOB API credentials")
         return None

@@ -18,7 +18,7 @@ Required env vars (already in your .env):
     POLYMARKET_FUNDER
     POLYMARKET_SIGNATURE_TYPE   (default 1 = POLY_PROXY)
 Optional:
-    TYREX_CLOB_HOST             (default https://clob-v2.polymarket.com)
+    TYREX_CLOB_HOST             (default https://clob.polymarket.com)
     POLYGON_RPC                 (default https://polygon-rpc.com)
 """
 
@@ -28,8 +28,14 @@ import json
 import os
 import sys
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC = REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 try:
     from dotenv import load_dotenv
@@ -142,7 +148,14 @@ def main() -> int:
         return 2
 
     sig_t = int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1"))
-    host = os.environ.get("TYREX_CLOB_HOST", "https://clob-v2.polymarket.com")
+    host = os.environ.get("TYREX_CLOB_HOST", "https://clob.polymarket.com").rstrip("/")
+    if host == "https://clob-v2.polymarket.com":
+        print(
+            "WARNING: TYREX_CLOB_HOST points at the pre-cutover V2 transition host; "
+            "using https://clob.polymarket.com instead.",
+            file=sys.stderr,
+        )
+        host = "https://clob.polymarket.com"
     env_rpc = os.environ.get("POLYGON_RPC")
     rpcs = [env_rpc] if env_rpc else list(POLYGON_RPC_DEFAULTS)
 
@@ -165,7 +178,12 @@ def main() -> int:
     )
     eoa = client.get_address()
 
-    creds = client.create_or_derive_api_key()
+    from tyrex_pm.venue.polymarket.clob_env import _derive_or_create_api_key
+
+    creds = _derive_or_create_api_key(client)
+    if creds is None:
+        print("ERROR: could not derive/create CLOB API credentials", file=sys.stderr)
+        return 2
     client.set_api_creds(creds)
 
     hr("ADDRESSES")

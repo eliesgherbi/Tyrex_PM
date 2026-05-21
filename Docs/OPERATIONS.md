@@ -67,7 +67,7 @@ tyrex-pm reset-state                          # default: var/state
 tyrex-pm reset-state --state-dir var/state    # explicit
 ```
 
-Currently removes: `guru_strategy_store.json` (guru watermark + dedup ledger). Run this before the first live process on a fresh V2 environment so no V1-era guru cursor leaks into the V2 startup. Bootstrap is also enforced in code: until the first successful V2 venue truth rebuild, `check_aggressive_readiness` denies with `bootstrap_not_complete`.
+Currently removes: `guru_strategy_store.json` (guru watermark + dedup ledger). Run this before the first live process on a fresh V2 environment, and again after major venue cutovers that invalidate old open-order assumptions, so no stale guru cursor or pre-cutover local state leaks into startup. Bootstrap is also enforced in code: until the first successful V2 venue truth rebuild, `check_aggressive_readiness` denies with `bootstrap_not_complete`.
 
 ---
 
@@ -104,10 +104,39 @@ Authoritative reference for every key: [CONFIG_MODEL.md](CONFIG_MODEL.md).
 |----------|-------|
 | `TYREX_PRIVATE_KEY` | Required for live / `live-attest`. **`POLYMARKET_PK`** is accepted as fallback. |
 | `TYREX_FUNDER` | Optional proxy/funder address. **`POLYMARKET_FUNDER`** fallback. |
-| `TYREX_CLOB_HOST` | Default `https://clob-v2.polymarket.com` (V2 staging; flipped to `https://clob.polymarket.com` on V2 cutover day). |
+| `TYREX_CLOB_HOST` | Optional override; default is `https://clob.polymarket.com` (post-cutover V2 production). If an old `.env` still sets `https://clob-v2.polymarket.com`, startup rewrites it to production and logs a warning because the transition host now redirects auth endpoints. |
 | `TYREX_CHAIN_ID` | Default `137`. |
 | `TYREX_SIGNATURE_TYPE` | Default `0` (EOA). `1=POLY_PROXY`, `2=POLY_GNOSIS_SAFE`, `3=POLY_1271`. Use a non-EOA value **with** `TYREX_FUNDER` = proxy/Safe address if orders fail with `invalid signature`. **`POLYMARKET_SIGNATURE_TYPE`** fallback. |
 | `TYREX_BUILDER_CODE` / `TYREX_BUILDER_ADDRESS` | Optional V2 builder attribution (32-byte hex code + 20-byte address). Both required when set; malformed values fail fast. |
+| `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_PASSPHRASE` | Optional but recommended post-cutover: pre-created **CLOB API credentials**. When all three are present, `try_create_clob_client()` uses them directly and skips the SDK API-key creation/derive call. Do not confuse these with `POLY_BUILDER_*` or `RELAYER_*` credentials; those do not authenticate CLOB trading. |
+
+Generate the CLOB API credentials once with:
+
+```bash
+python scripts/generate_clob_api_creds.py
+```
+
+The script loads `.env`, uses the current V2 host/wallet conventions (`POLYMARKET_PK`, `POLYMARKET_SIGNATURE_TYPE`, and `POLYMARKET_FUNDER` when signature type is non-EOA), then prints only:
+
+```env
+POLYMARKET_API_KEY=...
+POLYMARKET_API_SECRET=...
+POLYMARKET_PASSPHRASE=...
+```
+
+Copy those three lines into `.env`. After that, live runtime uses the direct CLOB creds and avoids `/auth/*` bootstrap at startup.
+
+To identify the correct post-cutover wallet mode/funder, run:
+
+```bash
+python scripts/diagnose_clob_wallet_modes.py
+```
+
+This loads `.env`, tries `signature_type=2` and `signature_type=3` across the candidate funder addresses it can infer (`POLYMARKET_FUNDER` / `TYREX_FUNDER`, the derived legacy Safe, plus any CLI address you pass), and reports which row the CLOB venue sees with non-zero balance and allowance. If the UI shows cash but all rows are zero, pass the UI deposit-wallet address explicitly:
+
+```bash
+python scripts/diagnose_clob_wallet_modes.py 0x<deposit_wallet_from_polymarket_ui>
+```
 
 ### 3.2 Heartbeat / venue refresh
 
@@ -244,7 +273,7 @@ Carries `status_code` + `error_msg`. The pipeline does **not** crash; it release
 ## 7. First-time live checklist
 
 1. `pip install -e .[live]`.
-2. Fill `.env` from `.env.example` (`TYREX_PRIVATE_KEY` + `TYREX_FUNDER` if proxy wallet, `TYREX_SIGNATURE_TYPE=1` for proxy).
+2. Fill `.env` from `.env.example` (`TYREX_PRIVATE_KEY` + `TYREX_FUNDER` if proxy wallet, `TYREX_SIGNATURE_TYPE=1` for proxy). Remove stale `TYREX_CLOB_HOST=https://clob-v2.polymarket.com` values from older migration env files; the default is now `https://clob.polymarket.com`.
 3. Verify env: `tyrex-pm live-attest --token-id <real_numeric_token> --size 1 --price 0.01 --side BUY`.
 4. Inspect `var/reporting/runs/<latest>/facts.jsonl` for `live_attest` `outcome` + `venue_order_id`.
 5. Edit `config/strategies/guru_follow.yaml` — set `guru.wallet` to a real address; tune `filters` and `sizing`.

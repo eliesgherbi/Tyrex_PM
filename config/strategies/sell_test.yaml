@@ -18,7 +18,7 @@ enabled: true
 
 # Canonical Polymarket CLOB outcome token_id (same field the watcher prints
 # under the "BUY ..." line). Replace with the token you want to test against.
-token_id: "84642333691714643565297173746491564153024614047448062634299745792573646496695"
+token_id: "4394372887385518214471608448209527405727552777602031099972143344338178308080"
 
 buy:
   enabled: true

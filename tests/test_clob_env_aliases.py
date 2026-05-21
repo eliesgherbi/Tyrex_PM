@@ -56,9 +56,9 @@ def test_polymarket_heartbeat_id_env_fallback(monkeypatch) -> None:
 # V2 client construction boundary (Phase 1).
 #
 # These tests patch ``py_clob_client_v2.ClobClient`` (the real top-level export
-# in the installed V2 SDK) and assert the env wiring, including the V2 staging
-# host default, env override, signature-type fallback, funder fallback, and the
-# V2 ``create_or_derive_api_key`` (singular) path.
+# in the installed V2 SDK) and assert the env wiring, including the post-cutover
+# production host default, env override, signature-type fallback, funder
+# fallback, and Tyrex ``_derive_or_create_api_key`` (derive-first bootstrap).
 # ---------------------------------------------------------------------------
 
 
@@ -76,6 +76,9 @@ def _clear_v2_env(monkeypatch):
         "POLYMARKET_FUNDER",
         "TYREX_BUILDER_CODE",
         "TYREX_BUILDER_ADDRESS",
+        "POLYMARKET_API_KEY",
+        "POLYMARKET_API_SECRET",
+        "POLYMARKET_PASSPHRASE",
     ):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -84,7 +87,11 @@ def _clear_v2_env(monkeypatch):
 def _patched_v2_client():
     """Helper: build a MagicMock that mimics the V2 ClobClient API surface used here."""
     instance = MagicMock(name="V2ClobClient")
-    instance.create_or_derive_api_key.return_value = MagicMock(name="ApiCreds")
+    creds = MagicMock(name="ApiCreds")
+    creds.api_key = "derived-key"
+    creds.api_secret = "sec"
+    creds.api_passphrase = "pp"
+    instance.derive_api_key.return_value = creds
     return instance
 
 
@@ -94,7 +101,7 @@ def test_returns_none_when_no_private_key(monkeypatch) -> None:
     assert clob_env.try_create_clob_client() is None
 
 
-def test_v2_client_constructed_with_default_staging_host(monkeypatch) -> None:
+def test_v2_client_constructed_with_default_post_cutover_host(monkeypatch) -> None:
     monkeypatch.setenv("TYREX_PRIVATE_KEY", "0xabc123")
     instance = _patched_v2_client()
     with patch("py_clob_client_v2.ClobClient", return_value=instance) as mock_cls:
@@ -104,20 +111,22 @@ def test_v2_client_constructed_with_default_staging_host(monkeypatch) -> None:
     assert result is instance
     mock_cls.assert_called_once()
     args, kwargs = mock_cls.call_args
-    assert args[0] == "https://clob-v2.polymarket.com"
+    assert args[0] == "https://clob.polymarket.com"
     assert kwargs["chain_id"] == 137
     assert kwargs["key"] == "0xabc123"
     assert kwargs["signature_type"] == 0
     assert kwargs["funder"] is None
     assert kwargs["builder_config"] is None
-    instance.create_or_derive_api_key.assert_called_once_with()
+    instance.derive_api_key.assert_called_once_with()
+    instance.create_api_key.assert_not_called()
     instance.set_api_creds.assert_called_once()
 
 
-def test_default_host_module_constant_is_v2_staging() -> None:
+def test_default_host_module_constant_is_post_cutover_production() -> None:
     from tyrex_pm.venue.polymarket import clob_env
 
-    assert clob_env.DEFAULT_CLOB_HOST_V2 == "https://clob-v2.polymarket.com"
+    assert clob_env.DEFAULT_CLOB_HOST_V2 == "https://clob.polymarket.com"
+    assert clob_env.PRE_CUTOVER_CLOB_HOST_V2 == "https://clob-v2.polymarket.com"
 
 
 def test_env_override_wins_over_v2_default(monkeypatch) -> None:
@@ -130,6 +139,19 @@ def test_env_override_wins_over_v2_default(monkeypatch) -> None:
         clob_env.try_create_clob_client()
     args, _kwargs = mock_cls.call_args
     assert args[0] == "https://clob.polymarket.com"
+
+
+def test_old_pre_cutover_host_override_is_rewritten_with_warning(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("TYREX_PRIVATE_KEY", "0xabc123")
+    monkeypatch.setenv("TYREX_CLOB_HOST", "https://clob-v2.polymarket.com")
+    instance = _patched_v2_client()
+    with patch("py_clob_client_v2.ClobClient", return_value=instance) as mock_cls:
+        from tyrex_pm.venue.polymarket import clob_env
+
+        clob_env.try_create_clob_client()
+    args, _kwargs = mock_cls.call_args
+    assert args[0] == "https://clob.polymarket.com"
+    assert "pre-cutover V2 transition host" in caplog.text
 
 
 def test_polymarket_pk_fallback(monkeypatch) -> None:
@@ -181,14 +203,46 @@ def test_returns_none_when_v2_sdk_missing(monkeypatch) -> None:
         assert clob_env.try_create_clob_client() is None
 
 
-def test_returns_none_when_create_api_key_returns_none(monkeypatch) -> None:
+def test_returns_none_when_api_key_bootstrap_returns_none(monkeypatch) -> None:
     monkeypatch.setenv("TYREX_PRIVATE_KEY", "0xabc123")
     instance = MagicMock()
-    instance.create_or_derive_api_key.return_value = None
+    instance.derive_api_key.side_effect = Exception("nope")
+    instance.create_api_key.side_effect = Exception("nope")
     with patch("py_clob_client_v2.ClobClient", return_value=instance):
         from tyrex_pm.venue.polymarket import clob_env
 
         assert clob_env.try_create_clob_client() is None
+
+
+def test_precreated_clob_api_creds_from_env_skip_create_or_derive(monkeypatch) -> None:
+    monkeypatch.setenv("TYREX_PRIVATE_KEY", "0xabc123")
+    monkeypatch.setenv("POLYMARKET_API_KEY", "api-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "api-secret")
+    monkeypatch.setenv("POLYMARKET_PASSPHRASE", "api-passphrase")
+    instance = MagicMock()
+    with patch("py_clob_client_v2.ClobClient", return_value=instance):
+        from tyrex_pm.venue.polymarket import clob_env
+        from py_clob_client_v2 import ApiCreds
+
+        assert clob_env.try_create_clob_client() is instance
+    instance.create_api_key.assert_not_called()
+    instance.derive_api_key.assert_not_called()
+    instance.set_api_creds.assert_called_once()
+    creds = instance.set_api_creds.call_args.args[0]
+    assert isinstance(creds, ApiCreds)
+    assert creds.api_key == "api-key"
+    assert creds.api_secret == "api-secret"
+    assert creds.api_passphrase == "api-passphrase"
+
+
+def test_partial_precreated_clob_api_creds_raise(monkeypatch) -> None:
+    monkeypatch.setenv("TYREX_PRIVATE_KEY", "0xabc123")
+    monkeypatch.setenv("POLYMARKET_API_KEY", "api-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "api-secret")
+    from tyrex_pm.venue.polymarket import clob_env
+
+    with pytest.raises(ValueError, match="partially configured"):
+        clob_env.try_create_clob_client()
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +324,14 @@ def test_v2_sdk_exposes_required_phase1_surface() -> None:
         assert hasattr(v2, sym), f"py-clob-client-v2 missing required symbol: {sym}"
 
     client_cls = v2.ClobClient
-    for method in ("create_or_derive_api_key", "set_api_creds", "post_heartbeat", "get_address"):
+    for method in (
+        "create_or_derive_api_key",
+        "derive_api_key",
+        "create_api_key",
+        "set_api_creds",
+        "post_heartbeat",
+        "get_address",
+    ):
         assert hasattr(client_cls, method), f"V2 ClobClient missing method: {method}"
 
     from py_clob_client_v2.exceptions import PolyApiException

@@ -1,4 +1,9 @@
-"""Compare V1 vs V2 /book responses for the same token_id."""
+"""Compare production vs historical transition /book responses for token_ids.
+
+Post-cutover production V2 lives at ``https://clob.polymarket.com``. The old
+``clob-v2.polymarket.com`` host is kept here only as a diagnostic for stale DNS
+or redirect issues; runtime code does not use it as the default.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +14,8 @@ import httpx
 
 
 HOSTS = {
-    "V1 (clob.polymarket.com)": "https://clob.polymarket.com/book",
-    "V2 (clob-v2.polymarket.com)": "https://clob-v2.polymarket.com/book",
+    "V2 production (clob.polymarket.com)": "https://clob.polymarket.com/book",
+    "historical transition (clob-v2.polymarket.com)": "https://clob-v2.polymarket.com/book",
 }
 
 TOKENS = {

@@ -1,11 +1,12 @@
-# Polymarket CLOB V2 migration plan (authoritative)
+# Polymarket CLOB V2 migration plan (historical)
 
-**Status:** All phases (0–9, including 7M) implemented; live submit→ack→cancel round-tripped on
-`clob-v2.polymarket.com` 2026-04-19 with venue order id
+**Status:** All phases (0–9, including 7M) implemented; live submit→ack→cancel round-tripped on the
+pre-cutover transition host `clob-v2.polymarket.com` 2026-04-19 with venue order id
 `0xc5aefaa7167aa604c03b9771098e98a05ea5776b8134a40f7633a8f6db6b43be` (see §7). The codebase is V2-only:
 no V1 SDK references remain in `src/`, the V2 SDK is import-isolated to `venue/polymarket/`, and
 per-market venue truth (tick / min-size / neg-risk / fees / outcomes) is sourced from the venue itself
-rather than YAML defaults.
+rather than YAML defaults. Post-cutover runtime default host is `https://clob.polymarket.com`; stale
+`https://clob-v2.polymarket.com` env overrides are rewritten with a startup warning.
 **Scope:** convert the current Tyrex_PM native Polymarket stack from V1 (`py-clob-client`, V1 CTF Exchange, USDC.e collateral) to a fully V2-compliant implementation (`py-clob-client-v2`, V2 CTF Exchange, Polymarket USD collateral).
 **Non-goal:** dual-mode runtime, V1 fallback, compatibility shim. Cutover is one-way; we are pre-production with no real bot positions to migrate, but we still require a clean first-V2-start reset posture (see §6).
 
@@ -32,16 +33,16 @@ The conceptual mapping below is robust regardless of those small naming deltas b
 | Phase (§7) | Title                                              | Status                              | Notes |
 |------------|----------------------------------------------------|-------------------------------------|-------|
 | 0          | Verify installed V2 SDK surface                    | ✅ Done                              | Real SDK shape captured; renamed `OrderArgsV2`/`AssetType`/`BalanceAllowanceParams` adopted from installed package. |
-| 1          | Pin V2 SDK and wire host config                    | ✅ Done                              | `pyproject.toml` pins `py-clob-client-v2`; `clob_env.try_create_clob_client` defaults to `https://clob-v2.polymarket.com`; `TYREX_BUILDER_CODE` parsed and validated. |
+| 1          | Pin V2 SDK and wire host config                    | ✅ Done                              | `pyproject.toml` pins `py-clob-client-v2`; `clob_env.try_create_clob_client` now defaults to post-cutover `https://clob.polymarket.com`; stale `https://clob-v2.polymarket.com` overrides are rewritten with a warning; `TYREX_BUILDER_CODE` parsed and validated. |
 | 2          | V2 bridge (place + cancel)                         | ✅ Done                              | `PyClobBridge` builds `OrderArgsV2` (no `fee_rate_bps`/`nonce`/`taker`), cancels via `OrderPayload`. |
 | 3          | Heartbeat exception + pipeline imports             | ✅ Done                              | `PolyApiException` import path migrated to `py_clob_client_v2.exceptions`. |
 | 4          | Wallet sync (V2 method names + payload shape)      | ✅ Done                              | `BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)`; `get_open_orders()` (V1 `get_orders` removed). **Real V2 payload bug fixed:** balance is raw 6-decimal token units (divided by `10**6`); `allowances` is a per-exchange dict (binding allowance reduced via `min`). Legacy V1-shape mocks still tolerated. Fail-loud if SDK missing. |
-| —          | **Live end-to-end validation**                     | ✅ Done (2026-04-19)                 | `live-attest` against `clob-v2.polymarket.com` round-tripped submit→ack→cancel for `0xc5aefaa7167aa604c03b9771098e98a05ea5776b8134a40f7633a8f6db6b43be`. |
+| —          | **Live end-to-end validation**                     | ✅ Done (2026-04-19)                 | `live-attest` against the pre-cutover transition host `clob-v2.polymarket.com` round-tripped submit→ack→cancel for `0xc5aefaa7167aa604c03b9771098e98a05ea5776b8134a40f7633a8f6db6b43be`. Post-cutover re-tests should use the default `https://clob.polymarket.com`. |
 | 5          | Market-info adapter                                | ✅ Done                              | `venue/polymarket/market_info.py` defines `MarketInfo` + `MarketInfoCache` (TTL=300s, fail-closed, asyncio-locked refresh). Resolves `condition_id` via `/markets-by-token/<token>`, market truth via `/clob-markets/<condition_id>`, and `neg_risk` + `fee_rate_bps` via SDK helpers. Wired into `RuntimeCoordinator.market_info_cache` (live mode only); snapshot fed into `RiskContext.market_info`. `risk.venue_min_size._resolve_min_size` now prefers venue `min_order_size` with provenance (`"venue"` / `"config_default"`). `execution.order_builder.to_place_request` floor-quantizes `limit_price` to the venue tick when `MarketInfo` is present. |
 | 6          | Cutover-safe startup (`reset-state` + bootstrap gate) | ✅ Done                           | `tyrex-pm reset-state` CLI clears `var/state/guru_strategy_store.json` (idempotent; never touches `var/reporting/`). `HealthRuntime.first_v2_sync_complete` defaults to False; `check_aggressive_readiness` denies live new-order intents with `bootstrap_not_complete` until the first successful `refresh_wallet_from_clob` flips it (set in `cmd_run`, `cmd_live_attest`, and `venue_refresh_loop`). |
 | 7          | `live-attest` V2 evidence facts                    | ✅ Done                              | `cmd_live_attest` emits three new `live_attest` phase facts: `v2_environment` (SDK module path + version, host, chain, signature_type, builder code presence), `collateral_check` (post-bootstrap pUSD balance + per-exchange allowances), `market_info` (resolved tick/min-size/neg-risk/fee/outcomes for the attested token). Implemented via `_v2_environment_payload` + `MarketInfoCache.get`. |
 | 7M         | Tick quantize / fee evidence / outcome validation  | ✅ Done                              | `execution.order_builder.build_quantize_evidence` returns `tick_quantize_applied`/`tick_size`/`original_price`/`quantized_price`/`price_was_quantized`; merged into the `oms_submit` fact for both pipeline and live-attest paths. The live-attest `complete` phase now records `outcome_validation`: post-cancel order id resolution + the `outcomes` map, so an operator can verify the BUY/Yes vs No leg without leaving the facts file. |
-| 8          | Documentation refresh                              | ✅ Done                              | `current_state.md` rewritten; `OPERATIONS.md` adds `reset-state` runbook + V2 host default + `TYREX_BUILDER_*`; `CONFIG_MODEL.md`, `DEVELOPMENT.md`, `Architecture.md`, `developer_guide.md`, `modules/venue/README.md`, `modules/execution/README.md`, `README.md`, `.env.example` rebased onto `py-clob-client-v2` and the V2 staging host. |
+| 8          | Documentation refresh                              | ✅ Done                              | `current_state.md` rewritten; `OPERATIONS.md` adds `reset-state` runbook + post-cutover V2 production host + `TYREX_BUILDER_*`; `CONFIG_MODEL.md`, `DEVELOPMENT.md`, `Architecture.md`, `developer_guide.md`, `modules/venue/README.md`, `modules/execution/README.md`, `README.md`, `.env.example` rebased onto `py-clob-client-v2` and `https://clob.polymarket.com`. |
 | 9          | V1 cleanup + import-isolation guard                | ✅ Done                              | `rg "py_clob_client[^_]"` returns zero in `src/`. `tests/test_v2_import_isolation.py` enforces (a) no V1 SDK imports anywhere in `src/tyrex_pm/`, (b) `py_clob_client_v2` imports are confined to `src/tyrex_pm/venue/polymarket/`, (c) `runtime/pipeline.py` consumes `PolyApiException` via the venue re-export `tyrex_pm.venue.polymarket.exceptions`. |
 
 ### Operational artifacts shipped alongside the migration
@@ -62,7 +63,7 @@ The conceptual mapping below is robust regardless of those small naming deltas b
 - `tests/test_market_info_cache.py` (Phase 5) — 12 tests: `quantize_price` floor semantics across multiple ticks, TTL hit/miss behaviour, snapshot semantics, fail-closed on 404 / missing fields / SDK exception (httpx fully monkeypatched).
 - `tests/test_venue_min_size_market_info.py` (Phase 5) — 4 tests pinning venue-truth precedence over YAML default with provenance evidence (`venue_min_size_source`).
 
-Full suite (post Tier A + B + C, 2026-04-19): **262 passed, 1 skipped, 6 failed.** The 6 remaining failures (`test_pipeline_refresh_coordinated.*` ×3, `test_guru_strategy_golden::test_conviction_scales_enter_size`, `test_shadow_e2e_guru_to_oms_facts`, `test_t8_summarize_join_audit_on_real_run_dir`) are pre-existing — they fail because shadow-mode test fixtures still reference V1 SDK method names (`_Clob.get_open_orders`) or because the `config/risk/default.yaml` notional cap clips the shadow scenario below `venue_min_size`. Net: **−7 failures vs. the post-Phase-4 baseline of 13**, no new regressions introduced by Phases 5/6/7/7M/8/9.
+Full suite after final V2 closeout and sell-test additions: see current test output from `python -m pytest -q` (latest local result: **304 passed, 1 skipped** before the post-cutover host patch). Historical Tier A/B/C context remains in the transcript; top-level docs are the live source of truth.
 
 ---
 
@@ -102,7 +103,7 @@ V2 has its own pre-production endpoint. The plan treats host as a first-class co
 | Pre-cutover (everything in §7 except the final flip) | `https://clob-v2.polymarket.com` | The Polymarket-published V2 staging/transition endpoint. Used for SDK validation, `live-attest`, and any pre-production `tyrex-pm run`. |
 | Post-cutover (steady-state production) | `https://clob.polymarket.com` | Standard production endpoint. After Polymarket cuts the production domain over to V2, this becomes the only host we point at. |
 
-The default in `clob_env.try_create_clob_client` is rebased to `https://clob-v2.polymarket.com` for the duration of the migration; on the cutover day the default is flipped back to `https://clob.polymarket.com`. The env var override (`TYREX_CLOB_HOST`) lets operators move ahead of the default in either direction.
+The default in `clob_env.try_create_clob_client` is now `https://clob.polymarket.com`. During the migration window it was temporarily rebased to `https://clob-v2.polymarket.com`; after production cutover that transition host redirects auth endpoints, so stale env overrides are rewritten to production with a startup warning.
 
 ### 1.4 Cutover constraint (pre-production reality)
 
