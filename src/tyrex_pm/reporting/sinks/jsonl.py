@@ -24,3 +24,4 @@ class JsonlSink:
         if not self._fh:
             raise RuntimeError("sink not open")
         self._fh.write(json.dumps(obj, default=str) + "\n")
+        self._fh.flush()

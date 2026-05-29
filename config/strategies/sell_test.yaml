@@ -1,9 +1,5 @@
-# Standalone SELL-test strategy.
-#
-# Use this to validate the V2 SELL / exit path end-to-end without touching guru
-# logic. The strategy emits ONE BUY for the configured token_id, waits for the
-# venue to show sellable inventory (live) or for the synthetic shadow fill, and
-# then emits ONE SELL after `sell.delay_s` seconds.
+# Standalone SELL-test strategy. SELL size clamps to sell_test owner allocation.
+# Emits ONE BUY, waits for sellable inventory, then ONE SELL after sell.delay_s.
 #
 # Flow: strategy -> risk -> OMS -> venue truth / facts (same path as production).
 #

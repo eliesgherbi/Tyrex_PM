@@ -1,0 +1,49 @@
+# P4 allocation ownership validation toy strategy.
+#
+# Proves venue wallet inventory != strategy-owned allocation:
+#   1. Owner A BUY → allocation_buy_applied
+#   2. Owner B unauthorized SELL blocked (wallet has qty, allocation = 0)
+#   3. Owner A SELL → allocation_sell_applied, ledger → 0
+#
+# Run (shadow):
+#   python -m tyrex_pm.runtime.app run --strategy config/strategies/allocation_test.yaml
+#
+# Run (live, small notional):
+#   python -m tyrex_pm.runtime.app run --strategy config/strategies/allocation_test.yaml \
+#       --scenario live_guru --run-name allocation_test_live_auto_$(date +%s)
+
+kind: allocation_test
+enabled: true
+
+# Replace with a liquid CLOB outcome token for live runs.
+token_id: "4394372887385518214471608448209527405727552777602031099972143344338178308080"
+
+owner_a_id: allocation_test_A
+owner_b_id: allocation_test_B
+
+buy:
+  enabled: true
+  notional_usd: "5"
+  limit_price: "0.50"
+  order_style: GTC
+
+owner_b_unauthorized_sell:
+  enabled: true
+  size_mode: match_owner_a_buy
+  fixed_size: "10"
+
+owner_a_sell:
+  enabled: true
+  delay_s: 0
+  pricing_mode: auto
+  aggression_ticks: 0
+  limit_price: "0.01"
+  order_style: GTC
+
+run_once: true
+
+timeouts:
+  allocation_visible_s: 5
+  position_visible_s: 90
+  unauthorized_sell_timeout_s: 10
+  owner_a_exit_timeout_s: 120

@@ -29,6 +29,7 @@ from tyrex_pm.core.models import EnterIntent, RiskContext
 from tyrex_pm.risk.engine import evaluate_intent
 from tyrex_pm.risk.venue_min_size import evaluate_venue_min_size
 from tyrex_pm.runtime.config import (
+    AllocationLedgerConfig,
     AppConfig,
     CapitalConfig,
     ConcurrencyConfig,
@@ -118,6 +119,7 @@ def _app(vms: VenueMinSizeConfig, *, token_cap: str = "100", portfolio_cap: str 
         adoption_grace_s=5.0,
         log_level="INFO",
         shadow_bootstrap=None,
+        allocation_ledger=AllocationLedgerConfig(),
     )
     # Strategy block is unused by evaluate_intent but the dataclass requires it.
     strategy = StrategyConfig.__new__(StrategyConfig)

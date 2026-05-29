@@ -1,44 +1,56 @@
 # `strategies/`
 
-Composition layer that turns a `GuruCopySignal` (or other signal) into one or more `Intent`s. Currently one strategy: `guru_follow`.
+Composition layer that turns a `GuruCopySignal` (or other signal) into one or more `Intent`s. Production strategies: `guru_follow`, `sell_test`, `allocation_test`.
 
 ## `guru_follow/`
 
 | File | Purpose |
 |------|---------|
-| `strategy.py` | `GuruFollowStrategy.on_guru_signal(sig, holdings) -> (intents, skip_reason, sizing_meta)` — the single entry point |
-| `filters.py` | `apply_filters(sig, cfg)` — token allowlist, min notional, conviction, market tradeability gate (when wired) |
+| `strategy.py` | `GuruFollowStrategy.on_guru_signal(sig, coord)` — filters, BUY sizing, guru-mirror SELL |
+| `filters.py` | `apply_filters(sig, cfg)` — token allowlist, min notional, conviction |
 | `sizing.py` | `build_enter_intent(sig, cfg)` — static USD or proportional `copy_scale * conviction(score)` |
-| `exits.py` | `maybe_exit_intent(sig, cfg, holdings)` — proportional vs full-position exit + dust suppression |
+| `exits.py` | `maybe_exit_intent(sig, cfg, coord)` — **allocation-aware** guru SELL (P5) |
+| `scheduled_exit_demo.py` | Optional timed ExitIntent after BUY; clamps to `guru_follow` allocation |
 
 ## Contract
 
 ```python
 def on_guru_signal(
     sig: GuruCopySignal,
-    holdings: dict[TokenId, Decimal],
-) -> tuple[list[Intent], str | None, dict[str, str] | None]:
+    coord: RuntimeCoordinator,
+) -> tuple[list[Intent], str | None, dict[str, Any] | None]:
     ...
 ```
 
 - Returns `(intents, skip_reason, sizing_meta)`.
-- `skip_reason`, when set, is a constant from `core/reason_codes.py` (e.g. `GURU_BELOW_MIN_NOTIONAL`, `GURU_NO_BOT_INVENTORY`, `GURU_PRICE_REQUIRED`).
-- `sizing_meta` is merged into the `intent_created` fact for operator audit (e.g. `{"sizing_mode": "static"}`).
+- `skip_reason`, when set, is a constant from `core/reason_codes.py` (e.g. `GURU_NO_ALLOCATED_INVENTORY`, `GURU_NO_BOT_INVENTORY`).
+- Guru SELL `sizing_meta` may include `guru_exit_sizing` and `guru_exit_health` for pipeline fact emission.
 
-## Boundaries (enforced by code review, not the type system)
+## Guru SELL sizing (P5)
+
+Always allocation-aware — no wallet-only path:
+
+```
+final_size = min(planned, allocated_available[guru_follow], available_to_sell)
+```
+
+- `full_bot_position` → planned = full **allocated** `guru_follow` position (not wallet-wide).
+- `proportional_to_guru` → planned = guru-scaled size, then clamped.
+- Zero allocation → no `ExitIntent`, reason `guru_no_allocated_inventory`.
+
+## Boundaries
 
 A strategy MUST NOT:
 
-- Read from `WalletStore` / `OrderStore` directly. The pipeline passes `holdings` precisely so the strategy stays venue-agnostic.
+- Mutate `AllocationLedger`, `WalletStore`, or `OrderStore`.
 - Submit orders, cancel orders, or talk to the venue.
-- Emit logs that duplicate what facts will already record.
-- Carry side-effectful state across calls (the strategy itself is essentially a pure transformation).
+- Bypass `RiskEngine` (strategies only emit `Intent`s).
+
+A strategy MAY:
+
+- Read allocation via `coord.allocation_ledger.get_available_allocated(owner_id, token_id)` for SELL sizing.
+- Read venue inventory snapshots via `runtime/exit_lifecycle.inventory_snapshot(coord, token_id)`.
 
 ## Adding a new strategy
 
-See [../../developer_guide.md §4.2](../../developer_guide.md#42-add-a-new-strategy). At minimum:
-
-1. New `strategies/<name>/` package with `strategy.py`, `filters.py`, `sizing.py`, optional `exits.py`.
-2. Strategy YAML under `config/strategies/<name>.yaml` and a scenario under `config/scenarios/`.
-3. Wire it into `runtime/app.py::cmd_run` (the current code instantiates `GuruFollowStrategy` directly; promote that to a registry when a second strategy lands).
-4. At least one golden test under `tests/test_<name>_strategy_*.py`.
+See [../../developer_guide.md §4.2](../../developer_guide.md#42-add-a-new-strategy).

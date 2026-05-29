@@ -26,7 +26,7 @@ NautilusTrader is **not** the runtime spine; the bot owns its own bus, state mac
 |-----------|------------------------|
 | **One writer per wallet** | `SingleWriterOMS` serializes `submit`/`cancel` onto one queue (`execution/oms.py`). |
 | **Strategies never touch the venue** | `GuruFollowStrategy` consumes a normalized `GuruCopySignal` and returns `Intent`s. No HTTP/WS. |
-| **Separated state** | `WalletStore` (venue truth: positions, balance, open orders), `OrderStore` (local OMS with provisional repair), `StrategyStore` (guru watermark + dedup). |
+| **Separated state** | `WalletStore` (venue truth), `OrderStore` (local OMS), `AllocationLedger` (strategy ownership), `StrategyStore` (guru dedup). |
 | **Fast path vs slow path** | User WS is primary live truth; REST `/data/orders`, `/balance-allowance`, `/positions` are bootstrap + repair backstop. |
 | **Venue truth vs local truth** | See [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) for reconcile state machines (provisional repair, venue adoption, WS-terminal tombstones). |
 | **Fail-closed risk** | `RiskEngine.evaluate_intent` returns a `RiskDecision` with a stable `reason_code`. Missing prices, stale wallet, drift, missing capital all deny. |
@@ -61,6 +61,7 @@ flowchart TB
   subgraph State[state]
     Wallet[WalletStore]
     Orders[OrderStore]
+    Ledger[AllocationLedger]
     Strat[StrategyStore]
     Reconcile[reconcile_open_orders]
   end

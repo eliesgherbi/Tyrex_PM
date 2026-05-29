@@ -4,6 +4,8 @@
 
 Tyrex_PM has **three** YAML files that get merged in a fixed order, plus environment variables for secrets and a few runtime overrides. Everything is parsed by `runtime/config.py` into the immutable `AppConfig(strategy, risk, runtime, raw)` dataclass.
 
+**Allocation ledger:** required on every run. There is no `allocation_ledger.enabled` toggle; `enabled: false` is rejected at config load. All strategy SELL paths size against per-owner allocation.
+
 ---
 
 ## 1. File layout & merge order
@@ -142,7 +144,36 @@ exits:
 | `sizing.copy_scale` | Decimal | Multiplier on guru notional |
 | `sizing.conviction.*` | various | Linear interp between `min_multiplier` and `max_multiplier` over `[score_min, score_max]` |
 | `exits.dust_notional_usd` | Decimal | Suppress dust SELLs |
-| `exits.sell_mode` | str | `proportional_to_guru` mirrors guru's exit fraction; `full_bot_position` always exits the whole local position |
+| `exits.sell_mode` | str | `proportional_to_guru`: guru-scaled size clamped to `guru_follow` allocation + venue `available_to_sell`. `full_bot_position`: sell full **allocated** `guru_follow` position (not wallet-wide). |
+
+### 3.1 Standalone validation strategies (`kind: sell_test` | `kind: allocation_test`)
+
+These YAML kinds are **mutually exclusive** with full guru-follow parsing. They populate `AppConfig.sell_test` or `AppConfig.allocation_test` instead of the guru `strategy` block.
+
+**`config/strategies/allocation_test.yaml`** (`kind: allocation_test`) — P4 ownership toy:
+
+| Key | Meaning |
+|-----|---------|
+| `token_id` | CLOB outcome token for BUY/SELL |
+| `owner_a_id` / `owner_b_id` | Logical allocation owners (default `allocation_test_A` / `allocation_test_B`) |
+| `buy.*` | Owner A BUY leg (`notional_usd`, `limit_price`, `order_style`) |
+| `owner_b_unauthorized_sell.*` | Owner B block drill (`size_mode`: `match_owner_a_buy` \| `fixed`) |
+| `owner_a_sell.*` | Owner A authorized SELL (`delay_s`, `order_style`, `pricing_mode`, `aggression_ticks`, `limit_price` fallback, optional `min_price`) |
+| `timeouts.*` | Poll deadlines for allocation visibility, live position, exit completion |
+| `run_once` | Stop after one A→B→A cycle |
+
+Intent extensions carry `allocation_owner_id` per leg; Owner B never reaches OMS when allocation is zero.
+
+**Owner A SELL pricing** (default `pricing_mode: auto`):
+
+| Key | Meaning |
+|-----|---------|
+| `pricing_mode` | `auto` (default) — live run fetches book and picks `best_bid - aggression_ticks * tick_size` so the SELL is marketable; `fixed` — submit at `limit_price` (or buy limit if unset) |
+| `aggression_ticks` | Ticks below best bid for SELL auto-pricing (default `0` = at best bid) |
+| `limit_price` | Fallback when auto lookup fails; also used in shadow when no live book |
+| `min_price` | Optional lower guardrail: refuse to price below this and fall back to `limit_price` |
+
+Live runs emit `health` `allocation_test_pricing` with side `SELL` before Owner A exit submit.
 
 ---
 
@@ -166,6 +197,7 @@ supervisors:
   adoption_grace_s: 5
 logging:
   level: INFO
+allocation_ledger: {}
 ```
 
 | Key | Meaning |
@@ -173,6 +205,7 @@ logging:
 | `execution_mode` | `shadow` (synthetic fills via `apply_shadow_fill`) or `live` (real CLOB) |
 | `shadow_bootstrap.*` | Synthetic USDC seed for shadow runs (no venue sync) |
 | `reporting.enabled` / `runs_dir` | Toggle and root for `var/reporting/runs/<run_id>/` |
+| `allocation_ledger` | Required marker block. Runtime always tracks per-owner token qty in `var/state/allocation_ledger.json`; all strategy SELL paths clamp to allocated qty (P4/P5). `enabled: false` is rejected at config load. |
 | `supervisors.reconcile_interval_s` | Cadence of REST refresh + reconcile in `live_supervisor.venue_refresh_loop` |
 | `supervisors.submit_grace_s` | Provisional age below which a missing-from-venue local row is non-blocking (`provisional_pending_venue`) |
 | `supervisors.provisional_unknown_terminal_timeout_s` | Provisional age past which an absent row drops as `UNKNOWN_TERMINAL` (when WS fresh and no venue restart) |
@@ -218,7 +251,7 @@ Built-in scenarios in `config/scenarios/`:
 | File | Purpose | Notable overrides |
 |------|---------|-------------------|
 | `shadow_guru.yaml` | Default development / golden-test mode | `execution_mode: shadow`, fast guru poll (`1 s`), large synthetic USDC bootstrap |
-| `live_guru.yaml` | Live guru-follow on Polymarket | `execution_mode: live`, raises `deployment.token_cap_usd` to `100` |
+| `live_guru.yaml` | Live guru-follow on Polymarket | `execution_mode: live` only (inherits risk defaults from `config/risk/default.yaml`) |
 | `live_attest.yaml` | One-shot post + cancel attestation | `capital.enabled: false`, `venue_min_size.enabled: false`, relaxed `notional` band, `require_user_ws_live: false` |
 
 Add new scenarios as small overlays — never duplicate the defaults wholesale.

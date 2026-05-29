@@ -20,3 +20,5 @@ supervisors:
   adoption_grace_s: 5
 logging:
   level: INFO
+allocation_ledger:
+  # Required: per-strategy token ownership for all SELL sizing (P4/P5).

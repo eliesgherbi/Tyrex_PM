@@ -24,9 +24,9 @@ sizing:
 
 exits:
   # --- Guru SELL mirroring (when the copied wallet sells on data-api activity) ---
-  # Sizes an ExitIntent vs your holdings. Does NOT apply to demo forced exits below.
+  # Guru SELL mirroring sizes vs guru_follow allocated qty (allocation ledger required).
+  # full_bot_position: sell full guru_follow allocated position | proportional_to_guru: guru-scaled then clamped
   dust_notional_usd: "0.5"
-  # proportional_to_guru: min(guru_scaled_sell, bot_qty) | full_bot_position: sell entire bot qty
   sell_mode: proportional_to_guru
   # --- Optional: schedule a demo ExitIntent after each copied BUY (see Docs/Implementation/sell_feature/) ---
   # Live: timer starts only once venue sellable inventory >= BUY size (REST positions +/or user-WS).

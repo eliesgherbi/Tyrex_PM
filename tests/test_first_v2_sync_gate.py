@@ -26,6 +26,7 @@ from tyrex_pm.core.enums import ExecutionMode
 from tyrex_pm.core.models import RiskContext
 from tyrex_pm.risk.health import check_aggressive_readiness
 from tyrex_pm.runtime.config import (
+    AllocationLedgerConfig,
     AppConfig,
     CapitalConfig,
     ConcurrencyConfig,
@@ -57,6 +58,7 @@ def _runtime(execution_mode: ExecutionMode) -> RuntimeConfig:
         adoption_grace_s=5.0,
         log_level="INFO",
         shadow_bootstrap=None,
+        allocation_ledger=AllocationLedgerConfig(),
     )
 
 

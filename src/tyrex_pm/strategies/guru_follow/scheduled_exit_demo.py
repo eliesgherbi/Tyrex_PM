@@ -1,15 +1,4 @@
-"""Validation: schedule a demo SELL a few seconds after a copied guru BUY.
-
-* **Shadow:** arm the timer as soon as the BUY completes the success path (instant fill updates
-  positions immediately).
-* **Live:** register a pending exit; arm the timer only when venue-truth shows **sellable**
-  inventory ≥ planned exit size (same formula as :func:`tyrex_pm.risk.inventory.available_to_sell`).
-  That aligns the 3-second window with data-api/positions REST and/or user-WS CONFIRMED fills
-  updating :class:`~tyrex_pm.state.wallet_store.WalletStore` — not merely HTTP submit ack.
-
-``try_arm_live_pending`` is invoked from :meth:`~tyrex_pm.runtime.coordinator.RuntimeCoordinator`
-hooks after wallet/position updates (venue refresh loop, user channel).
-"""
+"""Validation: schedule a demo SELL a few seconds after a copied guru BUY."""
 
 from __future__ import annotations
 
@@ -20,9 +9,19 @@ from tyrex_pm.core.enums import ExecutionMode, OrderStyle, Side
 from tyrex_pm.core.ids import TokenId
 from tyrex_pm.core.models import ApprovedIntent, EnterIntent, ExitIntent
 from tyrex_pm.core.time import monotonic_s
-from tyrex_pm.risk.inventory import available_to_sell
 from tyrex_pm.runtime.config import ExitsConfig
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
+from tyrex_pm.runtime.allocation_ids import OWNER_GURU_FOLLOW
+from tyrex_pm.runtime.allocation_runtime import clamp_planned_to_allocated
+from tyrex_pm.runtime.exit_lifecycle import (
+    ArmSource,
+    clamp_planned_sell_size,
+    emit_arm_attempt,
+    emit_exit_lifecycle,
+    inventory_snapshot,
+    parse_taking_amount,
+    required_sell_qty,
+)
 from tyrex_pm.runtime.intent_work import IntentWorkUnit
 
 
@@ -37,6 +36,7 @@ class _PendingLiveArm:
     parent_correlation_id: str
     parent_buy_intent_id: str
     parent_client_order_id: str
+    match_taking_amount: Decimal | None = None
 
 
 @dataclass
@@ -65,64 +65,120 @@ class ScheduledExitDemoState:
     def register_after_successful_buy(
         self,
         ap: ApprovedIntent,
+        coord: RuntimeCoordinator,
         *,
         parent_correlation_id: str,
         execution_mode: ExecutionMode,
         apply_shadow_fill: bool,
+        match_evidence: dict | None = None,
     ) -> None:
         if not self.enabled:
             return
         intent = ap.intent
         if not isinstance(intent, EnterIntent) or intent.side != Side.BUY:
             return
+        match_taking = parse_taking_amount(match_evidence or {})
+        planned = clamp_planned_sell_size(
+            intent.size,
+            match_taking_amount=match_taking,
+        )
+        planned = clamp_planned_to_allocated(
+            coord,
+            owner_id=OWNER_GURU_FOLLOW,
+            token_id=intent.token_id,
+            planned=planned,
+        )
         delay = float(self.cfg.demo_forced_exit_delay_s)
         now = monotonic_s()
+        emit_exit_lifecycle(
+            coord,
+            "pending_registered",
+            parent_correlation_id,
+            token_id=str(intent.token_id),
+            planned_sell_size=str(planned),
+            parent_buy_intent_id=str(intent.intent_id),
+            parent_client_order_id=str(ap.client_order_id),
+            match_taking_amount=str(match_taking) if match_taking is not None else None,
+        )
         if execution_mode == ExecutionMode.SHADOW and apply_shadow_fill:
             self._armed.append(
                 _ArmedDemoExit(
                     due_mono=now + delay,
                     token_id=intent.token_id,
-                    sell_size=intent.size,
+                    sell_size=planned,
                     limit_price=intent.limit_price,
                     parent_correlation_id=parent_correlation_id,
                     parent_buy_intent_id=str(intent.intent_id),
                     parent_client_order_id=str(ap.client_order_id),
                 )
             )
+            emit_exit_lifecycle(
+                coord,
+                "arm_granted",
+                parent_correlation_id,
+                token_id=str(intent.token_id),
+                planned_sell_size=str(planned),
+                required_qty=str(planned),
+                source="post_buy_ack",
+                armed=True,
+                sell_size=str(planned),
+            )
             return
-        # Live: arm the delay only once venue-truth shows sellable inventory (see try_arm_live_pending).
         self._pending_live.append(
             _PendingLiveArm(
                 token_id=intent.token_id,
-                planned_sell_size=intent.size,
+                planned_sell_size=planned,
                 limit_price=intent.limit_price,
                 parent_correlation_id=parent_correlation_id,
                 parent_buy_intent_id=str(intent.intent_id),
                 parent_client_order_id=str(ap.client_order_id),
+                match_taking_amount=match_taking,
             )
         )
 
-    def try_arm_live_pending(self, coord: RuntimeCoordinator) -> None:
-        """Move pending live rows to armed when ``available_to_sell >= planned_sell_size``."""
+    def try_arm_live_pending(
+        self,
+        coord: RuntimeCoordinator,
+        *,
+        source: ArmSource = "post_buy_ack",
+    ) -> None:
         if not self.enabled or not self._pending_live:
             return
-        positions = {p.token_id: p for p in coord.wallet.positions.values()}
-        in_flight = dict(coord.orders.in_flight_by_token)
         delay = float(self.cfg.demo_forced_exit_delay_s)
         now = monotonic_s()
         still_pending: list[_PendingLiveArm] = []
         for row in self._pending_live:
-            avail = available_to_sell(
-                token_id=row.token_id,
-                positions=positions,
-                in_flight=in_flight,
-            )
-            if avail >= row.planned_sell_size:
+            snap = inventory_snapshot(coord, row.token_id)
+            avail = Decimal(snap["available_to_sell"])
+            req = required_sell_qty(row.planned_sell_size, row.match_taking_amount)
+            if avail >= req:
+                sell_size = clamp_planned_sell_size(
+                    row.planned_sell_size,
+                    match_taking_amount=row.match_taking_amount,
+                    available=avail,
+                )
+                sell_size = clamp_planned_to_allocated(
+                    coord,
+                    owner_id=OWNER_GURU_FOLLOW,
+                    token_id=row.token_id,
+                    planned=sell_size,
+                )
+                emit_arm_attempt(
+                    coord,
+                    event="arm_granted",
+                    token_id=row.token_id,
+                    parent_correlation_id=row.parent_correlation_id,
+                    planned_sell_size=row.planned_sell_size,
+                    required_qty=req,
+                    source=source,
+                    armed=True,
+                    snap=snap,
+                )
                 self._armed.append(
                     _ArmedDemoExit(
                         due_mono=now + delay,
                         token_id=row.token_id,
-                        sell_size=row.planned_sell_size,
+                        sell_size=sell_size,
                         limit_price=row.limit_price,
                         parent_correlation_id=row.parent_correlation_id,
                         parent_buy_intent_id=row.parent_buy_intent_id,
@@ -130,11 +186,37 @@ class ScheduledExitDemoState:
                     )
                 )
             else:
+                emit_arm_attempt(
+                    coord,
+                    event="arm_attempt",
+                    token_id=row.token_id,
+                    parent_correlation_id=row.parent_correlation_id,
+                    planned_sell_size=row.planned_sell_size,
+                    required_qty=req,
+                    source=source,
+                    armed=False,
+                    snap=snap,
+                    reason="waiting_for_inventory",
+                )
+                emit_exit_lifecycle(
+                    coord,
+                    "waiting_for_inventory",
+                    row.parent_correlation_id,
+                    token_id=str(row.token_id),
+                    planned_sell_size=str(row.planned_sell_size),
+                    required_qty=str(req),
+                    source=source,
+                    reason="insufficient_inventory",
+                    **snap,
+                )
                 still_pending.append(row)
         self._pending_live = still_pending
 
-    def pop_due_work_units(self, now_mono: float | None = None) -> list[IntentWorkUnit]:
-        """Return work units for demo exits whose timer has fired (due_mono <= now)."""
+    def pop_due_work_units(
+        self,
+        coord: RuntimeCoordinator,
+        now_mono: float | None = None,
+    ) -> list[IntentWorkUnit]:
         if not self.enabled or not self._armed:
             return []
         now = monotonic_s() if now_mono is None else now_mono
@@ -148,6 +230,13 @@ class ScheduledExitDemoState:
         self._armed = rest
         out: list[IntentWorkUnit] = []
         for row in due:
+            emit_exit_lifecycle(
+                coord,
+                "sell_due",
+                row.parent_correlation_id,
+                token_id=str(row.token_id),
+                sell_size=str(row.sell_size),
+            )
             exit_int = ExitIntent(
                 token_id=row.token_id,
                 side=Side.SELL,
@@ -162,6 +251,13 @@ class ScheduledExitDemoState:
                 "parent_client_order_id": row.parent_client_order_id,
                 "demo_exit_delay_s": str(self.cfg.demo_forced_exit_delay_s),
             }
+            emit_exit_lifecycle(
+                coord,
+                "sell_intent_emitted",
+                row.parent_correlation_id,
+                token_id=str(row.token_id),
+                sell_size=str(row.sell_size),
+            )
             out.append(
                 IntentWorkUnit(
                     intent=exit_int,
@@ -172,10 +268,12 @@ class ScheduledExitDemoState:
         return out
 
 
-def try_arm_scheduled_exit_demos(strat: object, coord: RuntimeCoordinator) -> None:
-    """Invoke from coordinator hooks when wallet/positions may have changed."""
+def try_arm_scheduled_exit_demos(
+    strat: object,
+    coord: RuntimeCoordinator,
+    *,
+    source: ArmSource = "post_buy_ack",
+) -> None:
     demo = getattr(strat, "scheduled_exit_demo", None)
-    if demo is None:
-        return
     if isinstance(demo, ScheduledExitDemoState):
-        demo.try_arm_live_pending(coord)
+        demo.try_arm_live_pending(coord, source=source)

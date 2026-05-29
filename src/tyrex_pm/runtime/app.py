@@ -52,7 +52,9 @@ from tyrex_pm.state.order_store import OrderStore
 from tyrex_pm.state.reconcile import reconcile_open_orders
 from tyrex_pm.state.shadow_wallet import apply_shadow_bootstrap
 from tyrex_pm.state.strategy_store import load_strategy_store, save_strategy_store
+from tyrex_pm.state.allocation_ledger import load_allocation_ledger
 from tyrex_pm.state.wallet_store import WalletStore
+from tyrex_pm.strategies.allocation_test.strategy import AllocationTestStrategy
 from tyrex_pm.strategies.guru_follow.strategy import GuruFollowStrategy
 from tyrex_pm.venue.polymarket.clob_bridge import PyClobBridge
 from tyrex_pm.venue.polymarket.clob_env import (
@@ -375,24 +377,257 @@ async def _run_sell_test_loop(
             live_clob_client=live_clob,
         )
         iterations += 1
-    if args.once or (args.max_iterations is not None and iterations >= args.max_iterations):
+    if args.once:
         return iterations
+    if not strat.cfg.sell.enabled:
+        return iterations
+    completion_timeout = float(os.environ.get("TYREX_SELL_TEST_COMPLETION_TIMEOUT_S", "120"))
+    inventory_timeout = float(os.environ.get("TYREX_SELL_TEST_INVENTORY_TIMEOUT_S", "90"))
+    deadline = monotonic_s() + completion_timeout
+    inventory_deadline = (
+        monotonic_s() + inventory_timeout if strat.buy_submit_succeeded else deadline
+    )
     next_reconcile_at = monotonic_s()
-    while not stop_live.is_set():
+    while not stop_live.is_set() and monotonic_s() < deadline:
+        if strat.is_done():
+            log.info("sell_test strategy reports is_done; exiting run loop")
+            break
+        if strat.has_pending_inventory_wait() and monotonic_s() >= inventory_deadline:
+            strat.sell_test_state.emit_timeout_waiting_for_inventory(coord)
+            log.error("sell_test timed out waiting for sellable inventory")
+            break
         now = monotonic_s()
         if now >= next_reconcile_at:
             reconcile_coordinator(coord, sink, str(run_id))
             next_reconcile_at = now + float(app.runtime.reconcile_interval_s)
-        if strat.is_done():
-            log.info("sell_test strategy reports is_done; exiting run loop")
-            break
         try:
             await asyncio.wait_for(stop_live.wait(), timeout=0.5)
             break
         except asyncio.TimeoutError:
             iterations += 1
-            if args.max_iterations is not None and iterations >= args.max_iterations:
+    grace_s = float(os.environ.get("TYREX_SELL_TEST_SCHEDULER_GRACE_S", "2"))
+    await asyncio.sleep(grace_s)
+    return iterations
+
+
+async def _run_allocation_test_loop(
+    *,
+    args: argparse.Namespace,
+    app,
+    run_id: RunId,
+    strat: AllocationTestStrategy,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms_backend,
+    apply_local_fill: bool,
+    live_clob,
+    stop_live: asyncio.Event,
+) -> int:
+    """Drive allocation_test: Owner A BUY → Owner B block → Owner A SELL."""
+    from decimal import Decimal
+
+    from tyrex_pm.core.ids import TokenId
+    from tyrex_pm.runtime.exit_lifecycle import inventory_snapshot
+
+    iterations = 0
+    cfg = strat.cfg
+    rid = str(run_id)
+
+    if app.runtime.execution_mode == ExecutionMode.LIVE:
+        readiness_timeout = float(os.environ.get("TYREX_ALLOCATION_TEST_READINESS_S", "60"))
+        ok_r, rsn = await _wait_sell_test_live_readiness(coord, app, timeout_s=readiness_timeout)
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                rid,
+                {"event": "allocation_test_readiness", "ok": ok_r, "detail": rsn},
+            )
+        )
+        if not ok_r:
+            log.error(
+                "allocation_test live readiness failed after %.1fs: %s — aborting before BUY",
+                readiness_timeout,
+                rsn,
+            )
+            return iterations
+
+    for wu in strat.owner_a_buy_work_units():
+        await process_intent_work_unit(
+            wu,
+            app=app,
+            run_id=run_id,
+            strategy=strat,
+            coord=coord,
+            sink=sink,
+            oms=oms_backend,
+            apply_local_shadow_fill=apply_local_fill,
+            live_clob_client=live_clob,
+        )
+        iterations += 1
+
+    if strat.is_done():
+        return iterations
+
+    if not strat.buy_submit_succeeded:
+        return iterations
+
+    pos_deadline = monotonic_s() + cfg.timeouts.position_visible_s
+    prerequisites_visible = False
+    tid = TokenId(cfg.token_id)
+    last_pos_refresh = 0.0
+    while monotonic_s() < pos_deadline and not stop_live.is_set():
+        if (
+            app.runtime.execution_mode == ExecutionMode.LIVE
+            and live_clob is not None
+            and coord.positions_client is not None
+            and coord.positions_wallet_address
+            and monotonic_s() - last_pos_refresh >= 0.5
+        ):
+            await refresh_positions_from_data_api(
+                coord.wallet,
+                coord.positions_client,
+                coord.positions_wallet_address,
+            )
+            last_pos_refresh = monotonic_s()
+        if strat.check_owner_b_prerequisites_visible(coord):
+            prerequisites_visible = True
+            strat.mark_owner_a_allocation_visible()
+            break
+        await asyncio.sleep(0.05 if apply_local_fill else 0.5)
+
+    if not prerequisites_visible:
+        if strat.check_owner_b_prerequisites_visible(coord):
+            strat.mark_owner_a_allocation_visible()
+        else:
+            strat.emit_timeout_position_visible(sink, rid)
+            return iterations
+
+    if strat.is_done():
+        return iterations
+
+    strat.attempt_owner_b_unauthorized_sell(coord, sink, rid)
+    if strat.is_done():
+        return iterations
+
+    if cfg.owner_a_sell.delay_s > 0:
+        await asyncio.sleep(float(cfg.owner_a_sell.delay_s))
+
+    if app.runtime.execution_mode == ExecutionMode.LIVE:
+        pos_deadline = monotonic_s() + cfg.timeouts.position_visible_s
+        tid = TokenId(cfg.token_id)
+        while monotonic_s() < pos_deadline and not stop_live.is_set():
+            snap = inventory_snapshot(coord, tid)
+            if Decimal(snap["available_to_sell"]) > 0:
                 break
+            await asyncio.sleep(0.5)
+        else:
+            strat.mark_timeout_position_visible()
+            return iterations
+
+    sell_cfg = cfg.owner_a_sell
+    if (
+        sell_cfg.enabled
+        and sell_cfg.pricing_mode == SELL_TEST_PRICING_AUTO
+        and app.runtime.execution_mode == ExecutionMode.LIVE
+        and live_clob is not None
+    ):
+        market_info = None
+        if coord.market_info_cache is not None:
+            try:
+                market_info = await coord.market_info_cache.get(cfg.token_id)
+            except Exception:  # noqa: BLE001 — pricing falls back regardless
+                market_info = None
+        fallback = sell_cfg.limit_price or cfg.buy.limit_price
+        resolved = await resolve_marketable_price_via_client(
+            client=live_clob,
+            market_info=market_info,
+            token_id=cfg.token_id,
+            side="SELL",
+            aggression_ticks=sell_cfg.aggression_ticks,
+            fallback_price=fallback,
+            min_price=sell_cfg.min_price,
+        )
+        evidence = resolved.to_evidence()
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                rid,
+                {
+                    "event": "allocation_test_pricing",
+                    "side": "SELL",
+                    "token_id": cfg.token_id,
+                    **evidence,
+                },
+            )
+        )
+        if resolved.source == "auto_book" and resolved.price > 0:
+            strat.set_resolved_sell_price(resolved.price, evidence=evidence)
+            log.info(
+                "allocation_test auto-pricing SELL: best_bid=%s tick=%s aggression=%s -> price=%s",
+                resolved.best_bid,
+                resolved.tick_size,
+                resolved.aggression_ticks,
+                resolved.price,
+            )
+        elif fallback is not None and fallback > 0:
+            log.warning(
+                "allocation_test auto-pricing SELL fell back: %s (using limit_price=%s)",
+                resolved.error,
+                fallback,
+            )
+            strat.set_resolved_sell_price(
+                fallback,
+                evidence={**evidence, "fallback_used": True},
+            )
+        else:
+            log.error(
+                "allocation_test auto-pricing SELL failed with no fallback: %s",
+                resolved.error,
+            )
+            strat.emit_sell_pricing_failed(sink, rid, error=resolved.error)
+            return iterations
+
+    wu = strat.build_owner_a_sell_work_unit(coord)
+    if wu is None:
+        strat.mark_timeout_owner_a_exit()
+        return iterations
+
+    await process_intent_work_unit(
+        wu,
+        app=app,
+        run_id=run_id,
+        strategy=strat,
+        coord=coord,
+        sink=sink,
+        oms=oms_backend,
+        apply_local_shadow_fill=apply_local_fill,
+        live_clob_client=live_clob,
+    )
+    iterations += 1
+
+    exit_deadline = monotonic_s() + cfg.timeouts.owner_a_exit_timeout_s
+    while monotonic_s() < exit_deadline and not stop_live.is_set():
+        if strat.is_done():
+            break
+        await asyncio.sleep(0.05)
+    if not strat.is_done():
+        strat.mark_timeout_owner_a_exit()
+
+    strat.verify_final_ledger(coord)
+    complete_payload: dict = {
+        "event": "allocation_test_complete",
+        "phase": strat.phase,
+        "done": strat.is_done(),
+        "sell_outcome": strat.sell_outcome,
+    }
+    complete_payload.update(strat.ledger_snapshot(coord))
+    sink.write(
+        make_fact(
+            FACT_TYPE_HEALTH,
+            rid,
+            complete_payload,
+        )
+    )
     return iterations
 
 
@@ -423,9 +658,22 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     state_path = (root / args.state_dir).resolve() / "guru_strategy_store.json"
     strategy_store = load_strategy_store(state_path)
+    allocation_ledger_path = (root / args.state_dir).resolve() / "allocation_ledger.json"
+    allocation_ledger = load_allocation_ledger(allocation_ledger_path)
     sell_test_mode = app.sell_test is not None
-    strat: GuruFollowStrategy | SellTestStrategy
-    if sell_test_mode:
+    allocation_test_mode = app.allocation_test is not None
+    strat: GuruFollowStrategy | SellTestStrategy | AllocationTestStrategy
+    if allocation_test_mode:
+        assert app.allocation_test is not None
+        strat = AllocationTestStrategy(app.allocation_test)
+        log.info(
+            "Loaded allocation_test strategy: token_id=%s owner_a=%s owner_b=%s run_once=%s",
+            app.allocation_test.token_id,
+            app.allocation_test.owner_a_id,
+            app.allocation_test.owner_b_id,
+            app.allocation_test.run_once,
+        )
+    elif sell_test_mode:
         assert app.sell_test is not None  # for type checker
         strat = SellTestStrategy(app.sell_test)
         log.info(
@@ -495,16 +743,18 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     assert coord is not None
 
+    coord.allocation_ledger = allocation_ledger
+
     if sell_test_mode:
 
-        def _sell_test_try_arm() -> None:
-            try_arm_sell_test_pending(strat, coord)
+        def _sell_test_try_arm(*, source="post_buy_ack"):
+            try_arm_sell_test_pending(strat, coord, source=source)
 
         coord.scheduled_exit_demo_try_arm = _sell_test_try_arm
     elif app.strategy.exits.demo_forced_exit_enabled:
 
-        def _scheduled_exit_try_arm() -> None:
-            try_arm_scheduled_exit_demos(strat, coord)
+        def _scheduled_exit_try_arm(*, source="post_buy_ack"):
+            try_arm_scheduled_exit_demos(strat, coord, source=source)
 
         coord.scheduled_exit_demo_try_arm = _scheduled_exit_try_arm
 
@@ -512,6 +762,10 @@ async def cmd_run(args: argparse.Namespace) -> None:
     iterations = 0
     last_guru_poll: dict | None = None
     with JsonlSink(facts_path) as sink:
+        coord.exit_lifecycle_run_id = str(run_id)
+        coord.exit_lifecycle_sink = sink
+        coord.allocation_ledger_run_id = str(run_id)
+        coord.allocation_ledger_sink = sink
         try:
             sink.write(
                 make_fact(
@@ -526,10 +780,12 @@ async def cmd_run(args: argparse.Namespace) -> None:
                 venue_interval = float(os.environ.get("TYREX_VENUE_REFRESH_S", str(app.runtime.reconcile_interval_s)))
                 positions_addr = resolve_positions_wallet_address(live_clob)
                 positions_data_client: DataApiClient | None = None
+                coord.positions_wallet_address = positions_addr
                 if positions_addr:
                     positions_data_client = DataApiClient(
                         os.environ.get("TYREX_DATA_API_BASE", DEFAULT_DATA_API_BASE)
                     )
+                    coord.positions_client = positions_data_client
                 else:
                     log.warning(
                         "positions REST safety net disabled: no funder/EOA wallet address resolved; "
@@ -548,7 +804,7 @@ async def cmd_run(args: argparse.Namespace) -> None:
                     # ``bootstrap_not_complete`` (see runtime/health_runtime).
                     coord.health.mark_first_v2_sync_complete()
                     if coord.scheduled_exit_demo_try_arm is not None:
-                        coord.scheduled_exit_demo_try_arm()
+                        coord.scheduled_exit_demo_try_arm(source="periodic_refresh")
                 except Exception:
                     log.exception("initial live bootstrap (wallet sync) failed")
                     coord.health.mark_heartbeat(ok=False)
@@ -647,7 +903,21 @@ async def cmd_run(args: argparse.Namespace) -> None:
                 )
 
             fixture_path: Path | None = args.fixture
-            if sell_test_mode:
+            if allocation_test_mode:
+                assert isinstance(strat, AllocationTestStrategy)
+                iterations = await _run_allocation_test_loop(
+                    args=args,
+                    app=app,
+                    run_id=run_id,
+                    strat=strat,
+                    coord=coord,
+                    sink=sink,
+                    oms_backend=oms_backend,
+                    apply_local_fill=apply_local_fill,
+                    live_clob=live_clob,
+                    stop_live=stop_live,
+                )
+            elif sell_test_mode:
                 assert isinstance(strat, SellTestStrategy)
                 iterations = await _run_sell_test_loop(
                     args=args,

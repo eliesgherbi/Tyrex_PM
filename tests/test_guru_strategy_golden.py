@@ -4,14 +4,43 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from tyrex_pm.core.enums import OrderStyle, Side
 from tyrex_pm.core.ids import TokenId
-from tyrex_pm.core.models import GuruTradeSignal
+from tyrex_pm.core.models import GuruTradeSignal, WalletPosition
 from tyrex_pm.runtime.config import load_app_config, parse_app_config
+from tyrex_pm.runtime.coordinator import RuntimeCoordinator
+from tyrex_pm.runtime.health_runtime import HealthRuntime
 from tyrex_pm.signals.guru_copy_signal import to_copy_signal
+from tyrex_pm.state.allocation_ledger import AllocationLedger
+from tyrex_pm.state.order_store import OrderStore
+from tyrex_pm.state.wallet_store import WalletStore
 from tyrex_pm.strategies.guru_follow import filters
 from tyrex_pm.strategies.guru_follow.strategy import GuruFollowStrategy
+from tyrex_pm.runtime.allocation_ids import OWNER_GURU_FOLLOW
+
+TOKEN = TokenId("1234567890")
+
+
+def _wire_coord(
+    tmp_path: Path,
+    *,
+    wallet_qty: Decimal = Decimal("0"),
+    allocated: Decimal = Decimal("0"),
+) -> RuntimeCoordinator:
+    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
+    if wallet_qty > 0:
+        coord.wallet.positions[TOKEN] = WalletPosition(
+            token_id=TOKEN,
+            qty=wallet_qty,
+            avg_price_usd=Decimal("0.5"),
+        )
+    ledger = AllocationLedger(path=tmp_path / f"ledger-{uuid4()}.json")
+    coord.allocation_ledger = ledger
+    if allocated > 0:
+        ledger.apply_buy(OWNER_GURU_FOLLOW, TOKEN, allocated, correlation_id="seed")
+    return coord
 
 
 def test_significance_skip_reason() -> None:
@@ -22,7 +51,7 @@ def test_significance_skip_reason() -> None:
     app2 = parse_app_config(risk=app.raw["risk"], strategy=strat, runtime=app.raw["runtime"])
     sig = GuruTradeSignal(
         guru_wallet="0xg",
-        token_id=TokenId("1234567890"),
+        token_id=TOKEN,
         side=Side.BUY,
         size=Decimal("10"),
         price=Decimal("0.7"),
@@ -52,7 +81,7 @@ def test_conviction_requires_score_when_enabled() -> None:
     app2 = parse_app_config(risk=app.raw["risk"], strategy=strat, runtime=app.raw["runtime"])
     sig = GuruTradeSignal(
         guru_wallet="0xg",
-        token_id=TokenId("1234567890"),
+        token_id=TOKEN,
         side=Side.BUY,
         size=Decimal("10"),
         price=Decimal("0.5"),
@@ -68,16 +97,7 @@ def test_conviction_requires_score_when_enabled() -> None:
     assert fr.reason == rc.GURU_LOW_CONVICTION
 
 
-def test_conviction_scales_enter_size() -> None:
-    """Conviction multiplier only applies when ``static_enabled`` is off.
-
-    The default ``config/strategies/guru_follow.yaml`` ships with
-    ``sizing.static_enabled: true`` (BUY entries use a fixed USD notional and
-    ignore both ``copy_scale`` and conviction). To exercise the proportional
-    path that conviction scales, the test must explicitly opt out of static
-    sizing in addition to enabling conviction.
-    """
-
+def test_conviction_scales_enter_size(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     app = load_app_config(repo_root=root)
     strat = deepcopy(app.raw["strategy"])
@@ -93,7 +113,7 @@ def test_conviction_scales_enter_size() -> None:
     gf = GuruFollowStrategy(app2.strategy)
     sig = GuruTradeSignal(
         guru_wallet="0xg",
-        token_id=TokenId("1234567890"),
+        token_id=TOKEN,
         side=Side.BUY,
         size=Decimal("10"),
         price=Decimal("0.5"),
@@ -102,7 +122,8 @@ def test_conviction_scales_enter_size() -> None:
         ts_venue=datetime.now(timezone.utc),
         conviction_score=Decimal("1"),
     )
-    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), {})
+    coord = _wire_coord(tmp_path)
+    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), coord)
     assert skip is None
     assert len(intents) == 1
     assert intents[0].size == Decimal("20")
@@ -110,13 +131,14 @@ def test_conviction_scales_enter_size() -> None:
     assert meta["sizing_mode"] == "proportional"
 
 
-def test_exit_proportional_caps_to_holdings() -> None:
+def test_exit_proportional_clamps_to_allocation_not_wallet(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     app = load_app_config(repo_root=root)
     gf = GuruFollowStrategy(app.strategy)
+    coord = _wire_coord(tmp_path, wallet_qty=Decimal("10"), allocated=Decimal("3"))
     sig = GuruTradeSignal(
         guru_wallet="0xg",
-        token_id=TokenId("1234567890"),
+        token_id=TOKEN,
         side=Side.SELL,
         size=Decimal("100"),
         price=Decimal("0.5"),
@@ -124,18 +146,18 @@ def test_exit_proportional_caps_to_holdings() -> None:
         dedup_key="e1",
         ts_venue=datetime.now(timezone.utc),
     )
-    holdings = {TokenId("1234567890"): Decimal("3")}
-    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), holdings)
+    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), coord)
     assert skip is None
     assert len(intents) == 1
-    assert meta is None
+    assert meta is not None
     from tyrex_pm.core.models import ExitIntent
 
     assert isinstance(intents[0], ExitIntent)
     assert intents[0].size == Decimal("3")
+    assert meta["guru_exit_sizing"]["allocated_available"] == "3"
 
 
-def test_static_buy_uses_fixed_notional_and_meta() -> None:
+def test_static_buy_uses_fixed_notional_and_meta(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     app = load_app_config(repo_root=root)
     strat = deepcopy(app.raw["strategy"])
@@ -153,7 +175,7 @@ def test_static_buy_uses_fixed_notional_and_meta() -> None:
     gf = GuruFollowStrategy(app2.strategy)
     sig = GuruTradeSignal(
         guru_wallet="0xg",
-        token_id=TokenId("1234567890"),
+        token_id=TOKEN,
         side=Side.BUY,
         size=Decimal("99999"),
         price=Decimal("0.5"),
@@ -162,14 +184,15 @@ def test_static_buy_uses_fixed_notional_and_meta() -> None:
         ts_venue=datetime.now(timezone.utc),
         conviction_score=Decimal("1"),
     )
-    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), {})
+    coord = _wire_coord(tmp_path)
+    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), coord)
     assert skip is None
     assert meta == {"sizing_mode": "static"}
     assert len(intents) == 1
     assert intents[0].size == Decimal("200")
 
 
-def test_proportional_respects_copy_scale_when_static_off() -> None:
+def test_proportional_respects_copy_scale_when_static_off(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     app = load_app_config(repo_root=root)
     strat = deepcopy(app.raw["strategy"])
@@ -179,7 +202,7 @@ def test_proportional_respects_copy_scale_when_static_off() -> None:
     gf = GuruFollowStrategy(app2.strategy)
     sig = GuruTradeSignal(
         guru_wallet="0xg",
-        token_id=TokenId("1234567890"),
+        token_id=TOKEN,
         side=Side.BUY,
         size=Decimal("10"),
         price=Decimal("0.5"),
@@ -188,7 +211,8 @@ def test_proportional_respects_copy_scale_when_static_off() -> None:
         ts_venue=datetime.now(timezone.utc),
         conviction_score=None,
     )
-    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), {})
+    coord = _wire_coord(tmp_path)
+    intents, skip, meta = gf.on_guru_signal(to_copy_signal(sig), coord)
     assert skip is None
     assert meta == {"sizing_mode": "proportional"}
     assert intents[0].size == Decimal("5")

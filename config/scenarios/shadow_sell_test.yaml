@@ -1,10 +1,5 @@
-# Shadow scenario for the standalone sell_test strategy.
-#
-# Loosens the production-tight notional cap so a $5 BUY/SELL test can flow
-# through risk -> shadow OMS without being clipped below ``venue_min_size``.
-# Live runs should use ``--scenario live_guru`` (or a sell-test-specific live
-# scenario) — those still enforce real venue gates.
-
+# Shadow scenario for sell_test. Loosens notional caps; seeds synthetic USDC.
+# SELL sizing still clamps to sell_test owner allocation (allocation ledger required).
 execution_mode: shadow
 
 risk:

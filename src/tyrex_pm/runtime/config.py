@@ -14,7 +14,12 @@ from tyrex_pm.core.errors import ConfigError
 
 STRATEGY_KIND_GURU_FOLLOW = "guru_follow"
 STRATEGY_KIND_SELL_TEST = "sell_test"
-_VALID_STRATEGY_KINDS = (STRATEGY_KIND_GURU_FOLLOW, STRATEGY_KIND_SELL_TEST)
+STRATEGY_KIND_ALLOCATION_TEST = "allocation_test"
+_VALID_STRATEGY_KINDS = (
+    STRATEGY_KIND_GURU_FOLLOW,
+    STRATEGY_KIND_SELL_TEST,
+    STRATEGY_KIND_ALLOCATION_TEST,
+)
 
 
 SELL_TEST_PRICING_FIXED = "fixed"
@@ -161,6 +166,57 @@ class SellTestStrategyConfig:
 
 
 @dataclass(frozen=True)
+class AllocationTestBuyConfig:
+    enabled: bool
+    notional_usd: Decimal
+    limit_price: Decimal | None
+    order_style: OrderStyle
+
+
+@dataclass(frozen=True)
+class AllocationTestOwnerBConfig:
+    enabled: bool
+    size_mode: str  # match_owner_a_buy | fixed
+    fixed_size: Decimal
+
+
+@dataclass(frozen=True)
+class AllocationTestOwnerASellConfig:
+    enabled: bool
+    delay_s: float
+    order_style: OrderStyle
+    #: ``fixed``: submit at ``limit_price`` (or buy limit if unset). ``auto``: live
+    #: run resolves ``best_bid - aggression_ticks * tick`` before SELL submit.
+    limit_price: Decimal | None
+    pricing_mode: str = SELL_TEST_PRICING_AUTO
+    aggression_ticks: int = 0
+    min_price: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class AllocationTestTimeoutsConfig:
+    allocation_visible_s: float
+    position_visible_s: float
+    unauthorized_sell_timeout_s: float
+    owner_a_exit_timeout_s: float
+
+
+@dataclass(frozen=True)
+class AllocationTestStrategyConfig:
+    """Toy strategy validating P4 allocation ownership (A buy / B block / A sell)."""
+
+    enabled: bool
+    token_id: str
+    owner_a_id: str
+    owner_b_id: str
+    buy: AllocationTestBuyConfig
+    owner_b_unauthorized_sell: AllocationTestOwnerBConfig
+    owner_a_sell: AllocationTestOwnerASellConfig
+    run_once: bool
+    timeouts: AllocationTestTimeoutsConfig
+
+
+@dataclass(frozen=True)
 class NotionalConfig:
     min_usd: Decimal
     max_usd: Decimal
@@ -246,6 +302,11 @@ class ShadowBootstrapConfig:
 
 
 @dataclass(frozen=True)
+class AllocationLedgerConfig:
+    """Allocation ledger is always active; persisted to ``var/state/allocation_ledger.json``."""
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     execution_mode: ExecutionMode
     reporting: ReportingConfig
@@ -262,6 +323,7 @@ class RuntimeConfig:
     adoption_grace_s: float
     log_level: str
     shadow_bootstrap: ShadowBootstrapConfig | None
+    allocation_ledger: AllocationLedgerConfig
 
 
 @dataclass(frozen=True)
@@ -275,6 +337,8 @@ class AppConfig:
     #: holds default placeholder values so risk gates and other code paths that
     #: read ``app.strategy.*`` remain stable.
     sell_test: SellTestStrategyConfig | None = None
+    #: Populated only when the loaded strategy YAML declares ``kind: allocation_test``.
+    allocation_test: AllocationTestStrategyConfig | None = None
 
 
 def _dec(d: dict[str, Any], key: str, default: str = "0") -> Decimal:
@@ -326,10 +390,15 @@ def _parse_order_style(raw: Any, default: OrderStyle = OrderStyle.GTC) -> OrderS
     return default
 
 
-def _parse_pricing_mode(raw: Any, *, where: str) -> str:
-    """Validate a ``pricing_mode`` field; default to ``fixed`` when missing/blank."""
+def _parse_pricing_mode(
+    raw: Any,
+    *,
+    where: str,
+    default: str = SELL_TEST_PRICING_FIXED,
+) -> str:
+    """Validate a ``pricing_mode`` field; default when missing/blank."""
     if raw in (None, ""):
-        return SELL_TEST_PRICING_FIXED
+        return default
     s = str(raw).strip().lower()
     if s not in _VALID_SELL_TEST_PRICING_MODES:
         raise ConfigError(
@@ -399,6 +468,93 @@ def _parse_sell_test_strategy(strategy: dict[str, Any]) -> SellTestStrategyConfi
     )
 
 
+_VALID_ALLOCATION_TEST_SIZE_MODES = ("match_owner_a_buy", "fixed")
+
+
+def _parse_allocation_test_strategy(strategy: dict[str, Any]) -> AllocationTestStrategyConfig:
+    from tyrex_pm.runtime.allocation_ids import (
+        DEFAULT_ALLOCATION_TEST_OWNER_A,
+        DEFAULT_ALLOCATION_TEST_OWNER_B,
+    )
+
+    enabled = bool(strategy.get("enabled", True))
+    token_id = str(strategy.get("token_id", "")).strip()
+    if not token_id:
+        raise ConfigError("allocation_test strategy requires non-empty top-level 'token_id'")
+    owner_a_id = str(strategy.get("owner_a_id", DEFAULT_ALLOCATION_TEST_OWNER_A)).strip()
+    owner_b_id = str(strategy.get("owner_b_id", DEFAULT_ALLOCATION_TEST_OWNER_B)).strip()
+    if not owner_a_id or not owner_b_id:
+        raise ConfigError("allocation_test owner_a_id and owner_b_id must be non-empty")
+    if owner_a_id == owner_b_id:
+        raise ConfigError("allocation_test owner_a_id and owner_b_id must differ")
+
+    buy_raw = strategy.get("buy") or {}
+    buy_enabled = bool(buy_raw.get("enabled", True))
+    buy_price_raw = buy_raw.get("limit_price")
+    if buy_enabled and buy_price_raw in (None, ""):
+        raise ConfigError("allocation_test buy.enabled requires buy.limit_price")
+    buy_cfg = AllocationTestBuyConfig(
+        enabled=buy_enabled,
+        notional_usd=_dec(buy_raw, "notional_usd", "5"),
+        limit_price=Decimal(str(buy_price_raw)) if buy_price_raw not in (None, "") else None,
+        order_style=_parse_order_style(buy_raw.get("order_style"), OrderStyle.GTC),
+    )
+
+    ob_raw = strategy.get("owner_b_unauthorized_sell") or {}
+    size_mode = str(ob_raw.get("size_mode", "match_owner_a_buy")).strip().lower()
+    if size_mode not in _VALID_ALLOCATION_TEST_SIZE_MODES:
+        raise ConfigError(
+            f"allocation_test owner_b_unauthorized_sell.size_mode '{size_mode}' is not supported "
+            f"(valid: {', '.join(_VALID_ALLOCATION_TEST_SIZE_MODES)})"
+        )
+    owner_b_cfg = AllocationTestOwnerBConfig(
+        enabled=bool(ob_raw.get("enabled", True)),
+        size_mode=size_mode,
+        fixed_size=_dec(ob_raw, "fixed_size", "10"),
+    )
+
+    sell_raw = strategy.get("owner_a_sell") or {}
+    sell_price_raw = sell_raw.get("limit_price")
+    sell_pricing_mode = _parse_pricing_mode(
+        sell_raw.get("pricing_mode"),
+        where="owner_a_sell",
+        default=SELL_TEST_PRICING_AUTO,
+    )
+    sell_aggression = int(sell_raw.get("aggression_ticks", 0))
+    if sell_aggression < 0:
+        raise ConfigError("allocation_test owner_a_sell.aggression_ticks must be >= 0")
+    sell_min_price_raw = sell_raw.get("min_price")
+    owner_a_sell_cfg = AllocationTestOwnerASellConfig(
+        enabled=bool(sell_raw.get("enabled", True)),
+        delay_s=float(sell_raw.get("delay_s", 0)),
+        order_style=_parse_order_style(sell_raw.get("order_style"), OrderStyle.GTC),
+        limit_price=Decimal(str(sell_price_raw)) if sell_price_raw not in (None, "") else None,
+        pricing_mode=sell_pricing_mode,
+        aggression_ticks=sell_aggression,
+        min_price=Decimal(str(sell_min_price_raw)) if sell_min_price_raw not in (None, "") else None,
+    )
+
+    to_raw = strategy.get("timeouts") or {}
+    timeouts_cfg = AllocationTestTimeoutsConfig(
+        allocation_visible_s=float(to_raw.get("allocation_visible_s", 5)),
+        position_visible_s=float(to_raw.get("position_visible_s", 90)),
+        unauthorized_sell_timeout_s=float(to_raw.get("unauthorized_sell_timeout_s", 10)),
+        owner_a_exit_timeout_s=float(to_raw.get("owner_a_exit_timeout_s", 120)),
+    )
+
+    return AllocationTestStrategyConfig(
+        enabled=enabled,
+        token_id=token_id,
+        owner_a_id=owner_a_id,
+        owner_b_id=owner_b_id,
+        buy=buy_cfg,
+        owner_b_unauthorized_sell=owner_b_cfg,
+        owner_a_sell=owner_a_sell_cfg,
+        run_once=bool(strategy.get("run_once", True)),
+        timeouts=timeouts_cfg,
+    )
+
+
 def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[RiskConfig, RuntimeConfig]:
     n = risk.get("notional") or {}
     d = risk.get("deployment") or {}
@@ -458,6 +614,13 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
         unknown_terminal = sup.get("venue_confirm_provisional_timeout_s", 60)
     unknown_terminal = float(unknown_terminal)
     adoption_grace = float(sup.get("adoption_grace_s", 5))
+    al = runtime.get("allocation_ledger")
+    if al is None:
+        al = {}
+    if isinstance(al, dict) and al.get("enabled") is False:
+        raise ConfigError(
+            "allocation_ledger.enabled=false is not supported; the allocation ledger is required"
+        )
     rt = RuntimeConfig(
         execution_mode=execution_mode,
         reporting=ReportingConfig(
@@ -471,6 +634,7 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
         adoption_grace_s=adoption_grace,
         log_level=str(log.get("level", "INFO")),
         shadow_bootstrap=shadow_boot,
+        allocation_ledger=AllocationLedgerConfig(),
     )
     return rsk, rt
 
@@ -481,10 +645,18 @@ def _finalize_app_config(
     runtime: dict[str, Any],
     strategy_raw: dict[str, Any],
     sell_test: SellTestStrategyConfig | None,
+    allocation_test: AllocationTestStrategyConfig | None = None,
 ) -> AppConfig:
     rsk, rt = _build_risk_runtime(risk, runtime)
     raw = {"risk": risk, "strategy": strategy_raw, "runtime": runtime}
-    return AppConfig(strategy=strat, risk=rsk, runtime=rt, raw=raw, sell_test=sell_test)
+    return AppConfig(
+        strategy=strat,
+        risk=rsk,
+        runtime=rt,
+        raw=raw,
+        sell_test=sell_test,
+        allocation_test=allocation_test,
+    )
 
 
 def _placeholder_guru_strategy_config() -> StrategyConfig:
@@ -536,10 +708,15 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
             f"strategy.kind '{kind_raw}' is not supported (valid: {', '.join(_VALID_STRATEGY_KINDS)})"
         )
     sell_test_cfg: SellTestStrategyConfig | None = None
+    allocation_test_cfg: AllocationTestStrategyConfig | None = None
     if kind_raw == STRATEGY_KIND_SELL_TEST:
         sell_test_cfg = _parse_sell_test_strategy(strategy)
         strat = _placeholder_guru_strategy_config()
         return _finalize_app_config(strat, risk, runtime, strategy, sell_test_cfg)
+    if kind_raw == STRATEGY_KIND_ALLOCATION_TEST:
+        allocation_test_cfg = _parse_allocation_test_strategy(strategy)
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(strat, risk, runtime, strategy, None, allocation_test_cfg)
 
     g = strategy.get("guru") or {}
     f = strategy.get("filters") or {}
@@ -626,7 +803,22 @@ def load_app_config(
             runtime = _deep_merge(runtime, rt_overlay)
         st_overlay = {
             k: sc[k]
-            for k in ("kind", "guru", "filters", "sizing", "exits", "buy", "sell", "token_id", "run_once")
+            for k in (
+                "kind",
+                "guru",
+                "filters",
+                "sizing",
+                "exits",
+                "buy",
+                "sell",
+                "token_id",
+                "run_once",
+                "owner_a_id",
+                "owner_b_id",
+                "owner_b_unauthorized_sell",
+                "owner_a_sell",
+                "timeouts",
+            )
             if k in sc
         }
         if st_overlay:

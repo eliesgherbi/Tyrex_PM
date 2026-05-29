@@ -18,7 +18,10 @@ log = logging.getLogger(__name__)
 
 #: Files under ``state_dir`` that carry per-run mutable state which a future
 #: ``tyrex-pm run`` would consume. Add any new on-disk state files here.
-_RESETTABLE_FILES: tuple[str, ...] = ("guru_strategy_store.json",)
+_RESETTABLE_FILES: tuple[str, ...] = (
+    "guru_strategy_store.json",
+    "allocation_ledger.json",
+)
 
 
 def reset_local_state(state_dir: Path) -> list[Path]:

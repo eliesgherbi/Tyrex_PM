@@ -8,8 +8,10 @@ Wires everything together. The only module allowed to import freely across layer
 |------|------|
 | `app.py` | CLI entrypoint (`tyrex-pm`). `cmd_run`, `cmd_live_attest`, `cmd_summarize`. Loads config, builds stores, starts supervisors, drives the guru loop |
 | `config.py` | YAML loader + `AppConfig` parsing (see [CONFIG_MODEL.md](../../CONFIG_MODEL.md)) |
-| `coordinator.py` | `RuntimeCoordinator` — holds `WalletStore`, `OrderStore`, `HealthRuntime`, runtime knobs (`submit_grace_s`, `adoption_grace_s`, `provisional_unknown_terminal_timeout_s`), dedup signatures (`last_reconcile_signature`, `last_wallet_sync_signature`). Builds `RiskContext` per call (including derived in-flight reservations) |
-| `pipeline.py` | The synchronous business pipeline: guru signal → strategy → risk → OMS → reconcile + fact emission for each step. Owns `reconcile_coordinator` and `emit_wallet_sync` (with dedup signatures) |
+| `coordinator.py` | `RuntimeCoordinator` — holds `WalletStore`, `OrderStore`, `AllocationLedger`, `HealthRuntime`, dedup signatures. Builds `RiskContext` per call |
+| `pipeline.py` | Guru signal → strategy → risk → OMS → **allocation ledger hooks** → reconcile + facts. `process_intent_work_unit`, `process_new_guru_signals` |
+| `allocation_runtime.py` | Owner resolution, `clamp_planned_to_allocated`, buy/sell/reserve/clamp mutations + `allocation_ledger` facts |
+| `allocation_exit_lifecycle.py` | P4.1 resting SELL fill promotion via WS/reconcile |
 | `live_supervisor.py` | Background async loops for live mode: `supervised_heartbeat_loop`, `venue_refresh_loop`, `provisional_repair_probe_loop`, `user_ws_staleness_loop` |
 | `live_attest.py` | Standalone `tyrex-pm live-attest` command — minimal post + cancel against real CLOB |
 | `health_runtime.py` | `HealthRuntime` — heartbeat, user-WS staleness, reconcile-drift, venue-restart-suspected flags. Read-only into `RiskContext` |
@@ -32,11 +34,12 @@ cmd_run(args)
  │   ├─ ingest_guru_signals           # state/strategy_store dedup + watermark
  │   └─ process_new_guru_signals      # pipeline.py
  │        ├─ guru_signal fact
- │        ├─ strategy.on_guru_signal  # strategies/
+ │        ├─ strategy.on_guru_signal(coord)  # strategies/ (reads allocation; no mutation)
  │        ├─ risk.evaluate_intent     # risk/
- │        ├─ register_submit / oms.submit / ack_submit  # execution/
+ │        ├─ register_submit / oms.submit / ack_submit
+ │        ├─ allocation ledger hooks  # buy/sell/reserve (runtime/allocation_runtime.py)
  │        ├─ apply_shadow_fill  (shadow only)
- │        └─ reconcile_coordinator    # state/reconcile
+ │        └─ reconcile_coordinator
  └─ summarize_run -> run_summary.json # reporting/
 ```
 

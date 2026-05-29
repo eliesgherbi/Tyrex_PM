@@ -32,4 +32,16 @@ Polymarket-native trading stack. Documentation is grouped by audience.
 
 ## Historical / planning notes
 
-[Implementation/](Implementation/) — original rebuild plan, event catalog, copy-strategy scope. Useful for archeology; the live source of truth is the code under `src/tyrex_pm/` and the documents above.
+[Implementation/](Implementation/) — rebuild plans and sell-feature phase docs.
+
+**Current sell/exit phase status (2026-05-21):**
+
+| Phase | Status |
+|-------|--------|
+| P3.5 live validation hardening | Complete |
+| P4 allocation ledger | Complete — live validated (`allocation_test_live_auto_1`) |
+| P4.1 resting SELL lifecycle | Complete |
+| P5 guru allocation-aware SELL | **Code + shadow/unit complete** — live guru validation pending |
+| P6 TP/SL overlays | Deferred |
+
+See [Implementation/sell_feature/README.md](Implementation/sell_feature/README.md).

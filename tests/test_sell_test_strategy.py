@@ -35,6 +35,7 @@ from tyrex_pm.runtime.config import (
     SellTestStrategyConfig,
     parse_app_config,
 )
+from tyrex_pm.runtime.allocation_ids import OWNER_SELL_TEST
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
 from tyrex_pm.runtime.health_runtime import HealthRuntime
 from tyrex_pm.runtime.pipeline import (
@@ -42,6 +43,7 @@ from tyrex_pm.runtime.pipeline import (
     process_scheduled_exit_demo_due,
 )
 from tyrex_pm.state.order_store import OrderStore
+from tyrex_pm.state.allocation_ledger import AllocationLedger
 from tyrex_pm.state.shadow_wallet import apply_shadow_bootstrap
 from tyrex_pm.state.wallet_store import WalletStore
 from tyrex_pm.strategies.sell_test.strategy import (
@@ -175,8 +177,13 @@ def test_live_pending_arms_when_inventory_sufficient() -> None:
         order_style=OrderStyle.GTC,
     )
     ap = ApprovedIntent(intent=ent, client_order_id=ClientOrderId("cid-live"), run_id=RunId("r-live"))
+    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
+    ledger = AllocationLedger()
+    coord.allocation_ledger = ledger
+    ledger.apply_buy(OWNER_SELL_TEST, tid, Decimal("10"), correlation_id="corr-live")
     state.register_after_successful_buy(
         ap,
+        coord,
         parent_correlation_id="corr-live",
         execution_mode=ExecutionMode.LIVE,
         apply_shadow_fill=False,
@@ -184,7 +191,6 @@ def test_live_pending_arms_when_inventory_sufficient() -> None:
     assert len(state._pending_live) == 1
     assert state._armed == []
 
-    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
     state.try_arm_live_pending(coord)
     assert len(state._pending_live) == 1, "no inventory yet -> stays pending"
 
@@ -208,6 +214,7 @@ async def _shadow_buy_then_drain_sell(tmp_path: Path) -> list[dict]:
     assert app.sell_test is not None
     strat = SellTestStrategy(app.sell_test)
     coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
+    coord.allocation_ledger = AllocationLedger(path=tmp_path / "sell_test_alloc.json")
     assert app.runtime.shadow_bootstrap is not None
     apply_shadow_bootstrap(coord.wallet, app.runtime.shadow_bootstrap)
     run_id = RunId(str(uuid4()))
@@ -422,14 +429,14 @@ async def _drive_one_sell_cycle(
     ap = ApprovedIntent(
         intent=ent, client_order_id=ClientOrderId("cid-auto"), run_id=RunId("r-auto")
     )
-    # Simulate shadow instant fill so the SELL is armed and immediately due.
+    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
     strat.sell_test_state.register_after_successful_buy(
         ap,
+        coord,
         parent_correlation_id="corr-auto",
         execution_mode=ExecutionMode.SHADOW,
         apply_shadow_fill=True,
     )
-    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
     work_units = await strat.resolve_due_work_units(coord=coord, live_clob_client=live_clob)
     return strat, work_units
 

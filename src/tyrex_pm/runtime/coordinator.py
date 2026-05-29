@@ -52,7 +52,16 @@ class RuntimeCoordinator:
     market_info_cache: MarketInfoCache | None = None
     #: When set, called after user-WS or REST updates that may change positions — used to arm
     #: live scheduled demo exits once sellable inventory is visible (see ``scheduled_exit_demo``).
-    scheduled_exit_demo_try_arm: Callable[[], None] | None = None
+    scheduled_exit_demo_try_arm: Callable[..., None] | None = None
+    #: P3.5: facts + optional immediate positions refresh for exit lifecycle.
+    exit_lifecycle_run_id: str | None = None
+    exit_lifecycle_sink: object | None = None
+    positions_client: object | None = None
+    positions_wallet_address: str | None = None
+    #: P4/P5: per-strategy token allocation ledger (required; strategy ownership truth).
+    allocation_ledger: object | None = None
+    allocation_ledger_run_id: str | None = None
+    allocation_ledger_sink: object | None = None
 
     def holdings(self) -> dict[TokenId, Decimal]:
         return {tid: p.qty for tid, p in self.wallet.positions.items()}

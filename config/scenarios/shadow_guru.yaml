@@ -6,12 +6,9 @@ runtime:
 guru:
   data_api_poll_interval_s: 1
 
-# Shadow mode boots with $1M synthetic collateral and never touches the venue,
-# so the production-tight $2 notional cap (which exists to keep live-attest
-# orders cheap) is wrong by construction here. Loosen the caps just enough that
-# typical guru-follow fixture signals can flow through risk → OMS without being
-# clipped below ``venue_min_size``. live mode and live-attest are unaffected;
-# this overlay is read only when ``--scenario shadow_guru`` is passed.
+# Shadow guru_follow: synthetic USDC, fast guru poll, relaxed notional caps for fixtures.
+# Allocation ledger still required; guru SELL sizes vs guru_follow allocation (P5).
+# Loosen caps so fixture signals flow through risk without clipping below venue_min_size.
 risk:
   notional:
     min_usd: "1"

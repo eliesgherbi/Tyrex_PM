@@ -281,10 +281,115 @@ Carries `status_code` + `error_msg`. The pipeline does **not** crash; it release
 7. Tail `facts.jsonl`; confirm `risk_decision`, `oms_submit`, `wallet_sync`, `reconcile` cadence.
 8. Scale up by lifting `risk.deployment.*` caps in a custom scenario.
 
+### 7.1 Live `sell_test` validation (P3.5)
+
+Use a **unique** `--run-name` per run so facts do not collide under `var/reporting/runs/`:
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/sell_test.yaml \
+  --scenario live_guru \
+  --run-name "sell_test_live_$(date +%s)"
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m tyrex_pm.runtime.app run `
+  --strategy config/strategies/sell_test.yaml `
+  --scenario live_guru `
+  --run-name "sell_test_live_$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+```
+
+**Success criteria** in `facts.jsonl`:
+
+1. BUY `risk_decision` approved → `oms_submit` with `match_evidence` when matched
+2. `exit_lifecycle`: `pending_registered` → `arm_granted` (or `arm_attempt` then `arm_granted`) → `sell_due` → `sell_intent_emitted` → `sell_submitted` → `sell_completed`
+3. SELL `risk_decision` approved (inventory from venue position, not match evidence alone)
+4. `health` fact with `stopped` + `run_summary.json` written
+
+**Env knobs** (optional):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TYREX_SELL_TEST_COMPLETION_TIMEOUT_S` | `120` | Max wait for terminal SELL after BUY |
+| `TYREX_SELL_TEST_INVENTORY_TIMEOUT_S` | `90` | Max wait for sellable inventory before `timeout_waiting_for_sellable_inventory` |
+
+If SELL never arms, check `exit_lifecycle` `arm_attempt` / `waiting_for_inventory` payloads for `wallet_position_qty` vs `required_qty`, and confirm user-WS CONFIRMED or immediate REST positions refresh ran (`source` field).
+
+### 7.2 Shadow `allocation_test` validation (P4)
+
+Proves venue wallet inventory ≠ per-owner allocation. Run in shadow first (no venue cost):
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/allocation_test.yaml \
+  --run-name "allocation_test_shadow_$(date +%s)"
+```
+
+On Windows PowerShell:
+
+```powershell
+python -m tyrex_pm.runtime.app run `
+  --strategy config/strategies/allocation_test.yaml `
+  --run-name "allocation_test_shadow_$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+```
+
+**Success criteria** in `facts.jsonl`:
+
+1. Owner A BUY → `allocation_ledger` `allocation_buy_applied` with `owner_id=allocation_test_A`
+2. After wallet position visible: `health` `allocation_test_unauthorized_sell_blocked` with **`wallet_position_qty > 0`** and `allocated_available == 0`
+3. **No** Owner B SELL `oms_submit`
+4. Owner A SELL:
+   - Live default is **auto-priced** (`pricing_mode: auto`, `aggression_ticks: 0`) so the limit is at or below current best bid and normally **matches immediately**. Expect `health` `allocation_test_pricing` with side `SELL` before submit.
+   - **Matched:** `allocation_sell_applied`; ledger owner A `allocated_qty → 0`, `reserved_exit_qty → 0`
+   - **Live/resting:** `allocation_exit_order_live`; `allocated_qty` unchanged, `reserved_exit_qty > 0`, `available_allocated == 0` — validates reservation, not economic closure. P4.1 resolves fills/cancels via user WS when the process stays running; otherwise monitor/cancel on Polymarket.
+5. `health` `allocation_test_complete` with `phase=DONE` and `sell_outcome` (`matched` | `live_resting`)
+
+Optional live validation (small notional, unique run name). Default SELL is marketable auto-pricing; expected outcome is matched SELL and final ledger zero:
+
+```powershell
+python -m tyrex_pm.runtime.app run `
+  --strategy config/strategies/allocation_test.yaml `
+  --scenario live_guru `
+  --run-name "allocation_test_live_auto_$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+```
+
+If SELL returns `live_resting` despite auto-pricing, monitor or cancel the resting order on Polymarket; ledger will retain reservation until P4.1 lifecycle or manual cancel.
+
+### 7.3 Live `guru_follow` guru-mirror SELL validation (P5)
+
+P5 is **code + shadow/unit validated**. Before P6, confirm a real guru SELL signal on a live run with the allocation ledger.
+
+```powershell
+python -m tyrex_pm.runtime.app run `
+  --strategy config/strategies/guru_follow.yaml `
+  --scenario live_guru `
+  --run-name "guru_p5_live_$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+```
+
+**Preconditions:** prior guru BUY credited `owner_id=guru_follow` on the same token (check `var/state/allocation_ledger.json` or `allocation_buy_applied` facts).
+
+**Success criteria** when guru emits SELL:
+
+1. `guru_signal` → `strategy_skip` **absent** (unless dust / filters)
+2. `health` `guru_exit_allocation_clamped` if size reduced; otherwise `intent_created` carries `guru_exit_sizing`
+3. `risk_decision` SELL approved (venue inventory gate still applies)
+4. `oms_submit` SELL
+5. `allocation_ledger` `allocation_reserved` → `allocation_sell_applied` (matched) or `allocation_exit_order_live` (resting)
+
+**Blocked SELL** (foreign allocation / zero guru allocation):
+
+- `strategy_skip` reason `guru_no_allocated_inventory`
+- `health` `guru_exit_allocation_blocked` with `wallet_position_qty > 0`, `allocated_available == 0`
+- **No** SELL `oms_submit`
+
+Use a **unique `--run-name`** per attempt.
+
 ---
 
 ## 8. Planned / not yet shipped
 
 - `tyrex-pm summarize` CLI subcommand (use the Python API for now).
 - Kill-switch drill runbook + incident templates.
-- Built-in protection / virtual TP-SL overlays (intentionally absent today; strategies own exits).
+- **P6** TP/SL overlays (deferred until P5 live guru validation is stable).

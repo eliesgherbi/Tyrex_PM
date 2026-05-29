@@ -46,6 +46,8 @@ Constants live in `src/tyrex_pm/reporting/schema_v2.py`. Adding a fact starts th
 | `oms_result` | reserved | — | Reserved for richer post-submit lifecycle (currently `oms_submit/cancel` carry the result inline) |
 | `reconcile` | `pipeline.reconcile_coordinator` | none | Drift flags, severity, repair / adoption decisions, suppressed REST ids |
 | `wallet_sync` | `pipeline.emit_wallet_sync` | none | Snapshot of balance, allowance, position count, open-order count after a REST refresh |
+| `exit_lifecycle` | `runtime/exit_lifecycle`, strategies, `pipeline` | parent correlation id | Scheduled exit / sell_test lifecycle: pending, arm attempts, SELL terminal outcomes (P3.5) |
+| `allocation_ledger` | `state/allocation_ledger`, `runtime/allocation_runtime`, `pipeline` | correlation id when present | Per-strategy token allocation: buy/sell/reserve/clamp (P4) |
 | `live_attest` | `runtime/live_attest.py` | none | Attestation milestones (`auth_ok`, `submit_ok`, `cancel_ok`, ...) plus V2 evidence phases: `v2_environment` (SDK module + version, host, chain, signature_type, builder code presence), `collateral_check` (post-bootstrap pUSD balance + per-exchange allowances), `market_info` (resolved tick/min-size/neg-risk/fee/outcomes), and `outcome_validation` on `complete` (post-cancel order id resolution + outcomes map). |
 
 ---
@@ -110,6 +112,142 @@ Reason codes are stable strings from `core/reason_codes.py`. Always extend that 
 ```
 
 **Dedup**: the signature deliberately **excludes** both `last_sync_ts` and `last_positions_sync_ts` (they advance on every refresh; including them defeated dedup as observed in `live_tes_700`). Two refreshes that change nothing actionable produce one fact.
+
+### `exit_lifecycle` (P3.5)
+
+Emitted during scheduled exit / `sell_test` runs. The `payload.event` field identifies the lifecycle stage:
+
+| `event` | Meaning |
+|---------|---------|
+| `pending_registered` | Pending SELL row created after successful BUY ack |
+| `arm_attempt` | `try_arm_live_pending` evaluated; not enough inventory yet |
+| `waiting_for_inventory` | Same as arm_attempt denial with explicit wait reason |
+| `arm_granted` | Sell delay timer started |
+| `sell_due` | Armed row reached `due_mono` |
+| `sell_intent_emitted` | `ExitIntent` work unit constructed |
+| `sell_risk_denied` | Risk engine denied the SELL |
+| `sell_submitted` | SELL `oms_submit` succeeded |
+| `sell_completed` | Terminal success after SELL submit |
+| `sell_failed` | SELL `oms_reject` or other failure |
+| `timeout_waiting_for_sellable_inventory` | Gave up waiting for venue position visibility |
+
+Example `arm_attempt` / `arm_granted` payload:
+
+```json
+{
+  "event": "arm_granted",
+  "token_id": "4394372887...",
+  "parent_correlation_id": "sell_test:4394372887...",
+  "planned_sell_size": "23.52941176470588235294117647",
+  "required_qty": "23.52",
+  "wallet_position_qty": "23.52",
+  "in_flight_qty": "0",
+  "available_to_sell": "23.52",
+  "source": "immediate_positions_refresh",
+  "armed": true
+}
+```
+
+Live `oms_submit` (BUY) may also include `match_evidence`:
+
+```json
+{
+  "match_evidence": {
+    "match_status": "matched",
+    "taking_amount": "23.52",
+    "making_amount": "3.95136",
+    "order_id": "0x30815ec4..."
+  }
+}
+```
+
+### `allocation_ledger` (P4)
+
+Per-strategy token allocation mutations. Does **not** replace venue inventory; RiskEngine still gates SELL on `WalletStore.positions`.
+
+| `event` | Meaning |
+|---------|---------|
+| `allocation_buy_applied` | Successful BUY OMS increased owner allocation |
+| `allocation_sell_applied` | SELL fill (immediate match, WS, or reconcile) decreased owner allocation |
+| `allocation_partial_fill_applied` | Partial exit fill; reservation reduced, allocation decreased |
+| `allocation_reserved` | Exit qty reserved before SELL submit |
+| `allocation_exit_order_live` | SELL ack is resting on book; reservation stays active; allocation unchanged |
+| `allocation_released` | Reservation released (OMS reject, cancel, etc.) |
+| `allocation_clamped` | Ledger qty reduced to match venue position |
+
+Example:
+
+```json
+{
+  "event": "allocation_buy_applied",
+  "owner_id": "sell_test",
+  "token_id": "4394372887...",
+  "delta_qty": "23.52",
+  "allocated_before": "0",
+  "allocated_after": "23.52",
+  "correlation_id": "sell_test:4394372887..."
+}
+```
+
+### Guru mirror SELL sizing (P5)
+
+Guru mirror exits **always** size against `owner_id = guru_follow` allocation (not wallet-wide qty). The allocation ledger is required; there is no wallet-only guru SELL mode. `full_bot_position` means the full **allocated** guru_follow position.
+
+**`strategy_skip` reason:** `guru_no_allocated_inventory` — wallet has position qty but `guru_follow` `allocated_available` is zero.
+
+**`health` events:**
+
+| `event` | When |
+|---------|------|
+| `guru_exit_allocation_blocked` | SELL skipped; wallet qty > 0 but allocated available is zero |
+| `guru_exit_allocation_clamped` | Final size reduced below planned due to allocation or venue availability |
+
+Blocked example:
+
+```json
+{
+  "event": "guru_exit_allocation_blocked",
+  "owner_id": "guru_follow",
+  "token_id": "1234567890",
+  "planned_size": "100",
+  "wallet_position_qty": "10",
+  "allocated_available": "0",
+  "available_to_sell": "10",
+  "reason": "insufficient_allocation",
+  "dedup_key": "sell-1"
+}
+```
+
+Clamped example:
+
+```json
+{
+  "event": "guru_exit_allocation_clamped",
+  "owner_id": "guru_follow",
+  "token_id": "1234567890",
+  "planned_size": "100",
+  "wallet_position_qty": "10",
+  "allocated_available": "3",
+  "available_to_sell": "10",
+  "final_size": "3",
+  "dedup_key": "sell-1"
+}
+```
+
+**`intent_created` extension** (`guru_exit_sizing`) on successful guru SELL:
+
+```json
+{
+  "guru_exit_sizing": {
+    "owner_id": "guru_follow",
+    "planned_before_clamp": "100",
+    "wallet_position_qty": "10",
+    "allocated_available": "3",
+    "available_to_sell": "10",
+    "final_size": "3"
+  }
+}
+```
 
 ### `oms_submit` / `oms_reject`
 

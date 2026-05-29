@@ -10,7 +10,7 @@ How code is organized, what each layer is allowed to do, and how to extend the s
 
 | Layer | May import | Must not import |
 |-------|------------|-----------------|
-| `strategies/` | `signals/`, `core/`, `runtime.config` (typed dataclasses only) | `venue/*`, HTTP/WS clients, `state/*` (read holdings via the value passed in) |
+| `strategies/` | `signals/`, `core/`, `runtime.config` (typed dataclasses only) | `venue/*`, HTTP/WS clients, direct `state/*` mutation |
 | `risk/` | `core/`, `runtime.config`, `risk/*` | `venue/*`, `strategies/*`, `execution/*` |
 | `execution/` | `core/`, `state/*`, `venue/polymarket/*` (live OMS only) | `strategies/*`, `risk/*` |
 | `state/` | `core/` | `venue/*`, `risk/*`, `strategies/*` |
@@ -73,8 +73,8 @@ class Strategy:                               # de facto interface; see strategi
     def on_guru_signal(
         self,
         sig: GuruCopySignal,
-        holdings: dict[TokenId, Decimal],
-    ) -> tuple[list[Intent], str | None, dict[str, str] | None]:
+        coord: RuntimeCoordinator,
+    ) -> tuple[list[Intent], str | None, dict[str, Any] | None]:
         ...
 ```
 
@@ -82,13 +82,15 @@ Returns:
 
 - a list of `Intent`s (empty when filtered out),
 - an optional **skip reason code** (constant in `core/reason_codes.py`),
-- optional sizing **metadata** merged into the `intent_created` fact (e.g. `{"sizing_mode": "static"}`).
+- optional **metadata** merged into facts (`sizing_mode`, `guru_exit_sizing`, etc.).
 
 A strategy must **not**:
 
-- read venue state directly (use `holdings` argument; that's all you get for live correctness),
-- emit log lines that duplicate what facts will already record,
-- mutate any store (the pipeline owns lifecycle calls).
+- mutate `WalletStore`, `OrderStore`, or `AllocationLedger`,
+- call venue clients or submit orders,
+- emit log lines that duplicate what facts will already record.
+
+A strategy **may** read allocation via `coord.allocation_ledger` (read-only) and venue inventory via `inventory_snapshot(coord, token_id)` for SELL sizing.
 
 ---
 

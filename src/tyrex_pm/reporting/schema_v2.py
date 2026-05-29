@@ -18,6 +18,10 @@ FACT_TYPE_LIVE_ATTEST = "live_attest"
 #: positions). Lets operators see the cadence and content of the positions/balance safety net
 #: without having to infer it from the absence of symptoms. See ``runtime.pipeline.emit_wallet_sync``.
 FACT_TYPE_WALLET_SYNC = "wallet_sync"
+#: Scheduled exit / sell_test lifecycle (P3.5): pending, arm attempts, terminal SELL outcomes.
+FACT_TYPE_EXIT_LIFECYCLE = "exit_lifecycle"
+#: Per-strategy token allocation mutations (P4): buy/sell/reserve/clamp.
+FACT_TYPE_ALLOCATION_LEDGER = "allocation_ledger"
 
 # Canonical key inside oms_submit / oms_cancel payloads for venue response summary string.
 OMS_RESULT_PAYLOAD_KEY = "oms_result"

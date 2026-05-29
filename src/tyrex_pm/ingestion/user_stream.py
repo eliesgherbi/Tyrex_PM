@@ -113,14 +113,23 @@ def apply_user_ws_message(
     wallet: Any,
     msg: dict[str, Any],
     order_store: OrderStore | None = None,
+    coord: RuntimeCoordinator | None = None,
 ) -> None:
     """Apply one user-channel payload; optional ``order_store`` upgrades provisional local rows."""
     t = str(msg.get("type", "")).upper()
     if t == "TRADE":
         _apply_trade(wallet, msg)
+        if coord is not None:
+            from tyrex_pm.runtime.allocation_exit_lifecycle import process_user_ws_allocation_exit
+
+            process_user_ws_allocation_exit(coord, msg)
         return
     if t in ("PLACEMENT", "UPDATE", "CANCELLATION"):
         _apply_order_event(wallet, msg, t, order_store)
+        if coord is not None:
+            from tyrex_pm.runtime.allocation_exit_lifecycle import process_user_ws_allocation_exit
+
+            process_user_ws_allocation_exit(coord, msg)
         return
     if t in ("PONG", "PING", "SUBSCRIBED", "ERROR"):
         return
@@ -182,9 +191,9 @@ async def run_user_ws_ingest(
                         except json.JSONDecodeError:
                             continue
                         if isinstance(msg, dict):
-                            apply_user_ws_message(coord.wallet, msg, coord.orders)
+                            apply_user_ws_message(coord.wallet, msg, coord.orders, coord)
                             if coord.scheduled_exit_demo_try_arm is not None:
-                                coord.scheduled_exit_demo_try_arm()
+                                coord.scheduled_exit_demo_try_arm(source="websocket")
                 finally:
                     ping_task.cancel()
                     try:

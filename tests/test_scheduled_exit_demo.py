@@ -24,6 +24,7 @@ from tyrex_pm.runtime.pipeline import (
     process_scheduled_exit_demo_due,
 )
 from tyrex_pm.state.order_store import OrderStore
+from tyrex_pm.state.allocation_ledger import AllocationLedger
 from tyrex_pm.state.shadow_wallet import apply_shadow_bootstrap
 from tyrex_pm.state.strategy_store import StrategyStore
 from tyrex_pm.state.wallet_store import WalletStore
@@ -56,6 +57,7 @@ async def _shadow_buy_then_drain_demo(tmp_path: Path, *, delay_s: float) -> list
     new = process_fixture_signals(sigs, store)
     strat = GuruFollowStrategy(app.strategy)
     coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
+    coord.allocation_ledger = AllocationLedger(path=tmp_path / "demo_alloc.json")
     apply_shadow_bootstrap(coord.wallet, app.runtime.shadow_bootstrap)
     facts_path = tmp_path / "facts.jsonl"
     with JsonlSink(facts_path) as sink:
@@ -140,6 +142,8 @@ def test_live_demo_pending_arms_when_inventory_sufficient() -> None:
             demo_forced_exit_delay_s=3.0,
         ),
     )
+    from tyrex_pm.runtime.allocation_ids import OWNER_GURU_FOLLOW
+
     demo = ScheduledExitDemoState(cfg.exits)
     tid = TokenId("tok1")
     ent = EnterIntent(
@@ -150,8 +154,13 @@ def test_live_demo_pending_arms_when_inventory_sufficient() -> None:
         order_style=OrderStyle.GTC,
     )
     ap = ApprovedIntent(intent=ent, client_order_id=ClientOrderId("cid-1"), run_id=RunId("r"))
+    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
+    ledger = AllocationLedger()
+    coord.allocation_ledger = ledger
+    ledger.apply_buy(OWNER_GURU_FOLLOW, tid, Decimal("10"), correlation_id="corr-1")
     demo.register_after_successful_buy(
         ap,
+        coord,
         parent_correlation_id="corr-1",
         execution_mode=ExecutionMode.LIVE,
         apply_shadow_fill=False,
@@ -159,7 +168,6 @@ def test_live_demo_pending_arms_when_inventory_sufficient() -> None:
     assert len(demo._pending_live) == 1
     assert not demo._armed
 
-    coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
     demo.try_arm_live_pending(coord)
     assert len(demo._pending_live) == 1
 
