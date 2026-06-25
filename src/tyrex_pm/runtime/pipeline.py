@@ -76,6 +76,7 @@ from tyrex_pm.state.shadow_wallet import apply_shadow_fill
 from tyrex_pm.strategies.guru_follow.strategy import GuruFollowStrategy
 from tyrex_pm.strategies.sell_test.strategy import SellTestStrategy
 from tyrex_pm.strategies.allocation_test.strategy import AllocationTestStrategy
+from tyrex_pm.strategies.tp_sl_test.strategy import TpSlTestStrategy
 from tyrex_pm.venue.polymarket.clob_bridge import parse_venue_order_id
 from tyrex_pm.venue.polymarket.clob_wallet_sync import refresh_wallet_from_clob
 from tyrex_pm.venue.polymarket.positions_sync import refresh_positions_from_data_api
@@ -453,6 +454,8 @@ async def process_intent_work_unit(
             if isinstance(ap.intent, EnterIntent) and ap.intent.side == Side.BUY:
                 if isinstance(strategy, SellTestStrategy):
                     strategy.notify_buy_not_submitted()
+                elif isinstance(strategy, TpSlTestStrategy):
+                    strategy.notify_buy_not_submitted()
                 elif isinstance(strategy, AllocationTestStrategy):
                     strategy.notify_buy_oms_reject()
             elif is_sell_exit:
@@ -597,6 +600,8 @@ async def process_intent_work_unit(
             )
             if isinstance(strategy, SellTestStrategy):
                 strategy.sell_test_state.mark_sell_terminal("sell_submitted")
+            elif isinstance(strategy, TpSlTestStrategy):
+                strategy.tp_sl_state.mark_exit_terminal("sell_submitted")
             elif isinstance(strategy, AllocationTestStrategy):
                 strategy.notify_sell_submitted(
                     match_evidence,
@@ -625,7 +630,7 @@ def _dispatch_post_buy_ack_hook(
     if not isinstance(ap.intent, EnterIntent) or ap.intent.side != Side.BUY:
         return
     sell_test_hook = getattr(strategy, "on_buy_submit_ack", None)
-    if sell_test_hook is not None and isinstance(strategy, SellTestStrategy):
+    if sell_test_hook is not None and isinstance(strategy, (SellTestStrategy, TpSlTestStrategy)):
         sell_test_hook(
             ap=ap,
             parent_correlation_id=parent_correlation_id,
@@ -780,6 +785,8 @@ def _handle_intent_risk_denied(
     if isinstance(intent, EnterIntent) and intent.side == Side.BUY:
         if isinstance(strategy, SellTestStrategy):
             strategy.notify_buy_not_submitted()
+        elif isinstance(strategy, TpSlTestStrategy):
+            strategy.notify_buy_not_submitted()
         elif isinstance(strategy, AllocationTestStrategy):
             strategy.notify_buy_not_submitted()
         return
@@ -793,6 +800,8 @@ def _handle_intent_risk_denied(
         )
         if isinstance(strategy, SellTestStrategy):
             strategy.sell_test_state.mark_sell_terminal("sell_risk_denied")
+        elif isinstance(strategy, TpSlTestStrategy):
+            strategy.tp_sl_state.mark_exit_terminal("sell_risk_denied")
         elif isinstance(strategy, AllocationTestStrategy):
             strategy.notify_sell_denied()
 
@@ -815,6 +824,8 @@ def _handle_sell_oms_reject(
     )
     if isinstance(strategy, SellTestStrategy):
         strategy.sell_test_state.mark_sell_terminal("sell_oms_reject")
+    elif isinstance(strategy, TpSlTestStrategy):
+        strategy.tp_sl_state.mark_exit_terminal("sell_oms_reject")
     elif isinstance(strategy, AllocationTestStrategy):
         strategy.notify_sell_oms_reject()
 

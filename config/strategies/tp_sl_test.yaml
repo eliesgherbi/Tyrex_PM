@@ -1,0 +1,67 @@
+# Standalone TP/SL validation harness (P6). Not production TP/SL — validates the
+# overlay pattern: BUY → monitor price → allocation-aware ExitIntent on trigger.
+#
+# Run (shadow):
+#   python -m tyrex_pm.runtime.app run --strategy config/strategies/tp_sl_test.yaml
+#
+# fixture_prices drives deterministic triggers in shadow; live uses best_bid when
+# price_source=best_bid.
+
+kind: tp_sl_test
+enabled: true
+
+token_id: "107259278816298402654822103861927486042412499982187590917424237525323082866574"
+
+# Allocation owner for BUY credit and SELL clamp (isolated from guru_follow).
+owner_id: tp_sl_test
+
+buy:
+  enabled: true
+  notional_usd: "5"
+  pricing_mode: auto
+  aggression_ticks: 2
+  max_price: "0.95"
+  limit_price: "0.50"
+  order_style: GTC
+
+monitor:
+  enabled: true
+  # price_source: fixture (shadow/CI) | best_bid (live)
+  price_source: best_bid
+  poll_interval_s: 1
+  trigger_mode: take_profit_or_stop_loss
+
+  # Absolute thresholds (either this block OR percentage block below):
+  #take_profit_price: "0.60"
+  #stop_loss_price: "0.40"
+
+  # Percentage thresholds (decimal fractions, not whole numbers):
+  trigger_reference: entry_price
+  take_profit_pct: "0.01"   # +5% from entry
+  stop_loss_pct: "0.01"     # -3% from entry
+  #
+  # Live spread note: price_source=best_bid compared to a BUY limit/ask-side entry
+  # can trigger SL immediately on wide spreads. Monitoring starts only after
+  # protected_qty > 0 (sellable inventory). Future reference options: avg_fill_price,
+  # entry_best_bid, mid, mark.
+
+  fixture_prices: ["0.50", "0.55", "0.61"]
+
+exit:
+  enabled: true
+  # full_allocated_position | percent_allocated_position | fixed_size
+  size_mode: full_allocated_position
+  percent: "1.0"
+  fixed_size: null
+  pricing_mode: auto
+  aggression_ticks: 1
+  min_price: "0.05"
+  limit_price: null
+  order_style: GTC
+
+timeouts:
+  inventory_timeout_s: 90
+  trigger_timeout_s: 120
+  completion_timeout_s: 120
+
+run_once: true

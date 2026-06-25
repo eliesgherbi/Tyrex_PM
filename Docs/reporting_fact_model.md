@@ -202,6 +202,21 @@ Guru mirror exits **always** size against `owner_id = guru_follow` allocation (n
 | `guru_exit_allocation_blocked` | SELL skipped; wallet qty > 0 but allocated available is zero |
 | `guru_exit_allocation_clamped` | Final size reduced below planned due to allocation or venue availability |
 
+**`tp_sl_*` events** (P6 validation harness `tp_sl_test`; emitted as `health` facts):
+
+| `event` | When |
+|---------|------|
+| `tp_sl_registered` | Monitor row created after successful BUY |
+| `tp_sl_monitor_tick` | Price observed during monitoring |
+| `tp_sl_triggered` | TP or SL threshold crossed |
+| `tp_sl_exit_sizing` | Final size computed after allocation + venue clamps |
+| `tp_sl_waiting_for_inventory` | Venue sellable qty below required before monitor starts |
+| `tp_sl_exit_intent_emitted` | `ExitIntent` work unit built |
+| `tp_sl_timeout_waiting_for_inventory` | Inventory wait exceeded |
+| `tp_sl_timeout_waiting_for_trigger` | Monitor did not trigger in time |
+
+Intent extensions: `tp_sl_sizing`, `tp_sl_exit_pricing` (pricing resolved at trigger time, not BUY time).
+
 Blocked example:
 
 ```json

@@ -15,10 +15,12 @@ from tyrex_pm.core.errors import ConfigError
 STRATEGY_KIND_GURU_FOLLOW = "guru_follow"
 STRATEGY_KIND_SELL_TEST = "sell_test"
 STRATEGY_KIND_ALLOCATION_TEST = "allocation_test"
+STRATEGY_KIND_TP_SL_TEST = "tp_sl_test"
 _VALID_STRATEGY_KINDS = (
     STRATEGY_KIND_GURU_FOLLOW,
     STRATEGY_KIND_SELL_TEST,
     STRATEGY_KIND_ALLOCATION_TEST,
+    STRATEGY_KIND_TP_SL_TEST,
 )
 
 
@@ -216,6 +218,90 @@ class AllocationTestStrategyConfig:
     timeouts: AllocationTestTimeoutsConfig
 
 
+TP_SL_PRICE_SOURCE_FIXTURE = "fixture"
+TP_SL_PRICE_SOURCE_BEST_BID = "best_bid"
+TP_SL_PRICE_SOURCE_MARK = "mark"
+_VALID_TP_SL_PRICE_SOURCES = (
+    TP_SL_PRICE_SOURCE_FIXTURE,
+    TP_SL_PRICE_SOURCE_BEST_BID,
+    TP_SL_PRICE_SOURCE_MARK,
+)
+
+TP_SL_TRIGGER_MODE_TP_OR_SL = "take_profit_or_stop_loss"
+_VALID_TP_SL_TRIGGER_MODES = (TP_SL_TRIGGER_MODE_TP_OR_SL,)
+
+TP_SL_TRIGGER_REFERENCE_ENTRY = "entry_price"
+_VALID_TP_SL_TRIGGER_REFERENCES = (TP_SL_TRIGGER_REFERENCE_ENTRY,)
+
+TP_SL_SIZE_MODE_FULL = "full_allocated_position"
+TP_SL_SIZE_MODE_PERCENT = "percent_allocated_position"
+TP_SL_SIZE_MODE_FIXED = "fixed_size"
+_VALID_TP_SL_SIZE_MODES = (
+    TP_SL_SIZE_MODE_FULL,
+    TP_SL_SIZE_MODE_PERCENT,
+    TP_SL_SIZE_MODE_FIXED,
+)
+
+
+@dataclass(frozen=True)
+class TpSlTestBuyConfig:
+    enabled: bool
+    notional_usd: Decimal
+    limit_price: Decimal | None
+    order_style: OrderStyle
+    pricing_mode: str = SELL_TEST_PRICING_FIXED
+    aggression_ticks: int = 1
+    max_price: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class TpSlTestMonitorConfig:
+    enabled: bool
+    price_source: str
+    poll_interval_s: float
+    trigger_mode: str
+    take_profit_price: Decimal | None
+    stop_loss_price: Decimal | None
+    take_profit_pct: Decimal | None
+    stop_loss_pct: Decimal | None
+    trigger_reference: str | None
+    fixture_prices: tuple[Decimal, ...]
+
+
+@dataclass(frozen=True)
+class TpSlTestExitConfig:
+    enabled: bool
+    size_mode: str
+    percent: Decimal
+    fixed_size: Decimal | None
+    order_style: OrderStyle
+    pricing_mode: str = SELL_TEST_PRICING_FIXED
+    aggression_ticks: int = 1
+    min_price: Decimal | None = None
+    limit_price: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class TpSlTestTimeoutsConfig:
+    inventory_timeout_s: float
+    trigger_timeout_s: float
+    completion_timeout_s: float
+
+
+@dataclass(frozen=True)
+class TpSlTestStrategyConfig:
+    """Validation harness for P6 TP/SL overlay (deterministic fixture triggers)."""
+
+    enabled: bool
+    token_id: str
+    owner_id: str
+    buy: TpSlTestBuyConfig
+    monitor: TpSlTestMonitorConfig
+    exit: TpSlTestExitConfig
+    timeouts: TpSlTestTimeoutsConfig
+    run_once: bool
+
+
 @dataclass(frozen=True)
 class NotionalConfig:
     min_usd: Decimal
@@ -339,6 +425,8 @@ class AppConfig:
     sell_test: SellTestStrategyConfig | None = None
     #: Populated only when the loaded strategy YAML declares ``kind: allocation_test``.
     allocation_test: AllocationTestStrategyConfig | None = None
+    #: Populated only when the loaded strategy YAML declares ``kind: tp_sl_test``.
+    tp_sl_test: TpSlTestStrategyConfig | None = None
 
 
 def _dec(d: dict[str, Any], key: str, default: str = "0") -> Decimal:
@@ -464,6 +552,177 @@ def _parse_sell_test_strategy(strategy: dict[str, Any]) -> SellTestStrategyConfi
         token_id=token_id,
         buy=buy_cfg,
         sell=sell_cfg,
+        run_once=bool(strategy.get("run_once", True)),
+    )
+
+
+def _parse_tp_sl_test_strategy(strategy: dict[str, Any]) -> TpSlTestStrategyConfig:
+    from tyrex_pm.runtime.allocation_ids import OWNER_TP_SL_TEST
+
+    enabled = bool(strategy.get("enabled", True))
+    token_id = str(strategy.get("token_id", "")).strip()
+    if not token_id:
+        raise ConfigError("tp_sl_test strategy requires non-empty top-level 'token_id'")
+    owner_id = str(strategy.get("owner_id", OWNER_TP_SL_TEST)).strip()
+    if not owner_id:
+        raise ConfigError("tp_sl_test owner_id must be non-empty")
+
+    buy_raw = strategy.get("buy") or {}
+    buy_pricing_mode = _parse_pricing_mode(
+        buy_raw.get("pricing_mode"),
+        where="buy",
+        default=SELL_TEST_PRICING_FIXED,
+    )
+    buy_aggression = int(buy_raw.get("aggression_ticks", 1))
+    if buy_aggression < 0:
+        raise ConfigError("tp_sl_test buy.aggression_ticks must be >= 0")
+    buy_price_raw = buy_raw.get("limit_price")
+    buy_enabled = bool(buy_raw.get("enabled", True))
+    if buy_enabled and buy_pricing_mode == SELL_TEST_PRICING_FIXED and buy_price_raw in (None, ""):
+        raise ConfigError("tp_sl_test buy.enabled with pricing_mode=fixed requires buy.limit_price")
+    buy_max_raw = buy_raw.get("max_price")
+    buy_cfg = TpSlTestBuyConfig(
+        enabled=buy_enabled,
+        notional_usd=_dec(buy_raw, "notional_usd", "5"),
+        limit_price=Decimal(str(buy_price_raw)) if buy_price_raw not in (None, "") else None,
+        order_style=_parse_order_style(buy_raw.get("order_style"), OrderStyle.GTC),
+        pricing_mode=buy_pricing_mode,
+        aggression_ticks=buy_aggression,
+        max_price=Decimal(str(buy_max_raw)) if buy_max_raw not in (None, "") else None,
+    )
+
+    mon_raw = strategy.get("monitor") or {}
+    price_source = str(mon_raw.get("price_source", TP_SL_PRICE_SOURCE_FIXTURE)).strip().lower()
+    if price_source not in _VALID_TP_SL_PRICE_SOURCES:
+        raise ConfigError(
+            f"tp_sl_test monitor.price_source '{price_source}' is not supported "
+            f"(valid: {', '.join(_VALID_TP_SL_PRICE_SOURCES)})"
+        )
+    if price_source == TP_SL_PRICE_SOURCE_MARK:
+        raise ConfigError(
+            "tp_sl_test monitor.price_source 'mark' is not implemented yet "
+            "(use fixture or best_bid)"
+        )
+    trigger_mode = str(mon_raw.get("trigger_mode", TP_SL_TRIGGER_MODE_TP_OR_SL)).strip().lower()
+    if trigger_mode not in _VALID_TP_SL_TRIGGER_MODES:
+        raise ConfigError(
+            f"tp_sl_test monitor.trigger_mode '{trigger_mode}' is not supported "
+            f"(valid: {', '.join(_VALID_TP_SL_TRIGGER_MODES)})"
+        )
+    tp_raw = mon_raw.get("take_profit_price")
+    sl_raw = mon_raw.get("stop_loss_price")
+    tp_pct_raw = mon_raw.get("take_profit_pct")
+    sl_pct_raw = mon_raw.get("stop_loss_pct")
+    if tp_raw not in (None, "") and tp_pct_raw not in (None, ""):
+        raise ConfigError(
+            "tp_sl_test monitor cannot define both take_profit_price and take_profit_pct"
+        )
+    if sl_raw not in (None, "") and sl_pct_raw not in (None, ""):
+        raise ConfigError(
+            "tp_sl_test monitor cannot define both stop_loss_price and stop_loss_pct"
+        )
+    take_profit_pct = Decimal(str(tp_pct_raw)) if tp_pct_raw not in (None, "") else None
+    stop_loss_pct = Decimal(str(sl_pct_raw)) if sl_pct_raw not in (None, "") else None
+    if take_profit_pct is not None and take_profit_pct < 0:
+        raise ConfigError("tp_sl_test monitor.take_profit_pct must be >= 0")
+    if stop_loss_pct is not None and stop_loss_pct < 0:
+        raise ConfigError("tp_sl_test monitor.stop_loss_pct must be >= 0")
+    if stop_loss_pct is not None and stop_loss_pct >= 1:
+        raise ConfigError("tp_sl_test monitor.stop_loss_pct must be < 1")
+    monitor_enabled = bool(mon_raw.get("enabled", True))
+    has_tp = tp_raw not in (None, "") or take_profit_pct is not None
+    has_sl = sl_raw not in (None, "") or stop_loss_pct is not None
+    if monitor_enabled and not has_tp and not has_sl:
+        raise ConfigError(
+            "tp_sl_test monitor requires at least one of "
+            "take_profit_price, take_profit_pct, stop_loss_price, stop_loss_pct "
+            "(or set monitor.enabled: false)"
+        )
+    trigger_ref_raw = mon_raw.get("trigger_reference")
+    uses_pct = take_profit_pct is not None or stop_loss_pct is not None
+    if uses_pct:
+        trigger_reference = str(trigger_ref_raw or TP_SL_TRIGGER_REFERENCE_ENTRY).strip().lower()
+        if trigger_reference not in _VALID_TP_SL_TRIGGER_REFERENCES:
+            raise ConfigError(
+                f"tp_sl_test monitor.trigger_reference '{trigger_reference}' is not supported "
+                f"(valid: {', '.join(_VALID_TP_SL_TRIGGER_REFERENCES)})"
+            )
+    else:
+        trigger_reference = (
+            str(trigger_ref_raw).strip().lower() if trigger_ref_raw not in (None, "") else None
+        )
+        if trigger_reference is not None and trigger_reference not in _VALID_TP_SL_TRIGGER_REFERENCES:
+            raise ConfigError(
+                f"tp_sl_test monitor.trigger_reference '{trigger_reference}' is not supported "
+                f"(valid: {', '.join(_VALID_TP_SL_TRIGGER_REFERENCES)})"
+            )
+    fixture_raw = mon_raw.get("fixture_prices") or []
+    if price_source == TP_SL_PRICE_SOURCE_FIXTURE:
+        if not isinstance(fixture_raw, list) or not fixture_raw:
+            raise ConfigError(
+                "tp_sl_test monitor.price_source=fixture requires non-empty monitor.fixture_prices"
+            )
+    fixture_prices = tuple(Decimal(str(x)) for x in fixture_raw) if fixture_raw else ()
+    monitor_cfg = TpSlTestMonitorConfig(
+        enabled=monitor_enabled,
+        price_source=price_source,
+        poll_interval_s=float(mon_raw.get("poll_interval_s", 1)),
+        trigger_mode=trigger_mode,
+        take_profit_price=Decimal(str(tp_raw)) if tp_raw not in (None, "") else None,
+        stop_loss_price=Decimal(str(sl_raw)) if sl_raw not in (None, "") else None,
+        take_profit_pct=take_profit_pct,
+        stop_loss_pct=stop_loss_pct,
+        trigger_reference=trigger_reference,
+        fixture_prices=fixture_prices,
+    )
+
+    exit_raw = strategy.get("exit") or {}
+    size_mode = str(exit_raw.get("size_mode", TP_SL_SIZE_MODE_FULL)).strip().lower()
+    if size_mode not in _VALID_TP_SL_SIZE_MODES:
+        raise ConfigError(
+            f"tp_sl_test exit.size_mode '{size_mode}' is not supported "
+            f"(valid: {', '.join(_VALID_TP_SL_SIZE_MODES)})"
+        )
+    fixed_raw = exit_raw.get("fixed_size")
+    if size_mode == TP_SL_SIZE_MODE_FIXED and fixed_raw in (None, ""):
+        raise ConfigError("tp_sl_test exit.size_mode=fixed_size requires exit.fixed_size")
+    exit_pricing_mode = _parse_pricing_mode(
+        exit_raw.get("pricing_mode"),
+        where="exit",
+        default=SELL_TEST_PRICING_FIXED,
+    )
+    exit_aggression = int(exit_raw.get("aggression_ticks", 1))
+    if exit_aggression < 0:
+        raise ConfigError("tp_sl_test exit.aggression_ticks must be >= 0")
+    exit_price_raw = exit_raw.get("limit_price")
+    exit_min_raw = exit_raw.get("min_price")
+    exit_cfg = TpSlTestExitConfig(
+        enabled=bool(exit_raw.get("enabled", True)),
+        size_mode=size_mode,
+        percent=_dec(exit_raw, "percent", "1.0"),
+        fixed_size=Decimal(str(fixed_raw)) if fixed_raw not in (None, "") else None,
+        order_style=_parse_order_style(exit_raw.get("order_style"), OrderStyle.GTC),
+        pricing_mode=exit_pricing_mode,
+        aggression_ticks=exit_aggression,
+        min_price=Decimal(str(exit_min_raw)) if exit_min_raw not in (None, "") else None,
+        limit_price=Decimal(str(exit_price_raw)) if exit_price_raw not in (None, "") else None,
+    )
+
+    to_raw = strategy.get("timeouts") or {}
+    timeouts_cfg = TpSlTestTimeoutsConfig(
+        inventory_timeout_s=float(to_raw.get("inventory_timeout_s", 90)),
+        trigger_timeout_s=float(to_raw.get("trigger_timeout_s", 120)),
+        completion_timeout_s=float(to_raw.get("completion_timeout_s", 120)),
+    )
+
+    return TpSlTestStrategyConfig(
+        enabled=enabled,
+        token_id=token_id,
+        owner_id=owner_id,
+        buy=buy_cfg,
+        monitor=monitor_cfg,
+        exit=exit_cfg,
+        timeouts=timeouts_cfg,
         run_once=bool(strategy.get("run_once", True)),
     )
 
@@ -646,6 +905,7 @@ def _finalize_app_config(
     strategy_raw: dict[str, Any],
     sell_test: SellTestStrategyConfig | None,
     allocation_test: AllocationTestStrategyConfig | None = None,
+    tp_sl_test: TpSlTestStrategyConfig | None = None,
 ) -> AppConfig:
     rsk, rt = _build_risk_runtime(risk, runtime)
     raw = {"risk": risk, "strategy": strategy_raw, "runtime": runtime}
@@ -656,6 +916,7 @@ def _finalize_app_config(
         raw=raw,
         sell_test=sell_test,
         allocation_test=allocation_test,
+        tp_sl_test=tp_sl_test,
     )
 
 
@@ -717,6 +978,10 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
         allocation_test_cfg = _parse_allocation_test_strategy(strategy)
         strat = _placeholder_guru_strategy_config()
         return _finalize_app_config(strat, risk, runtime, strategy, None, allocation_test_cfg)
+    if kind_raw == STRATEGY_KIND_TP_SL_TEST:
+        tp_sl_test_cfg = _parse_tp_sl_test_strategy(strategy)
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(strat, risk, runtime, strategy, None, None, tp_sl_test_cfg)
 
     g = strategy.get("guru") or {}
     f = strategy.get("filters") or {}

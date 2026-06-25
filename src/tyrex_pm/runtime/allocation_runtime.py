@@ -13,8 +13,10 @@ from tyrex_pm.reporting.schema_v2 import FACT_TYPE_ALLOCATION_LEDGER
 from tyrex_pm.runtime.allocation_ids import (
     OWNER_GURU_FOLLOW,
     OWNER_SELL_TEST,
+    OWNER_TP_SL_TEST,
     SCHEDULED_EXIT_DEMO_SOURCE,
     SELL_TEST_INTENT_SOURCE,
+    TP_SL_TEST_INTENT_SOURCE,
 )
 from tyrex_pm.runtime.config import AppConfig
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
@@ -35,9 +37,15 @@ def resolve_owner_id(
         return str(owner).strip()
     if type(strategy).__name__ == "SellTestStrategy":
         return OWNER_SELL_TEST
+    if type(strategy).__name__ == "TpSlTestStrategy":
+        owner = getattr(getattr(strategy, "cfg", None), "owner_id", None)
+        return str(owner).strip() if owner else OWNER_TP_SL_TEST
     source = ext.get("source")
     if source == SELL_TEST_INTENT_SOURCE:
         return OWNER_SELL_TEST
+    if source == TP_SL_TEST_INTENT_SOURCE:
+        owner = ext.get("allocation_owner_id")
+        return str(owner).strip() if owner else OWNER_TP_SL_TEST
     if source == SCHEDULED_EXIT_DEMO_SOURCE:
         return OWNER_GURU_FOLLOW
     return OWNER_GURU_FOLLOW

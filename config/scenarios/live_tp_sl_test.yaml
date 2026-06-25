@@ -1,0 +1,24 @@
+# Live scenario for tp_sl_test validation.
+# Loosens notional caps so BUY survives risk clipping + Polymarket 5-share minimum
+# on high-price tokens (e.g. ~0.90+ needs >= ~$4.60 notional after cap).
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#       --strategy config/strategies/tp_sl_test.yaml \
+#       --scenario live_tp_sl_test \
+#       --run-name tp_sl_test_live_$(date +%s)
+
+execution_mode: live
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "10"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "15"
+    portfolio_cap_usd: "25"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"

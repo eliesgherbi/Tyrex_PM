@@ -146,9 +146,9 @@ exits:
 | `exits.dust_notional_usd` | Decimal | Suppress dust SELLs |
 | `exits.sell_mode` | str | `proportional_to_guru`: guru-scaled size clamped to `guru_follow` allocation + venue `available_to_sell`. `full_bot_position`: sell full **allocated** `guru_follow` position (not wallet-wide). |
 
-### 3.1 Standalone validation strategies (`kind: sell_test` | `kind: allocation_test`)
+### 3.1 Standalone validation strategies (`kind: sell_test` | `kind: allocation_test` | `kind: tp_sl_test`)
 
-These YAML kinds are **mutually exclusive** with full guru-follow parsing. They populate `AppConfig.sell_test` or `AppConfig.allocation_test` instead of the guru `strategy` block.
+These YAML kinds are **mutually exclusive** with full guru-follow parsing. They populate `AppConfig.sell_test`, `AppConfig.allocation_test`, or `AppConfig.tp_sl_test` instead of the guru `strategy` block.
 
 **`config/strategies/allocation_test.yaml`** (`kind: allocation_test`) — P4 ownership toy:
 
@@ -174,6 +174,20 @@ Intent extensions carry `allocation_owner_id` per leg; Owner B never reaches OMS
 | `min_price` | Optional lower guardrail: refuse to price below this and fall back to `limit_price` |
 
 Live runs emit `health` `allocation_test_pricing` with side `SELL` before Owner A exit submit.
+
+**`config/strategies/tp_sl_test.yaml`** (`kind: tp_sl_test`) — P6 TP/SL validation harness (not production TP/SL):
+
+| Key | Meaning |
+|-----|---------|
+| `token_id` | CLOB outcome token for BUY + monitor |
+| `owner_id` | Allocation owner for BUY credit and SELL clamp (default `tp_sl_test`; isolated from `guru_follow`) |
+| `buy.*` | Same shape as `sell_test.buy` |
+| `monitor.*` | TP/SL monitor: `price_source` (`fixture` \| `best_bid`; `mark` rejected), `poll_interval_s`, `trigger_mode`, absolute thresholds (`take_profit_price`, `stop_loss_price`) **or** percentage thresholds (`take_profit_pct`, `stop_loss_pct` as decimal fractions e.g. `0.20` = +20%, `trigger_reference: entry_price`), `fixture_prices` (required for `fixture`) |
+| `exit.*` | Exit leg: `size_mode` (`full_allocated_position` \| `percent_allocated_position` \| `fixed_size`), `percent`, `fixed_size`, `pricing_mode`, `aggression_ticks`, `min_price`, `limit_price`, `order_style` |
+| `timeouts.*` | `inventory_timeout_s`, `trigger_timeout_s`, `completion_timeout_s` |
+| `run_once` | Stop after terminal SELL outcome or timeout |
+
+TP/SL overlay emits `ExitIntent` through the same pipeline as `sell_test`; pricing resolves at **trigger time**. Facts use `health` events `tp_sl_*`. See [tp_sl_overlay_plan.md](Implementation/sell_feature/tp_sl_overlay_plan.md).
 
 ---
 

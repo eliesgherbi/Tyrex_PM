@@ -39,6 +39,10 @@ from tyrex_pm.strategies.sell_test.strategy import (
     SellTestStrategy,
     try_arm_sell_test_pending,
 )
+from tyrex_pm.strategies.tp_sl_test.strategy import (
+    TpSlTestStrategy,
+    try_arm_tp_sl_pending,
+)
 from tyrex_pm.runtime.pipeline import (
     _reconcile_kw,
     process_intent_work_unit,
@@ -410,6 +414,154 @@ async def _run_sell_test_loop(
     return iterations
 
 
+async def _run_tp_sl_test_loop(
+    *,
+    args: argparse.Namespace,
+    app,
+    run_id: RunId,
+    strat: TpSlTestStrategy,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms_backend,
+    apply_local_fill: bool,
+    live_clob,
+    stop_live: asyncio.Event,
+) -> int:
+    """Drive tp_sl_test: one BUY, monitor price, emit SELL on TP/SL trigger."""
+    iterations = 0
+    if app.runtime.execution_mode == ExecutionMode.LIVE:
+        readiness_timeout = float(os.environ.get("TYREX_TP_SL_TEST_READINESS_S", "60"))
+        ok_r, rsn = await _wait_sell_test_live_readiness(
+            coord, app, timeout_s=readiness_timeout
+        )
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                str(run_id),
+                {"event": "tp_sl_test_readiness", "ok": ok_r, "detail": rsn},
+            )
+        )
+        if not ok_r:
+            log.error(
+                "tp_sl_test live readiness failed after %.1fs: %s — aborting before BUY",
+                readiness_timeout,
+                rsn,
+            )
+            return iterations
+    buy_cfg = strat.cfg.buy
+    if (
+        buy_cfg.enabled
+        and buy_cfg.pricing_mode == SELL_TEST_PRICING_AUTO
+        and app.runtime.execution_mode == ExecutionMode.LIVE
+        and live_clob is not None
+    ):
+        market_info = None
+        if coord.market_info_cache is not None:
+            try:
+                market_info = await coord.market_info_cache.get(strat.cfg.token_id)
+            except Exception:  # noqa: BLE001
+                market_info = None
+        resolved = await resolve_marketable_price_via_client(
+            client=live_clob,
+            market_info=market_info,
+            token_id=strat.cfg.token_id,
+            side="BUY",
+            aggression_ticks=buy_cfg.aggression_ticks,
+            fallback_price=buy_cfg.limit_price,
+            max_price=buy_cfg.max_price,
+        )
+        evidence = resolved.to_evidence()
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                str(run_id),
+                {
+                    "event": "tp_sl_test_pricing",
+                    "side": "BUY",
+                    "token_id": strat.cfg.token_id,
+                    **evidence,
+                },
+            )
+        )
+        if resolved.source == "auto_book" and resolved.price > 0:
+            strat.set_resolved_buy_price(resolved.price, evidence=evidence)
+    for wu in strat.initial_buy_work_units():
+        await process_intent_work_unit(
+            wu,
+            app=app,
+            run_id=run_id,
+            strategy=strat,
+            coord=coord,
+            sink=sink,
+            oms=oms_backend,
+            apply_local_shadow_fill=apply_local_fill,
+            live_clob_client=live_clob,
+        )
+        iterations += 1
+    if args.once:
+        return iterations
+    if not strat.cfg.exit.enabled:
+        return iterations
+    timeouts = strat.cfg.timeouts
+    completion_deadline = monotonic_s() + timeouts.completion_timeout_s
+    inventory_deadline = (
+        monotonic_s() + timeouts.inventory_timeout_s if strat.buy_submit_succeeded else completion_deadline
+    )
+    trigger_deadline = monotonic_s() + timeouts.trigger_timeout_s
+    poll_s = float(strat.cfg.monitor.poll_interval_s)
+    next_reconcile_at = monotonic_s()
+    while not stop_live.is_set() and monotonic_s() < completion_deadline:
+        if strat.is_done():
+            log.info("tp_sl_test strategy reports is_done; exiting run loop")
+            break
+        st = strat.tp_sl_state
+        if strat.has_pending_inventory_wait() and monotonic_s() >= inventory_deadline:
+            st.emit_timeout_waiting_for_inventory(coord)
+            log.error("tp_sl_test timed out waiting for sellable inventory")
+            break
+        if (
+            st._monitoring is not None
+            and not st._monitoring.triggered
+            and st._monitor_started_mono is not None
+            and monotonic_s() >= trigger_deadline
+        ):
+            st.emit_timeout_waiting_for_trigger(coord)
+            log.error("tp_sl_test timed out waiting for TP/SL trigger")
+            break
+        if coord.scheduled_exit_demo_try_arm is not None:
+            coord.scheduled_exit_demo_try_arm(source="periodic_refresh")
+        await st.tick_monitor(coord, live_clob_client=live_clob)
+        work = await st.resolve_triggered_work_units(
+            coord=coord,
+            live_clob_client=live_clob,
+        )
+        for wu in work:
+            await process_intent_work_unit(
+                wu,
+                app=app,
+                run_id=run_id,
+                strategy=strat,
+                coord=coord,
+                sink=sink,
+                oms=oms_backend,
+                apply_local_shadow_fill=apply_local_fill,
+                live_clob_client=live_clob,
+            )
+            iterations += 1
+        now = monotonic_s()
+        if now >= next_reconcile_at:
+            reconcile_coordinator(coord, sink, str(run_id))
+            next_reconcile_at = now + float(app.runtime.reconcile_interval_s)
+        try:
+            await asyncio.wait_for(stop_live.wait(), timeout=poll_s)
+            break
+        except asyncio.TimeoutError:
+            iterations += 1
+    grace_s = float(os.environ.get("TYREX_TP_SL_TEST_GRACE_S", "2"))
+    await asyncio.sleep(grace_s)
+    return iterations
+
+
 async def _run_allocation_test_loop(
     *,
     args: argparse.Namespace,
@@ -662,7 +814,8 @@ async def cmd_run(args: argparse.Namespace) -> None:
     allocation_ledger = load_allocation_ledger(allocation_ledger_path)
     sell_test_mode = app.sell_test is not None
     allocation_test_mode = app.allocation_test is not None
-    strat: GuruFollowStrategy | SellTestStrategy | AllocationTestStrategy
+    tp_sl_test_mode = app.tp_sl_test is not None
+    strat: GuruFollowStrategy | SellTestStrategy | AllocationTestStrategy | TpSlTestStrategy
     if allocation_test_mode:
         assert app.allocation_test is not None
         strat = AllocationTestStrategy(app.allocation_test)
@@ -672,6 +825,15 @@ async def cmd_run(args: argparse.Namespace) -> None:
             app.allocation_test.owner_a_id,
             app.allocation_test.owner_b_id,
             app.allocation_test.run_once,
+        )
+    elif tp_sl_test_mode:
+        assert app.tp_sl_test is not None
+        strat = TpSlTestStrategy(app.tp_sl_test)
+        log.info(
+            "Loaded tp_sl_test strategy: token_id=%s owner_id=%s run_once=%s",
+            app.tp_sl_test.token_id,
+            app.tp_sl_test.owner_id,
+            app.tp_sl_test.run_once,
         )
     elif sell_test_mode:
         assert app.sell_test is not None  # for type checker
@@ -751,6 +913,12 @@ async def cmd_run(args: argparse.Namespace) -> None:
             try_arm_sell_test_pending(strat, coord, source=source)
 
         coord.scheduled_exit_demo_try_arm = _sell_test_try_arm
+    elif tp_sl_test_mode:
+
+        def _tp_sl_try_arm(*, source="post_buy_ack"):
+            try_arm_tp_sl_pending(strat, coord, source=source)
+
+        coord.scheduled_exit_demo_try_arm = _tp_sl_try_arm
     elif app.strategy.exits.demo_forced_exit_enabled:
 
         def _scheduled_exit_try_arm(*, source="post_buy_ack"):
@@ -906,6 +1074,20 @@ async def cmd_run(args: argparse.Namespace) -> None:
             if allocation_test_mode:
                 assert isinstance(strat, AllocationTestStrategy)
                 iterations = await _run_allocation_test_loop(
+                    args=args,
+                    app=app,
+                    run_id=run_id,
+                    strat=strat,
+                    coord=coord,
+                    sink=sink,
+                    oms_backend=oms_backend,
+                    apply_local_fill=apply_local_fill,
+                    live_clob=live_clob,
+                    stop_live=stop_live,
+                )
+            elif tp_sl_test_mode:
+                assert isinstance(strat, TpSlTestStrategy)
+                iterations = await _run_tp_sl_test_loop(
                     args=args,
                     app=app,
                     run_id=run_id,

@@ -1,6 +1,14 @@
 # `strategies/`
 
-Composition layer that turns a `GuruCopySignal` (or other signal) into one or more `Intent`s. Production strategies: `guru_follow`, `sell_test`, `allocation_test`.
+Composition layer that turns a `GuruCopySignal` (or other signal) into one or more `Intent`s. Production strategies: `guru_follow`, `sell_test`, `allocation_test`, `tp_sl_test` (P6 validation harness).
+
+## `tp_sl_test/` (P6 validation harness)
+
+| File | Purpose |
+|------|---------|
+| `strategy.py` | One BUY → TP/SL monitor → allocation-aware `ExitIntent` on trigger |
+
+Not production TP/SL — validates the overlay pattern before attaching to `guru_follow`. Uses `owner_id = tp_sl_test` by default. Reuses `sell_test/pricing.py` for SELL price at trigger time.
 
 ## `guru_follow/`
 
