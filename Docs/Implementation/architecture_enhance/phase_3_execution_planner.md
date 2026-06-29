@@ -301,3 +301,32 @@ Provides for: **Phase 4** (protection exits get correct FAK worst-price executio
 ## 16. Event-ready design notes
 
 `ExecutionPlanner.plan(approved_intent, ctx) -> ExecutionPlan` is a pure function of `(approved_intent, ctx.market_state, config)` with no I/O or store mutation. A future event bus could call it on an `IntentApproved` event unchanged. `validate_planned_order(plan, ctx, risk_config) -> RiskDecision` is likewise a pure validation call. No bus, queue, or subscription introduced.
+
+---
+
+## Implementation status
+
+**Status: implemented.**
+
+**Implementation summary.** `execution/planner.py::ExecutionPlanner.plan(approved, market_state, now)` converts a pre-check `ApprovedIntent` into an `ExecutionPlan` (`execution/models.py`). Rules: passive/normal entry → GTC at the strategy limit; urgent/protection exit → FAK at a worst-acceptable price from `estimate_fill_price` (falls back to best bid/ask); urgent exit with stale/missing book → deny (`PLANNER_STALE_BOOK` / `PLANNER_MISSING_BOOK` / `PLANNER_NO_MARKET_DATA`) unless `allow_urgent_exit_fallback` and an intent limit exist. The plan preserves the pre-check `client_order_id`. `risk/planned_order.py::validate_planned_order` re-checks notional, deployment caps, capital (BUY), inventory (SELL), and venue-min-size **without** re-entering `evaluate_intent` or minting a new client order id, and denies planner price-worsening for non-urgent intents. `runtime/pipeline.py` inserts the planner between risk pre-check and OMS when `execution.planner.enabled`, emitting `execution_plan` then a `risk_decision` with `{"phase":"planned"}` and tagging `oms_submit` with `planner_reason`.
+
+**Files changed.** `execution/planner.py` (new), `execution/models.py` (new), `risk/planned_order.py` (new), `core/models.py` (`urgency` on intents + `URGENCY_*`), `core/reason_codes.py` (planner codes), `reporting/schema_v2.py` (`FACT_TYPE_EXECUTION_PLAN`), `runtime/config.py` (`ExecutionConfig`/`ExecutionPlannerConfig` + planner⇒market_data cross-check), `runtime/pipeline.py`.
+
+**Tests added.** `tests/test_execution_planner.py`, `tests/test_validate_planned_order.py`.
+
+**Known limitations.** Only GTC and FAK are produced; GTD, post-only, slicing, iceberg, and cancel/replace remain future work. Disabled by default (`execution.planner.enabled=false`); enabling requires `market_data.enabled=true`. **`coord.market_state` is not populated by `app.py`** — entry planner works without a book; urgent/protection exits need store wiring (see live validation matrix).
+
+**How to run tests.** `python -m pytest tests/test_execution_planner.py tests/test_validate_planned_order.py`
+
+**How to run a safe harness (CLI, entry path).** Shadow scenario overlay — **verified CLI-runnable:**
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/simple_signal_test.yaml \
+  --scenario shadow_planner_simple_signal_test \
+  --run-name simple_strat_planner_shadow
+```
+
+Inspect `execution_plan` + `risk_decision` with `"phase":"planned"` in `facts.jsonl`. Urgent/stale deny: unit tests only until `MarketStateStore` is wired on the coordinator.
+
+**Verification label:** `shadow-runnable` (entry) · `unit-tested` (urgent/stale) — see [live_validation_matrix.md](live_validation_matrix.md).

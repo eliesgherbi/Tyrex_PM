@@ -1,0 +1,58 @@
+# Live simple_signal_test WITH ExecutionPlanner enabled (Phase 3 entry path).
+#
+# Proves live:
+#   signal → risk pre-check → ExecutionPlanner → validate_planned_order → LiveOMS
+#
+# Entry planner uses the strategy/auto-resolved limit (GTC); it does NOT require a
+# populated MarketStateStore. Urgent/protection FAK exits still need Phase 2 wiring.
+#
+# Prerequisites: same as live_simple_signal_test (.env, tyrex-pm[live], token_id in strategy YAML)
+#
+# Run (bash):
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/simple_signal_test_live.yaml \
+#     --scenario live_planner_simple_signal_test \
+#     --run-name "simple_strat_live_planner_$(date +%s)"
+#
+# Expected facts (grep facts.jsonl):
+#   execution_plan          (planner_normal_entry)
+#   risk_decision           ("phase":"planned")
+#   oms_submit              (planner_reason + venue order id)
+#
+# Shadow first ($0): use shadow_planner_simple_signal_test scenario instead.
+
+execution_mode: live
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+      allow_urgent_exit_fallback: false
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "10"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "15"
+    portfolio_cap_usd: "25"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  capital:
+    enabled: true
+    max_wallet_age_s: 120
+  readiness:
+    require_user_ws_live: true
+    require_heartbeat_live: true
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+  concurrency:
+    max_orders_in_flight: 4

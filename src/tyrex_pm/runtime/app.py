@@ -23,8 +23,32 @@ from tyrex_pm.ingestion.user_stream import run_user_ws_ingest
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import FACT_TYPE_GURU_POLL, FACT_TYPE_HEALTH
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
-from tyrex_pm.runtime.config import load_app_config
+from tyrex_pm.runtime.config import (
+    STRATEGY_KIND_ALLOCATION_TEST,
+    STRATEGY_KIND_GURU_FOLLOW,
+    STRATEGY_KIND_PAIRED_BINARY,
+    STRATEGY_KIND_SELL_TEST,
+    STRATEGY_KIND_SIMPLE_SIGNAL_TEST,
+    STRATEGY_KIND_TP_SL_TEST,
+    STRATEGY_KIND_VALIDATION_HARNESS,
+    VALIDATION_MODE_MARKET_DATA_READONLY,
+    VALIDATION_MODE_PROTECTION_SL,
+    VALIDATION_MODE_PROTECTION_TP,
+    VALIDATION_MODE_PROTECTION_TRIGGER_LIVE,
+    VALIDATION_MODE_STALE_BOOK_DENY,
+    load_app_config,
+)
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
+from tyrex_pm.runtime.fixture_signal_run import run_fixture_signals_once
+from tyrex_pm.runtime.paired_binary_recovery import recover_on_startup
+from tyrex_pm.runtime.paired_binary_run import run_paired_binary_loop
+from tyrex_pm.runtime.market_data_runtime import (
+    bootstrap_market_state,
+    ensure_market_state_store,
+    market_data_rest_refresh_loop,
+)
+from tyrex_pm.runtime.protection_runtime import init_protection_monitor
+from tyrex_pm.runtime.validation_harness_run import run_validation_harness_once
 from tyrex_pm.runtime.health_runtime import HealthRuntime
 from tyrex_pm.runtime.live_supervisor import (
     provisional_repair_probe_loop,
@@ -60,6 +84,9 @@ from tyrex_pm.state.allocation_ledger import load_allocation_ledger
 from tyrex_pm.state.wallet_store import WalletStore
 from tyrex_pm.strategies.allocation_test.strategy import AllocationTestStrategy
 from tyrex_pm.strategies.guru_follow.strategy import GuruFollowStrategy
+from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
+from tyrex_pm.strategies.simple_signal_test.strategy import SimpleSignalTestStrategy
+from tyrex_pm.strategies.validation_harness.strategy import ValidationHarnessStrategy
 from tyrex_pm.venue.polymarket.clob_bridge import PyClobBridge
 from tyrex_pm.venue.polymarket.clob_env import (
     DEFAULT_CLOB_HOST_V2,
@@ -75,6 +102,18 @@ from tyrex_pm.venue.polymarket.positions_sync import refresh_positions_from_data
 log = logging.getLogger(__name__)
 
 _PLACEHOLDER_GURU = "0x0000000000000000000000000000000000000000"
+
+_RUNTIME_WIRED_STRATEGY_KINDS = frozenset(
+    {
+        STRATEGY_KIND_GURU_FOLLOW,
+        STRATEGY_KIND_SELL_TEST,
+        STRATEGY_KIND_ALLOCATION_TEST,
+        STRATEGY_KIND_TP_SL_TEST,
+        STRATEGY_KIND_SIMPLE_SIGNAL_TEST,
+        STRATEGY_KIND_VALIDATION_HARNESS,
+        STRATEGY_KIND_PAIRED_BINARY,
+    }
+)
 
 
 def _maybe_load_dotenv(repo_root: Path) -> None:
@@ -166,6 +205,11 @@ def main() -> None:
         default=None,
         help="resolve --state-dir relative to this root (default: detected repo root)",
     )
+    p_rs.add_argument(
+        "--paired-binary",
+        action="store_true",
+        help="also remove var/state/paired_binary/ persistence (does not cancel venue orders)",
+    )
     p_la = sub.add_parser(
         "live-attest",
         help="minimal live post+cancel via native OMS (designated wallet; not guru copy)",
@@ -226,19 +270,20 @@ def cmd_reset_state(args: argparse.Namespace) -> None:
     See ``tyrex_pm.runtime.reset_state.reset_local_state`` for the file list.
     Reporting artifacts under ``var/reporting/`` are intentionally preserved.
     """
-    from tyrex_pm.runtime.reset_state import reset_local_state, resettable_file_names
+    from tyrex_pm.runtime.reset_state import reset_local_state, resettable_file_names, venue_orders_warning
 
     root = args.repo_root or _repo_root()
     state_dir = Path(args.state_dir)
     if not state_dir.is_absolute():
         state_dir = (root / state_dir).resolve()
-    removed = reset_local_state(state_dir)
+    removed = reset_local_state(state_dir, paired_binary=bool(getattr(args, "paired_binary", False)))
     if removed:
         for p in removed:
             print(f"removed {p}")
     else:
         names = ", ".join(resettable_file_names())
         print(f"no state to clear under {state_dir} (looked for: {names})")
+    print(f"warning: {venue_orders_warning()}")
 
 
 async def _wait_sell_test_live_readiness(
@@ -812,10 +857,27 @@ async def cmd_run(args: argparse.Namespace) -> None:
     strategy_store = load_strategy_store(state_path)
     allocation_ledger_path = (root / args.state_dir).resolve() / "allocation_ledger.json"
     allocation_ledger = load_allocation_ledger(allocation_ledger_path)
-    sell_test_mode = app.sell_test is not None
-    allocation_test_mode = app.allocation_test is not None
-    tp_sl_test_mode = app.tp_sl_test is not None
-    strat: GuruFollowStrategy | SellTestStrategy | AllocationTestStrategy | TpSlTestStrategy
+    strategy_kind = app.strategy_kind
+    if strategy_kind not in _RUNTIME_WIRED_STRATEGY_KINDS:
+        raise RuntimeError(
+            f"strategy kind {strategy_kind!r} has no runtime loop wired in runtime/app.py "
+            f"(supported: {sorted(_RUNTIME_WIRED_STRATEGY_KINDS)})"
+        )
+    sell_test_mode = strategy_kind == STRATEGY_KIND_SELL_TEST
+    allocation_test_mode = strategy_kind == STRATEGY_KIND_ALLOCATION_TEST
+    tp_sl_test_mode = strategy_kind == STRATEGY_KIND_TP_SL_TEST
+    simple_signal_test_mode = strategy_kind == STRATEGY_KIND_SIMPLE_SIGNAL_TEST
+    validation_harness_mode = strategy_kind == STRATEGY_KIND_VALIDATION_HARNESS
+    paired_binary_mode = strategy_kind == STRATEGY_KIND_PAIRED_BINARY
+    strat: (
+        GuruFollowStrategy
+        | SellTestStrategy
+        | AllocationTestStrategy
+        | TpSlTestStrategy
+        | SimpleSignalTestStrategy
+        | ValidationHarnessStrategy
+        | PairedBinaryStrategy
+    )
     if allocation_test_mode:
         assert app.allocation_test is not None
         strat = AllocationTestStrategy(app.allocation_test)
@@ -846,8 +908,42 @@ async def cmd_run(args: argparse.Namespace) -> None:
             app.sell_test.sell.delay_s,
             app.sell_test.run_once,
         )
-    else:
+    elif simple_signal_test_mode:
+        assert app.simple_signal_test is not None
+        strat = SimpleSignalTestStrategy(owner_id=app.simple_signal_test.owner_id)
+        log.info(
+            "Loaded simple_signal_test harness: token_id=%s side=%s notional=%s limit=%s run_once=%s",
+            app.simple_signal_test.token_id,
+            app.simple_signal_test.side.value,
+            app.simple_signal_test.notional_usd,
+            app.simple_signal_test.limit_price,
+            app.simple_signal_test.run_once,
+        )
+    elif validation_harness_mode:
+        assert app.validation_harness is not None
+        strat = ValidationHarnessStrategy(owner_id=app.validation_harness.owner_id)
+        log.info(
+            "Loaded validation_harness: mode=%s token_id=%s owner_id=%s",
+            app.validation_harness.mode,
+            app.validation_harness.token_id,
+            app.validation_harness.owner_id,
+        )
+    elif paired_binary_mode:
+        assert app.paired_binary is not None
+        strat = PairedBinaryStrategy(app.paired_binary)
+        log.info(
+            "Loaded paired_binary: market_id=%s yes=%s no=%s owner_id=%s",
+            app.paired_binary.market_id,
+            app.paired_binary.yes_token_id,
+            app.paired_binary.no_token_id,
+            app.paired_binary.owner_id,
+        )
+    elif strategy_kind == STRATEGY_KIND_GURU_FOLLOW:
         strat = GuruFollowStrategy(app.strategy)
+    else:
+        raise RuntimeError(
+            f"strategy kind {strategy_kind!r} has no runtime loop wired in runtime/app.py"
+        )
     shadow_oms = ShadowOMS()
 
     coord: RuntimeCoordinator | None = None
@@ -906,6 +1002,12 @@ async def cmd_run(args: argparse.Namespace) -> None:
     assert coord is not None
 
     coord.allocation_ledger = allocation_ledger
+    coord.allocation_clamp_grace_s = float(app.runtime.allocation_ledger.clamp_grace_s_after_buy)
+
+    if app.runtime.market_data.enabled:
+        ensure_market_state_store(coord, app)
+    if app.protection is not None and app.protection.enabled:
+        init_protection_monitor(coord)
 
     if sell_test_mode:
 
@@ -1053,6 +1155,27 @@ async def cmd_run(args: argparse.Namespace) -> None:
                     )
                 )
 
+                if app.runtime.market_data.enabled and live_clob is not None:
+                    try:
+                        boot_n = await bootstrap_market_state(
+                            coord, app, live_clob_client=live_clob
+                        )
+                        log.info("market_data REST bootstrap: %s token(s)", boot_n)
+                    except Exception:
+                        log.exception("market_data REST bootstrap failed")
+                    md_refresh_s = float(os.environ.get("TYREX_MARKET_DATA_REFRESH_S", "5"))
+                    live_tasks.append(
+                        asyncio.create_task(
+                            market_data_rest_refresh_loop(
+                                coord,
+                                app,
+                                live_clob,
+                                stop=stop_live,
+                                interval_s=md_refresh_s,
+                            )
+                        )
+                    )
+
             if sell_test_mode or app.strategy.exits.demo_forced_exit_enabled:
                 live_tasks.append(
                     asyncio.create_task(
@@ -1113,6 +1236,144 @@ async def cmd_run(args: argparse.Namespace) -> None:
                     live_clob=live_clob,
                     stop_live=stop_live,
                 )
+            elif simple_signal_test_mode:
+                assert app.simple_signal_test is not None
+                if app.runtime.execution_mode == ExecutionMode.LIVE:
+                    readiness_timeout = float(
+                        os.environ.get("TYREX_SIMPLE_SIGNAL_TEST_READINESS_S", "60")
+                    )
+                    ok_r, rsn = await _wait_sell_test_live_readiness(
+                        coord, app, timeout_s=readiness_timeout
+                    )
+                    sink.write(
+                        make_fact(
+                            FACT_TYPE_HEALTH,
+                            str(run_id),
+                            {
+                                "event": "simple_signal_test_readiness",
+                                "ok": ok_r,
+                                "detail": rsn,
+                            },
+                        )
+                    )
+                    if not ok_r:
+                        log.error(
+                            "simple_signal_test live readiness failed after %.1fs: %s "
+                            "— aborting before BUY",
+                            readiness_timeout,
+                            rsn,
+                        )
+                        iterations = 0
+                    else:
+                        iterations = await run_fixture_signals_once(
+                            app=app,
+                            run_id=run_id,
+                            coord=coord,
+                            sink=sink,
+                            oms=oms_backend,
+                            cfg=app.simple_signal_test,
+                            apply_local_shadow_fill=apply_local_fill,
+                            live_clob_client=live_clob,
+                        )
+                else:
+                    iterations = await run_fixture_signals_once(
+                        app=app,
+                        run_id=run_id,
+                        coord=coord,
+                        sink=sink,
+                        oms=oms_backend,
+                        cfg=app.simple_signal_test,
+                        apply_local_shadow_fill=apply_local_fill,
+                        live_clob_client=live_clob,
+                    )
+            elif validation_harness_mode:
+                assert app.validation_harness is not None
+                vh_cfg = app.validation_harness
+                needs_live_readiness = (
+                    app.runtime.execution_mode == ExecutionMode.LIVE
+                    and vh_cfg.mode
+                    not in (
+                        VALIDATION_MODE_MARKET_DATA_READONLY,
+                        VALIDATION_MODE_STALE_BOOK_DENY,
+                        VALIDATION_MODE_PROTECTION_TP,
+                        VALIDATION_MODE_PROTECTION_SL,
+                        VALIDATION_MODE_PROTECTION_TRIGGER_LIVE,
+                    )
+                )
+                if needs_live_readiness:
+                    readiness_timeout = float(
+                        os.environ.get("TYREX_VALIDATION_HARNESS_READINESS_S", "60")
+                    )
+                    ok_r, rsn = await _wait_sell_test_live_readiness(
+                        coord, app, timeout_s=readiness_timeout
+                    )
+                    sink.write(
+                        make_fact(
+                            FACT_TYPE_HEALTH,
+                            str(run_id),
+                            {
+                                "event": "validation_harness_readiness",
+                                "ok": ok_r,
+                                "detail": rsn,
+                                "mode": vh_cfg.mode,
+                            },
+                        )
+                    )
+                    if not ok_r:
+                        log.error(
+                            "validation_harness live readiness failed after %.1fs: %s "
+                            "— aborting mode=%s",
+                            readiness_timeout,
+                            rsn,
+                            vh_cfg.mode,
+                        )
+                        iterations = 0
+                    else:
+                        iterations = await run_validation_harness_once(
+                            app=app,
+                            run_id=run_id,
+                            coord=coord,
+                            sink=sink,
+                            oms=oms_backend,
+                            cfg=vh_cfg,
+                            apply_local_shadow_fill=apply_local_fill,
+                            live_clob_client=live_clob,
+                        )
+                else:
+                    iterations = await run_validation_harness_once(
+                        app=app,
+                        run_id=run_id,
+                        coord=coord,
+                        sink=sink,
+                        oms=oms_backend,
+                        cfg=vh_cfg,
+                        apply_local_shadow_fill=apply_local_fill,
+                        live_clob_client=live_clob,
+                    )
+            elif paired_binary_mode:
+                assert app.paired_binary is not None
+                pb_cfg = app.paired_binary
+                state_dir = (root / args.state_dir).resolve()
+                pb_state = recover_on_startup(
+                    coord,
+                    pb_cfg,
+                    state_dir=state_dir,
+                    sink=sink,
+                    run_id=run_id,
+                )
+                iterations = await run_paired_binary_loop(
+                    app=app,
+                    run_id=run_id,
+                    coord=coord,
+                    sink=sink,
+                    oms=oms_backend,
+                    cfg=pb_cfg,
+                    state=pb_state,
+                    state_dir=state_dir,
+                    apply_local_shadow_fill=apply_local_fill,
+                    live_clob_client=live_clob,
+                    stop=stop_live,
+                )
             elif fixture_path is not None:  # noqa: E701 — keep elif chain readable
                 if app.runtime.execution_mode == ExecutionMode.LIVE:
                     log.error("Fixture replay is only supported in shadow mode")
@@ -1153,7 +1414,7 @@ async def cmd_run(args: argparse.Namespace) -> None:
                         await asyncio.sleep(float(app.strategy.exits.demo_forced_exit_delay_s) + 0.2)
                     save_strategy_store(state_path, strategy_store)
                     iterations = 1
-            else:
+            elif strategy_kind == STRATEGY_KIND_GURU_FOLLOW:
                 if not app.strategy.guru.wallet or app.strategy.guru.wallet == _PLACEHOLDER_GURU:
                     log.warning(
                         "guru.wallet is unset or placeholder; set it in strategy YAML for live polling "
@@ -1257,6 +1518,11 @@ async def cmd_run(args: argparse.Namespace) -> None:
                             if args.once or args.max_iterations is not None and iterations >= args.max_iterations:
                                 break
                             await asyncio.sleep(app.strategy.guru.data_api_poll_interval_s)
+
+            else:
+                raise RuntimeError(
+                    f"strategy kind {strategy_kind!r} has no main-loop wired in runtime/app.py"
+                )
 
             sink.write(
                 make_fact(

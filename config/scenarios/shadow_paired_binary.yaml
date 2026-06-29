@@ -1,0 +1,61 @@
+# Shadow paired binary smoke (Phase 4.6 PB-Level 1–3).
+#
+# PB-Level 1 (read-only):
+#   set paired_binary.entry_dry_run: true in strategy overlay or edit strategy YAML
+#
+# PB-Level 2 (paired entry):
+#   default shadow_paired_binary — stop_after_entry: true
+#
+# PB-Level 3 (timeout exit):
+#   set paired_binary.max_holding_time_s: 2 in strategy overlay
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/paired_binary.yaml \
+#     --scenario shadow_paired_binary \
+#     --run-name paired_binary_shadow
+
+execution_mode: shadow
+
+runtime:
+  shadow_bootstrap:
+    usdc_balance: "1000000"
+    usdc_allowance: "1000000"
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "600"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "600"
+    portfolio_cap_usd: "1200"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  capital:
+    enabled: false
+  inventory:
+    sell_requires_venue_position: false
+
+strategy:
+  paired_binary:
+    position_size: "5"
+    max_holding_time_s: 3600
+    stop_after_entry: true
+    use_fixture_book: true
+    fixture_yes_bid: "0.48"
+    fixture_yes_ask: "0.49"
+    fixture_no_bid: "0.50"
+    fixture_no_ask: "0.51"
+    run_once: true
+    max_runtime_s: 30

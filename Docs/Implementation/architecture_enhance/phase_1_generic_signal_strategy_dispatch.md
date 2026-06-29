@@ -271,3 +271,38 @@ Provides for later phases: the `on_signal` / `process_signals` entry that Phase 
 ## 16. Event-ready design notes
 
 `Strategy.on_signal(signal, ctx) -> StrategyResult` is intentionally a pure function of `(signal, ctx)`: no I/O, no store mutation, deterministic given context. A future event bus can deliver `Signal` events to `on_signal` unchanged; today `process_signals` calls it in a loop. `StrategyContext` is a read-only handle bundle so the same signature works whether invoked procedurally or by a dispatcher. No bus, subscriptions, or queues are added here.
+
+---
+
+## Implementation status
+
+**Status: implemented · CLI-runnable (shadow + tiny live BUY).**
+
+**Verification label:** `CLI-runnable` · `shadow-runnable` · `tiny-live-order-runnable` — see [live_validation_matrix.md](live_validation_matrix.md).
+
+**Implementation summary.** A generic `Signal` protocol (`signals/base.py`) plus `StrategyContext` / `StrategyResult` / `Strategy.on_signal` (`strategies/base.py`) were added. `runtime/pipeline.py::process_signals(...)` is the single dispatch path; `process_new_guru_signals(...)` is now a thin wrapper that runs its guru-specific pre-checks and delegates to `process_signals`. `GuruFollowStrategy.on_signal` delegates to the legacy `on_guru_signal`. A new `simple_signal_test` strategy + `SimpleSignal` prove a non-guru source produces an `EnterIntent` through the same pipeline.
+
+**Runtime integration (post-Phase 1 gap fix).** `runtime/app.py` now routes `kind: simple_signal_test` through `runtime/fixture_signal_run.py::run_fixture_signals_once(...)` — a generic one-shot fixture runner (not a guru-style poll loop). It builds a `SimpleSignal`, instantiates `SimpleSignalTestStrategy`, and calls `process_signals(...)`. Unsupported strategy kinds fail closed with `RuntimeError` instead of falling back to guru polling. Guru polling (`poll_guru_incremental`) runs **only** when `strategy_kind == guru_follow`.
+
+**Files changed.** `signals/base.py`, `signals/simple_signal.py` (new), `strategies/base.py`, `strategies/guru_follow/strategy.py`, `strategies/simple_signal_test/` (new), `runtime/pipeline.py`, `runtime/config.py` (`strategy_kind` on `AppConfig`), `runtime/app.py` (fixture runner path + fail-closed kind routing), `runtime/fixture_signal_run.py` (new), `runtime/allocation_ids.py`, `reporting/schema_v2.py` (`FACT_TYPE_SIGNAL_RECEIVED`), `config/strategies/simple_signal_test.yaml` (new).
+
+**Tests added.** `tests/test_generic_signal_dispatch.py` (guru-unchanged facts, generic dispatch, `signal_received` for non-guru, SELL allocation clamp, no-venue-import invariant, legacy harnesses still run). `tests/test_simple_signal_test_runtime.py` (CLI path does not poll guru, no guru wallet required, uses `process_signals`, emits `signal_received`, exits cleanly, unknown kind does not fall back to guru).
+
+**Known limitations.** `sell_test` / `allocation_test` / `tp_sl_test` deliberately remain on their legacy loops (not force-migrated). `ProtectionMonitor.tick` and market-stream supervisor wiring in `app.py` are still deferred (Phases 2–4 packages exist; orchestration is not unified yet).
+
+**How to run tests.**
+
+```bash
+python -m pytest tests/test_generic_signal_dispatch.py
+python -m pytest tests/test_simple_signal_test_runtime.py
+```
+
+**How to run a safe harness.** `simple_signal_test` is the CLI-safe non-guru reference harness for the generic Signal → Strategy → Intent path. It does **not** use guru polling or require `guru.wallet`. Use it for architecture validation, shadow tests, and controlled smoke tests:
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/simple_signal_test.yaml \
+  --run-name simple_strat
+```
+
+Expected facts: `signal_received` → `intent_created` (if enabled) → `risk_decision` → OMS/shadow path. With `execution.planner.enabled` in a scenario overlay, also expect `execution_plan` and `risk_decision` with `phase="planned"`.

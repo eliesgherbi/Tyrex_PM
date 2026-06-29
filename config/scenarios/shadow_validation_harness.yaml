@@ -1,0 +1,38 @@
+# Shadow validation harness — normal entry through generic pipeline + planner.
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness.yaml \
+#     --scenario shadow_validation_harness \
+#     --run-name validation_shadow_entry
+#
+# Expected facts: signal_received, intent_created, execution_plan,
+#   risk_decision phase=planned, oms_submit planner_reason=planner_normal_entry
+
+execution_mode: shadow
+
+runtime:
+  shadow_bootstrap:
+    usdc_balance: "1000000"
+    usdc_allowance: "1000000"
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "10"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "15"
+    portfolio_cap_usd: "25"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"

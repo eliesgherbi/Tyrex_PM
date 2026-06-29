@@ -62,6 +62,13 @@ class RuntimeCoordinator:
     allocation_ledger: object | None = None
     allocation_ledger_run_id: str | None = None
     allocation_ledger_sink: object | None = None
+    #: Skip clamping recent BUY credits to ``venue_qty=0`` within this window (REST lag).
+    allocation_clamp_grace_s: float = 90.0
+    #: Phase 2 architecture_enhance: shared, stale-aware order-book state
+    #: (:class:`tyrex_pm.state.market_store.MarketStateStore`). ``None`` when
+    #: market data is dark-launched/disabled; the ExecutionPlanner (Phase 3) and
+    #: ProtectionEngine (Phase 4) consult it and fail closed on stale/missing books.
+    market_state: object | None = None
 
     def holdings(self) -> dict[TokenId, Decimal]:
         return {tid: p.qty for tid, p in self.wallet.positions.items()}

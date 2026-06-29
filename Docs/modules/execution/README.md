@@ -6,6 +6,8 @@ Turns approved intents into venue submits / cancels and keeps the local OMS stat
 
 | File | Purpose |
 |------|---------|
+| `planner.py` | `ExecutionPlanner` (P3 architecture_enhance) — converts a risk-approved intent into a concrete `ExecutionPlan`: passive/normal entry → GTC at strategy limit; urgent/protection exit → FAK at worst-acceptable price from `MarketStateStore`; stale/missing book on an urgent exit → deny unless an explicit fallback is configured. Preserves the pre-check `client_order_id` |
+| `models.py` | `ExecutionPlan` / `ExecutionPlanResult` (P3 architecture_enhance) — the planner's output, kept out of `core/` to keep core small |
 | `oms.py` | `SingleWriterOMS` — serializes submits and cancels for one wallet onto a single asyncio queue, then awaits the backend. Eliminates double-submit races between concurrent guru signals |
 | `adapters.py` | `OMSBackend` Protocol + `ShadowOMS` (returns `"shadow_ack"` / `"shadow_cancel_ack"`) |
 | `live_oms.py` | `LiveOMS` — real Polymarket backend that delegates to `venue.polymarket.clob_bridge.PyClobBridge` (V2 SDK) |
@@ -25,6 +27,25 @@ class OMSBackend(Protocol):
 ```
 
 The pipeline always wraps the chosen backend in `SingleWriterOMS(backend)` so the actual submit/cancel call site is a single coroutine; backends do not need to be reentrant.
+
+## Planner pipeline (P3 architecture_enhance)
+
+When `execution.planner.enabled` (requires `market_data.enabled`), the pipeline inserts the planner between risk pre-check and OMS:
+
+```
+Intent → RiskEngine.evaluate_intent (pre-check, mints client_order_id)
+       → ExecutionPlanner.plan(approved, market_state)        → execution_plan fact
+       → risk/planned_order.validate_planned_order(plan)      → risk_decision {phase: planned}
+       → SingleWriterOMS.submit                               → oms_submit (planner_reason)
+```
+
+**BUY submit ack:** resting orders update `OrderStore` only. Allocation credits require matched fill qty (`allocation_buy_applied_from_fill`). Resting acks emit `order_resting_recorded` on `oms_submit`.
+
+**Urgent reduce-only SELL:** `risk/planned_order.py` + `risk/exits.py` may approve via executable-bid mark fallback when deployment mark is missing but venue position and fresh bid exist (`reduce_only_exit_mark_fallback`).
+
+`validate_planned_order` re-checks notional / deployment caps / capital / inventory / venue-min-size on the *final* plan **without** re-entering `evaluate_intent` and **without** minting a new client order id. It denies non-urgent planner price-worsening; urgent (protection) exits are exempt because marketable pricing is the point. When the planner is disabled the OMS receives the strategy/intent order style unchanged (no `execution_plan` fact).
+
+**Readiness:** normal entry — unit-tested, shadow CLI, **live-validated** (`simple_signal_test`). Urgent FAK — unit-tested, shadow CLI via `validation_harness`, **live-ready** via `validation_harness_urgent_exit_live.yaml`. Stale-book deny — unit-tested, **shadow-only synthetic** via `validation_harness`. **Phase 4.6** paired binary uses GTC entry + FAK exits through the same pipeline ([design](../../Implementation/architecture_enhance/phase_4_6_paired_binary_strategy_production_protection.md)).
 
 ## Order lifecycle (local view)
 

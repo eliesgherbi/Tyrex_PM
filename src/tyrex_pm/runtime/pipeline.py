@@ -22,6 +22,7 @@ from tyrex_pm.core.models import (
     GuruTradeSignal,
     Intent,
     ReduceIntent,
+    URGENCY_URGENT,
 )
 from tyrex_pm.core import reason_codes as rc
 from tyrex_pm.execution.adapters import OMSBackend
@@ -33,8 +34,12 @@ from tyrex_pm.execution.order_lifecycle import (
     submit_fingerprint_for_intent,
     sync_local_open_orders_from_venue_wallet,
 )
+from tyrex_pm.core.time import utc_now
+from tyrex_pm.execution.models import ExecutionPlan, ExecutionPlanResult
+from tyrex_pm.execution.planner import ExecutionPlanner
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import (
+    FACT_TYPE_EXECUTION_PLAN,
     FACT_TYPE_GURU_SIGNAL,
     FACT_TYPE_HEALTH,
     FACT_TYPE_INTENT,
@@ -43,14 +48,17 @@ from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_OMS_SUBMIT,
     FACT_TYPE_RECONCILE,
     FACT_TYPE_RISK,
+    FACT_TYPE_SIGNAL_RECEIVED,
     FACT_TYPE_STRATEGY_SKIP,
     FACT_TYPE_WALLET_SYNC,
 )
+from tyrex_pm.risk.planned_order import validate_planned_order
 from tyrex_pm.runtime.exit_lifecycle import (
     emit_exit_lifecycle,
     oms_status_is_matched,
     parse_oms_match_evidence,
 )
+from tyrex_pm.state.entry_fill_lifecycle import filled_qty_from_match_evidence, is_resting_ack
 from tyrex_pm.runtime.allocation_exit_lifecycle import (
     link_exit_reservation_venue_order,
     process_allocation_exit_from_order_store,
@@ -66,10 +74,12 @@ from tyrex_pm.runtime.allocation_runtime import (
 )
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
 from tyrex_pm.risk.engine import evaluate_intent
+from tyrex_pm.risk.exits import build_exit_book_evidence_for_intent
 from tyrex_pm.risk.evidence_format import s_usd
 from tyrex_pm.runtime.config import AppConfig
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
 from tyrex_pm.runtime.intent_work import IntentWorkUnit
+from tyrex_pm.signals.base import SIGNAL_SOURCE_GURU, Signal
 from tyrex_pm.signals.guru_copy_signal import to_copy_signal
 from tyrex_pm.state.reconcile import reconcile_open_orders
 from tyrex_pm.state.shadow_wallet import apply_shadow_fill
@@ -96,6 +106,27 @@ def _guru_payload(sig: GuruTradeSignal) -> dict:
         "notional_usd": str(sig.notional_usd) if sig.notional_usd is not None else None,
         "conviction_score": str(sig.conviction_score) if sig.conviction_score is not None else None,
     }
+
+
+def _signal_received_payload(signal: Signal) -> dict:
+    """Minimal generic ingress payload for non-guru sources (P1).
+
+    Best-effort: only fields every :class:`Signal` is guaranteed to expose plus a
+    few optional ones probed via ``getattr`` so a new signal type does not need a
+    bespoke serializer.
+    """
+    payload: dict = {
+        "source": signal.source,
+        "token_id": str(signal.token_id),
+        "dedup_key": signal.dedup_key,
+    }
+    signal_type = getattr(signal, "signal_type", None)
+    if signal_type is not None:
+        payload["signal_type"] = str(signal_type)
+    side = getattr(signal, "side", None)
+    if side is not None:
+        payload["side"] = getattr(side, "value", str(side))
+    return payload
 
 
 def _intent_payload(intent: Intent) -> dict:
@@ -291,6 +322,77 @@ def reconcile_coordinator(coord: RuntimeCoordinator, sink: JsonlSink, run_id: st
     process_allocation_exit_from_order_store(coord)
 
 
+def _execution_plan_payload(result: ExecutionPlanResult, *, client_order_id: str) -> dict:
+    payload: dict = {
+        "approved": result.approved,
+        "planner_reason": result.reason,
+        "client_order_id": client_order_id,
+    }
+    if result.plan is not None:
+        plan = result.plan
+        payload.update(
+            {
+                "execution_style": plan.order_style.value,
+                "limit_price": str(plan.limit_price) if plan.limit_price is not None else None,
+                "size": str(plan.size),
+                "urgency": plan.urgency,
+            }
+        )
+    if result.evidence:
+        payload["evidence"] = result.evidence
+    return payload
+
+
+def _run_execution_planner(
+    ap: ApprovedIntent,
+    *,
+    app: AppConfig,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    rid: str,
+    corr: str,
+    risk_ctx,
+) -> tuple[ApprovedIntent, str] | None:
+    """Planner → execution_plan fact → final validation → risk_decision[planned].
+
+    Returns ``(approved_intent, planner_reason)`` to submit, or ``None`` when the
+    planner or final validation denied (caller fails the intent closed). The
+    returned ``ApprovedIntent`` preserves the pre-check ``client_order_id``.
+    """
+    planner = ExecutionPlanner(app.execution.planner)
+    result = planner.plan(ap, market_state=coord.market_state, now=utc_now())
+    sink.write(
+        make_fact(
+            FACT_TYPE_EXECUTION_PLAN,
+            rid,
+            _execution_plan_payload(result, client_order_id=str(ap.client_order_id)),
+            correlation_id=corr,
+        )
+    )
+    if not result.approved or result.plan is None:
+        return None
+    plan: ExecutionPlan = result.plan
+    final = validate_planned_order(plan, risk_ctx, app=app)
+    planned_payload: dict = {
+        "approved": final.approved,
+        "reason_codes": list(final.reason_codes),
+        "detail": final.detail,
+    }
+    if final.extensions:
+        planned_payload.update(final.extensions)
+    sink.write(
+        make_fact(
+            FACT_TYPE_RISK,
+            rid,
+            planned_payload,
+            correlation_id=corr,
+        )
+    )
+    if not final.approved or final.approved_intent is None:
+        return None
+    return final.approved_intent, plan.planner_reason
+
+
 async def process_intent_work_unit(
     work: IntentWorkUnit,
     *,
@@ -325,7 +427,21 @@ async def process_intent_work_unit(
         )
     )
     risk_ctx = coord.build_risk_context(app)
-    decision = evaluate_intent(intent, risk_ctx, app=app, run_id=run_id)
+    exit_book_evidence = None
+    if isinstance(intent, (ExitIntent, ReduceIntent)) and intent.side == Side.SELL:
+        if getattr(intent, "urgency", None) == URGENCY_URGENT:
+            exit_book_evidence = build_exit_book_evidence_for_intent(
+                coord.market_state,
+                intent.token_id,
+                max_book_age_s=app.risk.exits.urgent_exit_max_book_age_s,
+            )
+    decision = evaluate_intent(
+        intent,
+        risk_ctx,
+        app=app,
+        run_id=run_id,
+        exit_book_evidence=exit_book_evidence,
+    )
     risk_payload: dict = {
         "approved": decision.approved,
         "reason_codes": list(decision.reason_codes),
@@ -349,6 +465,7 @@ async def process_intent_work_unit(
             coord=coord,
             corr=corr,
             reason_codes=list(decision.reason_codes),
+            intent_extensions=intent_extensions,
         )
         reconcile_coordinator(coord, sink, rid)
         return
@@ -389,6 +506,24 @@ async def process_intent_work_unit(
         )
     elif decision.approved and decision.approved_intent:
         ap = decision.approved_intent
+        planner_reason: str | None = None
+        if app.execution.planner.enabled:
+            plan_outcome = _run_execution_planner(
+                ap, app=app, coord=coord, sink=sink, rid=rid, corr=corr, risk_ctx=risk_ctx
+            )
+            if plan_outcome is None:
+                _handle_intent_risk_denied(
+                    intent,
+                    strategy=strategy,
+                    coord=coord,
+                    corr=corr,
+                    reason_codes=[rc.UNKNOWN],
+                    intent_extensions=intent_extensions,
+                    blocked_reason="PLANNER_DENIED",
+                )
+                reconcile_coordinator(coord, sink, rid)
+                return
+            ap, planner_reason = plan_outcome
         fp = submit_fingerprint_for_intent(ap)
         if coord.orders.has_pending_submit_fingerprint(fp):
             sink.write(
@@ -472,6 +607,7 @@ async def process_intent_work_unit(
                     corr=corr,
                     token_id=str(ap.intent.token_id),
                     error_payload=reject_payload,
+                    intent_extensions=intent_extensions,
                 )
             reconcile_coordinator(coord, sink, rid)
             return
@@ -484,12 +620,22 @@ async def process_intent_work_unit(
         ack_status = None
         if isinstance(parsed, dict):
             ack_status = parsed.get("status") or parsed.get("orderStatus")
+        buy_fill_qty = None
+        if isinstance(ap.intent, EnterIntent) and ap.intent.side == Side.BUY:
+            buy_fill_qty = filled_qty_from_match_evidence(
+                match_evidence,
+                ap.intent.size,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+            )
+            if buy_fill_qty <= 0:
+                buy_fill_qty = None
         ack_submit(
             coord.orders,
             ap,
             v_oid,
             shadow_instant_fill=apply_local_shadow_fill,
             ack_status=str(ack_status) if ack_status is not None else None,
+            filled_qty=buy_fill_qty,
         )
         is_live_buy = (
             isinstance(ap.intent, EnterIntent)
@@ -516,6 +662,20 @@ async def process_intent_work_unit(
                 correlation_id=corr,
                 intent_extensions=intent_extensions,
                 run_id=rid,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+            )
+            from tyrex_pm.runtime.protection_runtime import maybe_register_protection_after_buy
+
+            maybe_register_protection_after_buy(
+                coord,
+                app,
+                strategy=strategy,
+                ap=ap,
+                match_evidence=match_evidence,
+                correlation_id=corr,
+                intent_extensions=intent_extensions,
+                run_id=rid,
+                apply_local_shadow_fill=apply_local_shadow_fill,
             )
         _dispatch_post_buy_ack_hook(
             strategy=strategy,
@@ -528,6 +688,15 @@ async def process_intent_work_unit(
         )
         if isinstance(strategy, AllocationTestStrategy):
             strategy.notify_buy_submitted(ap, match_evidence=match_evidence)
+        from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
+
+        if isinstance(strategy, PairedBinaryStrategy):
+            strategy.notify_buy_submitted(
+                ap,
+                match_evidence=match_evidence,
+                intent_extensions=intent_extensions,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+            )
         if is_live_buy and oms_status_is_matched(match_evidence):
             await refresh_positions_immediate_and_try_arm(coord, sink, rid)
         from tyrex_pm.execution.order_builder import build_quantize_evidence
@@ -537,8 +706,18 @@ async def process_intent_work_unit(
             "oms_result": res,
             **build_quantize_evidence(ap, mi),
         }
+        if planner_reason is not None:
+            submit_payload["planner_reason"] = planner_reason
         if match_evidence:
             submit_payload["match_evidence"] = match_evidence
+        if (
+            isinstance(ap.intent, EnterIntent)
+            and ap.intent.side == Side.BUY
+            and is_resting_ack(match_evidence)
+            and not apply_local_shadow_fill
+        ):
+            submit_payload["order_resting_recorded"] = True
+            submit_payload["allocation_buy_skipped"] = True
         sink.write(
             make_fact(
                 FACT_TYPE_OMS_SUBMIT,
@@ -607,6 +786,14 @@ async def process_intent_work_unit(
                     match_evidence,
                     shadow_instant_fill=apply_local_shadow_fill,
                 )
+            _notify_paired_binary_exit(
+                strategy,
+                intent_extensions,
+                submitted=True,
+                match_evidence=match_evidence,
+                ap=ap,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+            )
     reconcile_coordinator(coord, sink, rid)
 
 
@@ -774,6 +961,46 @@ async def refresh_positions_immediate_and_try_arm(
     return ok
 
 
+def _notify_paired_binary_exit(
+    strategy: object,
+    intent_extensions: dict[str, object] | None,
+    *,
+    submitted: bool,
+    reason: str | None = None,
+    match_evidence: dict | None = None,
+    ap: object | None = None,
+    apply_local_shadow_fill: bool = False,
+) -> None:
+    from tyrex_pm.core.models import ExitIntent
+    from tyrex_pm.runtime.allocation_ids import PAIRED_BINARY_INTENT_SOURCE
+    from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
+
+    if not isinstance(strategy, PairedBinaryStrategy):
+        return
+    ext = intent_extensions or {}
+    if ext.get("source") != PAIRED_BINARY_INTENT_SOURCE:
+        return
+    leg = ext.get("leg")
+    if not leg:
+        return
+    if submitted and match_evidence is not None and ap is not None:
+        intent = getattr(ap, "intent", None)
+        if isinstance(intent, ExitIntent) and should_apply_allocation_sell_on_submit(
+            match_evidence, apply_local_shadow_fill=apply_local_shadow_fill
+        ):
+            strategy.notify_exit_matched(
+                leg=str(leg),
+                match_evidence=match_evidence,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                size=intent.size,
+                limit_price=intent.limit_price,
+            )
+    if submitted:
+        strategy.notify_exit_submitted(leg=str(leg))
+    elif reason:
+        strategy.notify_exit_blocked(leg=str(leg), reason=reason)
+
+
 def _handle_intent_risk_denied(
     intent: Intent,
     *,
@@ -781,6 +1008,8 @@ def _handle_intent_risk_denied(
     coord: RuntimeCoordinator,
     corr: str,
     reason_codes: list[str],
+    intent_extensions: dict[str, object] | None = None,
+    blocked_reason: str = "RISK_DENIED",
 ) -> None:
     if isinstance(intent, EnterIntent) and intent.side == Side.BUY:
         if isinstance(strategy, SellTestStrategy):
@@ -804,6 +1033,12 @@ def _handle_intent_risk_denied(
             strategy.tp_sl_state.mark_exit_terminal("sell_risk_denied")
         elif isinstance(strategy, AllocationTestStrategy):
             strategy.notify_sell_denied()
+        _notify_paired_binary_exit(
+            strategy,
+            intent_extensions,
+            submitted=False,
+            reason=reason_codes[0] if reason_codes else blocked_reason,
+        )
 
 
 def _handle_sell_oms_reject(
@@ -813,6 +1048,7 @@ def _handle_sell_oms_reject(
     corr: str,
     token_id: str,
     error_payload: dict,
+    intent_extensions: dict[str, object] | None = None,
 ) -> None:
     emit_exit_lifecycle(
         coord,
@@ -828,6 +1064,12 @@ def _handle_sell_oms_reject(
         strategy.tp_sl_state.mark_exit_terminal("sell_oms_reject")
     elif isinstance(strategy, AllocationTestStrategy):
         strategy.notify_sell_oms_reject()
+    _notify_paired_binary_exit(
+        strategy,
+        intent_extensions,
+        submitted=False,
+        reason="OMS_REJECTED",
+    )
 
 
 async def refresh_wallet_coordinated_after_live_submit(
@@ -849,6 +1091,84 @@ async def refresh_wallet_coordinated_after_live_submit(
         sync_local_open_orders_from_venue_wallet(coord.orders, coord.wallet)
 
 
+async def process_signals(
+    signals: Sequence[Signal],
+    *,
+    app: AppConfig,
+    run_id: RunId,
+    strategy: object,
+    coord: RuntimeCoordinator,
+    sink: JsonlSink,
+    oms: OMSBackend,
+    apply_local_shadow_fill: bool = True,
+    live_clob_client: object | None = None,
+    emit_signal_received_fact: bool = True,
+) -> None:
+    """Generic signal → strategy → risk → OMS dispatch (P1 architecture_enhance).
+
+    The single dispatch path for every strategy. ``strategy`` must implement
+    :meth:`Strategy.on_signal`. Guru runs through this same function (its
+    venue-specific pre-checks and ``guru_signal`` fact live in
+    :func:`process_new_guru_signals`, which calls this with
+    ``emit_signal_received_fact=False``).
+
+    For non-guru sources a minimal ``signal_received`` fact is emitted so they
+    are not invisible before ``intent_created``.
+    """
+    from tyrex_pm.strategies.base import StrategyContext
+
+    rid = str(run_id)
+    ctx = StrategyContext(coord=coord, market_state=getattr(coord, "market_state", None))
+    for signal in signals:
+        corr = signal.dedup_key
+        if emit_signal_received_fact and signal.source != SIGNAL_SOURCE_GURU:
+            sink.write(
+                make_fact(
+                    FACT_TYPE_SIGNAL_RECEIVED,
+                    rid,
+                    _signal_received_payload(signal),
+                    correlation_id=corr,
+                )
+            )
+        result = strategy.on_signal(signal, ctx)
+        intents = result.intents
+        skip_reason = result.skip_reason
+        meta: dict = dict(result.meta) if result.meta else {}
+        # Reserved meta key: a strategy may attach a health snapshot to surface
+        # alongside its skip/intent (guru exit health gating). Emitted as a
+        # ``health`` fact, never leaked into the intent payload.
+        health_ev = meta.pop("guru_exit_health", None)
+        if skip_reason:
+            if health_ev is not None:
+                sink.write(make_fact(FACT_TYPE_HEALTH, rid, health_ev, correlation_id=corr))
+            sink.write(
+                make_fact(
+                    FACT_TYPE_STRATEGY_SKIP,
+                    rid,
+                    {"reason": skip_reason, "dedup_key": corr},
+                    correlation_id=corr,
+                )
+            )
+            reconcile_coordinator(coord, sink, rid)
+            continue
+        if health_ev is not None:
+            sink.write(make_fact(FACT_TYPE_HEALTH, rid, health_ev, correlation_id=corr))
+        for intent in intents:
+            ext: dict = dict(meta)
+            work = IntentWorkUnit(intent=intent, correlation_id=corr, intent_fact_extensions=ext)
+            await process_intent_work_unit(
+                work,
+                app=app,
+                run_id=run_id,
+                strategy=strategy,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+            )
+
+
 async def process_new_guru_signals(
     new_signals: Sequence[GuruTradeSignal],
     *,
@@ -863,7 +1183,13 @@ async def process_new_guru_signals(
     gamma_client: GammaClient | None = None,
     live_clob_client: object | None = None,
 ) -> None:
-    """Guru → strategy → risk → OMS; optional synthetic shadow fill for offline parity."""
+    """Guru → strategy → risk → OMS; optional synthetic shadow fill for offline parity.
+
+    Thin guru wrapper around :func:`process_signals` (P1): it keeps the
+    guru-specific pre-checks (tradeable filter, market-info resolution) and the
+    backward-compatible ``guru_signal`` fact, then delegates the strategy
+    dispatch + intent processing to the generic path.
+    """
     rid = str(run_id)
     gamma = gamma_client or GammaClient()
     for sig in new_signals:
@@ -927,49 +1253,15 @@ async def process_new_guru_signals(
                 )
                 reconcile_coordinator(coord, sink, rid)
                 continue
-        risk_ctx = coord.build_risk_context(app)
-        intents, skip_reason, sizing_meta = strategy.on_guru_signal(copy_sig, coord)
-        health_ev = sizing_meta.pop("guru_exit_health", None) if sizing_meta else None
-        if skip_reason:
-            if health_ev is not None:
-                sink.write(
-                    make_fact(
-                        FACT_TYPE_HEALTH,
-                        rid,
-                        health_ev,
-                        correlation_id=corr,
-                    )
-                )
-            sink.write(
-                make_fact(
-                    FACT_TYPE_STRATEGY_SKIP,
-                    rid,
-                    {"reason": skip_reason, "dedup_key": sig.dedup_key},
-                    correlation_id=corr,
-                )
-            )
-            reconcile_coordinator(coord, sink, rid)
-            continue
-        if health_ev is not None:
-            sink.write(
-                make_fact(
-                    FACT_TYPE_HEALTH,
-                    rid,
-                    health_ev,
-                    correlation_id=corr,
-                )
-            )
-        for intent in intents:
-            ext: dict = dict(sizing_meta) if sizing_meta else {}
-            work = IntentWorkUnit(intent=intent, correlation_id=corr, intent_fact_extensions=ext)
-            await process_intent_work_unit(
-                work,
-                app=app,
-                run_id=run_id,
-                strategy=strategy,
-                coord=coord,
-                sink=sink,
-                oms=oms,
-                apply_local_shadow_fill=apply_local_shadow_fill,
-                live_clob_client=live_clob_client,
-            )
+        await process_signals(
+            [copy_sig],
+            app=app,
+            run_id=run_id,
+            strategy=strategy,
+            coord=coord,
+            sink=sink,
+            oms=oms,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+            live_clob_client=live_clob_client,
+            emit_signal_received_fact=False,
+        )

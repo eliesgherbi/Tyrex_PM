@@ -1,0 +1,53 @@
+# Production paired binary strategy (Phase 4.6).
+# Shadow smoke: use with config/scenarios/shadow_paired_binary.yaml
+kind: paired_binary
+
+enabled: true
+
+paired_binary:
+  owner_id: paired_binary
+  market_id: "shadow_test_market"
+  yes_token_id: "93600127953453226164027182960250028230847035010973306659500433874577010899527"
+  no_token_id: "98261242917329382720414284166477944193653462411741333161666117894652193129742"
+
+  position_size: "5"
+  max_pair_entry_cost: "1.015"
+  max_spread_yes: "0.02"
+  max_spread_no: "0.02"
+
+  pair_stop_loss_pct: "0.09"
+  pair_take_profit_pct: "0.3"
+  slippage_buffer: "0.005"
+  reject_if_spread_exceeds_loss_budget: true
+
+  activation_gap_retry_s: 3
+  activation_gap_retry_interval_s: 0.5
+  activation_gap_max_retries: 6
+
+  activation_unwind_retry_s: 15
+  activation_unwind_retry_interval_s: 0.5
+
+  entry_price_mismatch_tolerance: "0.005"
+  entry_price_mismatch_abort_threshold: "0.02"
+
+  max_holding_time_s: 299
+
+  entry_order_style: FAK
+  exit_order_style: FAK
+  allow_entry_style_downgrade: false
+  allow_resting_entry_orders: false
+  pair_entry_submit_timeout_s: 5
+  pair_entry_fill_timeout_s: 10
+  pair_entry_resting_timeout_s: 2
+
+  entry_fill_timeout_s: 60
+  abort_unpaired_entry: true
+  unwind_partial_entry: true
+  min_effective_pair_qty: "5"
+
+  run_once: false
+  max_markets: 1
+  tick_interval_s: 0.2
+  max_runtime_s: 300
+
+  use_fixture_book: false

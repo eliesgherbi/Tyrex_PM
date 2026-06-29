@@ -304,7 +304,7 @@ async def test_guru_buy_then_sell_allocation_round_trip(tmp_path: Path) -> None:
     assert ledger.get_allocated(OWNER_GURU_FOLLOW, TOKEN) == Decimal("0")
     assert ledger.get_reserved(OWNER_GURU_FOLLOW, TOKEN) == Decimal("0")
     events = [r["payload"]["event"] for r in _facts(tmp_path) if r["fact_type"] == FACT_TYPE_ALLOCATION_LEDGER]
-    assert "allocation_buy_applied" in events
+    assert "allocation_buy_applied_from_fill" in events
     assert "allocation_sell_applied" in events
     oms = [r for r in _facts(tmp_path) if r["fact_type"] == FACT_TYPE_OMS_SUBMIT]
     assert len(oms) == 2

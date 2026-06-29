@@ -64,6 +64,7 @@ def ack_submit(
     *,
     shadow_instant_fill: bool,
     ack_status: str | None = None,
+    filled_qty: Decimal | None = None,
 ) -> None:
     """After venue ack: clear submit in-flight; live keeps resting row with ack metadata."""
     o = order_store.orders.get(ap.client_order_id)
@@ -77,14 +78,18 @@ def ack_submit(
         order_store.orders.pop(ap.client_order_id, None)
         return
     if venue_order_id is not None:
+        matched = filled_qty if filled_qty is not None else Decimal("0")
+        remaining = intent.size - matched if matched > 0 else intent.size
+        if matched > 0:
+            remaining = max(Decimal("0"), intent.size - matched)
         order_store.orders[ap.client_order_id] = LocalOrder(
             client_order_id=ap.client_order_id,
             venue_order_id=venue_order_id,
             token_id=o.token_id,
             side=o.side,
-            remaining=o.remaining,
+            remaining=remaining,
             original_size=intent.size,
-            size_matched=Decimal("0"),
+            size_matched=matched if matched > 0 else Decimal("0"),
             confirmation="provisional",
             submit_ack_utc=utc_now(),
             last_local_source="local",

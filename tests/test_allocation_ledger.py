@@ -61,10 +61,11 @@ def test_clamp_to_venue_positions_reduces_over_allocation(tmp_path: Path) -> Non
     ledger = AllocationLedger(path=tmp_path / "allocation_ledger.json")
     tid = TokenId("tok-a")
     ledger.apply_buy("sell_test", tid, Decimal("10"))
-    clamps = ledger.clamp_to_venue_positions(
+    clamps, skipped = ledger.clamp_to_venue_positions(
         {tid: WalletPosition(token_id=tid, qty=Decimal("6"), avg_price_usd=Decimal("0.5"))}
     )
     assert len(clamps) == 1
+    assert len(skipped) == 0
     assert clamps[0].allocated_after == Decimal("6")
     assert ledger.get_allocated("sell_test", tid) == Decimal("6")
 

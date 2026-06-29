@@ -1,0 +1,90 @@
+# Live tiny paired binary validation overlay (Phase 4.6).
+
+# Forces small exposure — must override conceptual 100-share default.
+
+#
+
+# Run (when live credentials available):
+
+#   python -m tyrex_pm.runtime.app run \
+
+#     --strategy config/strategies/paired_binary.yaml \
+
+#     --scenario live_paired_binary_tiny \
+
+#     --run-name paired_binary_live_tiny
+
+
+
+execution_mode: live
+
+
+
+runtime:
+
+  market_data:
+
+    enabled: true
+
+    max_book_age_s: 5
+
+  execution:
+
+    planner:
+
+      enabled: true
+
+      require_fresh_book_for_urgent: true
+
+      max_book_age_s: 5
+
+  allocation_ledger:
+
+    clamp_grace_s_after_buy: 90
+
+
+
+risk:
+
+  notional:
+
+    min_usd: "1"
+
+    max_usd: "15"
+
+    max_policy: cap
+
+  deployment:
+
+    token_cap_usd: "20"
+
+    portfolio_cap_usd: "30"
+
+  exits:
+
+    allow_reduce_only_mark_fallback: true
+
+    require_fresh_book_for_mark_fallback: true
+
+    urgent_exit_max_book_age_s: 0.5
+
+  venue_min_size:
+
+    enabled: true
+
+    policy: deny
+
+    default_min_size: "5"
+
+  readiness:
+
+    require_wallet_sync: true
+
+    max_wallet_age_s_live: 120
+
+    require_heartbeat_live: true
+
+    require_user_ws_live: true
+
+
+

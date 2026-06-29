@@ -13,7 +13,7 @@ def test_scenario_overlay_execution_mode() -> None:
     from tyrex_pm.core.enums import ExecutionMode
 
     assert app.runtime.execution_mode == ExecutionMode.LIVE
-    assert app.risk.deployment.token_cap_usd == Decimal("100")
+    assert app.risk.deployment.token_cap_usd == Decimal("10")
 
 
 def test_scenario_bare_name_resolves() -> None:

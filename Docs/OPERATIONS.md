@@ -11,11 +11,13 @@ How to run, configure, and observe Tyrex_PM in shadow and live modes.
 Three subcommands, all backed by `tyrex_pm.runtime.app`:
 
 ```bash
-tyrex-pm run [...]            # full guru-follow loop (shadow or live)
+tyrex-pm run [...]            # strategy loop (guru poll, fixture replay, or harness — see strategy kind)
 tyrex-pm live-attest [...]    # one-shot live submit + cancel attestation
 tyrex-pm reset-state [...]    # clear local on-disk state (V2 cutover hygiene)
 # Equivalent: python -m tyrex_pm.runtime.app <cmd> [...]
 ```
+
+Strategy kind determines the runtime path. Only `guru_follow` polls the guru Data API. Unsupported kinds fail closed — they do **not** fall back to guru polling.
 
 ### 1.1 `tyrex-pm run`
 
@@ -29,6 +31,127 @@ tyrex-pm reset-state [...]    # clear local on-disk state (V2 cutover hygiene)
 | `--fixture <path>` | none | replay a Data API JSON file (shadow only) |
 | `--max-iterations N` | none | stop after N poll loops |
 | `--run-name <label>` | none | use `<label>` as the run directory name (sanitized); `run_id` in facts is still a fresh UUID |
+
+**Non-guru smoke (architecture harness).** `simple_signal_test` is the CLI-safe reference for the generic Signal → Strategy → Intent path. No guru wallet, no Data API polling:
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/simple_signal_test.yaml \
+  --run-name simple_strat
+```
+
+Expect `signal_received`, `intent_created` (when enabled), `risk_decision`, and OMS/shadow facts under `var/reporting/runs/simple_strat/`. With `execution.planner.enabled` in a scenario overlay, also grep for `execution_plan` and `risk_decision` with `"phase":"planned"`.
+
+**Live generic-path BUY** (real CLOB order, no guru polling):
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/simple_signal_test_live.yaml \
+  --scenario live_simple_signal_test \
+  --run-name "simple_strat_live_$(date +%s)"
+```
+
+Requires `TYREX_PRIVATE_KEY` in `.env` and `pip install tyrex-pm[live]`. The live strategy YAML uses `pricing_mode: auto` so the BUY crosses the spread. After submit, the runner waits up to `TYREX_SIMPLE_SIGNAL_TEST_FILL_WAIT_S` (default 45s) for allocation credit. Success: `oms_submit` with a venue order id; fill confirmed when `allocation_buy_applied` or `simple_signal_test_fill_wait` with `"filled": true`.
+
+**Phase 3 planner shadow (entry path, no real orders):**
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/simple_signal_test.yaml \
+  --scenario shadow_planner_simple_signal_test \
+  --run-name simple_strat_planner_shadow
+```
+
+Expect `execution_plan`, `risk_decision` with `"phase":"planned"`, and `oms_submit` with `planner_reason`. Full verification matrix: [live_validation_matrix.md](Implementation/architecture_enhance/live_validation_matrix.md).
+
+**Phase 4.5 validation harness** (exercises urgent exit, stale-book deny, protection — paths `simple_signal_test` cannot reach):
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/validation_harness.yaml \
+  --scenario shadow_validation_harness \
+  --run-name validation_shadow_entry
+```
+
+Change `validation.mode` in the strategy YAML for each ladder step (`normal_entry`, `urgent_exit`, `stale_book_deny`, `protection_register_only`, `protection_trigger_tp`, `market_data_readonly`). See [phase_4_5_live_validation_harness.md](Implementation/architecture_enhance/phase_4_5_live_validation_harness.md).
+
+**Live tiny harness entry (Level 1 — live-validated):**
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/validation_harness.yaml \
+  --scenario live_validation_harness_tiny \
+  --run-name validation_live_entry
+```
+
+**Live validation ladder (Levels 3/5/6 — live-ready; inspect facts after each run):**
+
+```bash
+# Level 3 — urgent FAK exit (requires prior Level 1 BUY on same token)
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/validation_harness_urgent_exit_live.yaml \
+  --scenario live_validation_urgent_exit \
+  --run-name validation_live_urgent_exit
+
+# Level 5 — protection register after CONFIRMED finality
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/validation_harness_protection_register_live.yaml \
+  --scenario live_validation_protection_register \
+  --run-name validation_live_protection_register
+
+# Level 6 — protection supervisor (6A wiring; 6B if market triggers)
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/validation_harness_protection_trigger_live.yaml \
+  --scenario live_validation_protection_trigger \
+  --run-name validation_live_protection_trigger
+```
+
+See [phase_4_5_live_validation_harness.md](Implementation/architecture_enhance/phase_4_5_live_validation_harness.md) and [phase_4_5_live_validation_wiring_plan.md](Implementation/architecture_enhance/phase_4_5_live_validation_wiring_plan.md) for pass criteria. **Live mode rejects fixtures** (`use_fixture_book`, `seed_allocation_qty`, manual protection registration).
+
+**Phase 4.6 paired binary** (implemented · shadow-validated · live-ready):
+
+```bash
+# Shadow PB-Level 2 — tiny paired entry (fixture books, stop_after_entry)
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/paired_binary.yaml \
+  --scenario shadow_paired_binary \
+  --run-name paired_binary_shadow_entry
+
+# Shadow PB-Level 1 — read-only entry scan (set entry_dry_run: true in strategy YAML)
+# Live PB-Level 1 — read-only (when credentials available)
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/paired_binary.yaml \
+  --scenario live_paired_binary_tiny \
+  --run-name paired_binary_pb1_scan
+```
+
+See [phase_4_6_paired_binary_strategy_production_protection.md](Implementation/architecture_enhance/phase_4_6_paired_binary_strategy_production_protection.md) for the PB-Level validation ladder and pass criteria.
+
+**Before live PB-Level 2 re-run:** clear stale paired state if a prior live run ended `FAILED` or stuck `STOP_PENDING_*` / `EXITING_*` (`python -m tyrex_pm.runtime.app reset-state` or delete `var/state/paired_binary/`). Verify orphaned Polymarket positions from failed runs manually.
+
+**After lifecycle hardening (2026-06-26):** expect `paired_binary_entry_qty_reconciled` → `BOTH_LEGS_FILLED` → `paired_binary_waiting_for_sellable_inventory` (if venue lags) → `paired_binary_pnl_plan` + `paired_binary_monitor_started` at `BOTH_LEGS_ACTIVE`.
+
+**Robustness update (2026-06-26):**
+
+- Entry prices for pair-PnL come from **fill evidence only** (`oms_match_evidence`, `user_ws_confirmed_trade`, `venue_trade_repair`, `shadow_fill`) — never current ask at reconcile.
+- **Cashflow-based realized PnL:** authoritative `paired_binary_realized_pnl` uses matched venue cashflows only: `pnl_total = sell_cash_total - buy_cash_total`. Average prices (`yes_entry_avg_price`, etc.) are derived display fields: `avg_price = cash / qty`. Book bid, trigger price, limit price, and planned price are **never** used as authoritative realized PnL. If cashflows are missing, emit `paired_binary_realized_pnl_unavailable` (optional non-authoritative `paired_binary_price_based_pnl_estimate`). Polymarket UI cash values may differ from OMS facts due to display rounding, fees, or net/gross accounting.
+- Activation gap may **recheck** for `activation_gap_retry_s` before abort (`ACTIVATION_PENDING_RECHECK` → `paired_binary_activation_gap_recheck` / `paired_binary_activation_recovered`).
+- Activation abort triggers **emergency unwind with retry** (`UNWIND_PENDING`, facts `paired_binary_emergency_unwind_*`); manual intervention fact if retry window expires.
+- Urgent unwinds use generic **reduce-only mark fallback** in RiskEngine (phase 1 + planned).
+- Grep `paired_binary_latency_sample` and `paired_binary_book_capture_quality` for timing diagnostics.
+
+**Live validation vs production:** paired binary now uses `pair_stop_loss_pct` / `pair_take_profit_pct` (% of `yes_entry + no_entry`). With defaults `0.02` / `0.05`, planned net ≈ **+3% of pair cost** if both exits fill near plan. Entry/activation gates reject trades where spread consumes the loss budget. Live PnL still varies with slippage and fills — grep `paired_binary_realized_pnl` vs `paired_binary_pnl_plan`.
+
+**Urgent timeout/stop exits:** missing deployment mark on a held leg must not trap the exit. Grep `risk_decision` with `reduce_only_exit_mark_fallback` when `deployment_mark_unknown` would have blocked a reduce-only SELL.
+
+**Stuck EXITING_* without open sell:** restart emits `paired_binary_recovered` with `recovery_action` (`exiting_no_retry_stop_pending`, etc.) and returns to `STOP_PENDING_*` for retry. Timeout re-evaluates all non-terminal monitor phases including pending/exiting.
+
+```yaml
+# optional scenario overlay
+runtime:
+  allocation_ledger:
+    clamp_grace_s_after_buy: 90
+```
 
 ### 1.2 `tyrex-pm live-attest`
 
@@ -203,6 +326,19 @@ grep '"approved":false' var/reporting/runs/<id>/facts.jsonl
 # What did the venue actually accept / reject?
 grep '"fact_type":"oms_submit"' var/reporting/runs/<id>/facts.jsonl
 grep '"fact_type":"oms_reject"' var/reporting/runs/<id>/facts.jsonl
+
+# What execution style did the planner choose? (only when execution.planner.enabled)
+grep '"fact_type":"execution_plan"' var/reporting/runs/<id>/facts.jsonl
+# Final planned-order revalidation:
+grep '"fact_type":"risk_decision"' var/reporting/runs/<id>/facts.jsonl | grep '"phase":"planned"'
+
+# Protection (TP/SL) overlay activity:
+grep '"fact_type":"protection_register"' var/reporting/runs/<id>/facts.jsonl
+grep '"fact_type":"protection_trigger"' var/reporting/runs/<id>/facts.jsonl
+# (protection_tick is deduped on observed price so it does not flood the log)
+
+# Non-guru signal ingress:
+grep '"fact_type":"signal_received"' var/reporting/runs/<id>/facts.jsonl
 
 # Did reconciliation flag drift?
 grep '"fact_type":"reconcile"' var/reporting/runs/<id>/facts.jsonl | grep -i blocking

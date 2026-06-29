@@ -37,6 +37,14 @@ class GuruTradeSignal:
     conviction_score: Decimal | None = None
 
 
+#: Execution urgency hint (P3 architecture_enhance) consumed by the
+#: ExecutionPlanner. Default ``normal`` preserves existing behavior; protection
+#: exits (P4) set ``urgent`` to request a marketable FAK with book evidence.
+URGENCY_PASSIVE = "passive"
+URGENCY_NORMAL = "normal"
+URGENCY_URGENT = "urgent"
+
+
 @dataclass(frozen=True)
 class EnterIntent:
     token_id: TokenId
@@ -45,6 +53,7 @@ class EnterIntent:
     limit_price: Decimal | None
     order_style: OrderStyle
     intent_id: IntentId = field(default_factory=lambda: IntentId(str(uuid4())))
+    urgency: str = URGENCY_NORMAL
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,7 @@ class ExitIntent:
     limit_price: Decimal | None
     order_style: OrderStyle
     intent_id: IntentId = field(default_factory=lambda: IntentId(str(uuid4())))
+    urgency: str = URGENCY_NORMAL
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,7 @@ class ReduceIntent:
     limit_price: Decimal | None
     order_style: OrderStyle
     intent_id: IntentId = field(default_factory=lambda: IntentId(str(uuid4())))
+    urgency: str = URGENCY_NORMAL
 
 
 @dataclass(frozen=True)

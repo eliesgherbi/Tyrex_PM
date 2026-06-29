@@ -1,0 +1,31 @@
+# Live simple_signal_test — one real BUY through the generic dispatch path.
+#
+# Replace token_id with the CLOB outcome token you want to buy.
+# pricing_mode: auto crosses the spread (best_ask + aggression_ticks) so the order
+# is marketable and more likely to fill; limit_price is the fallback if book lookup fails.
+#
+# Shadow counterpart: config/strategies/simple_signal_test.yaml
+# Live scenario overlay: config/scenarios/live_simple_signal_test.yaml
+
+kind: simple_signal_test
+
+enabled: true
+
+# REQUIRED: set to your target market outcome token_id.
+token_id: "9059650700126795019827485089957938050581213031053374092199507389736394347163"
+
+owner_id: simple_signal_test
+side: BUY
+notional_usd: "5"
+
+# Fallback when pricing_mode=fixed, or when auto book lookup fails.
+limit_price: "0.50"
+
+# Live: fetch best_ask + aggression_ticks so the BUY is marketable (recommended).
+pricing_mode: auto
+aggression_ticks: 2
+# Safety ceiling for auto pricing — refuse to pay above this; fall back to limit_price.
+max_price: "0.95"
+
+order_style: GTC
+run_once: true

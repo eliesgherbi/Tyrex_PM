@@ -1,0 +1,30 @@
+# Level 3 — live urgent FAK exit (real MarketStateStore, no fixtures).
+#
+# Preconditions: validation_harness allocation + venue position on token_id
+# (run Level 1 live entry first on same token).
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness_urgent_exit_live.yaml \
+#     --scenario live_validation_urgent_exit \
+#     --run-name validation_live_urgent_exit
+
+kind: validation_harness
+
+enabled: true
+
+token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+
+validation:
+  mode: urgent_exit
+  owner_id: validation_harness
+  token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+  side: SELL
+  limit_price: "0.05"
+  use_fixture_book: false
+  allow_seed_allocation: false
+  order_style: GTC
+  run_once: true
+
+protection:
+  enabled: false

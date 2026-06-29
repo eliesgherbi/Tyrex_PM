@@ -10,13 +10,15 @@ A modular Polymarket trading stack composed of:
 
 - a small **runtime** (`runtime.app`, supervisors, coordinator),
 - **venue adapters** for Polymarket (CLOB REST, user/market WS, Gamma, Data API),
-- **explicit state stores** (`WalletStore`, `OrderStore`, `StrategyStore`),
-- **thin strategies** that emit `Intent`s,
+- **explicit state stores** (`WalletStore`, `OrderStore`, `AllocationLedger`, `MarketStateStore`, `StrategyStore`),
+- **thin strategies** that emit `Intent`s via a generic `Strategy.on_signal`,
 - a **fail-closed `RiskEngine`** that produces `RiskDecision`s,
+- an **`ExecutionPlanner`** that chooses concrete order style/price between risk pre-check and OMS,
 - a **single-writer OMS** (shadow or live) for submit/cancel,
+- a reusable **`protection/` overlay** (TP/SL) that emits urgent `ExitIntent`s,
 - a **structured reporting** layer (`facts.jsonl` per run).
 
-NautilusTrader is **not** the runtime spine; the bot owns its own bus, state machines, and reconcile.
+The official runtime spine is **generic and procedural** (`Signal → Strategy → Intent → RiskEngine → ExecutionPlanner → SingleWriterOMS → Venue`). Guru copy is **one** signal source/strategy, not the spine. NautilusTrader is not the runtime spine, and the `core/bus.py` event bus stays deferred ("procedural now, event-ready later"); the bot owns its own state machines and reconcile.
 
 ---
 
@@ -111,6 +113,10 @@ flowchart TB
 
 Component owners (one writer each): `runtime.app` wires everything; `RuntimeCoordinator` holds shared state; supervisors (heartbeat, venue refresh, provisional repair, user-WS staleness) are the only producers of their respective truth deltas.
 
+**Non-guru CLI paths.** `simple_signal_test` (`fixture_signal_run.py`) proves Phase 1 + optional Phase 3 normal entry. `validation_harness` (`validation_harness_run.py`, Phase 4.5) exercises urgent exit, stale-book deny, protection registration/trigger, and live-read-only market data — paths `simple_signal_test` cannot reach. Live wiring adds `FinalityWaiter` (allocation-final wait after BUY) and `ProtectionSupervisor` (periodic protection tick loop). **Phase 4.6** adds `paired_binary` — production strategy with long-running monitor loop. Entry uses reconciled qty (user-WS finality primary; allocation clamp grace prevents REST lag zeroing). Status: **implemented · shadow-validated · live PB-Level 2/3 ready for re-run** ([phase_4_6 §18](Implementation/architecture_enhance/phase_4_6_paired_binary_strategy_production_protection.md#18-live-truth-sources-and-monitoring-reliability)).
+
+**Market data + protection runtime (P4.5).** When `market_data.enabled`, `app.py` attaches `MarketStateStore` and starts REST bootstrap/refresh (`market_data_runtime.py`). When `protection.enabled`, `protection_runtime.py` initializes `ProtectionMonitor` and registers after allocation-final BUY fills via the pipeline hook.
+
 ---
 
 ## 4. Three engines
@@ -127,13 +133,14 @@ Component owners (one writer each): `runtime.app` wires everything; `RuntimeCoor
 |---------|------|-----------|
 | **core** | Shared dataclasses, ids, enums, time, errors, reason codes. | `models.py`, `enums.py`, `ids.py`, `reason_codes.py`, `events.py`, `bus.py` |
 | **venue/polymarket** | Pure I/O adapter. CLOB bridge, REST clients (Gamma, Data API), WS, normalizers, auth, heartbeat. | `clob_bridge.py`, `clob_wallet_sync.py`, `clob_heartbeat.py`, `gamma_client.py`, `data_api_client.py`, `user_ws.py`, `market_ws.py`, `normalizers.py`, `auth.py`, `clob_env.py`, `positions_sync.py` |
-| **state** | Internal truth: stores + reconcile. | `wallet_store.py`, `order_store.py`, `market_store.py`, `strategy_store.py`, `reconcile.py`, `shadow_wallet.py` |
+| **state** | Internal truth: stores + reconcile. | `wallet_store.py`, `order_store.py`, `market_store.py` (`MarketStateStore`), `fill_state.py` (finality helper), `allocation_ledger.py`, `strategy_store.py`, `reconcile.py`, `shadow_wallet.py` |
 | **ingestion** | Long-lived inputs and watermark-driven guru polling. | `guru_stream.py`, `user_stream.py`, `market_stream.py`, `historical_backfill.py` |
-| **signals** | Reusable signal building blocks (no HTTP). | `base.py`, `guru_copy_signal.py` |
-| **strategies** | Composition only — filters + sizing + exits → intents. | `base.py`, `guru_follow/{strategy,filters,sizing,exits}.py` |
-| **risk** | Fail-closed `RiskEngine` + per-policy modules. | `engine.py`, `pretrade.py`, `deployment.py`, `capital.py`, `inventory.py`, `concurrency.py`, `health.py`, `kill_switch.py`, `venue_min_size.py`, `in_flight.py`, `evidence_format.py` |
-| **execution** | OMS, order builder, lifecycle, cancel manager, slippage / liquidity guards. | `oms.py`, `live_oms.py`, `adapters.py`, `order_builder.py`, `order_lifecycle.py`, `cancel_manager.py`, `router.py`, `slippage.py`, `liquidity_guard.py` |
-| **runtime** | App entrypoint, config loading, coordinator, supervisors, modes. | `app.py`, `config.py`, `coordinator.py`, `pipeline.py`, `live_supervisor.py`, `supervisors.py`, `health_runtime.py`, `healthchecks.py`, `live_attest.py`, `risk_contexts.py`, `dependency_graph.py`, `modes.py` |
+| **signals** | Reusable signal building blocks (no HTTP). Generic `Signal` protocol. | `base.py`, `guru_copy_signal.py`, `simple_signal.py`, `validation_signal.py` |
+| **strategies** | Composition only — `on_signal` → intents. | `base.py` (`Strategy.on_signal`), `guru_follow/{strategy,filters,sizing,exits}.py`, `simple_signal_test/`, `validation_harness/`, `paired_binary/` (P4.6 design) |
+| **risk** | Fail-closed `RiskEngine` + per-policy modules + planned-order validator. | `engine.py`, `planned_order.py`, `pretrade.py`, `deployment.py`, `capital.py`, `inventory.py`, `concurrency.py`, `health.py`, `kill_switch.py`, `venue_min_size.py`, `in_flight.py`, `evidence_format.py` |
+| **execution** | Planner, OMS, order builder, lifecycle, cancel manager, slippage / liquidity guards. | `planner.py`, `models.py`, `oms.py`, `live_oms.py`, `adapters.py`, `order_builder.py`, `order_lifecycle.py`, `cancel_manager.py`, `router.py`, `slippage.py`, `liquidity_guard.py` |
+| **protection** | Reusable TP/SL overlay (P4): registers after `allocation_buy_applied`, emits urgent `ExitIntent`s. | `config.py`, `registry.py`, `monitor.py`, `trigger_eval.py`, `sizing.py`, `lifecycle.py` |
+| **runtime** | App entrypoint, config loading, coordinator, supervisors, modes. | `app.py`, `config.py`, `coordinator.py`, `pipeline.py`, `fixture_signal_run.py`, `validation_harness_run.py`, `validation_harness_live.py`, `finality_waiter.py`, `protection_supervisor.py`, `market_data_runtime.py`, `protection_runtime.py`, `paired_binary_run.py` (P4.6 design), `live_supervisor.py`, `supervisors.py`, `health_runtime.py`, `healthchecks.py`, `live_attest.py`, `risk_contexts.py`, `dependency_graph.py`, `modes.py` |
 | **reporting** | Facts schema + sinks + summarizer. | `facts.py`, `schema_v2.py`, `oms_payload.py`, `summarize.py`, `sinks/jsonl.py` |
 
 Per-module READMEs live under [modules/](modules/README.md).
@@ -266,6 +273,47 @@ config/scenarios/<scenario>.yaml       # via --scenario (deep-merged into risk /
 Secrets are **never** in YAML; they live in `.env` and are loaded by `runtime.app._maybe_load_dotenv` when `python-dotenv` is installed.
 
 Authoritative reference: [CONFIG_MODEL.md](CONFIG_MODEL.md).
+
+---
+
+## 11.1 Order lifecycle vs allocation lifecycle
+
+Four concepts must stay separate in runtime code and strategy state:
+
+| Concept | Store / module | Meaning |
+|---------|----------------|---------|
+| **Submitted / resting order** | `OrderStore` | Venue accepted the order; it may have **zero** fill qty (`ack_status=live`). Not inventory. |
+| **Fill evidence** | OMS match payload, user-WS `MATCHED`/`CONFIRMED`, `state/entry_fill_lifecycle.py` | Proves how many shares actually traded. |
+| **Venue position** | `WalletStore.positions` | Exchange-ground-truth qty (REST/WS). Used for SELL inventory gate and repair. |
+| **Owner allocation** | `AllocationLedger` | Strategy-attributed **sellable** qty. Credited only from fill evidence (matched OMS qty, WS `CONFIRMED`, shadow instant fill, repair). |
+
+**Hard rules:**
+
+- `maybe_apply_allocation_buy` credits **only** matched/filled qty (`allocation_buy_applied_from_fill`). Resting BUY → `order_resting_recorded` + `allocation_buy_skipped_unfilled_order`; ledger unchanged.
+- Strategy **ACTIVE** transitions (e.g. `BOTH_LEGS_ACTIVE`) require fill/position evidence via `entry_qty_reconcile` + `entry_fill_lifecycle` — not ledger alone, not submit ack.
+- Pending entry legs stay in `OrderStore`; strategies wait, cancel, or timeout-unwind.
+
+See `state/entry_fill_lifecycle.py`, `runtime/entry_qty_reconcile.py`, `runtime/allocation_runtime.py`.
+
+---
+
+## 11.2 Reduce-only urgent exit risk policy
+
+Increasing exposure still requires deployment marks. **Reducing** exposure must not trap on `deployment_mark_unknown`.
+
+When `risk.exits.allow_reduce_only_mark_fallback=true` (default) and `validate_planned_order` sees an urgent reduce-only SELL denied for missing marks:
+
+- Re-evaluates deployment using **executable bid** from planner book evidence (`mark_source=executable_bid`, `reason=reduce_only_exit_mark_fallback`).
+- Still denies if: no venue position, no fresh bid, size exceeds venue/allocation clamp, not reduce-only, stale book (when `require_fresh_book_for_mark_fallback=true`).
+
+Config:
+
+```yaml
+risk:
+  exits:
+    allow_reduce_only_mark_fallback: true
+    require_fresh_book_for_mark_fallback: true
+```
 
 ---
 

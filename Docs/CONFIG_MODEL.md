@@ -212,6 +212,16 @@ supervisors:
 logging:
   level: INFO
 allocation_ledger: {}
+market_data:                            # P2 architecture_enhance (dark-launched)
+  enabled: false
+  max_book_age_s: 5.0
+  token_ids: []
+execution:                              # P3 architecture_enhance (dark-launched)
+  planner:
+    enabled: false
+    require_fresh_book_for_urgent: true
+    max_book_age_s: 5.0
+    allow_urgent_exit_fallback: false
 ```
 
 | Key | Meaning |
@@ -220,6 +230,11 @@ allocation_ledger: {}
 | `shadow_bootstrap.*` | Synthetic USDC seed for shadow runs (no venue sync) |
 | `reporting.enabled` / `runs_dir` | Toggle and root for `var/reporting/runs/<run_id>/` |
 | `allocation_ledger` | Required marker block. Runtime always tracks per-owner token qty in `var/state/allocation_ledger.json`; all strategy SELL paths clamp to allocated qty (P4/P5). `enabled: false` is rejected at config load. |
+| `market_data.enabled` | Dark-launch toggle for `MarketStateStore` (P2). When false, no live book behavior changes. |
+| `market_data.max_book_age_s` | Default staleness threshold for `is_stale`; missing books are always treated as stale. |
+| `execution.planner.enabled` | Insert `ExecutionPlanner` + `validate_planned_order` between risk pre-check and OMS (P3). **Requires `market_data.enabled: true`** (config load rejects otherwise). When false, the OMS gets the strategy/intent order style unchanged. |
+| `execution.planner.max_book_age_s` | Book staleness limit for urgent/protection exits. |
+| `execution.planner.allow_urgent_exit_fallback` | If true, an urgent exit with a stale/missing book may fall back to a FAK at the intent's limit price instead of denying. |
 | `supervisors.reconcile_interval_s` | Cadence of REST refresh + reconcile in `live_supervisor.venue_refresh_loop` |
 | `supervisors.submit_grace_s` | Provisional age below which a missing-from-venue local row is non-blocking (`provisional_pending_venue`) |
 | `supervisors.provisional_unknown_terminal_timeout_s` | Provisional age past which an absent row drops as `UNKNOWN_TERMINAL` (when WS fresh and no venue restart) |

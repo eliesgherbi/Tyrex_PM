@@ -116,7 +116,7 @@ async def test_successful_buy_updates_ledger(tmp_path: Path) -> None:
     tid = app.sell_test.token_id
     assert ledger.get_allocated(OWNER_SELL_TEST, tid) > 0
     events = [r["payload"]["event"] for r in _facts(tmp_path) if r["fact_type"] == FACT_TYPE_ALLOCATION_LEDGER]
-    assert "allocation_buy_applied" in events
+    assert "allocation_buy_applied_from_fill" in events
     sink.__exit__(None, None, None)
 
 
@@ -189,7 +189,7 @@ async def test_successful_sell_reduces_ledger(tmp_path: Path) -> None:
     after = ledger.get_allocated(OWNER_SELL_TEST, "tok-sell-alloc")
     assert after < before
     events = [r["payload"]["event"] for r in _facts(tmp_path) if r["fact_type"] == FACT_TYPE_ALLOCATION_LEDGER]
-    assert "allocation_buy_applied" in events
+    assert "allocation_buy_applied_from_fill" in events
     assert "allocation_sell_applied" in events
     sink.__exit__(None, None, None)
 

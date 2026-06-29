@@ -8,19 +8,64 @@ from typing import Any
 
 import yaml
 
-from tyrex_pm.core.enums import ExecutionMode, OrderStyle
+from tyrex_pm.core.enums import ExecutionMode, OrderStyle, Side
 from tyrex_pm.core.errors import ConfigError
+
+
+_PAIRED_BINARY_DEPRECATED_KEYS = frozenset(
+    {
+        "loser_stop_loss",
+        "winner_take_profit",
+        "stop_reference",
+        "min_stop_after_activation_s",
+    }
+)
+_PAIRED_BINARY_DEPRECATED_MSG = (
+    "paired_binary now uses pair_stop_loss_pct / pair_take_profit_pct; "
+    "absolute price params are not supported."
+)
+
+
+def _reject_paired_binary_deprecated_keys(pb: dict[str, Any]) -> None:
+    found = sorted(k for k in _PAIRED_BINARY_DEPRECATED_KEYS if k in pb)
+    if found:
+        raise ConfigError(f"{_PAIRED_BINARY_DEPRECATED_MSG} (found: {', '.join(found)})")
 
 
 STRATEGY_KIND_GURU_FOLLOW = "guru_follow"
 STRATEGY_KIND_SELL_TEST = "sell_test"
 STRATEGY_KIND_ALLOCATION_TEST = "allocation_test"
 STRATEGY_KIND_TP_SL_TEST = "tp_sl_test"
+STRATEGY_KIND_SIMPLE_SIGNAL_TEST = "simple_signal_test"
+STRATEGY_KIND_VALIDATION_HARNESS = "validation_harness"
+STRATEGY_KIND_PAIRED_BINARY = "paired_binary"
 _VALID_STRATEGY_KINDS = (
     STRATEGY_KIND_GURU_FOLLOW,
     STRATEGY_KIND_SELL_TEST,
     STRATEGY_KIND_ALLOCATION_TEST,
     STRATEGY_KIND_TP_SL_TEST,
+    STRATEGY_KIND_SIMPLE_SIGNAL_TEST,
+    STRATEGY_KIND_VALIDATION_HARNESS,
+    STRATEGY_KIND_PAIRED_BINARY,
+)
+
+VALIDATION_MODE_NORMAL_ENTRY = "normal_entry"
+VALIDATION_MODE_URGENT_EXIT = "urgent_exit"
+VALIDATION_MODE_STALE_BOOK_DENY = "stale_book_deny"
+VALIDATION_MODE_PROTECTION_REGISTER = "protection_register_only"
+VALIDATION_MODE_PROTECTION_TP = "protection_trigger_tp"
+VALIDATION_MODE_PROTECTION_SL = "protection_trigger_sl"
+VALIDATION_MODE_PROTECTION_TRIGGER_LIVE = "protection_trigger_live"
+VALIDATION_MODE_MARKET_DATA_READONLY = "market_data_readonly"
+_VALID_VALIDATION_MODES = (
+    VALIDATION_MODE_NORMAL_ENTRY,
+    VALIDATION_MODE_URGENT_EXIT,
+    VALIDATION_MODE_STALE_BOOK_DENY,
+    VALIDATION_MODE_PROTECTION_REGISTER,
+    VALIDATION_MODE_PROTECTION_TP,
+    VALIDATION_MODE_PROTECTION_SL,
+    VALIDATION_MODE_PROTECTION_TRIGGER_LIVE,
+    VALIDATION_MODE_MARKET_DATA_READONLY,
 )
 
 
@@ -303,6 +348,134 @@ class TpSlTestStrategyConfig:
 
 
 @dataclass(frozen=True)
+class SimpleSignalTestStrategyConfig:
+    """Non-guru architecture harness (P1 architecture_enhance).
+
+    CLI-safe reference harness for the generic ``Signal → Strategy → Intent`` path.
+    Driven by :func:`tyrex_pm.runtime.fixture_signal_run.run_fixture_signals_once`
+    (no guru polling).
+    """
+
+    enabled: bool
+    token_id: str
+    owner_id: str
+    side: Side
+    notional_usd: Decimal
+    limit_price: Decimal | None
+    order_style: OrderStyle
+    run_once: bool
+    #: Live-only: ``auto`` resolves a marketable limit from the venue book (same helper as sell_test).
+    pricing_mode: str = SELL_TEST_PRICING_FIXED
+    aggression_ticks: int = 2
+    max_price: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class ProtectionRuntimeConfig:
+    """Runtime protection overlay config (P4 / P4.5)."""
+
+    enabled: bool
+    take_profit_pct: Decimal | None = None
+    stop_loss_pct: Decimal | None = None
+    take_profit_price: Decimal | None = None
+    stop_loss_price: Decimal | None = None
+    size_mode: str = "full"
+    fixed_size: Decimal | None = None
+    percent: Decimal | None = None
+    exit_order_style: OrderStyle = OrderStyle.FAK
+    exit_limit_price: Decimal | None = None
+    max_book_age_s: float = 5.0
+    register_on_buy: bool = True
+    tick_interval_s: float = 1.0
+    max_runtime_s: float = 180.0
+    stop_after_trigger: bool = True
+    stop_after_exit_submit: bool = True
+    fail_if_no_trigger: bool = False
+
+
+@dataclass(frozen=True)
+class ValidationHarnessStrategyConfig:
+    """Architecture validation harness (P4.5). Operator tool — not production."""
+
+    enabled: bool
+    mode: str
+    owner_id: str
+    token_id: str
+    side: Side
+    notional_usd: Decimal | None
+    limit_price: Decimal | None
+    size: Decimal | None
+    urgency: str
+    order_style: OrderStyle
+    run_once: bool
+    pricing_mode: str = SELL_TEST_PRICING_FIXED
+    aggression_ticks: int = 2
+    max_price: Decimal | None = None
+    entry_price: Decimal | None = None
+    seed_allocation_qty: Decimal | None = None
+    fixture_book_bid: Decimal | None = None
+    fixture_book_ask: Decimal | None = None
+    market_data_readonly_seconds: float = 3.0
+    use_fixture_book: bool = False
+    allow_seed_allocation: bool = False
+    wait_for_confirmed: bool = False
+    confirmed_timeout_s: float = 90.0
+    fail_if_not_confirmed: bool = True
+
+
+@dataclass(frozen=True)
+class PairedBinaryStrategyConfig:
+    """Production paired binary strategy (Phase 4.6)."""
+
+    enabled: bool
+    owner_id: str
+    market_id: str
+    yes_token_id: str
+    no_token_id: str
+    position_size: Decimal
+    max_pair_entry_cost: Decimal
+    max_spread_yes: Decimal
+    max_spread_no: Decimal
+    pair_stop_loss_pct: Decimal
+    pair_take_profit_pct: Decimal
+    slippage_buffer: Decimal
+    reject_if_spread_exceeds_loss_budget: bool
+    max_holding_time_s: float
+    entry_order_style: OrderStyle
+    exit_order_style: OrderStyle
+    entry_fill_timeout_s: float
+    abort_unpaired_entry: bool
+    unwind_partial_entry: bool
+    min_effective_pair_qty: Decimal | None
+    run_once: bool
+    max_markets: int
+    tick_interval_s: float
+    max_book_age_s: float
+    entry_dry_run: bool = False
+    stop_after_entry: bool = False
+    max_runtime_s: float = 600.0
+    use_fixture_book: bool = False
+    allow_seed_allocation: bool = False
+    seed_allocation_qty: Decimal | None = None
+    fixture_yes_bid: Decimal | None = None
+    fixture_yes_ask: Decimal | None = None
+    fixture_no_bid: Decimal | None = None
+    fixture_no_ask: Decimal | None = None
+    activation_gap_retry_s: float = 0.0
+    activation_gap_retry_interval_s: float = 0.5
+    activation_gap_max_retries: int = 6
+    activation_unwind_retry_s: float = 15.0
+    activation_unwind_retry_interval_s: float = 0.5
+    entry_price_mismatch_tolerance: Decimal = Decimal("0.005")
+    entry_price_mismatch_abort_threshold: Decimal | None = Decimal("0.02")
+    allow_entry_style_downgrade: bool = False
+    allow_resting_entry_orders: bool = False
+    pair_entry_submit_timeout_s: float = 5.0
+    pair_entry_fill_timeout_s: float = 10.0
+    pair_entry_resting_timeout_s: float = 2.0
+
+
+@dataclass(frozen=True)
 class NotionalConfig:
     min_usd: Decimal
     max_usd: Decimal
@@ -362,6 +535,15 @@ class ReadinessConfig:
 
 
 @dataclass(frozen=True)
+class RiskExitsConfig:
+    """Reduce-only urgent exit policy (Phase 4.6 architecture fix)."""
+
+    allow_reduce_only_mark_fallback: bool = True
+    require_fresh_book_for_mark_fallback: bool = True
+    urgent_exit_max_book_age_s: float = 0.5
+
+
+@dataclass(frozen=True)
 class RiskConfig:
     notional: NotionalConfig
     deployment: DeploymentConfig
@@ -371,6 +553,7 @@ class RiskConfig:
     concurrency: ConcurrencyConfig
     readiness: ReadinessConfig
     venue_min_size: VenueMinSizeConfig
+    exits: RiskExitsConfig = RiskExitsConfig()
 
 
 @dataclass(frozen=True)
@@ -391,6 +574,46 @@ class ShadowBootstrapConfig:
 class AllocationLedgerConfig:
     """Allocation ledger is always active; persisted to ``var/state/allocation_ledger.json``."""
 
+    #: Do not clamp owner allocation to ``venue_qty=0`` within this window after a BUY
+    #: credit when REST positions lag behind instant live fills.
+    clamp_grace_s_after_buy: float = 90.0
+
+
+@dataclass(frozen=True)
+class ExecutionPlannerConfig:
+    """ExecutionPlanner settings (P3 architecture_enhance).
+
+    Dark-launched: ``enabled`` defaults to ``False`` so the pipeline keeps using
+    the strategy/intent order style. When enabled, a market data provider is
+    required (cross-checked against ``market_data.enabled``). Urgent/protection
+    exits require a fresh book unless ``allow_urgent_exit_fallback`` is set.
+    """
+
+    enabled: bool = False
+    require_fresh_book_for_urgent: bool = True
+    max_book_age_s: float = 5.0
+    allow_urgent_exit_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    planner: ExecutionPlannerConfig = ExecutionPlannerConfig()
+
+
+@dataclass(frozen=True)
+class MarketDataConfig:
+    """Shared market-data / order-book state (Phase 2 architecture_enhance).
+
+    Dark-launched: ``enabled`` defaults to ``False`` so merging Phase 2 changes
+    no live behavior. When the planner (Phase 3) is enabled it requires a market
+    data provider; ``max_book_age_s`` is the freshness window beyond which a book
+    is treated as stale (fail-closed for urgent/protection exits).
+    """
+
+    enabled: bool = False
+    max_book_age_s: float = 5.0
+    token_ids: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -410,6 +633,7 @@ class RuntimeConfig:
     log_level: str
     shadow_bootstrap: ShadowBootstrapConfig | None
     allocation_ledger: AllocationLedgerConfig
+    market_data: MarketDataConfig = MarketDataConfig()
 
 
 @dataclass(frozen=True)
@@ -427,6 +651,15 @@ class AppConfig:
     allocation_test: AllocationTestStrategyConfig | None = None
     #: Populated only when the loaded strategy YAML declares ``kind: tp_sl_test``.
     tp_sl_test: TpSlTestStrategyConfig | None = None
+    #: Populated only when the loaded strategy YAML declares ``kind: simple_signal_test``.
+    simple_signal_test: SimpleSignalTestStrategyConfig | None = None
+    validation_harness: ValidationHarnessStrategyConfig | None = None
+    paired_binary: PairedBinaryStrategyConfig | None = None
+    protection: ProtectionRuntimeConfig | None = None
+    #: Execution layer config (P3 architecture_enhance): planner enable + book policy.
+    execution: ExecutionConfig = ExecutionConfig()
+    #: Loaded strategy YAML ``kind`` (selects the runtime loop in ``runtime/app.py``).
+    strategy_kind: str = STRATEGY_KIND_GURU_FOLLOW
 
 
 def _dec(d: dict[str, Any], key: str, default: str = "0") -> Decimal:
@@ -727,6 +960,217 @@ def _parse_tp_sl_test_strategy(strategy: dict[str, Any]) -> TpSlTestStrategyConf
     )
 
 
+def _parse_simple_signal_test_strategy(strategy: dict[str, Any]) -> SimpleSignalTestStrategyConfig:
+    from tyrex_pm.runtime.allocation_ids import OWNER_SIMPLE_SIGNAL_TEST
+
+    enabled = bool(strategy.get("enabled", True))
+    token_id = str(strategy.get("token_id", "")).strip()
+    if not token_id:
+        raise ConfigError("simple_signal_test strategy requires non-empty top-level 'token_id'")
+    owner_id = str(strategy.get("owner_id", OWNER_SIMPLE_SIGNAL_TEST)).strip()
+    if not owner_id:
+        raise ConfigError("simple_signal_test owner_id must be non-empty")
+    side_raw = str(strategy.get("side", "BUY")).strip().upper()
+    if side_raw not in ("BUY", "SELL"):
+        raise ConfigError("simple_signal_test side must be BUY or SELL")
+    side = Side.BUY if side_raw == "BUY" else Side.SELL
+    price_raw = strategy.get("limit_price")
+    pricing_mode = _parse_pricing_mode(
+        strategy.get("pricing_mode"),
+        where="simple_signal_test",
+        default=SELL_TEST_PRICING_FIXED,
+    )
+    max_price_raw = strategy.get("max_price")
+    return SimpleSignalTestStrategyConfig(
+        enabled=enabled,
+        token_id=token_id,
+        owner_id=owner_id,
+        side=side,
+        notional_usd=_dec(strategy, "notional_usd", "5"),
+        limit_price=Decimal(str(price_raw)) if price_raw not in (None, "") else None,
+        order_style=_parse_order_style(strategy.get("order_style"), OrderStyle.GTC),
+        run_once=bool(strategy.get("run_once", True)),
+        pricing_mode=pricing_mode,
+        aggression_ticks=int(strategy.get("aggression_ticks", 2)),
+        max_price=Decimal(str(max_price_raw)) if max_price_raw not in (None, "") else None,
+    )
+
+
+def _parse_paired_binary_strategy(strategy: dict[str, Any]) -> PairedBinaryStrategyConfig:
+    from tyrex_pm.runtime.allocation_ids import OWNER_PAIRED_BINARY
+
+    pb = strategy.get("paired_binary") or {}
+    if not isinstance(pb, dict):
+        pb = {}
+    enabled = bool(strategy.get("enabled", pb.get("enabled", True)))
+    owner_id = str(pb.get("owner_id", OWNER_PAIRED_BINARY)).strip()
+    market_id = str(pb.get("market_id", "")).strip()
+    yes_token_id = str(pb.get("yes_token_id", "")).strip()
+    no_token_id = str(pb.get("no_token_id", "")).strip()
+    if not market_id:
+        raise ConfigError("paired_binary.market_id is required")
+    if not yes_token_id or not no_token_id:
+        raise ConfigError("paired_binary.yes_token_id and no_token_id are required")
+    min_eff_raw = pb.get("min_effective_pair_qty")
+    seed_raw = pb.get("seed_allocation_qty")
+    fy_bid = pb.get("fixture_yes_bid")
+    fy_ask = pb.get("fixture_yes_ask")
+    fn_bid = pb.get("fixture_no_bid")
+    fn_ask = pb.get("fixture_no_ask")
+    _reject_paired_binary_deprecated_keys(pb)
+    return PairedBinaryStrategyConfig(
+        enabled=enabled,
+        owner_id=owner_id,
+        market_id=market_id,
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        position_size=_dec(pb, "position_size", "100"),
+        max_pair_entry_cost=_dec(pb, "max_pair_entry_cost", "1.02"),
+        max_spread_yes=_dec(pb, "max_spread_yes", "0.02"),
+        max_spread_no=_dec(pb, "max_spread_no", "0.02"),
+        pair_stop_loss_pct=_dec(pb, "pair_stop_loss_pct", "0.02"),
+        pair_take_profit_pct=_dec(pb, "pair_take_profit_pct", "0.05"),
+        slippage_buffer=_dec(pb, "slippage_buffer", "0.005"),
+        reject_if_spread_exceeds_loss_budget=bool(
+            pb.get("reject_if_spread_exceeds_loss_budget", True)
+        ),
+        max_holding_time_s=float(pb.get("max_holding_time_s", 1800)),
+        entry_order_style=_parse_order_style(pb.get("entry_order_style"), OrderStyle.GTC),
+        exit_order_style=_parse_order_style(pb.get("exit_order_style"), OrderStyle.FAK),
+        entry_fill_timeout_s=float(pb.get("entry_fill_timeout_s", 60)),
+        abort_unpaired_entry=bool(pb.get("abort_unpaired_entry", True)),
+        unwind_partial_entry=bool(pb.get("unwind_partial_entry", True)),
+        min_effective_pair_qty=Decimal(str(min_eff_raw)) if min_eff_raw not in (None, "") else None,
+        run_once=bool(pb.get("run_once", False)),
+        max_markets=int(pb.get("max_markets", 1)),
+        tick_interval_s=float(pb.get("tick_interval_s", 1.0)),
+        max_book_age_s=float(pb.get("max_book_age_s", 5.0)),
+        entry_dry_run=bool(pb.get("entry_dry_run", False)),
+        stop_after_entry=bool(pb.get("stop_after_entry", False)),
+        max_runtime_s=float(pb.get("max_runtime_s", 600)),
+        use_fixture_book=bool(pb.get("use_fixture_book", False)),
+        allow_seed_allocation=bool(pb.get("allow_seed_allocation", False)),
+        seed_allocation_qty=Decimal(str(seed_raw)) if seed_raw not in (None, "") else None,
+        fixture_yes_bid=Decimal(str(fy_bid)) if fy_bid not in (None, "") else None,
+        fixture_yes_ask=Decimal(str(fy_ask)) if fy_ask not in (None, "") else None,
+        fixture_no_bid=Decimal(str(fn_bid)) if fn_bid not in (None, "") else None,
+        fixture_no_ask=Decimal(str(fn_ask)) if fn_ask not in (None, "") else None,
+        activation_gap_retry_s=float(pb.get("activation_gap_retry_s", 0)),
+        activation_gap_retry_interval_s=float(pb.get("activation_gap_retry_interval_s", 0.5)),
+        activation_gap_max_retries=int(pb.get("activation_gap_max_retries", 6)),
+        activation_unwind_retry_s=float(pb.get("activation_unwind_retry_s", 15)),
+        activation_unwind_retry_interval_s=float(pb.get("activation_unwind_retry_interval_s", 0.5)),
+        entry_price_mismatch_tolerance=_dec(pb, "entry_price_mismatch_tolerance", "0.005"),
+        entry_price_mismatch_abort_threshold=(
+            _dec(pb, "entry_price_mismatch_abort_threshold", "0.02")
+            if pb.get("entry_price_mismatch_abort_threshold") not in (None, "")
+            else None
+        ),
+        allow_entry_style_downgrade=bool(pb.get("allow_entry_style_downgrade", False)),
+        allow_resting_entry_orders=bool(pb.get("allow_resting_entry_orders", False)),
+        pair_entry_submit_timeout_s=float(pb.get("pair_entry_submit_timeout_s", pb.get("entry_fill_timeout_s", 5))),
+        pair_entry_fill_timeout_s=float(pb.get("pair_entry_fill_timeout_s", pb.get("entry_fill_timeout_s", 10))),
+        pair_entry_resting_timeout_s=float(pb.get("pair_entry_resting_timeout_s", 2)),
+    )
+
+
+def _parse_protection_block(raw: dict[str, Any] | None, *, where: str) -> ProtectionRuntimeConfig | None:
+    if not raw or not isinstance(raw, dict):
+        return None
+    if not bool(raw.get("enabled", False)):
+        return None
+    from tyrex_pm.protection.config import SIZE_MODE_FULL
+
+    tp_pct = raw.get("take_profit_pct")
+    sl_pct = raw.get("stop_loss_pct")
+    tp_price = raw.get("take_profit_price")
+    sl_price = raw.get("stop_loss_price")
+    fixed = raw.get("fixed_size")
+    pct = raw.get("percent")
+    exit_lim = raw.get("exit_limit_price")
+    return ProtectionRuntimeConfig(
+        enabled=True,
+        take_profit_pct=Decimal(str(tp_pct)) if tp_pct not in (None, "") else None,
+        stop_loss_pct=Decimal(str(sl_pct)) if sl_pct not in (None, "") else None,
+        take_profit_price=Decimal(str(tp_price)) if tp_price not in (None, "") else None,
+        stop_loss_price=Decimal(str(sl_price)) if sl_price not in (None, "") else None,
+        size_mode=str(raw.get("size_mode", SIZE_MODE_FULL)),
+        fixed_size=Decimal(str(fixed)) if fixed not in (None, "") else None,
+        percent=Decimal(str(pct)) if pct not in (None, "") else None,
+        exit_order_style=_parse_order_style(raw.get("exit_order_style"), OrderStyle.FAK),
+        exit_limit_price=Decimal(str(exit_lim)) if exit_lim not in (None, "") else None,
+        max_book_age_s=float(raw.get("max_book_age_s", 5)),
+        register_on_buy=bool(raw.get("register_on_buy", True)),
+        tick_interval_s=float(raw.get("tick_interval_s", 1)),
+        max_runtime_s=float(raw.get("max_runtime_s", 180)),
+        stop_after_trigger=bool(raw.get("stop_after_trigger", True)),
+        stop_after_exit_submit=bool(raw.get("stop_after_exit_submit", True)),
+        fail_if_no_trigger=bool(raw.get("fail_if_no_trigger", False)),
+    )
+
+
+def _parse_validation_harness_strategy(strategy: dict[str, Any]) -> ValidationHarnessStrategyConfig:
+    from tyrex_pm.runtime.allocation_ids import OWNER_VALIDATION_HARNESS
+
+    enabled = bool(strategy.get("enabled", True))
+    v = strategy.get("validation") or {}
+    if not isinstance(v, dict):
+        v = {}
+    mode = str(v.get("mode", VALIDATION_MODE_NORMAL_ENTRY)).strip().lower()
+    if mode not in _VALID_VALIDATION_MODES:
+        raise ConfigError(
+            f"validation_harness mode '{mode}' unsupported "
+            f"(valid: {', '.join(_VALID_VALIDATION_MODES)})"
+        )
+    token_id = str(v.get("token_id") or strategy.get("token_id", "")).strip()
+    if not token_id and mode != VALIDATION_MODE_MARKET_DATA_READONLY:
+        raise ConfigError("validation_harness requires validation.token_id or top-level token_id")
+    owner_id = str(v.get("owner_id", OWNER_VALIDATION_HARNESS)).strip()
+    side_raw = str(v.get("side", "BUY")).strip().upper()
+    if side_raw not in ("BUY", "SELL"):
+        raise ConfigError("validation_harness side must be BUY or SELL")
+    side = Side.BUY if side_raw == "BUY" else Side.SELL
+    price_raw = v.get("limit_price")
+    size_raw = v.get("size")
+    notional_raw = v.get("notional_usd")
+    entry_raw = v.get("entry_price")
+    seed_raw = v.get("seed_allocation_qty")
+    bid_raw = v.get("fixture_book_bid")
+    ask_raw = v.get("fixture_book_ask")
+    pricing_mode = _parse_pricing_mode(
+        v.get("pricing_mode"),
+        where="validation_harness",
+        default=SELL_TEST_PRICING_FIXED,
+    )
+    max_price_raw = v.get("max_price")
+    return ValidationHarnessStrategyConfig(
+        enabled=enabled,
+        mode=mode,
+        owner_id=owner_id,
+        token_id=token_id,
+        side=side,
+        notional_usd=Decimal(str(notional_raw)) if notional_raw not in (None, "") else None,
+        limit_price=Decimal(str(price_raw)) if price_raw not in (None, "") else None,
+        size=Decimal(str(size_raw)) if size_raw not in (None, "") else None,
+        urgency=str(v.get("urgency", "normal")),
+        order_style=_parse_order_style(v.get("order_style"), OrderStyle.GTC),
+        run_once=bool(v.get("run_once", True)),
+        pricing_mode=pricing_mode,
+        aggression_ticks=int(v.get("aggression_ticks", 2)),
+        max_price=Decimal(str(max_price_raw)) if max_price_raw not in (None, "") else None,
+        entry_price=Decimal(str(entry_raw)) if entry_raw not in (None, "") else None,
+        seed_allocation_qty=Decimal(str(seed_raw)) if seed_raw not in (None, "") else None,
+        fixture_book_bid=Decimal(str(bid_raw)) if bid_raw not in (None, "") else None,
+        fixture_book_ask=Decimal(str(ask_raw)) if ask_raw not in (None, "") else None,
+        market_data_readonly_seconds=float(v.get("market_data_readonly_seconds", 3.0)),
+        use_fixture_book=bool(v.get("use_fixture_book", False)),
+        allow_seed_allocation=bool(v.get("allow_seed_allocation", False)),
+        wait_for_confirmed=bool(v.get("wait_for_confirmed", False)),
+        confirmed_timeout_s=float(v.get("confirmed_timeout_s", 90)),
+        fail_if_not_confirmed=bool(v.get("fail_if_not_confirmed", True)),
+    )
+
+
 _VALID_ALLOCATION_TEST_SIZE_MODES = ("match_owner_a_buy", "fixed")
 
 
@@ -823,6 +1267,7 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
     co = risk.get("concurrency") or {}
     rd = risk.get("readiness") or {}
     vms = risk.get("venue_min_size") or {}
+    ex = risk.get("exits") or {}
 
     mp_raw = str(n.get("max_policy", "deny") or "deny").lower().strip()
     max_policy = mp_raw if mp_raw in ("cap", "deny") else "deny"
@@ -852,6 +1297,13 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
             require_user_ws_live=bool(rd.get("require_user_ws_live", True)),
         ),
         venue_min_size=_parse_venue_min_size(vms),
+        exits=RiskExitsConfig(
+            allow_reduce_only_mark_fallback=bool(ex.get("allow_reduce_only_mark_fallback", True)),
+            require_fresh_book_for_mark_fallback=bool(
+                ex.get("require_fresh_book_for_mark_fallback", True)
+            ),
+            urgent_exit_max_book_age_s=float(ex.get("urgent_exit_max_book_age_s", 0.5)),
+        ),
     )
 
     em = str(runtime.get("execution_mode", "shadow")).lower()
@@ -880,6 +1332,15 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
         raise ConfigError(
             "allocation_ledger.enabled=false is not supported; the allocation ledger is required"
         )
+    md_raw = runtime.get("market_data") or {}
+    md_tokens = md_raw.get("token_ids") or []
+    if not isinstance(md_tokens, list):
+        md_tokens = []
+    market_data = MarketDataConfig(
+        enabled=bool(md_raw.get("enabled", False)),
+        max_book_age_s=float(md_raw.get("max_book_age_s", 5)),
+        token_ids=tuple(str(x) for x in md_tokens),
+    )
     rt = RuntimeConfig(
         execution_mode=execution_mode,
         reporting=ReportingConfig(
@@ -893,9 +1354,31 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
         adoption_grace_s=adoption_grace,
         log_level=str(log.get("level", "INFO")),
         shadow_bootstrap=shadow_boot,
-        allocation_ledger=AllocationLedgerConfig(),
+        allocation_ledger=AllocationLedgerConfig(
+            clamp_grace_s_after_buy=float(al.get("clamp_grace_s_after_buy", 90)),
+        ),
+        market_data=market_data,
     )
     return rsk, rt
+
+
+def _parse_execution_config(
+    runtime: dict[str, Any], market_data: MarketDataConfig
+) -> ExecutionConfig:
+    ex_raw = runtime.get("execution") or {}
+    pl_raw = ex_raw.get("planner") or {}
+    planner = ExecutionPlannerConfig(
+        enabled=bool(pl_raw.get("enabled", False)),
+        require_fresh_book_for_urgent=bool(pl_raw.get("require_fresh_book_for_urgent", True)),
+        max_book_age_s=float(pl_raw.get("max_book_age_s", market_data.max_book_age_s)),
+        allow_urgent_exit_fallback=bool(pl_raw.get("allow_urgent_exit_fallback", False)),
+    )
+    if planner.enabled and not market_data.enabled:
+        raise ConfigError(
+            "execution.planner.enabled requires market_data.enabled "
+            "(the planner needs a market data provider)"
+        )
+    return ExecutionConfig(planner=planner)
 
 
 def _finalize_app_config(
@@ -906,10 +1389,16 @@ def _finalize_app_config(
     sell_test: SellTestStrategyConfig | None,
     allocation_test: AllocationTestStrategyConfig | None = None,
     tp_sl_test: TpSlTestStrategyConfig | None = None,
+    simple_signal_test: SimpleSignalTestStrategyConfig | None = None,
+    validation_harness: ValidationHarnessStrategyConfig | None = None,
+    protection: ProtectionRuntimeConfig | None = None,
+    paired_binary: PairedBinaryStrategyConfig | None = None,
+    strategy_kind: str = STRATEGY_KIND_GURU_FOLLOW,
 ) -> AppConfig:
     rsk, rt = _build_risk_runtime(risk, runtime)
+    execution = _parse_execution_config(runtime, rt.market_data)
     raw = {"risk": risk, "strategy": strategy_raw, "runtime": runtime}
-    return AppConfig(
+    app = AppConfig(
         strategy=strat,
         risk=rsk,
         runtime=rt,
@@ -917,7 +1406,23 @@ def _finalize_app_config(
         sell_test=sell_test,
         allocation_test=allocation_test,
         tp_sl_test=tp_sl_test,
+        simple_signal_test=simple_signal_test,
+        validation_harness=validation_harness,
+        paired_binary=paired_binary,
+        protection=protection,
+        execution=execution,
+        strategy_kind=strategy_kind,
     )
+    from tyrex_pm.runtime.paired_binary_live import (
+        validate_paired_binary_live_config,
+        validate_paired_binary_required_wiring,
+    )
+    from tyrex_pm.runtime.validation_harness_live import validate_validation_harness_live_config
+
+    validate_validation_harness_live_config(app)
+    validate_paired_binary_live_config(app)
+    validate_paired_binary_required_wiring(app)
+    return app
 
 
 def _placeholder_guru_strategy_config() -> StrategyConfig:
@@ -973,15 +1478,71 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
     if kind_raw == STRATEGY_KIND_SELL_TEST:
         sell_test_cfg = _parse_sell_test_strategy(strategy)
         strat = _placeholder_guru_strategy_config()
-        return _finalize_app_config(strat, risk, runtime, strategy, sell_test_cfg)
+        return _finalize_app_config(
+            strat, risk, runtime, strategy, sell_test_cfg, strategy_kind=kind_raw
+        )
     if kind_raw == STRATEGY_KIND_ALLOCATION_TEST:
         allocation_test_cfg = _parse_allocation_test_strategy(strategy)
         strat = _placeholder_guru_strategy_config()
-        return _finalize_app_config(strat, risk, runtime, strategy, None, allocation_test_cfg)
+        return _finalize_app_config(
+            strat, risk, runtime, strategy, None, allocation_test_cfg, strategy_kind=kind_raw
+        )
     if kind_raw == STRATEGY_KIND_TP_SL_TEST:
         tp_sl_test_cfg = _parse_tp_sl_test_strategy(strategy)
         strat = _placeholder_guru_strategy_config()
-        return _finalize_app_config(strat, risk, runtime, strategy, None, None, tp_sl_test_cfg)
+        return _finalize_app_config(
+            strat, risk, runtime, strategy, None, None, tp_sl_test_cfg, strategy_kind=kind_raw
+        )
+    if kind_raw == STRATEGY_KIND_SIMPLE_SIGNAL_TEST:
+        simple_cfg = _parse_simple_signal_test_strategy(strategy)
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(
+            strat,
+            risk,
+            runtime,
+            strategy,
+            None,
+            None,
+            None,
+            simple_signal_test=simple_cfg,
+            strategy_kind=kind_raw,
+        )
+    if kind_raw == STRATEGY_KIND_VALIDATION_HARNESS:
+        vh_cfg = _parse_validation_harness_strategy(strategy)
+        prot = _parse_protection_block(strategy.get("protection"), where="validation_harness")
+        if prot is None:
+            prot = _parse_protection_block(runtime.get("protection"), where="runtime")
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(
+            strat,
+            risk,
+            runtime,
+            strategy,
+            None,
+            None,
+            None,
+            None,
+            vh_cfg,
+            prot,
+            strategy_kind=kind_raw,
+        )
+    if kind_raw == STRATEGY_KIND_PAIRED_BINARY:
+        pb_cfg = _parse_paired_binary_strategy(strategy)
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(
+            strat,
+            risk,
+            runtime,
+            strategy,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            paired_binary=pb_cfg,
+            strategy_kind=kind_raw,
+        )
 
     g = strategy.get("guru") or {}
     f = strategy.get("filters") or {}
@@ -1020,8 +1581,17 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
     )
 
     rsk, rt = _build_risk_runtime(risk, runtime)
+    execution = _parse_execution_config(runtime, rt.market_data)
     raw = {"risk": risk, "strategy": strategy, "runtime": runtime}
-    return AppConfig(strategy=strat, risk=rsk, runtime=rt, raw=raw, sell_test=None)
+    return AppConfig(
+        strategy=strat,
+        risk=rsk,
+        runtime=rt,
+        raw=raw,
+        sell_test=None,
+        execution=execution,
+        strategy_kind=STRATEGY_KIND_GURU_FOLLOW,
+    )
 
 
 def _resolve_scenario_path(repo_root: Path, scenario_file: str | None) -> str | None:
@@ -1063,7 +1633,11 @@ def load_app_config(
         if "strategy" in sc:
             strategy = _deep_merge(strategy, sc["strategy"])
         # scenario top-level keys
-        rt_overlay = {k: sc[k] for k in ("execution_mode", "reporting", "supervisors", "logging") if k in sc}
+        rt_overlay = {
+            k: sc[k]
+            for k in ("execution_mode", "reporting", "supervisors", "logging", "market_data", "execution")
+            if k in sc
+        }
         if rt_overlay:
             runtime = _deep_merge(runtime, rt_overlay)
         st_overlay = {

@@ -2,6 +2,8 @@
 
 **Program:** [README.md](README.md) · **Prev:** [phase_5_portfolio_foundation.md](phase_5_portfolio_foundation.md)
 
+> **Prerequisite:** [Phase 4.5 — Live Validation Harness](phase_4_5_live_validation_harness.md) must be green for P2–4 CLI paths before portfolio work begins.
+
 > **Procedural now, event-ready later.** Cancel-all flows through OMS; no bus.
 
 ---

@@ -1,0 +1,36 @@
+# Level 6 — live protection supervisor (6A wiring / 6B trigger if market moves).
+#
+# Preconditions: venue position on token; ideally Level 5 protection_register in same session
+# or register from venue position on startup.
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness_protection_trigger_live.yaml \
+#     --scenario live_validation_protection_trigger \
+#     --run-name validation_live_protection_trigger
+
+kind: validation_harness
+
+enabled: true
+
+token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+
+validation:
+  mode: protection_trigger_live
+  owner_id: validation_harness
+  token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+  side: BUY
+  use_fixture_book: false
+  allow_seed_allocation: false
+  entry_price: null
+  run_once: true
+
+protection:
+  enabled: true
+  take_profit_pct: "0.005"
+  stop_loss_pct: "0.005"
+  tick_interval_s: 1
+  max_runtime_s: 180
+  stop_after_trigger: true
+  stop_after_exit_submit: true
+  fail_if_no_trigger: false

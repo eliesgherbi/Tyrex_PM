@@ -151,6 +151,22 @@ Releases are implicit (no separate ledger):
 
 ---
 
+## 4.2 Fill finality (P3.5 architecture_enhance)
+
+Trade-status semantics are centralized in `state/fill_state.py` so execution evidence is never confused with final ownership/PnL:
+
+| status | evidence | position/allocation final | releases reservation | realized PnL |
+|--------|----------|---------------------------|----------------------|--------------|
+| MATCHED / MINED | yes | **no** | no | no |
+| CONFIRMED | yes | **yes** (`allocation_buy_applied`) | yes | yes |
+| RETRYING | no | no | no | no |
+| FAILED | no | no | yes | no |
+| *(unknown)* | no | no | no | no (fail-closed) |
+
+Operator rule: do not treat `MATCHED`/`MINED` as final. Only `CONFIRMED` credits allocation and is the boundary on which the `protection/` overlay registers TP/SL.
+
+---
+
 ## 5. Operator-facing guarantees
 
 - **One writer per wallet** — `SingleWriterOMS` serializes submit/cancel onto one queue.

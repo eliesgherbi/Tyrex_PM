@@ -16,6 +16,7 @@ from tyrex_pm.execution.order_lifecycle import (
     remove_local_resting_by_venue_order_id,
 )
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
+from tyrex_pm.state import fill_state
 from tyrex_pm.state.order_store import OrderStore
 from tyrex_pm.state.shadow_wallet import apply_confirmed_trade_to_wallet
 
@@ -87,7 +88,12 @@ def _apply_trade(wallet: Any, msg: dict[str, Any]) -> None:
     sz = _dec(msg.get("size") or 0)
     px = _dec(msg.get("price") or 0)
     status = str(msg.get("status", "")).upper()
-    if status in ("MATCHED", "MINED", "CONFIRMED") and sz > 0:
+    cls = fill_state.classify(status)
+    # Evidence (record) and allocation/position finality (apply to wallet) are
+    # centralized in state.fill_state. Behavior is unchanged: evidence on
+    # MATCHED/MINED/CONFIRMED, wallet credit only on CONFIRMED. RETRYING/FAILED
+    # and unknown statuses are non-evidence and never apply.
+    if cls.execution_evidence and sz > 0:
         wallet.record_user_ws_trade(
             TradeFillRecord(
                 token_id=TokenId(str(asset)),
@@ -99,7 +105,7 @@ def _apply_trade(wallet: Any, msg: dict[str, Any]) -> None:
                 source="user_ws",
             )
         )
-    if status == "CONFIRMED":
+    if cls.allocation_final:
         apply_confirmed_trade_to_wallet(
             wallet,
             token_id=TokenId(str(asset)),

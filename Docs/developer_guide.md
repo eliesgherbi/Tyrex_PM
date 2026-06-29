@@ -68,14 +68,26 @@ Every fact type is declared in `reporting/schema_v2.py`. To add a new fact:
 
 ## 3. The contract for `Strategy` implementations
 
+The **generic** contract (P1 architecture_enhance), dispatched by `pipeline.process_signals`:
+
 ```python
-class Strategy:                               # de facto interface; see strategies/base.py
+class Strategy:                               # see strategies/base.py
+    def on_signal(self, signal: Signal, ctx: StrategyContext) -> StrategyResult:
+        ...
+```
+
+- `Signal` is the generic protocol (`source` / `token_id` / `dedup_key`); `StrategyContext` bundles read-only handles (`coord`, `market_state`).
+- `StrategyResult` carries `intents`, an optional `skip_reason` (constant in `core/reason_codes.py`), and optional `meta` merged into facts.
+
+The legacy guru tuple form is still supported via delegation:
+
+```python
     def on_guru_signal(
         self,
         sig: GuruCopySignal,
         coord: RuntimeCoordinator,
     ) -> tuple[list[Intent], str | None, dict[str, Any] | None]:
-        ...
+        ...   # GuruFollowStrategy.on_signal delegates here
 ```
 
 Returns:
@@ -106,10 +118,14 @@ A strategy **may** read allocation via `coord.allocation_ledger` (read-only) and
 
 ### 4.2 Add a new strategy
 
-1. Create `strategies/<name>/` with `strategy.py`, `filters.py`, `sizing.py` (and `exits.py` if SELL behavior differs).
-2. Wire it in `runtime/app.py::cmd_run` (or factor a registry — current code is hand-wired to `GuruFollowStrategy`).
+1. Create `strategies/<name>/` with `strategy.py` (implementing `on_signal(signal, ctx) -> StrategyResult`), plus `filters.py` / `sizing.py` / `exits.py` as needed. Use `simple_signal_test/` as the minimal template.
+2. Wire it in `runtime/app.py::cmd_run`. Do **not** add a bespoke per-strategy runtime loop — dispatch through `pipeline.process_signals`.
 3. Add a strategy YAML under `config/strategies/<name>.yaml` and a scenario under `config/scenarios/`.
 4. Add a `tests/test_<name>_strategy_*.py` golden test that exercises filter rejects + sizing math.
+
+### 4.2b Add protection (TP/SL) to an owner
+
+Production TP/SL is the [`protection/`](modules/protection/README.md) overlay — never inline in a strategy. Build a `ProtectionPolicy`, and after the BUY reaches `allocation_buy_applied` (CONFIRMED), call `ProtectionMonitor.register(owner_id=..., ...)`. Tick it against `MarketStateStore`; returned urgent `ExitIntent` work units run through the same `process_intent_work_unit` path (RiskEngine → ExecutionPlanner → `validate_planned_order` → OMS).
 
 ### 4.3 Add a new venue
 

@@ -1,0 +1,37 @@
+# Level 5 — live protection register with CONFIRMED finality wait.
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness_protection_register_live.yaml \
+#     --scenario live_validation_protection_register \
+#     --run-name validation_live_protection_register
+
+kind: validation_harness
+
+enabled: true
+
+token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+
+validation:
+  mode: protection_register_only
+  owner_id: validation_harness
+  token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+  side: BUY
+  notional_usd: "5"
+  limit_price: "0.20"
+  pricing_mode: auto
+  aggression_ticks: 2
+  max_price: "0.95"
+  use_fixture_book: false
+  allow_seed_allocation: false
+  wait_for_confirmed: true
+  confirmed_timeout_s: 90
+  fail_if_not_confirmed: true
+  order_style: GTC
+  run_once: true
+
+protection:
+  enabled: true
+  take_profit_pct: "0.10"
+  stop_loss_pct: "0.05"
+  register_on_buy: true

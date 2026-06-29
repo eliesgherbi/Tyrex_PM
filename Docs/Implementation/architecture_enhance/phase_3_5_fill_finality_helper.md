@@ -207,3 +207,23 @@ Provides for: **Phase 4** (the `allocation_buy_applied` registration boundary) a
 ## 16. Event-ready design notes
 
 `classify(status)` and the `is_*` / `counts_for_*` predicates are pure functions of a status string — reusable by any caller, procedural or event-driven. A future bus delivering `TradeUpdate` events would call the same helper to decide side effects. No bus added.
+
+---
+
+## Implementation status
+
+**Status: implemented · unit-tested · live behavior partially observable via user WS.**
+
+**Verification label:** `unit-tested` · allocation/protection registration boundary **not wired in runtime** — see [live_validation_matrix.md](live_validation_matrix.md).
+
+**Implementation summary.** `state/fill_state.py` provides `classify(status) -> FillClassification` and predicates `is_execution_evidence` / `is_position_final` / `is_allocation_final` / `releases_reservation` / `counts_for_realized_pnl`. The finality table matches the spec: MATCHED/MINED are evidence-only; CONFIRMED is final for position/allocation/reservation/PnL; RETRYING is non-final and non-evidence; FAILED releases the reservation but applies nothing; unknown statuses fail closed. Status matching is case-insensitive. `ingestion/user_stream.py::_apply_trade` was refactored to call `fill_state.classify` — behavior is unchanged (evidence recorded on MATCHED/MINED/CONFIRMED, wallet credit only on CONFIRMED) but the rules are now centralized.
+
+**Files changed.** `state/fill_state.py` (new), `ingestion/user_stream.py` (uses the helper).
+
+**Tests added.** `tests/test_fill_finality.py`.
+
+**Known limitations.** Helper-only — no portfolio or realized-PnL computation (Phase 5). `counts_for_realized_pnl` is a classification flag, not a number.
+
+**How to run tests.** `python -m pytest tests/test_fill_finality.py`
+
+**How to run a safe harness.** `from tyrex_pm.state import fill_state; fill_state.classify("CONFIRMED")` returns the full finality classification.

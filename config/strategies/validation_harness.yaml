@@ -1,0 +1,47 @@
+# Architecture validation harness (Phase 4.5) — operator tool, not production.
+#
+# Change validation.mode per scenario. Shadow smoke (normal entry + planner):
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness.yaml \
+#     --scenario shadow_validation_harness \
+#     --run-name validation_shadow_entry
+#
+# Live tiny entry:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness.yaml \
+#     --scenario live_validation_harness_tiny \
+#     --run-name validation_live_entry
+#
+# Live read-only market data (Level 2 — use dedicated strategy, no orders):
+#   config/strategies/validation_harness_market_data_readonly.yaml
+
+kind: validation_harness
+
+enabled: true
+
+token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+
+validation:
+  mode: normal_entry
+  owner_id: validation_harness
+  token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+  side: BUY
+  notional_usd: "5"
+  limit_price: "0.20"
+  size: null
+  urgency: normal
+  order_style: GTC
+  run_once: true
+  pricing_mode: auto
+  aggression_ticks: 2
+  max_price: "0.95"
+  # For urgent_exit / stale_book_deny / protection trigger modes:
+  seed_allocation_qty: null
+  entry_price: null
+  market_data_readonly_seconds: 3.0
+
+protection:
+  enabled: false
+  take_profit_pct: "0.10"
+  stop_loss_pct: "0.05"
+  register_on_buy: true

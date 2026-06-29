@@ -1,0 +1,42 @@
+# Shadow planner smoke for simple_signal_test (Phase 3 entry path).
+#
+# Proves: risk pre-check → ExecutionPlanner → validate_planned_order → ShadowOMS
+# for a normal BUY. Entry planning does not require a populated MarketStateStore
+# (strategy limit is authoritative), but config still requires market_data.enabled.
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/simple_signal_test.yaml \
+#     --scenario shadow_planner_simple_signal_test \
+#     --run-name simple_strat_planner_shadow
+#
+# Expected facts: execution_plan, risk_decision with "phase":"planned", oms_submit shadow_ack
+
+execution_mode: shadow
+
+runtime:
+  shadow_bootstrap:
+    usdc_balance: "1000000"
+    usdc_allowance: "1000000"
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    # token_ids optional for entry-only planner smoke (store may stay empty)
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "10"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "15"
+    portfolio_cap_usd: "25"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"

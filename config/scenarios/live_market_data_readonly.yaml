@@ -1,0 +1,45 @@
+# Live read-only market data smoke — no orders submitted.
+#
+# Use the dedicated strategy (mode locked to market_data_readonly):
+#   config/strategies/validation_harness_market_data_readonly.yaml
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness_market_data_readonly.yaml \
+#     --scenario live_market_data_readonly \
+#     --run-name validation_market_data_readonly
+
+execution_mode: live
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "10"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "15"
+    portfolio_cap_usd: "25"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  capital:
+    enabled: true
+    max_wallet_age_s: 120
+  readiness:
+    require_user_ws_live: true
+    require_heartbeat_live: true
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+  concurrency:
+    max_orders_in_flight: 4

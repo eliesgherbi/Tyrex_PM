@@ -1,6 +1,6 @@
 # Architecture enhancement program
 
-**Status:** planning only. No code changes are authorized by these documents. Each phase file is an executable plan for a later implementation pass.
+**Status:** Phases 1, 2, 3, 3.5, 4, and **4.5** are **implemented** (package + pipeline + unit tests). **Phase 4.6** is **implemented · shadow-validated** (paired binary strategy + `PairedBinaryMonitor` + persistence/recovery); live PB-Level ladder **not yet run**. Phases 5 (portfolio foundation) and 6 (hard kill switch) remain planning-only.
 
 ---
 
@@ -68,16 +68,20 @@ Position / Allocation / MarketState
 
 ## 3. Phases
 
-| Phase | File | Outcome |
-|-------|------|---------|
-| **0** | [phase_0_architecture_contract_freeze.md](phase_0_architecture_contract_freeze.md) | Docs frozen around the generic spine; guru demoted; planner/market-store/protection declared as roadmap; fill-finality + kill-switch semantics written down. |
-| **1** | [phase_1_generic_signal_strategy_dispatch.md](phase_1_generic_signal_strategy_dispatch.md) | Generic `Signal` type + `Strategy.on_signal` + `process_signals()`; guru runs through it; one simple non-guru harness; no new per-strategy loops in `app.py`. Existing harnesses stay legacy. |
-| **2** | [phase_2_market_state_store.md](phase_2_market_state_store.md) | Real `MarketStateStore` (best bid/ask, spread, staleness, slippage/fill estimates) fed by `market_stream` + REST bootstrap; exposed via coordinator. Dark-launched (disabled by default). |
-| **3** | [phase_3_execution_planner.md](phase_3_execution_planner.md) | First-class `ExecutionPlanner` between risk pre-check and OMS; **dedicated** planned-order validator (not `evaluate_intent` re-entry); planner evidence in facts; defines market-data activation path. |
-| **3.5** | [phase_3_5_fill_finality_helper.md](phase_3_5_fill_finality_helper.md) | Small fill-finality helper only (`fill_state.py`, `classify(status)`, finality table, reservation-release semantics). **Prerequisite for Phase 4.** No portfolio. |
-| **4** | [phase_4_protection_engine.md](phase_4_protection_engine.md) | Production `protection/` overlay (TP/SL) attached by `owner_id`; registers **only after `allocation_buy_applied`**; emits `ExitIntent` only; `tp_sl_test` becomes pure regression harness. |
-| **5** | [phase_5_portfolio_foundation.md](phase_5_portfolio_foundation.md) | Minimal `portfolio/` foundation: read-only `positions_view`, attribution scaffold. Full PnL deferred. |
-| **6** | [phase_6_hard_kill_switch.md](phase_6_hard_kill_switch.md) | Soft vs hard kill split; hard kill cancels all open orders through `SingleWriterOMS`; kill-switch facts + runbook. Does **not** depend on Phase 5. |
+| Phase | File | Status | Outcome |
+|-------|------|--------|---------|
+| **0** | [phase_0_architecture_contract_freeze.md](phase_0_architecture_contract_freeze.md) | docs | Docs frozen around the generic spine; guru demoted; planner/market-store/protection declared as roadmap; fill-finality + kill-switch semantics written down. |
+| **1** | [phase_1_generic_signal_strategy_dispatch.md](phase_1_generic_signal_strategy_dispatch.md) | **implemented · CLI-runnable** | Generic `Signal` + `Strategy.on_signal` + `process_signals()`; guru runs through it; `simple_signal_test` non-guru harness wired via `fixture_signal_run.py`. |
+| **2** | [phase_2_market_state_store.md](phase_2_market_state_store.md) | **implemented · CLI-runnable (P4.5)** | `MarketStateStore` + ingest parsers + REST bootstrap; wired in `app.py` when `market_data.enabled` (REST refresh loop; WS ingest still optional). |
+| **3** | [phase_3_execution_planner.md](phase_3_execution_planner.md) | **implemented · shadow CLI (entry) · harness (urgent/stale)** | `ExecutionPlanner` in pipeline when enabled; entry live-validated via `simple_signal_test`; urgent/stale via `validation_harness`. |
+| **3.5** | [phase_3_5_fill_finality_helper.md](phase_3_5_fill_finality_helper.md) | **implemented · unit-tested · live indirect** | `fill_state.py` + user_stream refactor; protection registration wired via `maybe_register_protection_after_buy`. |
+| **4** | [phase_4_protection_engine.md](phase_4_protection_engine.md) | **implemented · harness-runnable · unit-tested** | `protection/` package; registration + tick routing wired for harness modes; periodic live tick supervisor deferred. |
+| **4.5** | [phase_4_5_live_validation_harness.md](phase_4_5_live_validation_harness.md) | **implemented · L1–2 live-validated · L3/5/6 live-ready** | `validation_harness` + `FinalityWaiter` + `ProtectionSupervisor`; [wiring plan](phase_4_5_live_validation_wiring_plan.md) approved and implemented. |
+| **4.6** | [phase_4_6_paired_binary_strategy_production_protection.md](phase_4_6_paired_binary_strategy_production_protection.md) | **implemented · shadow-validated · live-ready** | `paired_binary` strategy + `PairedBinaryMonitor` + persistence/recovery; first production long-running monitor loop outside harness. |
+| **5** | [phase_5_portfolio_foundation.md](phase_5_portfolio_foundation.md) | planning (read-only work may proceed; production protection on guru blocked until P4.6) | Minimal `portfolio/` foundation: read-only `positions_view`, attribution scaffold. Full PnL deferred. |
+| **6** | [phase_6_hard_kill_switch.md](phase_6_hard_kill_switch.md) | planning | Soft vs hard kill split; hard kill cancels all open orders through `SingleWriterOMS`; kill-switch facts + runbook. Does **not** depend on Phase 5. |
+
+**Live/shadow verification:** [live_validation_matrix.md](live_validation_matrix.md) — what is CLI-runnable, live-runnable, unit-only, and runtime-unwired.
 
 ---
 
@@ -150,7 +154,9 @@ Phase 2    (market store)    → depends on Phase 1 (ctx surface)
 Phase 3    (planner)         → depends on Phase 2 (book state)
 Phase 3.5  (fill finality)   → can start after Phase 1; MUST land before Phase 4
 Phase 4    (protection)      → depends on Phase 2 + Phase 3 + Phase 3.5
-Phase 5    (portfolio)       → depends on Phase 3.5; lands after Phase 4
+Phase 4.5  (validation harness) → depends on Phase 2 + Phase 3 + Phase 4; MUST land before Phase 4.6
+Phase 4.6  (paired binary)    → depends on Phase 4.5; MUST land before production protection on long-running strategies
+Phase 5    (portfolio)       → depends on Phase 3.5; read-only work may proceed in parallel; production enablement gated on P4.6
 Phase 6    (hard kill)       → depends on Phase 3/4 pipeline; does NOT need Phase 5
 ```
 

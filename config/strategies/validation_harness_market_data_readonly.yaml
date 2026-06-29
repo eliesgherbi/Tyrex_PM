@@ -1,0 +1,33 @@
+# Level 2 — live read-only MarketStateStore smoke (Phase 4.5).
+# REST-bootstrap book, emit market_data_snapshot health facts, NO orders.
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/validation_harness_market_data_readonly.yaml \
+#     --scenario live_market_data_readonly \
+#     --run-name validation_market_data_readonly
+#
+# Expected facts: health event=market_data_snapshot (bid/ask/mid, is_stale=false)
+#   NO signal_received, NO intent_created, NO oms_submit
+
+kind: validation_harness
+
+enabled: true
+
+token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+
+validation:
+  mode: market_data_readonly
+  owner_id: validation_harness
+  token_id: "13720141007204726132976932163658350553917819242912487119786312240512385978016"
+  side: BUY
+  notional_usd: null
+  limit_price: null
+  size: null
+  urgency: normal
+  order_style: GTC
+  run_once: true
+  market_data_readonly_seconds: 5.0
+
+protection:
+  enabled: false

@@ -4,6 +4,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from tyrex_pm.core import reason_codes as rc
+from tyrex_pm.core.enums import Side
 from tyrex_pm.core.ids import ClientOrderId, RunId
 from tyrex_pm.core.models import (
     ApprovedCancel,
@@ -28,6 +29,7 @@ from tyrex_pm.risk import (
 )
 from tyrex_pm.risk.deployment import RiskConfigCaps
 from tyrex_pm.risk.evidence_format import s_usd, s_usd_map
+from tyrex_pm.risk.exits import apply_reduce_only_mark_fallback
 from tyrex_pm.runtime.config import AppConfig
 
 
@@ -37,6 +39,7 @@ def evaluate_intent(
     *,
     app: AppConfig,
     run_id: RunId,
+    exit_book_evidence: dict | None = None,
 ) -> RiskDecision:
     r = app.risk
 
@@ -102,10 +105,36 @@ def evaluate_intent(
             caps, ctx, pending_intent=work
         )
         if not ok_d:
-            ext_dep = {**ext, **dep_evidence}
-            return RiskDecision(
-                False, (reason_d or rc.TOKEN_DEPLOYMENT_CAP,), None, None, None, ext_dep
-            )
+            if (
+                reason_d == rc.DEPLOYMENT_MARK_UNKNOWN
+                and isinstance(work, (ExitIntent, ReduceIntent))
+                and work.side == Side.SELL
+            ):
+                ok_fb, reason_fb, dep_fb, _fb = apply_reduce_only_mark_fallback(
+                    caps,
+                    ctx,
+                    work,
+                    app,
+                    book_evidence=exit_book_evidence,
+                )
+                if ok_fb:
+                    ext = {**ext, **dep_fb, "phase": "intent"}
+                    ok_d, reason_d, dep_evidence = True, None, dep_fb
+                else:
+                    ext_dep = {**ext, **dep_evidence, **dep_fb}
+                    return RiskDecision(
+                        False,
+                        (reason_fb or reason_d or rc.TOKEN_DEPLOYMENT_CAP,),
+                        None,
+                        None,
+                        None,
+                        ext_dep,
+                    )
+            else:
+                ext_dep = {**ext, **dep_evidence}
+                return RiskDecision(
+                    False, (reason_d or rc.TOKEN_DEPLOYMENT_CAP,), None, None, None, ext_dep
+                )
 
         if isinstance(work, EnterIntent):
             cap_eval = capital.evaluate_capital_buy(work, ctx, enabled=r.capital.enabled)

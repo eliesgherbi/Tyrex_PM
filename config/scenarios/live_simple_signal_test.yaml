@@ -1,0 +1,44 @@
+# Live scenario for simple_signal_test — one-shot BUY through the generic path:
+#   SimpleSignal → process_signals → RiskEngine → LiveOMS (no guru polling).
+#
+# Prerequisites:
+#   - .env with TYREX_PRIVATE_KEY (+ TYREX_FUNDER / TYREX_SIGNATURE_TYPE if proxy wallet)
+#   - pip install tyrex-pm[live]
+#   - Edit config/strategies/simple_signal_test_live.yaml: real token_id + pricing
+#
+# Run (PowerShell):
+#   python -m tyrex_pm.runtime.app run `
+#     --strategy config/strategies/simple_signal_test_live.yaml `
+#     --scenario live_simple_signal_test `
+#     --run-name "simple_strat_live_$(Get-Date -UFormat %s)"
+#
+# Run (bash):
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/simple_signal_test_live.yaml \
+#     --scenario live_simple_signal_test \
+#     --run-name "simple_strat_live_$(date +%s)"
+
+execution_mode: live
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "10"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "15"
+    portfolio_cap_usd: "25"
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  capital:
+    enabled: true
+    max_wallet_age_s: 120
+  readiness:
+    require_user_ws_live: true
+    require_heartbeat_live: true
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+  concurrency:
+    max_orders_in_flight: 4

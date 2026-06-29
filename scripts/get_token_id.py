@@ -6,7 +6,8 @@ against the CLOB /book endpoint. It prints the token_id by default so it can be
 pasted into strategy YAML.
 
 Pass ``--event`` with a Polymarket URL or slug to resolve that event (or a single
-market under it) instead of scanning sports listings.
+market under it) and print every outcome ``token_id``. Without ``--event`` the
+script scans sports listings and returns the first match.
 
 Run from the repo root:
 
@@ -292,7 +293,7 @@ def _iter_target_markets(
     return filtered
 
 
-def _scan_events_for_candidate(
+def _scan_events_for_candidates(
     client: httpx.Client,
     *,
     events: list[dict[str, Any]],
@@ -301,7 +302,9 @@ def _scan_events_for_candidate(
     clob_base: str,
     market_slug: str | None,
     relax_market_filters: bool = False,
-) -> Candidate | None:
+    first_only: bool = False,
+) -> list[Candidate]:
+    found: list[Candidate] = []
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -318,32 +321,60 @@ def _scan_events_for_candidate(
                     best_bid, best_ask = _best_book_levels(book_resp.json())
                 elif relax_market_filters and require_book_side == "none":
                     best_bid, best_ask = None, None
+                elif not first_only:
+                    best_bid, best_ask = None, None
                 else:
                     continue
-                if not _book_satisfies(best_bid, best_ask, require_book_side):
+                if first_only and not _book_satisfies(best_bid, best_ask, require_book_side):
                     continue
-                return Candidate(
-                    token_id=token_id,
-                    outcome=label,
-                    event_title=str(event.get("title", "")),
-                    event_slug=str(event.get("slug", "")),
-                    market_question=str(market.get("question", "")),
-                    market_slug=str(market.get("slug", "")),
-                    best_bid=best_bid,
-                    best_ask=best_ask,
+                found.append(
+                    Candidate(
+                        token_id=token_id,
+                        outcome=label,
+                        event_title=str(event.get("title", "")),
+                        event_slug=str(event.get("slug", "")),
+                        market_question=str(market.get("question", "")),
+                        market_slug=str(market.get("slug", "")),
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                    )
                 )
-    return None
+                if first_only:
+                    return found
+    return found
 
 
-def find_candidate_for_event(
+def _scan_events_for_candidate(
+    client: httpx.Client,
+    *,
+    events: list[dict[str, Any]],
+    outcome: str,
+    require_book_side: str,
+    clob_base: str,
+    market_slug: str | None,
+    relax_market_filters: bool = False,
+) -> Candidate | None:
+    candidates = _scan_events_for_candidates(
+        client,
+        events=events,
+        outcome=outcome,
+        require_book_side=require_book_side,
+        clob_base=clob_base,
+        market_slug=market_slug,
+        relax_market_filters=relax_market_filters,
+        first_only=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def find_tokens_for_event(
     *,
     event: str,
     outcome: str,
-    require_book_side: str,
     gamma_base: str,
     clob_base: str,
     timeout_s: float,
-) -> Candidate | None:
+) -> list[Candidate]:
     gamma_base = gamma_base.rstrip("/")
     clob_base = clob_base.rstrip("/")
     event_ref = _parse_event_ref(event)
@@ -354,25 +385,27 @@ def find_candidate_for_event(
             gamma_base=gamma_base,
             event_ref=event_ref,
         )
-        candidate = _scan_events_for_candidate(
+        candidates = _scan_events_for_candidates(
             client,
             events=[resolved],
             outcome=outcome,
-            require_book_side=require_book_side,
+            require_book_side="none",
             clob_base=clob_base,
             market_slug=market_slug,
             relax_market_filters=False,
+            first_only=False,
         )
-        if candidate is not None:
-            return candidate
-        return _scan_events_for_candidate(
+        if candidates:
+            return candidates
+        return _scan_events_for_candidates(
             client,
             events=[resolved],
             outcome=outcome,
-            require_book_side=require_book_side,
+            require_book_side="none",
             clob_base=clob_base,
             market_slug=market_slug,
             relax_market_filters=True,
+            first_only=False,
         )
 
 
@@ -454,8 +487,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         metavar="URL_OR_SLUG",
         default=None,
         help=(
-            "Focus on one Polymarket event: full URL (/event/<slug> or category paths "
-            "like /esports/.../<slug>), /market/<slug>, or bare event slug."
+            "Resolve one Polymarket event and print every outcome token_id. "
+            "Accepts full URL (/event/<slug> or category paths like /esports/.../<slug>), "
+            "/market/<slug>, or bare event slug."
         ),
     )
     parser.add_argument(
@@ -473,14 +507,54 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _candidate_to_dict(candidate: Candidate) -> dict[str, Any]:
+    return {
+        "token_id": candidate.token_id,
+        "outcome": candidate.outcome,
+        "event_title": candidate.event_title,
+        "event_slug": candidate.event_slug,
+        "market_question": candidate.market_question,
+        "market_slug": candidate.market_slug,
+        "best_bid": str(candidate.best_bid) if candidate.best_bid is not None else None,
+        "best_ask": str(candidate.best_ask) if candidate.best_ask is not None else None,
+    }
+
+
+def _print_event_tokens(candidates: list[Candidate], *, as_json: bool) -> None:
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "event_title": candidates[0].event_title,
+                    "event_slug": candidates[0].event_slug,
+                    "outcomes": [_candidate_to_dict(candidate) for candidate in candidates],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    print(f"event={candidates[0].event_title}", file=sys.stderr)
+    print(f"event_slug={candidates[0].event_slug}", file=sys.stderr)
+    print(f"count={len(candidates)}", file=sys.stderr)
+
+    current_market = object()
+    for candidate in candidates:
+        if candidate.market_slug != current_market:
+            current_market = candidate.market_slug
+            print(file=sys.stderr)
+            print(f"market={candidate.market_question}", file=sys.stderr)
+            print(f"market_slug={candidate.market_slug}", file=sys.stderr)
+        print(f"{candidate.token_id}\t{candidate.outcome}\tbid={candidate.best_bid}\task={candidate.best_ask}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
         if args.event:
-            candidate = find_candidate_for_event(
+            candidates = find_tokens_for_event(
                 event=args.event,
                 outcome=args.outcome,
-                require_book_side=args.require_book_side,
                 gamma_base=args.gamma_base,
                 clob_base=args.clob_base,
                 timeout_s=args.timeout_s,
@@ -496,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
                 extra_terms=set(args.term),
                 timeout_s=args.timeout_s,
             )
+            candidates = [candidate] if candidate is not None else []
     except ValueError as e:
         print(f"Invalid --event value: {e}", file=sys.stderr)
         return 2
@@ -506,33 +581,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"HTTP error while searching for token_id: {e!r}", file=sys.stderr)
         return 2
 
-    if candidate is None:
+    if not candidates:
         if args.event:
             print(
-                "No outcome token_id found for that event with the requested filters. "
-                "For closed markets use --require-book-side none; try --outcome yes|no.",
+                "No outcome token_ids found for that event. "
+                "Try --outcome yes|no|any.",
                 file=sys.stderr,
             )
         else:
             print("No active sports token_id found with the requested filters.", file=sys.stderr)
         return 1
 
+    if args.event:
+        _print_event_tokens(candidates, as_json=args.json)
+        return 0
+
+    candidate = candidates[0]
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "token_id": candidate.token_id,
-                    "outcome": candidate.outcome,
-                    "event_title": candidate.event_title,
-                    "event_slug": candidate.event_slug,
-                    "market_question": candidate.market_question,
-                    "market_slug": candidate.market_slug,
-                    "best_bid": str(candidate.best_bid) if candidate.best_bid is not None else None,
-                    "best_ask": str(candidate.best_ask) if candidate.best_ask is not None else None,
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(_candidate_to_dict(candidate), indent=2))
     else:
         print(candidate.token_id)
         print(f"outcome={candidate.outcome}", file=sys.stderr)

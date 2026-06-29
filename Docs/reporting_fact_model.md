@@ -36,10 +36,12 @@ Constants live in `src/tyrex_pm/reporting/schema_v2.py`. Adding a fact starts th
 |-------------|----------|----------------|---------|
 | `health` | `runtime/app.py`, `runtime/live_supervisor.py` | none | Process / heartbeat / WS state transitions (`started`, `stopped`, `heartbeat_unhealthy`, `user_ws_stale`, ...) |
 | `guru_poll` | `runtime/app.py` | none | Each Data API tick: page count, fetched, kept-after-watermark, errors |
-| `guru_signal` | `pipeline.process_new_guru_signals` | `dedup_key` | Normalized guru trade |
-| `strategy_skip` | `pipeline.process_new_guru_signals` | `dedup_key` | Strategy filtered out the signal (token allowlist, min notional, dust, no inventory, ...) |
-| `intent_created` | `pipeline.process_new_guru_signals` | `dedup_key` | Strategy emitted an `EnterIntent` / `ExitIntent` / `ReduceIntent` / `CancelIntent` |
-| `risk_decision` | `risk/engine.evaluate_intent` | `dedup_key` | Approve / deny + per-policy evidence (the dense fact) |
+| `guru_signal` | `pipeline.process_new_guru_signals` | `dedup_key` | Normalized guru trade (guru back-compat; guru does **not** emit `signal_received`) |
+| `signal_received` | `pipeline.process_signals` | `dedup_key` | Generic non-guru signal ingress (e.g. `simple_signal_test`); source/type/token/side (P1 architecture_enhance) |
+| `strategy_skip` | `pipeline.process_signals` | `dedup_key` | Strategy filtered out the signal (token allowlist, min notional, dust, no inventory, ...) |
+| `intent_created` | `pipeline.process_signals` | `dedup_key` | Strategy emitted an `EnterIntent` / `ExitIntent` / `ReduceIntent` / `CancelIntent` |
+| `risk_decision` | `risk/engine.evaluate_intent`, `risk/planned_order.validate_planned_order` | `dedup_key` | Approve / deny + per-policy evidence. Pre-check has no `phase`; planned-order revalidation carries `{"phase":"planned"}` (P3 architecture_enhance) |
+| `execution_plan` | `pipeline` (`ExecutionPlanner`) | `dedup_key` | Planner output: chosen style (GTC/FAK), price, size, urgency, `planner_reason`, book evidence (P3 architecture_enhance) |
 | `oms_submit` | `pipeline` | `dedup_key` | Successful submit ack with raw `oms_result` |
 | `oms_reject` | `pipeline` | `dedup_key` | Submit failed (HTTP error, duplicate fingerprint) |
 | `oms_cancel` | `pipeline` | `dedup_key` | Cancel attempt + result |
@@ -48,6 +50,9 @@ Constants live in `src/tyrex_pm/reporting/schema_v2.py`. Adding a fact starts th
 | `wallet_sync` | `pipeline.emit_wallet_sync` | none | Snapshot of balance, allowance, position count, open-order count after a REST refresh |
 | `exit_lifecycle` | `runtime/exit_lifecycle`, strategies, `pipeline` | parent correlation id | Scheduled exit / sell_test lifecycle: pending, arm attempts, SELL terminal outcomes (P3.5) |
 | `allocation_ledger` | `state/allocation_ledger`, `runtime/allocation_runtime`, `pipeline` | correlation id when present | Per-strategy token allocation: buy/sell/reserve/clamp (P4) |
+| `protection_register` | `protection/monitor` | parent correlation id | TP/SL overlay registered for an `owner_id`/token after `allocation_buy_applied` (P4 architecture_enhance) |
+| `protection_tick` | `protection/monitor` | parent correlation id | Monitor observed price vs thresholds; **deduped** on observed price; flags stale/missing book (P4 architecture_enhance) |
+| `protection_trigger` | `protection/monitor` | parent correlation id | TP/SL trigger fired: kind, observed price, exit sizing. The exit itself reuses `intent_created`/`risk_decision`/`execution_plan`/`oms_submit`/`exit_lifecycle`/`allocation_ledger` (P4 architecture_enhance) |
 | `live_attest` | `runtime/live_attest.py` | none | Attestation milestones (`auth_ok`, `submit_ok`, `cancel_ok`, ...) plus V2 evidence phases: `v2_environment` (SDK module + version, host, chain, signature_type, builder code presence), `collateral_check` (post-bootstrap pUSD balance + per-exchange allowances), `market_info` (resolved tick/min-size/neg-risk/fee/outcomes), and `outcome_validation` on `complete` (post-cancel order id resolution + outcomes map). |
 
 ---

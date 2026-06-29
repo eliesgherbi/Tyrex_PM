@@ -1,6 +1,6 @@
 # Phase 4 — ProtectionEngine
 
-**Program:** [README.md](README.md) · **Prev:** [phase_3_5_fill_finality_helper.md](phase_3_5_fill_finality_helper.md) · **Next:** [phase_5_portfolio_foundation.md](phase_5_portfolio_foundation.md)
+**Program:** [README.md](README.md) · **Prev:** [phase_3_5_fill_finality_helper.md](phase_3_5_fill_finality_helper.md) · **Next:** [phase_4_5_live_validation_harness.md](phase_4_5_live_validation_harness.md)
 
 > **Procedural now, event-ready later.** `on_market_update(...) -> list[ExitIntent]`; no bus.
 
@@ -262,3 +262,23 @@ Provides for: production stops/exits used by guru and future strategies; exit fl
 ## 16. Event-ready design notes
 
 `ProtectionEngine.on_market_update(snapshot, ctx) -> list[ExitIntent]` is a pure function of `(snapshot, registry state, allocation, config)` that **returns** intents rather than submitting them. Today the monitor loop calls it on a timer / after market updates; a future event bus could deliver `MarketBookSnapshot` events to the same method unchanged. Registration is triggered by an existing runtime hook (post-BUY allocation), which a future bus could replace with an `AllocationApplied` event. No bus added.
+
+---
+
+## Implementation status
+
+**Status: implemented · runtime-unwired · unit-tested.**
+
+**Implementation summary.** The `protection/` package implements a strategy-agnostic TP/SL overlay: `config.py`, `trigger_eval.py`, `sizing.py`, `registry.py` (`register_if_allocation_final` gates on CONFIRMED only), `lifecycle.py`, and `monitor.py` (`ProtectionMonitor.tick`). Emitted exits are designed to flow through `process_intent_work_unit` → RiskEngine → ExecutionPlanner → OMS — **but the monitor loop and registration hook are not wired in `app.py`.**
+
+**Files changed.** `protection/*` (new), `reporting/schema_v2.py` (protection facts), `runtime/allocation_ids.py`.
+
+**Tests added.** `tests/test_protection_engine.py` (full chain in pytest only).
+
+**Known limitations.** The legacy `tp_sl_test` harness is retained as-is (a separate regression harness); it was not rewritten on top of `protection/`. Trailing stops are not implemented. **Production TP/SL is not live-ready:** `ProtectionMonitor.tick` is **not** called from `runtime/app.py`; there is no `protection.enabled` config; registration after CONFIRMED is not hooked. The engine is procedural and event-ready for future wiring.
+
+**How to run tests.** `python -m pytest tests/test_protection_engine.py`
+
+**How to run a safe harness.** **Unit tests only** until runtime wiring lands. Manual in-process: shadow + `market_data.enabled` + `execution.planner.enabled`, credit owner via ledger, `register_if_allocation_final(..., status="CONFIRMED")`, push book, `tick()`, feed work unit to `process_intent_work_unit`. **Do not claim production TP/SL is CLI-runnable.**
+
+**Verification label:** `unit-tested` · `IMPLEMENTED-BUT-UNWIRED` for CLI — see [live_validation_matrix.md](live_validation_matrix.md).

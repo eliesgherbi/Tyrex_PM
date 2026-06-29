@@ -6,8 +6,13 @@ Reusable adapters that turn raw venue / external rows into the shape strategies 
 
 | File | Purpose |
 |------|---------|
-| `base.py` | `GuruCopySignal` dataclass — the standard input to copy-style strategies (wraps a `GuruTradeSignal` with derived fields like normalized notional) |
+| `base.py` | The generic `Signal` protocol (`source` / `token_id` / `dedup_key`) every signal conforms to (P1 architecture_enhance), plus `GuruCopySignal` which implements it |
 | `guru_copy_signal.py` | `to_copy_signal(GuruTradeSignal) -> GuruCopySignal` adapter |
+| `simple_signal.py` | `SimpleSignal` — minimal non-guru signal used by the `simple_signal_test` harness to prove the generic dispatch path |
+
+All signals satisfy the `Signal` protocol so `pipeline.process_signals` can dispatch any source through one path. `guru` keeps its `guru_signal` fact for back-compat; non-guru sources emit a generic `signal_received` fact.
+
+**CLI wiring.** For `kind: simple_signal_test`, `runtime/fixture_signal_run.py` builds a `SimpleSignal` from config and passes it to `process_signals` via `SimpleSignalTestStrategy`. This path never polls the guru Data API.
 
 ## When to add a new signal vs. a new strategy
 

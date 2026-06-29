@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,11 @@ from tyrex_pm.core.ids import TokenId
 from tyrex_pm.core.models import WalletPosition
 
 _ALLOCATION_LEDGER_JSON_VERSION = 1
+
+META_LAST_BUY_APPLIED_TS = "last_buy_applied_ts"
+META_LAST_BUY_CORRELATION_ID = "last_buy_correlation_id"
+META_LAST_BUY_MATCH_STATUS = "last_buy_match_status"
+META_PROVISIONAL_UNTIL_TS = "provisional_until_ts"
 
 
 def _utc_now_iso() -> str:
@@ -58,6 +63,17 @@ class ExitReservation:
     venue_order_id: str | None = None
     applied_fill_qty: Decimal = Decimal("0")
     applied_dedup_keys: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AllocationClampSkipResult:
+    owner_id: str
+    token_id: str
+    allocated_qty: Decimal
+    venue_qty: Decimal
+    reason: str
+    age_s: float
+    last_buy_correlation_id: str | None = None
 
 
 @dataclass
@@ -133,6 +149,8 @@ class AllocationLedger:
         qty: Decimal,
         *,
         correlation_id: str | None = None,
+        match_status: str | None = None,
+        clamp_grace_s: float = 90.0,
     ) -> AllocationMutation:
         if qty <= 0:
             raise ValueError(f"apply_buy qty must be positive, got {qty!r}")
@@ -140,6 +158,14 @@ class AllocationLedger:
         entry = self._touch_entry(owner_id, tid)
         before = entry.allocated_qty
         entry.allocated_qty = before + qty
+        now = datetime.now(timezone.utc)
+        provisional_until = now + timedelta(seconds=max(0.0, clamp_grace_s))
+        entry.metadata[META_LAST_BUY_APPLIED_TS] = now.isoformat()
+        entry.metadata[META_PROVISIONAL_UNTIL_TS] = provisional_until.isoformat()
+        if correlation_id is not None:
+            entry.metadata[META_LAST_BUY_CORRELATION_ID] = correlation_id
+        if match_status is not None:
+            entry.metadata[META_LAST_BUY_MATCH_STATUS] = str(match_status)
         self._persist()
         return AllocationMutation(
             event="allocation_buy_applied",
@@ -150,6 +176,79 @@ class AllocationLedger:
             allocated_after=entry.allocated_qty,
             correlation_id=correlation_id,
         )
+
+    def repair_allocation_to_target(
+        self,
+        owner_id: str,
+        token_id: str | TokenId,
+        target_qty: Decimal,
+        *,
+        source: str,
+        correlation_id: str | None = None,
+        reason: str | None = None,
+    ) -> AllocationMutation | None:
+        """Raise allocated qty to *target_qty* when finality/venue evidence exceeds ledger."""
+        if target_qty <= 0:
+            return None
+        tid = str(token_id)
+        entry = self._touch_entry(owner_id, tid)
+        before = entry.allocated_qty
+        if before >= target_qty:
+            return None
+        delta = target_qty - before
+        entry.allocated_qty = target_qty
+        self._persist()
+        return AllocationMutation(
+            event="allocation_repaired_from_finality",
+            owner_id=owner_id,
+            token_id=tid,
+            delta_qty=delta,
+            allocated_before=before,
+            allocated_after=entry.allocated_qty,
+            correlation_id=correlation_id,
+            source=source,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _within_buy_clamp_grace(entry: AllocationEntry, *, clamp_grace_s: float) -> tuple[bool, float, str | None]:
+        raw_until = entry.metadata.get(META_PROVISIONAL_UNTIL_TS)
+        corr = entry.metadata.get(META_LAST_BUY_CORRELATION_ID)
+        corr_s = str(corr) if corr is not None else None
+        if raw_until:
+            try:
+                until = datetime.fromisoformat(str(raw_until))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                age_s = 0.0
+                raw_ts = entry.metadata.get(META_LAST_BUY_APPLIED_TS)
+                if raw_ts:
+                    try:
+                        applied = datetime.fromisoformat(str(raw_ts))
+                        if applied.tzinfo is None:
+                            applied = applied.replace(tzinfo=timezone.utc)
+                        age_s = max(0.0, (now - applied).total_seconds())
+                    except (ValueError, TypeError):
+                        age_s = 0.0
+                if now < until:
+                    return True, age_s, corr_s
+                return False, age_s, corr_s
+            except (ValueError, TypeError):
+                pass
+        raw_ts = entry.metadata.get(META_LAST_BUY_APPLIED_TS)
+        if raw_ts:
+            try:
+                applied = datetime.fromisoformat(str(raw_ts))
+                if applied.tzinfo is None:
+                    applied = applied.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                age_s = (now - applied).total_seconds()
+                if age_s <= clamp_grace_s:
+                    return True, age_s, corr_s
+            except (ValueError, TypeError):
+                pass
+        return False, 0.0, corr_s
 
     def set_reservation_venue_order_id(self, reservation_id: str, venue_order_id: str) -> None:
         row = self._reservations.get(reservation_id)
@@ -334,16 +433,36 @@ class AllocationLedger:
     def clamp_to_venue_positions(
         self,
         wallet_positions: dict[TokenId, WalletPosition],
-    ) -> list[AllocationClampResult]:
+        *,
+        clamp_grace_s_after_buy: float = 90.0,
+    ) -> tuple[list[AllocationClampResult], list[AllocationClampSkipResult]]:
         venue_by_token: dict[str, Decimal] = {
             str(tid): max(Decimal("0"), pos.qty) for tid, pos in wallet_positions.items()
         }
         results: list[AllocationClampResult] = []
+        skipped: list[AllocationClampSkipResult] = []
         changed = False
         for entry in list(self._entries.values()):
             venue_qty = venue_by_token.get(entry.token_id, Decimal("0"))
             if entry.allocated_qty <= venue_qty:
                 continue
+            if venue_qty == 0:
+                in_grace, age_s, corr = self._within_buy_clamp_grace(
+                    entry, clamp_grace_s=clamp_grace_s_after_buy
+                )
+                if in_grace:
+                    skipped.append(
+                        AllocationClampSkipResult(
+                            owner_id=entry.owner_id,
+                            token_id=entry.token_id,
+                            allocated_qty=entry.allocated_qty,
+                            venue_qty=venue_qty,
+                            reason="recent_buy_rest_lag",
+                            age_s=round(age_s, 3),
+                            last_buy_correlation_id=corr,
+                        )
+                    )
+                    continue
             before = entry.allocated_qty
             entry.allocated_qty = venue_qty
             if entry.reserved_exit_qty > entry.allocated_qty:
@@ -361,7 +480,7 @@ class AllocationLedger:
             )
         if changed:
             self._persist()
-        return results
+        return results, skipped
 
     def snapshot(self) -> dict[str, Any]:
         return {

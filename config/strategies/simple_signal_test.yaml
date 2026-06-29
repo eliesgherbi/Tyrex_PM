@@ -1,0 +1,17 @@
+# CLI-safe non-guru reference harness (P1 architecture_enhance).
+#
+# Proves the generic Signal → Strategy → Intent path from ``tyrex-pm run`` without
+# guru polling. Uses ``runtime/fixture_signal_run.run_fixture_signals_once``.
+#
+# Shadow smoke:
+#   python -m tyrex_pm.runtime.app run --strategy config/strategies/simple_signal_test.yaml --run-name simple_strat
+kind: simple_signal_test
+
+enabled: true
+token_id: "9059650700126795019827485089957938050581213031053374092199507389736394347163"
+owner_id: simple_signal_test
+side: BUY
+notional_usd: "5"
+limit_price: "0.50"
+order_style: GTC
+run_once: true

@@ -236,3 +236,23 @@ Provides for: **Phase 3** (planner book inputs), **Phase 4** (protection trigger
 ## 16. Event-ready design notes
 
 `MarketStateStore.apply_snapshot(snapshot)` / `apply_book_delta(...)` are the single mutation surface. Today `ingestion/market_stream` calls them in its loop; a future event bus could route `MarketBookSnapshot` events to the same methods with no change. Read methods (`best_bid`, `is_stale`, `estimate_*`) are pure queries safe for any caller. No bus, no subscriptions added.
+
+---
+
+## Implementation status
+
+**Status: implemented · runtime-unwired (market supervisor) · live-read-only via manual REST script.**
+
+**Verification label:** `unit-tested` · `fixture-tested` · **not** `CLI-runnable` for market stream — see [live_validation_matrix.md](live_validation_matrix.md).
+
+**Implementation summary.** `state/market_store.py` provides `MarketStateStore` with `best_bid` / `best_ask` / `spread` / `mid` / `last_update_ts` / `is_stale(max_age_s, now)` / `estimate_fill_price` (VWAP walk) / `estimate_slippage`, backed by immutable `MarketBookSnapshot` (`make_snapshot`). `apply_snapshot` is the only mutator (single-writer). `ingestion/market_stream.py` parses Polymarket `book` snapshots and `price_change` deltas; `venue/polymarket/book_snapshot.py` bootstraps the store from a REST order-book snapshot. The store is exposed on `RuntimeCoordinator.market_state` and configured via `MarketDataConfig` in `runtime/config.py`.
+
+**Files changed.** `state/market_store.py`, `ingestion/market_stream.py`, `venue/polymarket/book_snapshot.py` (new/completed), `runtime/coordinator.py` (`market_state` slot), `runtime/config.py` (`MarketDataConfig`).
+
+**Tests added.** `tests/test_market_state_store.py`, `tests/test_market_stream_ingest.py`.
+
+**Known limitations.** Dark-launched: `market_data.enabled` defaults to `false`; missing/stale books are treated as stale (fail-closed) by `is_stale`. Live WS wiring into the runtime loop is intentionally out of scope here.
+
+**How to run tests.** `python -m pytest tests/test_market_state_store.py tests/test_market_stream_ingest.py`
+
+**How to run a safe harness.** Construct a `MarketStateStore`, call `apply_snapshot(make_snapshot(...))`, and read `best_bid` / `estimate_fill_price`; or bootstrap from a captured REST book via `bootstrap_market_store_from_rest`.

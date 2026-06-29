@@ -1,6 +1,8 @@
 # Phase 5 — Portfolio foundation
 
-**Program:** [README.md](README.md) · **Prev:** [phase_4_protection_engine.md](phase_4_protection_engine.md) · **Next:** [phase_6_hard_kill_switch.md](phase_6_hard_kill_switch.md)
+**Program:** [README.md](README.md) · **Prev:** [phase_4_6_paired_binary_strategy_production_protection.md](phase_4_6_paired_binary_strategy_production_protection.md) · **Next:** [phase_6_hard_kill_switch.md](phase_6_hard_kill_switch.md)
+
+> **Gate:** Read-only portfolio work may proceed after [Phase 4.5](phase_4_5_live_validation_harness.md) harness exit criteria. **Production protection on long-running strategies** is gated on [Phase 4.6](phase_4_6_paired_binary_strategy_production_protection.md) (paired binary + monitor integration).
 
 > **Procedural now, event-ready later.** Read-only projections; no bus. The fill-finality helper this builds on shipped in [Phase 3.5](phase_3_5_fill_finality_helper.md).
 

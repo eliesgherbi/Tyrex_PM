@@ -244,7 +244,7 @@ async def test_shadow_full_chain_golden(tmp_path: Path) -> None:
         for r in facts
         if r["fact_type"] == FACT_TYPE_ALLOCATION_LEDGER
     ]
-    assert "allocation_buy_applied" in alloc_events
+    assert "allocation_buy_applied_from_fill" in alloc_events
     assert "allocation_sell_applied" in alloc_events
 
     blocked = [
@@ -335,7 +335,7 @@ async def test_buy_denied_produces_no_allocation_buy_applied(tmp_path: Path) -> 
     assert strat.is_done()
     assert not any(
         r["fact_type"] == FACT_TYPE_ALLOCATION_LEDGER
-        and r["payload"].get("event") == "allocation_buy_applied"
+        and r["payload"].get("event") in ("allocation_buy_applied", "allocation_buy_applied_from_fill")
         for r in facts
     )
     assert any(r["fact_type"] == FACT_TYPE_RISK and not r["payload"]["approved"] for r in facts)
