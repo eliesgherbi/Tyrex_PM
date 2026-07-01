@@ -1,0 +1,18 @@
+{
+  "_spike_note": "Wire shape from Polymarket market-channel docs (2026-06); asset_id set to paired_binary YES token for tests. Live WS connect verified; book payload matches official schema.",
+  "event_type": "book",
+  "asset_id": "93600127953453226164027182960250028230847035010973306659500433874577010899527",
+  "market": "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af",
+  "bids": [
+    { "price": "0.54", "size": "120" },
+    { "price": "0.53", "size": "80" },
+    { "price": "0.52", "size": "50" }
+  ],
+  "asks": [
+    { "price": "0.55", "size": "100" },
+    { "price": "0.56", "size": "60" },
+    { "price": "0.57", "size": "40" }
+  ],
+  "timestamp": "1757908892000",
+  "hash": "0xabc123def4567890abcdef1234567890abcdef12"
+}

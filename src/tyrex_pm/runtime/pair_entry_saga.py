@@ -530,6 +530,8 @@ async def run_pair_entry_from_idle(
     apply_local_shadow_fill: bool,
     live_clob_client,
     unwind_fn: UnwindFn,
+    entry_decision_id: str | None = None,
+    entry_decision_ts: float | None = None,
 ) -> bool:
     """Execute compound pair entry from IDLE. Returns True if saga entered pending/committed."""
     ctx = StrategyContext(coord=coord, market_state=coord.market_state)
@@ -573,6 +575,13 @@ async def run_pair_entry_from_idle(
     outcomes: list[LegSubmitOutcome] = []
 
     for intent, ext in pairs:
+        ext = dict(ext)
+        if entry_decision_id:
+            ext["decision_id"] = entry_decision_id
+            ext["decision_type"] = "entry_eval"
+            ext["pre_decision_snapshot_emitted"] = True
+            if entry_decision_ts is not None:
+                ext["latency_decision_ts"] = entry_decision_ts
         leg = str(ext.get("leg", ""))
         leg_corr = str(ext.get("leg_correlation_id", pair_correlation_id))
         if leg == "yes":

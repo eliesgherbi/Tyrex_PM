@@ -95,4 +95,29 @@ def test_single_writer_only() -> None:
         and callable(getattr(store, name))
         and any(name.startswith(p) for p in ("set_", "update_", "upsert_", "put_", "add_", "remove_", "delete_"))
     ]
-    assert mutators == [], f"unexpected mutator methods: {mutators}"
+    assert mutators == ["set_on_token_update", "set_reconnect_gap"], f"unexpected mutator methods: {mutators}"
+
+
+def test_ws_primary_not_regressed_by_rest_bootstrap() -> None:
+    from tyrex_pm.market_data.models import BookLevel, BookSource, SourceQuality
+
+    store = MarketStateStore()
+    store.apply_book(
+        TOKEN,
+        [BookLevel(Decimal("0.49"), Decimal("100"))],
+        [BookLevel(Decimal("0.51"), Decimal("100"))],
+        source=BookSource.WEBSOCKET,
+        source_quality=SourceQuality.WS_PRIMARY,
+    )
+    cap = store.capture(TOKEN)
+    assert cap is not None and cap.source_quality == SourceQuality.WS_PRIMARY
+    store.apply_book(
+        TOKEN,
+        [BookLevel(Decimal("0.10"), Decimal("100"))],
+        [BookLevel(Decimal("0.90"), Decimal("100"))],
+        source=BookSource.REST_BOOTSTRAP,
+    )
+    cap2 = store.capture(TOKEN)
+    assert cap2 is not None
+    assert cap2.source_quality == SourceQuality.WS_PRIMARY
+    assert store.best_bid(TOKEN) == Decimal("0.49")

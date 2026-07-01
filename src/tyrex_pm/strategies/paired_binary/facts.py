@@ -1941,3 +1941,108 @@ def emit_pair_entry_manual_intervention(
         ),
     )
 
+
+# --- Phase 2 Group B observability (M3/M4/M7) -----------------------------
+
+
+def emit_data_quality_verdict(
+    sink: JsonlSink,
+    run_id: RunId,
+    *,
+    decision_id: str,
+    decision_context: str,
+    report,
+    correlation_id: str | None = None,
+) -> None:
+    payload = {
+        "decision_id": decision_id,
+        "decision_context": decision_context,
+        **report.to_payload(),
+    }
+    _write_fact(
+        sink,
+        make_fact(
+            "data_quality_verdict",
+            str(run_id),
+            payload,
+            correlation_id=correlation_id,
+        ),
+    )
+
+
+def emit_execution_planner_evidence(
+    sink: JsonlSink,
+    run_id: RunId,
+    *,
+    evidence,
+    correlation_id: str | None = None,
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(
+            "execution_planner_evidence",
+            str(run_id),
+            evidence.to_payload(),
+            correlation_id=correlation_id,
+        ),
+    )
+
+
+def emit_decision_snapshot(
+    sink: JsonlSink,
+    run_id: RunId,
+    *,
+    snapshot,
+    correlation_id: str | None = None,
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(
+            "decision_snapshot",
+            str(run_id),
+            snapshot.to_payload(),
+            correlation_id=correlation_id,
+        ),
+    )
+
+
+def emit_latency_chain(
+    sink: JsonlSink,
+    run_id: RunId,
+    *,
+    chain,
+    correlation_id: str | None = None,
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(
+            "latency_chain",
+            str(run_id),
+            chain.to_payload(),
+            correlation_id=correlation_id,
+        ),
+    )
+
+
+def emit_paired_binary_tick_source(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    *,
+    tick_source: str,
+    coalesce_count: int,
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(
+            "paired_binary_tick_source",
+            str(run_id),
+            {
+                "tick_source": tick_source,
+                "decision_coalesce_count": coalesce_count,
+                "phase": state.phase.value,
+            },
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+

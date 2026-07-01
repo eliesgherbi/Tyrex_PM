@@ -267,6 +267,9 @@ def maybe_apply_allocation_buy(
         correlation_id=correlation_id,
         extra={"filled_qty": str(qty), "source": "oms_matched" if not apply_local_shadow_fill else "shadow_fill"},
     )
+    from tyrex_pm.runtime.market_update_coordinator import notify_coordinator_sellability
+
+    notify_coordinator_sellability(coord, intent.token_id)
 
 
 def _emit_allocation_skip_unfilled(

@@ -13,7 +13,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
 from tyrex_pm.core.ids import TokenId
-from tyrex_pm.state.market_store import MarketBookSnapshot, MarketStateStore, make_snapshot
+from tyrex_pm.core.time import utc_now
+from tyrex_pm.market_data.models import BookSource
+from tyrex_pm.state.market_store import BookLevel, MarketBookSnapshot, MarketStateStore, make_snapshot
 from tyrex_pm.strategies.sell_test.pricing import fetch_order_book
 
 log = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ async def bootstrap_market_store_from_rest(
     store: MarketStateStore,
     client: Any,
     token_ids: Iterable[str | TokenId],
+    *,
+    source: str = BookSource.REST_BOOTSTRAP,
 ) -> int:
     """Fetch each token's REST book and apply it to ``store``.
 
@@ -66,6 +70,13 @@ async def bootstrap_market_store_from_rest(
         except Exception as e:  # noqa: BLE001 — fail-soft per token
             log.warning("market_store REST bootstrap: get_order_book(%s) failed: %r", tid, e)
             continue
-        store.apply_snapshot(book_payload_to_snapshot(tid, book))
+        snap = book_payload_to_snapshot(tid, book)
+        store.apply_book(
+            tid,
+            list(snap.bids),
+            list(snap.asks),
+            source=source,
+            received_ts=utc_now(),
+        )
         applied += 1
     return applied

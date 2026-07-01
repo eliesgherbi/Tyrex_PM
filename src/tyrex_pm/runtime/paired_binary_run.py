@@ -18,6 +18,10 @@ from tyrex_pm.runtime.config import AppConfig, PairedBinaryStrategyConfig
 from tyrex_pm.runtime.entry_qty_reconcile import PairEntryQtyReconcile, reconcile_pair_entry_qty
 from tyrex_pm.runtime.intent_work import IntentWorkUnit
 from tyrex_pm.runtime.market_data_runtime import bootstrap_market_state, inject_fixture_book
+from tyrex_pm.runtime.market_update_coordinator import (
+    MarketUpdateCoordinator,
+    attach_coordinator_to_authoritative_store,
+)
 from tyrex_pm.runtime.pair_entry_saga import (
     abort_pair_entry,
     run_pair_entry_from_idle,
@@ -63,6 +67,11 @@ from tyrex_pm.strategies.paired_binary.entry_price import (
     resolve_pair_entry_prices,
 )
 from tyrex_pm.strategies.paired_binary.latency import LatencyTracker
+from tyrex_pm.strategies.paired_binary.observability import emit_material_decision
+from tyrex_pm.market_data.decision_freshness import activation_may_proceed
+from tyrex_pm.market_data.decision_gate import should_block_paired_binary_decision
+from tyrex_pm.market_data.quality import DecisionContext
+from tyrex_pm.market_data.readiness_runtime import emit_market_data_health_block, refresh_market_readiness
 from tyrex_pm.strategies.paired_binary.monitor import PairedBinaryMonitor
 from tyrex_pm.strategies.paired_binary.sizing import build_exit_work_unit, clamp_exit_size
 from tyrex_pm.strategies.paired_binary.state import (
@@ -171,6 +180,53 @@ async def _submit_entry_intents(
         estimated_loss_budget=ev.estimated_loss_budget,
         slippage_buffer=ev.slippage_buffer,
     )
+    entry_decision_ts = monotonic_s()
+    entry_decision_id = emit_material_decision(
+        app=app,
+        coord=coord,
+        sink=sink,
+        run_id=run_id,
+        cfg=cfg,
+        state=state,
+        decision_type="entry_eval",
+        context=DecisionContext.ENTRY,
+        size=cfg.position_size,
+        decision_id=None,
+        emit_latency=False,
+    )
+
+    gate_result = should_block_paired_binary_decision(
+        app=app,
+        coord=coord,
+        cfg=cfg,
+        context=DecisionContext.ENTRY,
+        size=cfg.position_size,
+    )
+    if not gate_result.allowed:
+        pb_facts.emit_entry_skip(
+            sink,
+            run_id,
+            state,
+            yes_book,
+            no_book,
+            reason=gate_result.block_reason or "market_data_health_block",
+            pair_cost=ev.pair_cost,
+            yes_spread=ev.yes_spread,
+            no_spread=ev.no_spread,
+            estimated_loss_budget=ev.estimated_loss_budget,
+            slippage_buffer=ev.slippage_buffer,
+        )
+        emit_market_data_health_block(
+            sink,
+            run_id,
+            block_reason=gate_result.block_reason or "decision_blocked",
+            decision_context=DecisionContext.ENTRY.value,
+            readiness_state=gate_result.readiness_state,
+            quality_verdict=gate_result.quality_verdict,
+            quality_reasons=gate_result.quality_reasons,
+            correlation_id=pair_correlation_id,
+        )
+        return
 
     await run_pair_entry_from_idle(
         app=app,
@@ -187,6 +243,8 @@ async def _submit_entry_intents(
         apply_local_shadow_fill=apply_local_shadow_fill,
         live_clob_client=live_clob_client,
         unwind_fn=_run_emergency_unwind,
+        entry_decision_id=entry_decision_id,
+        entry_decision_ts=entry_decision_ts,
     )
 
 
@@ -651,6 +709,8 @@ async def _run_emergency_unwind(
 
 async def _activate_monitoring_with_facts(
     *,
+    app: AppConfig,
+    coord,
     sink,
     run_id,
     state,
@@ -689,8 +749,157 @@ async def _activate_monitoring_with_facts(
     tracker = LatencyTracker()
     tracker.set_book_capture(yes_book, no_book)
     tracker.mark_sellable_seen()
+    emit_material_decision(
+        app=app,
+        coord=coord,
+        sink=sink,
+        run_id=run_id,
+        cfg=cfg,
+        state=state,
+        decision_type="activation",
+        context=DecisionContext.ACTIVATION,
+        size=state.effective_qty,
+        latency_tracker=tracker,
+    )
     pb_facts.emit_latency_sample(
         sink, run_id, state, payload=tracker.payload(event="activation")
+    )
+
+
+async def _try_activate_when_ready(
+    *,
+    app: AppConfig,
+    run_id: RunId,
+    coord,
+    sink,
+    oms,
+    strategy,
+    cfg: PairedBinaryStrategyConfig,
+    state: PairedBinaryRuntimeState,
+    yes_book: LegBook,
+    no_book: LegBook,
+    apply_local_shadow_fill: bool,
+    live_clob_client,
+    recheck: bool = False,
+) -> None:
+    """Arm monitoring only when loss-budget safety and WS-primary freshness both pass."""
+    if recheck:
+        state.activation_recheck_attempts += 1
+    safety = evaluate_activation_safety(state, cfg, yes_book, no_book)
+    if not safety.ok:
+        if recheck:
+            if activation_recheck_expired(state, cfg):
+                await _handle_activation_failure(
+                    app=app,
+                    run_id=run_id,
+                    coord=coord,
+                    sink=sink,
+                    oms=oms,
+                    strategy=strategy,
+                    cfg=cfg,
+                    state=state,
+                    yes_book=yes_book,
+                    no_book=no_book,
+                    safety=safety,
+                    apply_local_shadow_fill=apply_local_shadow_fill,
+                    live_clob_client=live_clob_client,
+                )
+            else:
+                pb_facts.emit_activation_gap_recheck(
+                    sink,
+                    run_id,
+                    state,
+                    yes_book,
+                    no_book,
+                    cfg,
+                    attempt_count=state.activation_recheck_attempts,
+                    elapsed_s=activation_recheck_elapsed_s(state),
+                    reason=safety.reason or "activation_gap_exceeds_loss_budget",
+                )
+        elif should_use_activation_recheck(cfg):
+            begin_activation_recheck(state)
+            state.activation_recheck_attempts = 1
+            pb_facts.emit_activation_gap_recheck(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                cfg,
+                attempt_count=1,
+                elapsed_s=0.0,
+                reason=safety.reason or "activation_gap_exceeds_loss_budget",
+            )
+        else:
+            await _handle_activation_failure(
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                strategy=strategy,
+                cfg=cfg,
+                state=state,
+                yes_book=yes_book,
+                no_book=no_book,
+                safety=safety,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+            )
+        return
+
+    fresh = activation_may_proceed(
+        app=app, coord=coord, cfg=cfg, size=state.effective_qty
+    )
+    if not fresh.fresh:
+        if recheck:
+            pb_facts.emit_activation_gap_recheck(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                cfg,
+                attempt_count=state.activation_recheck_attempts,
+                elapsed_s=activation_recheck_elapsed_s(state),
+                reason="activation_book_age_stale",
+            )
+        elif should_use_activation_recheck(cfg):
+            begin_activation_recheck(state)
+            state.activation_recheck_attempts = 1
+            pb_facts.emit_activation_gap_recheck(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                cfg,
+                attempt_count=1,
+                elapsed_s=0.0,
+                reason="activation_book_age_stale",
+            )
+        return
+
+    if recheck:
+        pb_facts.emit_activation_recovered(
+            sink,
+            run_id,
+            state,
+            yes_book,
+            no_book,
+            cfg,
+            attempt_count=state.activation_recheck_attempts,
+            elapsed_s=activation_recheck_elapsed_s(state),
+        )
+    await _activate_monitoring_with_facts(
+        app=app,
+        coord=coord,
+        sink=sink,
+        run_id=run_id,
+        state=state,
+        cfg=cfg,
+        yes_book=yes_book,
+        no_book=no_book,
     )
 
 
@@ -1092,8 +1301,19 @@ async def run_paired_binary_loop(
     if live_clob_client is not None:
         await bootstrap_market_state(coord, app, live_clob_client=live_clob_client)
 
+    coordinator = getattr(coord, "market_update_coordinator", None)
+    if coordinator is None and coord.market_state is not None:
+        coordinator = MarketUpdateCoordinator(
+            debounce_ms=float(app.runtime.paired_binary.max_decision_rate_per_market_ms),
+        )
+        attach_coordinator_to_authoritative_store(coord, coordinator)
+        coord.market_update_coordinator = coordinator
+
+    token_ids = [TokenId(cfg.yes_token_id), TokenId(cfg.no_token_id)]
+    poll_interval = float(app.runtime.paired_binary.poll_interval_s or cfg.tick_interval_s)
+
     ticks = 0
-    max_ticks = max(1, int(cfg.max_runtime_s / cfg.tick_interval_s)) if cfg.max_runtime_s else 10_000
+    max_ticks = max(1, int(cfg.max_runtime_s / poll_interval)) if cfg.max_runtime_s else 10_000
 
     while ticks < max_ticks:
         if stop is not None and stop.is_set():
@@ -1101,316 +1321,52 @@ async def run_paired_binary_loop(
         if state.is_terminal():
             break
 
-        yes_book, no_book = _books(coord, cfg)
-
-        if state.phase == PairedBinaryPhase.IDLE:
-            if cfg.entry_dry_run:
-                eval_inp = _entry_eval_input(cfg, yes_book, no_book)
-                ev = evaluate_entry(eval_inp)
-                if ev.allowed and ev.pair_cost and ev.yes_spread and ev.no_spread:
-                    pb_facts.emit_entry_eval(
-                        sink,
-                        run_id,
-                        state,
-                        yes_book,
-                        no_book,
-                        pair_cost=ev.pair_cost,
-                        yes_spread=ev.yes_spread,
-                        no_spread=ev.no_spread,
-                        estimated_loss_budget=ev.estimated_loss_budget,
-                        slippage_buffer=ev.slippage_buffer,
-                    )
-                elif ev.reason:
-                    pb_facts.emit_entry_skip(
-                        sink,
-                        run_id,
-                        state,
-                        yes_book,
-                        no_book,
-                        reason=ev.reason,
-                        pair_cost=ev.pair_cost,
-                        yes_spread=ev.yes_spread,
-                        no_spread=ev.no_spread,
-                        estimated_loss_budget=ev.estimated_loss_budget,
-                        slippage_buffer=ev.slippage_buffer,
-                    )
-                break
-            state.pair_correlation_id = f"paired_binary_{uuid.uuid4().hex[:12]}"
-            await _submit_entry_intents(
+        tick_lock = coordinator.tick_lock if coordinator is not None else None
+        if tick_lock is not None:
+            await tick_lock.acquire()
+        try:
+            await _paired_binary_tick_body(
                 app=app,
                 run_id=run_id,
                 coord=coord,
                 sink=sink,
                 oms=oms,
-                strategy=strategy,
                 cfg=cfg,
                 state=state,
-                pair_correlation_id=state.pair_correlation_id,
-                apply_local_shadow_fill=apply_local_shadow_fill,
-                live_clob_client=live_clob_client,
-            )
-            save_persisted_state(persist_path, state)
-
-        elif state.phase == PairedBinaryPhase.BOTH_ENTRY_PENDING:
-            action = await tick_pair_entry_pending(
-                app=app,
-                run_id=run_id,
-                coord=coord,
-                sink=sink,
-                oms=oms,
                 strategy=strategy,
-                cfg=cfg,
-                state=state,
-                yes_book=yes_book,
-                no_book=no_book,
+                monitor=monitor,
+                persist_path=persist_path,
                 apply_local_shadow_fill=apply_local_shadow_fill,
                 live_clob_client=live_clob_client,
-                unwind_fn=_run_emergency_unwind,
+                coordinator=coordinator,
+                token_ids=token_ids,
             )
-            if action == "fill_timeout":
-                yes_q = _leg_filled_qty(coord, cfg, "yes")
-                no_q = _leg_filled_qty(coord, cfg, "no")
-                blocked = "no" if yes_q > no_q else ("yes" if no_q > yes_q else "unknown")
-                pb_facts.emit_entry_timeout_unwind_retry(
-                    sink,
-                    run_id,
-                    state,
-                    yes_book,
-                    no_book,
-                    reason="entry_fill_timeout",
-                    blocked_leg=blocked,
-                )
-                await abort_pair_entry(
-                    app=app,
-                    run_id=run_id,
-                    coord=coord,
-                    sink=sink,
-                    oms=oms,
-                    strategy=strategy,
-                    cfg=cfg,
-                    state=state,
-                    yes_book=yes_book,
-                    no_book=no_book,
-                    reason="entry_fill_timeout",
-                    blocked_leg=None,
-                    blocking_phase="fill_timeout",
-                    reason_codes=("entry_fill_timeout",),
-                    apply_local_shadow_fill=apply_local_shadow_fill,
-                    live_clob_client=live_clob_client,
-                    unwind_fn=_run_emergency_unwind,
-                )
-            elif action in {"committed", "pending"}:
-                await _try_early_entry_completion(
-                    app=app,
-                    run_id=run_id,
-                    coord=coord,
-                    sink=sink,
-                    oms=oms,
-                    strategy=strategy,
-                    cfg=cfg,
-                    state=state,
-                    apply_local_shadow_fill=apply_local_shadow_fill,
-                    live_clob_client=live_clob_client,
-                )
+            ticks += 1
+        finally:
+            if tick_lock is not None and tick_lock.locked():
+                tick_lock.release()
 
-        elif state.phase == PairedBinaryPhase.BOTH_LEGS_FILLED:
-            sellable, yes_sell, no_sell = both_legs_sellable(coord, cfg, state)
-            if sellable:
-                safety = evaluate_activation_safety(state, cfg, yes_book, no_book)
-                if not safety.ok:
-                    if should_use_activation_recheck(cfg):
-                        begin_activation_recheck(state)
-                        state.activation_recheck_attempts = 1
-                        pb_facts.emit_activation_gap_recheck(
-                            sink,
-                            run_id,
-                            state,
-                            yes_book,
-                            no_book,
-                            cfg,
-                            attempt_count=1,
-                            elapsed_s=0.0,
-                            reason=safety.reason or "activation_gap_exceeds_loss_budget",
-                        )
-                    else:
-                        await _handle_activation_failure(
-                            app=app,
-                            run_id=run_id,
-                            coord=coord,
-                            sink=sink,
-                            oms=oms,
-                            strategy=strategy,
-                            cfg=cfg,
-                            state=state,
-                            yes_book=yes_book,
-                            no_book=no_book,
-                            safety=safety,
-                            apply_local_shadow_fill=apply_local_shadow_fill,
-                            live_clob_client=live_clob_client,
-                        )
-                else:
-                    await _activate_monitoring_with_facts(
-                        sink=sink,
-                        run_id=run_id,
-                        state=state,
-                        cfg=cfg,
-                        yes_book=yes_book,
-                        no_book=no_book,
-                    )
-            else:
-                pb_facts.emit_waiting_for_sellable_inventory(
-                    sink,
-                    run_id,
-                    state,
-                    yes_book,
-                    no_book,
-                    yes_sell=yes_sell,
-                    no_sell=no_sell,
-                )
-
-        elif state.phase == PairedBinaryPhase.ACTIVATION_PENDING_RECHECK:
-            sellable, yes_sell, no_sell = both_legs_sellable(coord, cfg, state)
-            if not sellable:
-                pb_facts.emit_waiting_for_sellable_inventory(
-                    sink,
-                    run_id,
-                    state,
-                    yes_book,
-                    no_book,
-                    yes_sell=yes_sell,
-                    no_sell=no_sell,
-                )
-            else:
-                elapsed = activation_recheck_elapsed_s(state)
-                state.activation_recheck_attempts += 1
-                safety = evaluate_activation_safety(state, cfg, yes_book, no_book)
-                if safety.ok:
-                    pb_facts.emit_activation_recovered(
-                        sink,
-                        run_id,
-                        state,
-                        yes_book,
-                        no_book,
-                        cfg,
-                        attempt_count=state.activation_recheck_attempts,
-                        elapsed_s=elapsed,
-                    )
-                    await _activate_monitoring_with_facts(
-                        sink=sink,
-                        run_id=run_id,
-                        state=state,
-                        cfg=cfg,
-                        yes_book=yes_book,
-                        no_book=no_book,
-                    )
-                elif activation_recheck_expired(state, cfg):
-                    await _handle_activation_failure(
-                        app=app,
-                        run_id=run_id,
-                        coord=coord,
-                        sink=sink,
-                        oms=oms,
-                        strategy=strategy,
-                        cfg=cfg,
-                        state=state,
-                        yes_book=yes_book,
-                        no_book=no_book,
-                        safety=safety,
-                        apply_local_shadow_fill=apply_local_shadow_fill,
-                        live_clob_client=live_clob_client,
-                    )
-                else:
-                    pb_facts.emit_activation_gap_recheck(
-                        sink,
-                        run_id,
-                        state,
-                        yes_book,
-                        no_book,
-                        cfg,
-                        attempt_count=state.activation_recheck_attempts,
-                        elapsed_s=elapsed,
-                        reason=safety.reason or "activation_gap_exceeds_loss_budget",
-                    )
-                    await asyncio.sleep(cfg.activation_gap_retry_interval_s)
-
-        elif state.phase == PairedBinaryPhase.UNWIND_PENDING:
-            yes_qty = leg_inventory_qty(coord, cfg, "yes")
-            no_qty = leg_inventory_qty(coord, cfg, "no")
-            if yes_qty <= 0 and no_qty <= 0:
-                transition_phase(state, PairedBinaryPhase.DONE, reason="emergency_unwind_complete")
-            elif state.unwind_block_reason:
-                outcome = await _run_emergency_unwind(
-                    app=app,
-                    run_id=run_id,
-                    coord=coord,
-                    sink=sink,
-                    oms=oms,
-                    strategy=strategy,
-                    cfg=cfg,
-                    state=state,
-                    qty=state.effective_qty,
-                    reason=state.unwind_block_reason,
-                    apply_local_shadow_fill=apply_local_shadow_fill,
-                    live_clob_client=live_clob_client,
-                )
-                state.unwind_attempt_count = outcome.attempt_count
-                if outcome.flat:
-                    transition_phase(state, PairedBinaryPhase.DONE, reason="emergency_unwind_complete")
-                elif outcome.manual_intervention:
-                    transition_phase(
-                        state, PairedBinaryPhase.FAILED, reason="manual_intervention_required"
-                    )
-
-        elif state.phase in {
-            PairedBinaryPhase.BOTH_LEGS_ACTIVE,
-            PairedBinaryPhase.ONLY_YES_ACTIVE,
-            PairedBinaryPhase.ONLY_NO_ACTIVE,
-            PairedBinaryPhase.STOP_PENDING_YES,
-            PairedBinaryPhase.STOP_PENDING_NO,
-            PairedBinaryPhase.TP_PENDING_YES,
-            PairedBinaryPhase.TP_PENDING_NO,
-            PairedBinaryPhase.TIMEOUT_PENDING,
-            PairedBinaryPhase.EXITING_YES,
-            PairedBinaryPhase.EXITING_NO,
-            PairedBinaryPhase.EXITING_BOTH,
-        }:
-            work = monitor.tick(coord, state, sink=sink, run_id=run_id)
-            for w in work:
-                leg = (w.intent_fact_extensions or {}).get("leg", "yes")
-                await process_intent_work_unit(
-                    w,
-                    app=app,
-                    run_id=run_id,
-                    strategy=strategy,
-                    coord=coord,
-                    sink=sink,
-                    oms=oms,
-                    apply_local_shadow_fill=apply_local_shadow_fill,
-                    live_clob_client=live_clob_client,
-                )
-                if getattr(strategy, "last_exit_submitted_leg", None) == leg:
-                    confirm_exit_submitted(state, leg)  # type: ignore[arg-type]
-            _update_post_exit_state(
-                state,
-                cfg,
-                coord,
-                sink=sink,
-                run_id=run_id,
-                yes_book=yes_book,
-                no_book=no_book,
-            )
-            if state.phase == PairedBinaryPhase.DONE:
-                pb_facts.emit_realized_pnl(sink, run_id, state, yes_book, no_book)
-                pb_facts.emit_done(sink, run_id, state, yes_book, no_book)
-
-        save_persisted_state(persist_path, state)
-        ticks += 1
+        if cfg.entry_dry_run:
+            break
 
         if state.phase == PairedBinaryPhase.BOTH_LEGS_ACTIVE and cfg.stop_after_entry:
             break
         if state.is_terminal():
             break
-        await asyncio.sleep(cfg.tick_interval_s)
+
+        if coordinator is not None:
+            tick_source, coalesce = await coordinator.wait_for_update(
+                token_ids, timeout_s=poll_interval
+            )
+            pb_facts.emit_paired_binary_tick_source(
+                sink,
+                run_id,
+                state,
+                tick_source=tick_source,
+                coalesce_count=coalesce,
+            )
+        else:
+            await asyncio.sleep(cfg.tick_interval_s)
 
     sink.write(
         make_fact(
@@ -1424,3 +1380,280 @@ async def run_paired_binary_loop(
         )
     )
     return ticks
+
+
+async def _paired_binary_tick_body(
+    *,
+    app: AppConfig,
+    run_id: RunId,
+    coord,
+    sink,
+    oms,
+    cfg: PairedBinaryStrategyConfig,
+    state: PairedBinaryRuntimeState,
+    strategy: PairedBinaryStrategy,
+    monitor: PairedBinaryMonitor,
+    persist_path: Path,
+    apply_local_shadow_fill: bool,
+    live_clob_client: object | None,
+    coordinator: MarketUpdateCoordinator | None,
+    token_ids: list[TokenId],
+) -> None:
+    refresh_market_readiness(coord, app, cfg, sink=sink, run_id=run_id)
+    yes_book, no_book = _books(coord, cfg)
+
+    if state.phase == PairedBinaryPhase.IDLE:
+        if cfg.entry_dry_run:
+            eval_inp = _entry_eval_input(cfg, yes_book, no_book)
+            ev = evaluate_entry(eval_inp)
+            if ev.allowed and ev.pair_cost and ev.yes_spread and ev.no_spread:
+                pb_facts.emit_entry_eval(
+                    sink,
+                    run_id,
+                    state,
+                    yes_book,
+                    no_book,
+                    pair_cost=ev.pair_cost,
+                    yes_spread=ev.yes_spread,
+                    no_spread=ev.no_spread,
+                    estimated_loss_budget=ev.estimated_loss_budget,
+                    slippage_buffer=ev.slippage_buffer,
+                )
+                emit_material_decision(
+                    app=app,
+                    coord=coord,
+                    sink=sink,
+                    run_id=run_id,
+                    cfg=cfg,
+                    state=state,
+                    decision_type="entry_eval",
+                    context=DecisionContext.ENTRY,
+                    size=cfg.position_size,
+                    emit_latency=False,
+                )
+            elif ev.reason:
+                pb_facts.emit_entry_skip(
+                    sink,
+                    run_id,
+                    state,
+                    yes_book,
+                    no_book,
+                    reason=ev.reason,
+                    pair_cost=ev.pair_cost,
+                    yes_spread=ev.yes_spread,
+                    no_spread=ev.no_spread,
+                    estimated_loss_budget=ev.estimated_loss_budget,
+                    slippage_buffer=ev.slippage_buffer,
+                )
+            return
+        state.pair_correlation_id = f"paired_binary_{uuid.uuid4().hex[:12]}"
+        await _submit_entry_intents(
+            app=app,
+            run_id=run_id,
+            coord=coord,
+            sink=sink,
+            oms=oms,
+            strategy=strategy,
+            cfg=cfg,
+            state=state,
+            pair_correlation_id=state.pair_correlation_id,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+            live_clob_client=live_clob_client,
+        )
+        save_persisted_state(persist_path, state)
+
+    elif state.phase == PairedBinaryPhase.BOTH_ENTRY_PENDING:
+        action = await tick_pair_entry_pending(
+            app=app,
+            run_id=run_id,
+            coord=coord,
+            sink=sink,
+            oms=oms,
+            strategy=strategy,
+            cfg=cfg,
+            state=state,
+            yes_book=yes_book,
+            no_book=no_book,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+            live_clob_client=live_clob_client,
+            unwind_fn=_run_emergency_unwind,
+        )
+        if action == "fill_timeout":
+            yes_q = _leg_filled_qty(coord, cfg, "yes")
+            no_q = _leg_filled_qty(coord, cfg, "no")
+            blocked = "no" if yes_q > no_q else ("yes" if no_q > yes_q else "unknown")
+            pb_facts.emit_entry_timeout_unwind_retry(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                reason="entry_fill_timeout",
+                blocked_leg=blocked,
+            )
+            await abort_pair_entry(
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                strategy=strategy,
+                cfg=cfg,
+                state=state,
+                yes_book=yes_book,
+                no_book=no_book,
+                reason="entry_fill_timeout",
+                blocked_leg=None,
+                blocking_phase="fill_timeout",
+                reason_codes=("entry_fill_timeout",),
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+                unwind_fn=_run_emergency_unwind,
+            )
+        elif action in {"committed", "pending"}:
+            await _try_early_entry_completion(
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                strategy=strategy,
+                cfg=cfg,
+                state=state,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+            )
+
+    elif state.phase == PairedBinaryPhase.BOTH_LEGS_FILLED:
+        sellable, yes_sell, no_sell = both_legs_sellable(coord, cfg, state)
+        if sellable:
+            await _try_activate_when_ready(
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                strategy=strategy,
+                cfg=cfg,
+                state=state,
+                yes_book=yes_book,
+                no_book=no_book,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+                recheck=False,
+            )
+        else:
+            pb_facts.emit_waiting_for_sellable_inventory(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                yes_sell=yes_sell,
+                no_sell=no_sell,
+            )
+
+    elif state.phase == PairedBinaryPhase.ACTIVATION_PENDING_RECHECK:
+        sellable, yes_sell, no_sell = both_legs_sellable(coord, cfg, state)
+        if not sellable:
+            pb_facts.emit_waiting_for_sellable_inventory(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                yes_sell=yes_sell,
+                no_sell=no_sell,
+            )
+        else:
+            await _try_activate_when_ready(
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                strategy=strategy,
+                cfg=cfg,
+                state=state,
+                yes_book=yes_book,
+                no_book=no_book,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+                recheck=True,
+            )
+            if state.phase == PairedBinaryPhase.ACTIVATION_PENDING_RECHECK:
+                if coordinator is not None:
+                    await coordinator.wait_for_update(
+                        token_ids, timeout_s=float(cfg.activation_gap_retry_interval_s)
+                    )
+                else:
+                    await asyncio.sleep(cfg.activation_gap_retry_interval_s)
+
+    elif state.phase == PairedBinaryPhase.UNWIND_PENDING:
+        yes_qty = leg_inventory_qty(coord, cfg, "yes")
+        no_qty = leg_inventory_qty(coord, cfg, "no")
+        if yes_qty <= 0 and no_qty <= 0:
+            transition_phase(state, PairedBinaryPhase.DONE, reason="emergency_unwind_complete")
+        elif state.unwind_block_reason:
+            outcome = await _run_emergency_unwind(
+                app=app,
+                run_id=run_id,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                strategy=strategy,
+                cfg=cfg,
+                state=state,
+                qty=state.effective_qty,
+                reason=state.unwind_block_reason,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+            )
+            state.unwind_attempt_count = outcome.attempt_count
+            if outcome.flat:
+                transition_phase(state, PairedBinaryPhase.DONE, reason="emergency_unwind_complete")
+            elif outcome.manual_intervention:
+                transition_phase(state, PairedBinaryPhase.FAILED, reason="manual_intervention_required")
+
+    elif state.phase in {
+        PairedBinaryPhase.BOTH_LEGS_ACTIVE,
+        PairedBinaryPhase.ONLY_YES_ACTIVE,
+        PairedBinaryPhase.ONLY_NO_ACTIVE,
+        PairedBinaryPhase.STOP_PENDING_YES,
+        PairedBinaryPhase.STOP_PENDING_NO,
+        PairedBinaryPhase.TP_PENDING_YES,
+        PairedBinaryPhase.TP_PENDING_NO,
+        PairedBinaryPhase.TIMEOUT_PENDING,
+        PairedBinaryPhase.EXITING_YES,
+        PairedBinaryPhase.EXITING_NO,
+        PairedBinaryPhase.EXITING_BOTH,
+    }:
+        work = monitor.tick(coord, state, sink=sink, run_id=run_id, app=app)
+        for w in work:
+            leg = (w.intent_fact_extensions or {}).get("leg", "yes")
+            await process_intent_work_unit(
+                w,
+                app=app,
+                run_id=run_id,
+                strategy=strategy,
+                coord=coord,
+                sink=sink,
+                oms=oms,
+                apply_local_shadow_fill=apply_local_shadow_fill,
+                live_clob_client=live_clob_client,
+            )
+            if getattr(strategy, "last_exit_submitted_leg", None) == leg:
+                confirm_exit_submitted(state, leg)  # type: ignore[arg-type]
+        _update_post_exit_state(
+            state,
+            cfg,
+            coord,
+            sink=sink,
+            run_id=run_id,
+            yes_book=yes_book,
+            no_book=no_book,
+        )
+        if state.phase == PairedBinaryPhase.DONE:
+            pb_facts.emit_realized_pnl(sink, run_id, state, yes_book, no_book)
+            pb_facts.emit_done(sink, run_id, state, yes_book, no_book)
+

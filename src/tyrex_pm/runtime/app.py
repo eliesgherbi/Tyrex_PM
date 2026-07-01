@@ -13,15 +13,31 @@ from uuid import uuid4
 import httpx
 
 from tyrex_pm.core.enums import ExecutionMode
-from tyrex_pm.core.ids import RunId
+from tyrex_pm.core.ids import RunId, TokenId
 from tyrex_pm.core.time import monotonic_s
 from tyrex_pm.execution.adapters import ShadowOMS
 from tyrex_pm.execution.live_oms import LiveOMS
 from tyrex_pm.execution.oms import SingleWriterOMS
 from tyrex_pm.ingestion.guru_stream import poll_guru_incremental, process_fixture_signals
+from tyrex_pm.ingestion.market_ws_ingest import (
+    market_ws_primary_enabled,
+    market_ws_shadow_enabled,
+    run_market_ws_ingest,
+)
 from tyrex_pm.ingestion.user_stream import run_user_ws_ingest
+from tyrex_pm.market_data.decision_gate import rest_poll_should_run, ws_primary_enabled
+from tyrex_pm.market_data.models import BookSource, SourceQuality
+from tyrex_pm.market_data.readiness_runtime import (
+    ensure_market_readiness_tracker,
+    emit_readiness_transitions,
+    refresh_market_readiness,
+)
 from tyrex_pm.reporting.facts import make_fact
-from tyrex_pm.reporting.schema_v2 import FACT_TYPE_GURU_POLL, FACT_TYPE_HEALTH
+from tyrex_pm.reporting.schema_v2 import (
+    FACT_TYPE_GURU_POLL,
+    FACT_TYPE_HEALTH,
+    FACT_TYPE_REST_POLL_DISABLED,
+)
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
 from tyrex_pm.runtime.config import (
     STRATEGY_KIND_ALLOCATION_TEST,
@@ -44,8 +60,14 @@ from tyrex_pm.runtime.paired_binary_recovery import recover_on_startup
 from tyrex_pm.runtime.paired_binary_run import run_paired_binary_loop
 from tyrex_pm.runtime.market_data_runtime import (
     bootstrap_market_state,
+    ensure_market_state_shadow_store,
     ensure_market_state_store,
     market_data_rest_refresh_loop,
+    resolve_market_token_ids,
+)
+from tyrex_pm.runtime.market_update_coordinator import (
+    MarketUpdateCoordinator,
+    attach_coordinator_to_authoritative_store,
 )
 from tyrex_pm.runtime.protection_runtime import init_protection_monitor
 from tyrex_pm.runtime.validation_harness_run import run_validation_harness_once
@@ -1156,25 +1178,179 @@ async def cmd_run(args: argparse.Namespace) -> None:
                 )
 
                 if app.runtime.market_data.enabled and live_clob is not None:
-                    try:
-                        boot_n = await bootstrap_market_state(
-                            coord, app, live_clob_client=live_clob
+                    md = app.runtime.market_data
+                    ws_primary = ws_primary_enabled(app) or market_ws_primary_enabled(
+                        config_flag=md.websocket.primary_enabled
+                    )
+                    auth_store = ensure_market_state_store(coord, app)
+                    if ws_primary and app.paired_binary is not None:
+                        if coord.market_update_coordinator is None:
+                            coord.market_update_coordinator = MarketUpdateCoordinator(
+                                debounce_ms=float(
+                                    app.runtime.paired_binary.max_decision_rate_per_market_ms
+                                ),
+                            )
+                        attach_coordinator_to_authoritative_store(
+                            coord, coord.market_update_coordinator
                         )
-                        log.info("market_data REST bootstrap: %s token(s)", boot_n)
-                    except Exception:
-                        log.exception("market_data REST bootstrap failed")
+                        ensure_market_readiness_tracker(coord, app, app.paired_binary)
+
+                    if md.rest.bootstrap_on_startup:
+                        try:
+                            boot_n = await bootstrap_market_state(
+                                coord, app, live_clob_client=live_clob
+                            )
+                            log.info("market_data REST bootstrap: %s token(s)", boot_n)
+                            tracker = getattr(coord, "market_readiness_tracker", None)
+                            if tracker is not None:
+                                tracker.note_rest_bootstrapped()
+                                emit_readiness_transitions(
+                                    sink,
+                                    run_id,
+                                    tracker,
+                                    correlation_id=getattr(app.paired_binary, "market_id", None),
+                                )
+                        except Exception:
+                            log.exception("market_data REST bootstrap failed")
+
+                    ws_conn_state = {"connected": False}
                     md_refresh_s = float(os.environ.get("TYREX_MARKET_DATA_REFRESH_S", "5"))
-                    live_tasks.append(
-                        asyncio.create_task(
-                            market_data_rest_refresh_loop(
-                                coord,
-                                app,
-                                live_clob,
-                                stop=stop_live,
-                                interval_s=md_refresh_s,
+
+                    async def _rest_recovery_after_gap() -> None:
+                        if not md.rest.recovery_on_reconnect:
+                            return
+                        await bootstrap_market_state(
+                            coord,
+                            app,
+                            live_clob_client=live_clob,
+                            source=BookSource.REST_RECOVERY,
+                        )
+                        tracker = getattr(coord, "market_readiness_tracker", None)
+                        if tracker is not None:
+                            tracker.note_rest_recovery()
+                            emit_readiness_transitions(
+                                sink,
+                                run_id,
+                                tracker,
+                                correlation_id=getattr(app.paired_binary, "market_id", None),
+                            )
+
+                    async def _on_ws_connected() -> None:
+                        ws_conn_state["connected"] = True
+                        tracker = getattr(coord, "market_readiness_tracker", None)
+                        if tracker is not None:
+                            tracker.note_ws_connected()
+                            emit_readiness_transitions(
+                                sink,
+                                run_id,
+                                tracker,
+                                correlation_id=getattr(app.paired_binary, "market_id", None),
+                            )
+
+                    async def _on_ws_disconnected() -> None:
+                        ws_conn_state["connected"] = False
+                        tracker = getattr(coord, "market_readiness_tracker", None)
+                        if tracker is not None:
+                            tracker.note_reconnect_gap()
+                            emit_readiness_transitions(
+                                sink,
+                                run_id,
+                                tracker,
+                                correlation_id=getattr(app.paired_binary, "market_id", None),
+                            )
+
+                    async def _on_book_applied(token_id: TokenId) -> None:
+                        tracker = getattr(coord, "market_readiness_tracker", None)
+                        if tracker is not None:
+                            tracker.note_ws_book(token_id, source_quality=SourceQuality.WS_PRIMARY)
+                            if app.paired_binary is not None:
+                                refresh_market_readiness(
+                                    coord,
+                                    app,
+                                    app.paired_binary,
+                                    sink=sink,
+                                    run_id=run_id,
+                                )
+
+                    ws_tokens = resolve_market_token_ids(app)
+                    ws_cfg = md.websocket
+                    run_shadow = market_ws_shadow_enabled(config_flag=ws_cfg.shadow_enabled) and not ws_primary
+                    run_primary = ws_primary
+
+                    if md.rest.poll_enabled and not (
+                        ws_primary and not rest_poll_should_run(app, ws_connected=False)
+                    ):
+                        live_tasks.append(
+                            asyncio.create_task(
+                                market_data_rest_refresh_loop(
+                                    coord,
+                                    app,
+                                    live_clob,
+                                    stop=stop_live,
+                                    interval_s=md_refresh_s,
+                                    ws_connected_ref=ws_conn_state,
+                                )
                             )
                         )
-                    )
+                    elif ws_primary:
+                        sink.write(
+                            make_fact(
+                                FACT_TYPE_REST_POLL_DISABLED,
+                                str(run_id),
+                                {"reason": "ws_primary_healthy_mode", "poll_enabled": False},
+                            )
+                        )
+
+                    if run_primary:
+                        live_tasks.append(
+                            asyncio.create_task(
+                                run_market_ws_ingest(
+                                    coord,
+                                    ws_tokens,
+                                    stop=stop_live,
+                                    shadow_store=None,
+                                    authoritative_store=auth_store,
+                                    primary_mode=True,
+                                    sink=sink,
+                                    run_id=run_id,
+                                    url=ws_cfg.url,
+                                    reconnect_backoff_s=ws_cfg.reconnect_backoff_s,
+                                    compare_interval_s=ws_cfg.compare_interval_s,
+                                    on_gap_recovery=_rest_recovery_after_gap,
+                                    on_ws_connected=_on_ws_connected,
+                                    on_ws_disconnected=_on_ws_disconnected,
+                                    on_book_applied=_on_book_applied,
+                                )
+                            )
+                        )
+                        log.info(
+                            "market WS primary ingest enabled (%s tokens); REST poll gated",
+                            len(ws_tokens),
+                        )
+                    elif run_shadow:
+                        shadow_store = ensure_market_state_shadow_store(coord, app)
+                        live_tasks.append(
+                            asyncio.create_task(
+                                run_market_ws_ingest(
+                                    coord,
+                                    ws_tokens,
+                                    stop=stop_live,
+                                    shadow_store=shadow_store,
+                                    authoritative_store=auth_store,
+                                    primary_mode=False,
+                                    sink=sink,
+                                    run_id=run_id,
+                                    url=ws_cfg.url,
+                                    reconnect_backoff_s=ws_cfg.reconnect_backoff_s,
+                                    compare_interval_s=ws_cfg.compare_interval_s,
+                                    on_gap_recovery=_rest_recovery_after_gap,
+                                )
+                            )
+                        )
+                        log.info(
+                            "market WS shadow ingest enabled (%s tokens); REST remains authoritative",
+                            len(ws_tokens),
+                        )
 
             if sell_test_mode or app.strategy.exits.demo_forced_exit_enabled:
                 live_tasks.append(

@@ -69,6 +69,12 @@ class RuntimeCoordinator:
     #: market data is dark-launched/disabled; the ExecutionPlanner (Phase 3) and
     #: ProtectionEngine (Phase 4) consult it and fail closed on stale/missing books.
     market_state: object | None = None
+    #: Phase 2 M1: WS shadow store — comparison only; never passed to strategy/risk/planner.
+    market_state_shadow: object | None = None
+    #: M6 hybrid scheduler: debounced wake for paired-binary loop.
+    market_update_coordinator: object | None = None
+    #: M8 WS-primary: readiness state machine for paired-binary market data.
+    market_readiness_tracker: object | None = None
 
     def holdings(self) -> dict[TokenId, Decimal]:
         return {tid: p.qty for tid, p in self.wallet.positions.items()}

@@ -1,0 +1,43 @@
+{
+  "paired_binary_live_1782741234": {
+    "provenance": "RECONSTRUCTED",
+    "backbone": "REST_POLL",
+    "description": "M0 forensics — full cycle NO SL + YES TP; original facts.jsonl not on disk",
+    "run_outcome": "DONE",
+    "market": "historical_live_market",
+    "duration_s": "UNAVAILABLE",
+    "book_age_ms": {"p50": "UNAVAILABLE", "p95": "UNAVAILABLE", "p99": "UNAVAILABLE", "samples": 0},
+    "activation_book_age_ms": {"p50": 4700, "p95": 4700, "samples": 0, "note": "inferred REST poll class"},
+    "entry_book_age_ms": {"p50": "UNAVAILABLE", "p95": "UNAVAILABLE", "samples": 0},
+    "exit_book_age_ms": {"p50": "UNAVAILABLE", "p95": "UNAVAILABLE", "samples": 0},
+    "latency_ms": {
+      "trigger_to_submit_ms": {"non_null_count": 0},
+      "submit_to_ack_ms": {"non_null_count": 0},
+      "trigger_to_fill_ms": {"non_null_count": 0}
+    },
+    "fak_reject_count": 0,
+    "planner_evidence_count": 0,
+    "rest_sourced_oms_submit_count": "UNAVAILABLE",
+    "realized_pnl_usd": "1.30",
+    "pnl_source": "RECONSTRUCTED_forensics",
+    "survivor_timeout": false,
+    "activation_abort_reason": "UNAVAILABLE"
+  },
+  "paired_binary_live_1782737121": {
+    "provenance": "RECONSTRUCTED",
+    "backbone": "REST_POLL",
+    "description": "M0 forensics — YES matched, NO OMS reject, saga abort ~17s",
+    "run_outcome": "FAILED",
+    "market": "historical_live_market",
+    "duration_s": 17,
+    "book_age_ms": {"p50": "UNAVAILABLE", "p95": "UNAVAILABLE", "p99": "UNAVAILABLE", "samples": 0},
+    "activation_book_age_ms": {"p50": "UNAVAILABLE", "p95": "UNAVAILABLE", "samples": 0},
+    "fak_reject_count": 1,
+    "planner_evidence_count": 0,
+    "rest_sourced_oms_submit_count": "UNAVAILABLE",
+    "realized_pnl_usd": "UNAVAILABLE",
+    "pnl_source": "N/A_pair_never_completed",
+    "survivor_timeout": false,
+    "activation_abort_reason": "oms_reject_not_enough_balance_allowance"
+  }
+}

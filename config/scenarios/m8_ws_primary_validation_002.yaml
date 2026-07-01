@@ -1,0 +1,73 @@
+# M8 WS-primary validation overlay — Group E2 run m8_validation_002.
+# Balanced market selected by scripts/m8_market_preflight.py (2026-06-30):
+#   Will bitcoin hit $1m before GTA VI?
+# Both legs ~0.50 ask; notional@5 >= $2.40; depth >> position_size 5.
+#
+# Run:
+#   python scripts/m8_preflight_check.py --scenario m8_ws_primary_validation_002
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/paired_binary.yaml \
+#     --scenario m8_ws_primary_validation_002 \
+#     --run-name m8_validation_002
+#   python scripts/validate_m8_ws_primary_run.py var/reporting/runs/m8_validation_002
+
+execution_mode: live
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: true
+      recovery_on_reconnect: true
+    quality:
+      enforcement_mode: enforce
+      require_ws_primary_for_entry: true
+      allow_rest_recovery_for_exit: true
+      allow_rest_recovery_for_entry: false
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+  observability:
+    emit_decision_snapshot: true
+  paired_binary:
+    poll_interval_s: 1.0
+    max_decision_rate_per_market_ms: 75
+  allocation_ledger:
+    clamp_grace_s_after_buy: 90
+
+strategy:
+  paired_binary:
+    market_id: "m8_ws_primary_validation_002"
+    yes_token_id: "105267568073659068217311993901927962476298440625043565106676088842803600775810"
+    no_token_id: "91863162118308663069733924043159186005106558783397508844234610341221325526200"
+    max_runtime_s: 1900
+    tick_interval_s: 0.2
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "15"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "20"
+    portfolio_cap_usd: "30"
+  exits:
+    allow_reduce_only_mark_fallback: true
+    require_fresh_book_for_mark_fallback: true
+    urgent_exit_max_book_age_s: 0.5
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  readiness:
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+    require_heartbeat_live: true
+    require_user_ws_live: true

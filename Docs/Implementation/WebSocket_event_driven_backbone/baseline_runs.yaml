@@ -1,0 +1,80 @@
+# Frozen baseline control runs for Phase 2 before/after experiment (M0 / M9).
+# M0 audit: 2026-06-29 — M9 report: 2026-06-30
+
+# --- Control set (REST/poll era) ---
+
+control_success_run_id: paired_binary_live_1782741234
+control_success_description: Full cycle; NO SL + YES TP; cashflow PnL success (+$1.30)
+control_success_facts: var/reporting/runs/paired_binary_live_1782741234/facts.jsonl
+control_success_manifest: var/reporting/runs/paired_binary_live_1782741234/manifest.json
+control_success_path_verified: false
+control_success_provenance: RECONSTRUCTED  # Option C — facts missing; see baseline_reconstructed_controls.json
+
+control_bad_stop_run_id: paired_binary_live_1782742788
+control_bad_stop_uuid: 74965d05-369e-4497-a87b-a0f565bdff52
+control_bad_stop_description: YES SL with 2 FAK rejects; survivor timeout; PnL unavailable on NO leg
+control_bad_stop_facts: var/reporting/runs/paired_binary_live_1782742788/facts.jsonl
+control_bad_stop_manifest: var/reporting/runs/paired_binary_live_1782742788/manifest.json
+control_bad_stop_path_verified: true
+control_bad_stop_provenance: VERIFIED
+
+control_activation_abort_run_id: paired_binary_live_1782737121
+control_activation_abort_description: YES matched; NO OMS reject (balance/allowance); saga abort ~17s
+control_activation_abort_facts: var/reporting/runs/paired_binary_live_1782737121/facts.jsonl
+control_activation_abort_manifest: var/reporting/runs/paired_binary_live_1782737121/manifest.json
+control_activation_abort_path_verified: false
+control_activation_abort_provenance: RECONSTRUCTED  # Option C — facts missing
+
+# Substitution policy (M9):
+# Option A restore failed for 1782741234 and 1782737121.
+# Option B (m9_control_rest_*_001) not executed — documented in baseline_vs_ws_primary_report.md.
+# Option C RECONSTRUCTED metrics used with explicit provenance labels.
+
+reconstructed_controls_json: Docs/Implementation/WebSocket_event_driven_backbone/baseline_reconstructed_controls.json
+
+# --- Treatment set (WS-primary, post-M8) ---
+
+treatment_primary_run_name: m8_validation_002c
+treatment_primary_run_id: 04056d08-b3b2-475b-a7cf-6cbb0138a3b0
+treatment_primary_facts: var/reporting/runs/m8_validation_002c/facts.jsonl
+treatment_primary_provenance: VERIFIED
+treatment_primary_m8_status: M8_VALIDATED
+
+treatment_runs:
+  - run_name: m8_validation_002
+    run_id: c8081d7c-5ed9-4277-b759-b995cd7b4727
+    facts: var/reporting/runs/m8_validation_002/facts.jsonl
+    provenance: VERIFIED
+  - run_name: m8_validation_002b
+    run_id: 6faabd4c-9545-4f14-9348-6d5fc3c8d03a
+    facts: var/reporting/runs/m8_validation_002b/facts.jsonl
+    provenance: VERIFIED
+    note: pre-E4 stale activation — not canonical treatment reference
+  - run_name: m8_validation_002c
+    run_id: 04056d08-b3b2-475b-a7cf-6cbb0138a3b0
+    facts: var/reporting/runs/m8_validation_002c/facts.jsonl
+    provenance: VERIFIED
+    note: primary M9 treatment reference
+
+# --- Frozen config metadata ---
+
+frozen_strategy_config: config/strategies/paired_binary.yaml
+frozen_control_scenario_config: config/scenarios/live_paired_binary_tiny.yaml
+frozen_treatment_scenario_config: config/scenarios/m8_ws_primary_validation_002.yaml
+
+strategy_config_sha256: cf2b1b7c2dbe15d99beb494c9bb7f1866214862d0987fad24891b794f170d311
+control_scenario_config_sha256: 628d30b601a95627f794ea4017449c23bdeb73ac272c686a95ee2567ef6bf41b
+treatment_scenario_config_sha256: dbc775ed4f4a2a20  # full hash in report
+git_commit_at_m9_treatment: ac5191d76aa26eea0c93cf8f004c0ba3e6cdf44e
+
+# M9 report output
+m9_report: Docs/Implementation/WebSocket_event_driven_backbone/baseline_vs_ws_primary_report.md
+m9_comparison_json: var/reporting/m9/phase2_comparison.json
+m9_status: PHASE_2_COMPLETE
+
+# Frozen strategy parameters (unchanged M0–M9):
+#   position_size: 5
+#   pair_stop_loss_pct: 0.09
+#   pair_take_profit_pct: 0.30
+#   entry_order_style / exit_order_style: FAK
+#   max_runtime_s: 300 (control) / overlay on M8 validation scenario (treatment)

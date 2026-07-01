@@ -79,6 +79,7 @@ PLANNER_NOTIONAL_VIOLATION = "planner_notional_violation"
 #: Final validation: venue-min-size would require resizing a finalized plan.
 PLANNER_RESIZE_NOT_ALLOWED = "planner_resize_not_allowed"
 PLANNER_UNSUPPORTED_INTENT = "planner_unsupported_intent"
+PLANNER_QUALITY_REJECT = "planner_quality_reject"
 
 # Paired binary entry (Phase 4.6)
 PAIR_COST_TOO_HIGH = "pair_cost_too_high"

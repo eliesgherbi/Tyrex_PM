@@ -36,13 +36,17 @@ from tyrex_pm.execution.order_lifecycle import (
 )
 from tyrex_pm.core.time import utc_now
 from tyrex_pm.execution.models import ExecutionPlan, ExecutionPlanResult
-from tyrex_pm.execution.planner import ExecutionPlanner
+from tyrex_pm.execution.planner import ExecutionPlanner, build_quality_gate_from_config
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import (
+    FACT_TYPE_DATA_QUALITY_VERDICT,
+    FACT_TYPE_DECISION_SNAPSHOT,
     FACT_TYPE_EXECUTION_PLAN,
+    FACT_TYPE_EXECUTION_PLANNER_EVIDENCE,
     FACT_TYPE_GURU_SIGNAL,
     FACT_TYPE_HEALTH,
     FACT_TYPE_INTENT,
+    FACT_TYPE_LATENCY_CHAIN,
     FACT_TYPE_OMS_CANCEL,
     FACT_TYPE_OMS_REJECT,
     FACT_TYPE_OMS_SUBMIT,
@@ -340,7 +344,166 @@ def _execution_plan_payload(result: ExecutionPlanResult, *, client_order_id: str
         )
     if result.evidence:
         payload["evidence"] = result.evidence
+        pe = result.evidence.get("planner_evidence")
+        if pe:
+            payload["snapshot_id"] = pe.get("snapshot_id")
+            payload["decision_id"] = pe.get("decision_id")
     return payload
+
+
+def _infer_decision_context(ap: ApprovedIntent) -> str:
+    intent = ap.intent
+    if isinstance(intent, EnterIntent):
+        return "entry"
+    if isinstance(intent, (ExitIntent, ReduceIntent)):
+        if getattr(intent, "urgency", None) == URGENCY_URGENT:
+            return "urgent_exit"
+        return "take_profit"
+    return "unknown"
+
+
+def _emit_post_submit_latency_chain(
+    *,
+    app: AppConfig,
+    sink: JsonlSink,
+    rid: str,
+    corr: str,
+    strategy,
+    ap: ApprovedIntent,
+    coord: RuntimeCoordinator,
+    intent_extensions: dict | None,
+    match_evidence: dict | None,
+) -> None:
+    if not app.runtime.observability.emit_decision_snapshot:
+        return
+    ext = intent_extensions or {}
+    decision_id = ext.get("decision_id")
+    if not decision_id or not match_evidence:
+        return
+    from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
+
+    if not isinstance(strategy, PairedBinaryStrategy):
+        return
+    if not oms_status_is_matched(match_evidence):
+        return
+    from tyrex_pm.core.time import monotonic_s
+    from tyrex_pm.strategies.paired_binary import facts as pb_facts
+    from tyrex_pm.strategies.paired_binary.latency import LatencyTracker
+
+    tracker = LatencyTracker(decision_id=str(decision_id))
+    decision_ts = ext.get("latency_decision_ts")
+    if isinstance(decision_ts, (int, float)):
+        tracker.decision_ts = float(decision_ts)
+    else:
+        tracker.mark_decision()
+    store = coord.market_state
+    if store is not None and hasattr(store, "capture"):
+        cap = store.capture(ap.intent.token_id)
+        if cap is not None:
+            tracker.book_age_ms = cap.book_age_ms
+            tracker.source = cap.source
+    submit_ts = monotonic_s()
+    tracker.oms_submit_ts = submit_ts
+    tracker.mark_oms_ack()
+    tracker.mark_fill_seen()
+    pb_facts.emit_latency_chain(
+        sink,
+        RunId(rid),
+        chain=tracker.build_chain(decision_id=str(decision_id)),
+        correlation_id=corr,
+    )
+
+
+def _emit_group_b_observability(
+    *,
+    app: AppConfig,
+    sink: JsonlSink,
+    rid: str,
+    corr: str,
+    ap: ApprovedIntent,
+    result: ExecutionPlanResult,
+    decision_id: str,
+    captured_snapshot,
+    intent_extensions: dict | None = None,
+) -> None:
+    if not app.runtime.observability.emit_decision_snapshot:
+        return
+    from decimal import Decimal
+
+    from tyrex_pm.market_data.decision_snapshot import build_decision_snapshot
+    from tyrex_pm.market_data.executable_book import PlannerEvidence
+    from tyrex_pm.market_data.quality import DataQualityReport, DecisionContext, QualityVerdict
+    from tyrex_pm.strategies.paired_binary import facts as pb_facts
+
+    evidence = (result.evidence or {}).get("planner_evidence")
+    quality_raw = (result.evidence or {}).get("quality_report")
+    context = _infer_decision_context(ap)
+    ext = intent_extensions or {}
+    trigger = ext.get("trigger_type")
+    if trigger == "timeout":
+        snap_decision_type = "timeout_exit"
+    elif context == DecisionContext.URGENT_EXIT:
+        snap_decision_type = "urgent_exit"
+    elif ext.get("decision_type"):
+        snap_decision_type = str(ext.get("decision_type"))
+    else:
+        snap_decision_type = context.value
+    report = None
+    if quality_raw:
+        report = DataQualityReport(
+            verdict=QualityVerdict(quality_raw["verdict"]),
+            reasons=tuple(quality_raw.get("reasons") or ()),
+            book_age_ms=quality_raw.get("book_age_ms"),
+            source=quality_raw.get("source"),
+            source_quality=quality_raw.get("source_quality"),
+            reconnect_gap=bool(quality_raw.get("reconnect_gap")),
+            spread=None,
+            depth_at_size=None,
+            profile_id=quality_raw.get("profile_id", "crypto_5m"),
+            emergency_reason=quality_raw.get("emergency_reason"),
+        )
+        pb_facts.emit_data_quality_verdict(
+            sink,
+            RunId(rid),
+            decision_id=decision_id,
+            decision_context=context,
+            report=report,
+            correlation_id=corr,
+        )
+
+    pe = None
+    if evidence:
+        pe = PlannerEvidence(
+            decision_id=evidence["decision_id"],
+            snapshot_id=evidence["snapshot_id"],
+            book_age_ms=int(evidence["book_age_ms"]),
+            source=evidence["source"],
+            touch_price=Decimal(evidence["touch_price"]) if evidence.get("touch_price") else None,
+            worst_price_to_fill=Decimal(evidence["worst_price_to_fill"])
+            if evidence.get("worst_price_to_fill")
+            else None,
+            sweep_vwap=Decimal(evidence["sweep_vwap"]) if evidence.get("sweep_vwap") else None,
+            expected_slippage=Decimal(evidence["expected_slippage"])
+            if evidence.get("expected_slippage")
+            else None,
+            available_depth=Decimal(evidence["available_depth"]),
+            quality_verdict=evidence["quality_verdict"],
+            emergency_reason=evidence.get("emergency_reason"),
+        )
+        pb_facts.emit_execution_planner_evidence(
+            sink, RunId(rid), evidence=pe, correlation_id=corr
+        )
+
+    decision = build_decision_snapshot(
+        decision_type=snap_decision_type,
+        snap=captured_snapshot,
+        quality_report=report,
+        planner_evidence=pe,
+        size=ap.intent.size,
+        decision_id=decision_id,
+    )
+    if not (intent_extensions or {}).get("pre_decision_snapshot_emitted"):
+        pb_facts.emit_decision_snapshot(sink, RunId(rid), snapshot=decision, correlation_id=corr)
 
 
 def _run_execution_planner(
@@ -352,6 +515,7 @@ def _run_execution_planner(
     rid: str,
     corr: str,
     risk_ctx,
+    intent_extensions: dict | None = None,
 ) -> tuple[ApprovedIntent, str] | None:
     """Planner → execution_plan fact → final validation → risk_decision[planned].
 
@@ -359,8 +523,58 @@ def _run_execution_planner(
     planner or final validation denied (caller fails the intent closed). The
     returned ``ApprovedIntent`` preserves the pre-check ``client_order_id``.
     """
-    planner = ExecutionPlanner(app.execution.planner)
-    result = planner.plan(ap, market_state=coord.market_state, now=utc_now())
+    from uuid import uuid4
+
+    from tyrex_pm.core.enums import OrderStyle
+    from tyrex_pm.market_data.executable_book import build_planner_evidence, ExecutableBookView
+    from tyrex_pm.market_data.quality import DecisionContext
+
+    quality_gate = build_quality_gate_from_config(app)
+    planner = ExecutionPlanner(app.execution.planner, quality_gate=quality_gate)
+    decision_id = (intent_extensions or {}).get("decision_id") or str(uuid4())
+    ext_type = (intent_extensions or {}).get("decision_type")
+    decision_context = DecisionContext(_infer_decision_context(ap))
+    if ext_type == "fak_retry":
+        decision_context = DecisionContext.STOP
+    elif ext_type == "exit_submit":
+        if getattr(ap.intent, "urgency", None) == URGENCY_URGENT:
+            decision_context = DecisionContext.URGENT_EXIT
+    captured_snapshot = None
+    executable_view = None
+    quality_report = None
+    planner_evidence = None
+    token = ap.intent.token_id
+    if coord.market_state is not None and hasattr(coord.market_state, "capture"):
+        captured_snapshot = coord.market_state.capture(token, now=utc_now())
+        if captured_snapshot is not None:
+            side = ap.intent.side
+            size = ap.intent.size
+            quality_report = quality_gate.evaluate_snapshot(
+                captured_snapshot, context=decision_context, size=size
+            )
+            if ap.intent.order_style in (OrderStyle.FAK, OrderStyle.FOK) or (
+                isinstance(ap.intent, (ExitIntent, ReduceIntent))
+                and getattr(ap.intent, "urgency", None) == URGENCY_URGENT
+            ):
+                executable_view = ExecutableBookView.from_snapshot(
+                    captured_snapshot, side=side, size=size
+                )
+                planner_evidence = build_planner_evidence(
+                    decision_id=decision_id,
+                    snap=captured_snapshot,
+                    view=executable_view,
+                    quality_report=quality_report,
+                )
+    result = planner.plan(
+        ap,
+        market_state=coord.market_state,
+        now=utc_now(),
+        captured_snapshot=captured_snapshot,
+        executable_view=executable_view,
+        quality_report=quality_report,
+        planner_evidence=planner_evidence,
+        decision_context=decision_context,
+    )
     sink.write(
         make_fact(
             FACT_TYPE_EXECUTION_PLAN,
@@ -368,6 +582,17 @@ def _run_execution_planner(
             _execution_plan_payload(result, client_order_id=str(ap.client_order_id)),
             correlation_id=corr,
         )
+    )
+    _emit_group_b_observability(
+        app=app,
+        sink=sink,
+        rid=rid,
+        corr=corr,
+        ap=ap,
+        result=result,
+        decision_id=decision_id,
+        captured_snapshot=captured_snapshot,
+        intent_extensions=intent_extensions,
     )
     if not result.approved or result.plan is None:
         return None
@@ -509,7 +734,14 @@ async def process_intent_work_unit(
         planner_reason: str | None = None
         if app.execution.planner.enabled:
             plan_outcome = _run_execution_planner(
-                ap, app=app, coord=coord, sink=sink, rid=rid, corr=corr, risk_ctx=risk_ctx
+                ap,
+                app=app,
+                coord=coord,
+                sink=sink,
+                rid=rid,
+                corr=corr,
+                risk_ctx=risk_ctx,
+                intent_extensions=intent_extensions,
             )
             if plan_outcome is None:
                 _handle_intent_risk_denied(
@@ -725,6 +957,17 @@ async def process_intent_work_unit(
                 submit_payload,
                 correlation_id=corr,
             )
+        )
+        _emit_post_submit_latency_chain(
+            app=app,
+            sink=sink,
+            rid=rid,
+            corr=corr,
+            strategy=strategy,
+            ap=ap,
+            coord=coord,
+            intent_extensions=intent_extensions,
+            match_evidence=match_evidence,
         )
         if is_sell_exit and v_oid is not None:
             link_exit_reservation_venue_order(coord, str(ap.client_order_id), str(v_oid))

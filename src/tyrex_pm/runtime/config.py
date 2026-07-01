@@ -593,11 +593,56 @@ class ExecutionPlannerConfig:
     require_fresh_book_for_urgent: bool = True
     max_book_age_s: float = 5.0
     allow_urgent_exit_fallback: bool = False
+    use_executable_depth: bool = True
+    max_slippage_vs_touch: float = 0.05
 
 
 @dataclass(frozen=True)
 class ExecutionConfig:
     planner: ExecutionPlannerConfig = ExecutionPlannerConfig()
+
+
+@dataclass(frozen=True)
+class MarketDataWebSocketConfig:
+    primary_enabled: bool = False
+    shadow_enabled: bool = False
+    url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    reconnect_backoff_s: float = 3.0
+    compare_interval_s: float = 5.0
+
+
+@dataclass(frozen=True)
+class MarketDataRestConfig:
+    poll_enabled: bool = True
+    bootstrap_on_startup: bool = True
+    recovery_on_reconnect: bool = True
+
+
+@dataclass(frozen=True)
+class MarketDataFeaturesConfig:
+    v0_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class MarketDataQualityConfig:
+    enforcement_mode: str = "observe_only"
+    market_profile: str = "crypto_5m"
+    require_ws_primary_for_entry: bool = True
+    allow_rest_recovery_for_exit: bool = True
+    allow_rest_recovery_for_entry: bool = False
+
+
+@dataclass(frozen=True)
+class MarketDataHealthConfig:
+    max_ws_disconnect_s: float = 30.0
+    max_reconnects_per_hour: int = 10
+    max_p95_book_age_ms: int = 2000
+
+
+@dataclass(frozen=True)
+class ObservabilityConfig:
+    emit_decision_snapshot: bool = True
+    sample_raw_events: int = 0
 
 
 @dataclass(frozen=True)
@@ -613,6 +658,19 @@ class MarketDataConfig:
     enabled: bool = False
     max_book_age_s: float = 5.0
     token_ids: tuple[str, ...] = ()
+    store_top_n_levels: int = 5
+    websocket: MarketDataWebSocketConfig = MarketDataWebSocketConfig()
+    rest: MarketDataRestConfig = MarketDataRestConfig()
+    features: MarketDataFeaturesConfig = MarketDataFeaturesConfig()
+    quality: MarketDataQualityConfig = MarketDataQualityConfig()
+    health: MarketDataHealthConfig = MarketDataHealthConfig()
+    market_profiles: dict[str, dict[str, object]] | None = None
+
+
+@dataclass(frozen=True)
+class PairedBinaryRuntimeConfig:
+    poll_interval_s: float = 1.0
+    max_decision_rate_per_market_ms: int = 75
 
 
 @dataclass(frozen=True)
@@ -634,6 +692,8 @@ class RuntimeConfig:
     shadow_bootstrap: ShadowBootstrapConfig | None
     allocation_ledger: AllocationLedgerConfig
     market_data: MarketDataConfig = MarketDataConfig()
+    observability: ObservabilityConfig = ObservabilityConfig()
+    paired_binary: PairedBinaryRuntimeConfig = PairedBinaryRuntimeConfig()
 
 
 @dataclass(frozen=True)
@@ -1336,10 +1396,45 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
     md_tokens = md_raw.get("token_ids") or []
     if not isinstance(md_tokens, list):
         md_tokens = []
+    ws_raw = md_raw.get("websocket") or {}
+    rest_raw = md_raw.get("rest") or {}
+    feat_raw = md_raw.get("features") or {}
+    qual_raw = md_raw.get("quality") or {}
+    health_raw = md_raw.get("health") or {}
+    profiles_raw = md_raw.get("market_profiles")
+    obs_raw = runtime.get("observability") or {}
+    pb_rt_raw = runtime.get("paired_binary") or {}
     market_data = MarketDataConfig(
         enabled=bool(md_raw.get("enabled", False)),
         max_book_age_s=float(md_raw.get("max_book_age_s", 5)),
         token_ids=tuple(str(x) for x in md_tokens),
+        store_top_n_levels=int(md_raw.get("store_top_n_levels", 5)),
+        websocket=MarketDataWebSocketConfig(
+            primary_enabled=bool(ws_raw.get("primary_enabled", False)),
+            shadow_enabled=bool(ws_raw.get("shadow_enabled", False)),
+            url=str(ws_raw.get("url", "wss://ws-subscriptions-clob.polymarket.com/ws/market")),
+            reconnect_backoff_s=float(ws_raw.get("reconnect_backoff_s", 3.0)),
+            compare_interval_s=float(ws_raw.get("compare_interval_s", 5.0)),
+        ),
+        rest=MarketDataRestConfig(
+            poll_enabled=bool(rest_raw.get("poll_enabled", True)),
+            bootstrap_on_startup=bool(rest_raw.get("bootstrap_on_startup", True)),
+            recovery_on_reconnect=bool(rest_raw.get("recovery_on_reconnect", True)),
+        ),
+        features=MarketDataFeaturesConfig(v0_enabled=bool(feat_raw.get("v0_enabled", True))),
+        quality=MarketDataQualityConfig(
+            enforcement_mode=str(qual_raw.get("enforcement_mode", "observe_only")),
+            market_profile=str(qual_raw.get("market_profile", "crypto_5m")),
+            require_ws_primary_for_entry=bool(qual_raw.get("require_ws_primary_for_entry", True)),
+            allow_rest_recovery_for_exit=bool(qual_raw.get("allow_rest_recovery_for_exit", True)),
+            allow_rest_recovery_for_entry=bool(qual_raw.get("allow_rest_recovery_for_entry", False)),
+        ),
+        health=MarketDataHealthConfig(
+            max_ws_disconnect_s=float(health_raw.get("max_ws_disconnect_s", 30.0)),
+            max_reconnects_per_hour=int(health_raw.get("max_reconnects_per_hour", 10)),
+            max_p95_book_age_ms=int(health_raw.get("max_p95_book_age_ms", 2000)),
+        ),
+        market_profiles=dict(profiles_raw) if isinstance(profiles_raw, dict) else None,
     )
     rt = RuntimeConfig(
         execution_mode=execution_mode,
@@ -1358,6 +1453,14 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
             clamp_grace_s_after_buy=float(al.get("clamp_grace_s_after_buy", 90)),
         ),
         market_data=market_data,
+        observability=ObservabilityConfig(
+            emit_decision_snapshot=bool(obs_raw.get("emit_decision_snapshot", True)),
+            sample_raw_events=int(obs_raw.get("sample_raw_events", 0)),
+        ),
+        paired_binary=PairedBinaryRuntimeConfig(
+            poll_interval_s=float(pb_rt_raw.get("poll_interval_s", 1.0)),
+            max_decision_rate_per_market_ms=int(pb_rt_raw.get("max_decision_rate_per_market_ms", 75)),
+        ),
     )
     return rsk, rt
 
@@ -1372,6 +1475,8 @@ def _parse_execution_config(
         require_fresh_book_for_urgent=bool(pl_raw.get("require_fresh_book_for_urgent", True)),
         max_book_age_s=float(pl_raw.get("max_book_age_s", market_data.max_book_age_s)),
         allow_urgent_exit_fallback=bool(pl_raw.get("allow_urgent_exit_fallback", False)),
+        use_executable_depth=bool(pl_raw.get("use_executable_depth", True)),
+        max_slippage_vs_touch=float(pl_raw.get("max_slippage_vs_touch", 0.05)),
     )
     if planner.enabled and not market_data.enabled:
         raise ConfigError(

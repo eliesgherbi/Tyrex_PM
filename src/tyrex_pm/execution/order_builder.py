@@ -23,11 +23,42 @@ that is too aggressive, the strategy should pre-quantize itself.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
+from tyrex_pm.core.enums import Side
 from tyrex_pm.core.models import ApprovedIntent
 from tyrex_pm.venue.polymarket.clob_execution import PlaceOrderRequest
+
+
+def _maker_notional_valid(price: Decimal, size: Decimal) -> bool:
+    return (price * size) == (price * size).quantize(Decimal("0.01"))
+
+
+def _quantize_buy_price_for_maker_notional(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal | None,
+) -> Decimal:
+    """Align BUY limit price so ``price * size`` (USDC maker amount) has ≤2 decimals."""
+    if size <= 0:
+        return price
+    if _maker_notional_valid(price, size):
+        return price
+    step = tick if tick is not None and tick > 0 else Decimal("0.001")
+    max_price = price + Decimal("0.01")
+    candidate = price
+    while candidate <= max_price:
+        if _maker_notional_valid(candidate, size):
+            return candidate
+        candidate += step
+    notional = (price * size).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    if notional <= 0:
+        return price
+    aligned = notional / size
+    if tick is not None and tick > 0:
+        aligned = (aligned / tick).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick
+    return aligned
 
 
 def to_place_request(
@@ -52,6 +83,11 @@ def to_place_request(
         price = quantized
     else:
         price = raw_price
+    price = Decimal(str(price))
+    if i.side == Side.BUY:
+        tick = getattr(market_info, "tick_size", None) if market_info is not None else None
+        tick_d = Decimal(str(tick)) if tick is not None else None
+        price = _quantize_buy_price_for_maker_notional(price, Decimal(str(i.size)), tick_d)
     return PlaceOrderRequest(
         token_id=i.token_id,
         side=i.side,

@@ -7,7 +7,8 @@ from decimal import Decimal
 
 from tyrex_pm.core.ids import TokenId
 from tyrex_pm.ingestion.market_stream import apply_market_message, apply_price_change
-from tyrex_pm.state.market_store import MarketStateStore, make_snapshot
+from tyrex_pm.market_data.models import BookSource
+from tyrex_pm.state.market_store import BookLevel, MarketStateStore, make_snapshot
 from tyrex_pm.venue.polymarket.book_snapshot import (
     book_payload_to_snapshot,
     bootstrap_market_store_from_rest,
@@ -67,7 +68,7 @@ def test_market_stream_single_writer_only() -> None:
     src = inspect.getsource(market_stream)
     # No direct dict assignment into the store internals.
     assert "._books[" not in src
-    assert src.count("apply_snapshot(") >= 1
+    assert "apply_book(" in src
 
 
 def test_rest_snapshot_bootstraps_market_store() -> None:
@@ -84,6 +85,9 @@ def test_rest_snapshot_bootstraps_market_store() -> None:
     assert applied == 1
     assert store.best_bid(TOKEN) == Decimal("0.45")
     assert store.best_ask(TOKEN) == Decimal("0.55")
+    cap = store.capture(TOKEN)
+    assert cap is not None
+    assert cap.source == BookSource.REST_BOOTSTRAP
 
 
 def test_book_payload_to_snapshot_filters_zero_size() -> None:
@@ -105,6 +109,26 @@ def test_rest_bootstrap_failsoft_on_client_error() -> None:
     applied = asyncio.run(bootstrap_market_store_from_rest(store, _BoomClient(), [str(TOKEN)]))
     assert applied == 0
     assert store.is_stale(TOKEN) is True
+
+
+def test_market_stream_applies_polymarket_price_changes_fixture() -> None:
+    import json
+    from pathlib import Path
+
+    delta = json.loads(
+        (Path(__file__).resolve().parent / "fixtures" / "ws" / "market_price_change.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    store = MarketStateStore()
+    store.apply_book(
+        TokenId(str(delta["price_changes"][0]["asset_id"])),
+        [BookLevel(Decimal("0.53"), Decimal("10"))],
+        [BookLevel(Decimal("0.55"), Decimal("10"))],
+        source=BookSource.WEBSOCKET,
+    )
+    assert apply_market_message(store, delta, source=BookSource.WEBSOCKET) is True
+    assert store.best_bid(TokenId(str(delta["price_changes"][0]["asset_id"]))) == Decimal("0.54")
 
 
 def test_make_snapshot_sorts_levels() -> None:

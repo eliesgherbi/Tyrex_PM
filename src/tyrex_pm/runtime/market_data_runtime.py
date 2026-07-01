@@ -14,11 +14,18 @@ from typing import Iterable
 
 from tyrex_pm.core.ids import RunId, TokenId
 from tyrex_pm.core.time import monotonic_s, utc_now
+from tyrex_pm.market_data.models import BookSource
+from tyrex_pm.market_data.decision_gate import rest_poll_should_run, ws_primary_enabled
+from tyrex_pm.market_data.readiness_runtime import (
+    ensure_market_readiness_tracker,
+    emit_market_data_health_block,
+    refresh_market_readiness,
+)
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import FACT_TYPE_HEALTH
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
 from tyrex_pm.runtime.config import AppConfig
-from tyrex_pm.state.market_store import MarketStateStore, make_snapshot
+from tyrex_pm.state.market_store import BookLevel, MarketStateStore, make_snapshot
 from tyrex_pm.venue.polymarket.book_snapshot import bootstrap_market_store_from_rest
 
 log = logging.getLogger(__name__)
@@ -28,9 +35,20 @@ def ensure_market_state_store(coord, app: AppConfig) -> MarketStateStore:
     """Create or return the coordinator's market store when market data is enabled."""
     if coord.market_state is None:
         coord.market_state = MarketStateStore(
-            default_max_age_s=float(app.runtime.market_data.max_book_age_s)
+            default_max_age_s=float(app.runtime.market_data.max_book_age_s),
+            store_top_n_levels=int(app.runtime.market_data.store_top_n_levels),
         )
     return coord.market_state  # type: ignore[return-value]
+
+
+def ensure_market_state_shadow_store(coord, app: AppConfig) -> MarketStateStore:
+    """Create the WS shadow store — never wired to strategy/risk/planner."""
+    if coord.market_state_shadow is None:
+        coord.market_state_shadow = MarketStateStore(
+            default_max_age_s=float(app.runtime.market_data.max_book_age_s),
+            store_top_n_levels=int(app.runtime.market_data.store_top_n_levels),
+        )
+    return coord.market_state_shadow  # type: ignore[return-value]
 
 
 def resolve_market_token_ids(app: AppConfig) -> list[str]:
@@ -52,6 +70,7 @@ async def bootstrap_market_state(
     app: AppConfig,
     *,
     live_clob_client: object | None = None,
+    source: str = BookSource.REST_BOOTSTRAP,
 ) -> int:
     """REST-bootstrap configured tokens into ``coord.market_state``."""
     if not app.runtime.market_data.enabled:
@@ -62,7 +81,7 @@ async def bootstrap_market_state(
         return 0
     if live_clob_client is None:
         return 0
-    return await bootstrap_market_store_from_rest(store, live_clob_client, token_ids)
+    return await bootstrap_market_store_from_rest(store, live_clob_client, token_ids, source=source)
 
 
 def inject_fixture_book(
@@ -80,13 +99,13 @@ def inject_fixture_book(
         raise RuntimeError("market_state not initialized")
     tid = TokenId(str(token_id))
     ts = utc_now() - timedelta(seconds=60) if stale else utc_now()
-    snap = make_snapshot(
+    store.apply_book(
         tid,
-        bids=[(best_bid, size)],
-        asks=[(best_ask, size)],
-        ts=ts,
+        [BookLevel(best_bid, size)],
+        [BookLevel(best_ask, size)],
+        source=BookSource.FIXTURE,
+        received_ts=ts,
     )
-    store.apply_snapshot(snap)
 
 
 def market_store_health_payload(coord, token_id: str | TokenId) -> dict:
@@ -154,11 +173,32 @@ async def market_data_rest_refresh_loop(
     *,
     stop: asyncio.Event,
     interval_s: float = 5.0,
+    ws_connected_ref: dict[str, bool] | None = None,
 ) -> None:
-    """Periodic REST book refresh (until market WS is fully wired)."""
+    """Periodic REST book refresh — skipped when WS-primary healthy and poll disabled."""
+
+    def _ws_connected() -> bool:
+        if ws_connected_ref is None:
+            return False
+        return bool(ws_connected_ref.get("connected", False))
+
+    if not app.runtime.market_data.rest.poll_enabled:
+        log.info("REST poll loop not started: poll_enabled=false")
+        return
+    if ws_primary_enabled(app) and not rest_poll_should_run(app, ws_connected=_ws_connected()):
+        log.info("REST poll loop not started: WS-primary healthy steady state")
+        return
     while not stop.is_set():
+        if ws_primary_enabled(app) and not rest_poll_should_run(app, ws_connected=_ws_connected()):
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval_s)
+            except asyncio.TimeoutError:
+                pass
+            continue
         try:
-            await bootstrap_market_state(coord, app, live_clob_client=live_clob_client)
+            await bootstrap_market_state(
+                coord, app, live_clob_client=live_clob_client, source=BookSource.REST_POLL
+            )
         except Exception:
             log.exception("market_data REST refresh failed")
         try:

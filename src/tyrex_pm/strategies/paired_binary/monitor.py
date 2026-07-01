@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 from tyrex_pm.core.ids import RunId, TokenId
 from tyrex_pm.core.time import monotonic_s
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
-from tyrex_pm.runtime.config import PairedBinaryStrategyConfig
+from tyrex_pm.runtime.config import AppConfig, PairedBinaryStrategyConfig
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
 from tyrex_pm.runtime.intent_work import IntentWorkUnit
 from tyrex_pm.strategies.paired_binary import facts as pb_facts
@@ -22,10 +23,15 @@ from tyrex_pm.strategies.paired_binary.exit_engine import (
     record_exit_blocked,
     try_build_exit,
 )
-from tyrex_pm.strategies.paired_binary.state import (
-    PairedBinaryPhase,
-    PairedBinaryRuntimeState,
+from tyrex_pm.strategies.paired_binary.observability import (
+    emit_material_decision,
+    new_decision_id,
+    trigger_to_context,
 )
+from tyrex_pm.market_data.decision_gate import should_block_paired_binary_decision
+from tyrex_pm.market_data.quality import DecisionContext
+from tyrex_pm.market_data.readiness_runtime import emit_market_data_health_block
+from tyrex_pm.strategies.paired_binary.state import PairedBinaryPhase, PairedBinaryRuntimeState
 
 
 class PairedBinaryMonitor:
@@ -33,6 +39,34 @@ class PairedBinaryMonitor:
 
     def __init__(self, cfg: PairedBinaryStrategyConfig) -> None:
         self._cfg = cfg
+
+    def _emit_trigger_snapshot(
+        self,
+        *,
+        app: AppConfig | None,
+        coord: RuntimeCoordinator,
+        state: PairedBinaryRuntimeState,
+        sink: JsonlSink | None,
+        run_id: RunId | None,
+        decision_type: str,
+        trigger_type: str,
+        is_retry: bool = False,
+    ) -> str | None:
+        if app is None or sink is None or run_id is None:
+            return None
+        dtype = "fak_retry" if is_retry else decision_type
+        return emit_material_decision(
+            app=app,
+            coord=coord,
+            sink=sink,
+            run_id=run_id,
+            cfg=self._cfg,
+            state=state,
+            decision_type=dtype,
+            context=trigger_to_context(trigger_type),
+            size=state.effective_qty,
+            emit_latency=not is_retry,
+        )
 
     def _books(self, coord: RuntimeCoordinator) -> tuple[LegBook, LegBook]:
         ms = coord.market_state
@@ -48,6 +82,7 @@ class PairedBinaryMonitor:
         *,
         sink: JsonlSink | None = None,
         run_id: RunId | None = None,
+        app: AppConfig | None = None,
     ) -> list[IntentWorkUnit]:
         if state.phase not in MONITOR_TICK_PHASES:
             return []
@@ -61,11 +96,11 @@ class PairedBinaryMonitor:
         pair_id = state.pair_correlation_id or "paired_binary_unknown"
         work: list[IntentWorkUnit] = []
 
-        timeout_work = self._maybe_timeout(coord, state, yes_book, no_book, sink, run_id)
+        timeout_work = self._maybe_timeout(coord, state, yes_book, no_book, sink, run_id, app=app)
         if timeout_work is not None:
             return timeout_work
 
-        pending_work = self._retry_pending_exits(coord, state, yes_book, no_book, sink, run_id)
+        pending_work = self._retry_pending_exits(coord, state, yes_book, no_book, sink, run_id, app=app)
         if pending_work:
             return pending_work
 
@@ -88,6 +123,15 @@ class PairedBinaryMonitor:
                     pb_facts.emit_leg_stop(
                         sink, run_id, state, yes_book, no_book, leg="yes", target_price=state.no_target
                     )
+                decision_id = self._emit_trigger_snapshot(
+                    app=app,
+                    coord=coord,
+                    state=state,
+                    sink=sink,
+                    run_id=run_id,
+                    decision_type="stop_trigger",
+                    trigger_type="stop_loss",
+                )
                 return self._dispatch_exit(
                     coord,
                     state,
@@ -101,6 +145,8 @@ class PairedBinaryMonitor:
                     no_book=no_book,
                     sink=sink,
                     run_id=run_id,
+                    app=app,
+                    decision_id=decision_id,
                 )
             prepare_no_stop_trigger(state, cfg)
             if sink and run_id:
@@ -116,6 +162,15 @@ class PairedBinaryMonitor:
                 pb_facts.emit_leg_stop(
                     sink, run_id, state, yes_book, no_book, leg="no", target_price=state.yes_target
                 )
+            decision_id = self._emit_trigger_snapshot(
+                app=app,
+                coord=coord,
+                state=state,
+                sink=sink,
+                run_id=run_id,
+                decision_type="stop_trigger",
+                trigger_type="stop_loss",
+            )
             return self._dispatch_exit(
                 coord,
                 state,
@@ -129,6 +184,8 @@ class PairedBinaryMonitor:
                 no_book=no_book,
                 sink=sink,
                 run_id=run_id,
+                app=app,
+                decision_id=decision_id,
             )
 
         if state.phase == PairedBinaryPhase.ONLY_YES_ACTIVE:
@@ -151,6 +208,15 @@ class PairedBinaryMonitor:
                     pb_facts.emit_winner_target(
                         sink, run_id, state, yes_book, no_book, leg="yes", target_price=state.yes_target
                     )
+                decision_id = self._emit_trigger_snapshot(
+                    app=app,
+                    coord=coord,
+                    state=state,
+                    sink=sink,
+                    run_id=run_id,
+                    decision_type="take_profit_trigger",
+                    trigger_type="take_profit",
+                )
                 return self._dispatch_exit(
                     coord,
                     state,
@@ -164,6 +230,8 @@ class PairedBinaryMonitor:
                     no_book=no_book,
                     sink=sink,
                     run_id=run_id,
+                    app=app,
+                    decision_id=decision_id,
                 )
 
         if state.phase == PairedBinaryPhase.ONLY_NO_ACTIVE:
@@ -186,6 +254,15 @@ class PairedBinaryMonitor:
                     pb_facts.emit_winner_target(
                         sink, run_id, state, yes_book, no_book, leg="no", target_price=state.no_target
                     )
+                decision_id = self._emit_trigger_snapshot(
+                    app=app,
+                    coord=coord,
+                    state=state,
+                    sink=sink,
+                    run_id=run_id,
+                    decision_type="take_profit_trigger",
+                    trigger_type="take_profit",
+                )
                 return self._dispatch_exit(
                     coord,
                     state,
@@ -199,6 +276,8 @@ class PairedBinaryMonitor:
                     no_book=no_book,
                     sink=sink,
                     run_id=run_id,
+                    app=app,
+                    decision_id=decision_id,
                 )
 
         return work
@@ -211,6 +290,8 @@ class PairedBinaryMonitor:
         no_book: LegBook,
         sink: JsonlSink | None,
         run_id: RunId | None,
+        *,
+        app: AppConfig | None = None,
     ) -> list[IntentWorkUnit] | None:
         cfg = self._cfg
         if state.pair_opened_ts is None:
@@ -222,7 +303,7 @@ class PairedBinaryMonitor:
         phase = state.phase
 
         if phase == PairedBinaryPhase.TIMEOUT_PENDING:
-            return self._retry_pending_exits(coord, state, yes_book, no_book, sink, run_id)
+            return self._retry_pending_exits(coord, state, yes_book, no_book, sink, run_id, app=app)
 
         if sink and run_id:
             pb_facts.emit_timeout_exit(sink, run_id, state, yes_book, no_book)
@@ -244,6 +325,7 @@ class PairedBinaryMonitor:
                     no_book=no_book,
                     sink=sink,
                     run_id=run_id,
+                    app=app,
                     append=True,
                 )
                 work.extend(w)
@@ -272,6 +354,7 @@ class PairedBinaryMonitor:
                 no_book=no_book,
                 sink=sink,
                 run_id=run_id,
+                app=app,
             )
 
         if phase == PairedBinaryPhase.ONLY_YES_ACTIVE and not state.yes.exit_submitted:
@@ -289,6 +372,7 @@ class PairedBinaryMonitor:
                 no_book=no_book,
                 sink=sink,
                 run_id=run_id,
+                app=app,
             )
 
         if phase == PairedBinaryPhase.ONLY_NO_ACTIVE and not state.no.exit_submitted:
@@ -306,6 +390,7 @@ class PairedBinaryMonitor:
                 no_book=no_book,
                 sink=sink,
                 run_id=run_id,
+                app=app,
             )
 
         if phase in {
@@ -313,7 +398,7 @@ class PairedBinaryMonitor:
             PairedBinaryPhase.EXITING_NO,
             PairedBinaryPhase.EXITING_BOTH,
         }:
-            return self._retry_stuck_exiting(coord, state, yes_book, no_book, sink, run_id)
+            return self._retry_stuck_exiting(coord, state, yes_book, no_book, sink, run_id, app=app)
 
         return None
 
@@ -325,6 +410,8 @@ class PairedBinaryMonitor:
         no_book: LegBook,
         sink: JsonlSink | None,
         run_id: RunId | None,
+        *,
+        app: AppConfig | None = None,
     ) -> list[IntentWorkUnit]:
         pair_id = state.pair_correlation_id or "paired_binary_unknown"
         work: list[IntentWorkUnit] = []
@@ -376,6 +463,8 @@ class PairedBinaryMonitor:
         no_book: LegBook,
         sink: JsonlSink | None,
         run_id: RunId | None,
+        *,
+        app: AppConfig | None = None,
     ) -> list[IntentWorkUnit]:
         phase = state.phase
         if phase not in {
@@ -389,6 +478,7 @@ class PairedBinaryMonitor:
 
         pair_id = state.pair_correlation_id or "paired_binary_unknown"
         legs: list[tuple[str, Decimal, str | None]] = []
+        retry_decision_id: str | None = None
 
         if phase == PairedBinaryPhase.TIMEOUT_PENDING:
             for leg in state.pending_timeout_legs or ("yes", "no"):
@@ -416,11 +506,22 @@ class PairedBinaryMonitor:
                     trigger_type=trigger,
                     reason=rt.pending_trigger_reason,
                 )
+                retry_decision_id = self._emit_trigger_snapshot(
+                    app=app,
+                    coord=coord,
+                    state=state,
+                    sink=sink,
+                    run_id=run_id,
+                    decision_type="fak_retry",
+                    trigger_type=trigger,
+                    is_retry=True,
+                )
 
         work: list[IntentWorkUnit] = []
         for leg, bid, target in legs:
             rt = state.yes if leg == "yes" else state.no
             trigger_type = rt.pending_trigger_type or "stop_loss"
+            did = retry_decision_id if rt.pending_trigger_reason else None
             work.extend(
                 self._dispatch_exit(
                     coord,
@@ -435,6 +536,9 @@ class PairedBinaryMonitor:
                     no_book=no_book,
                     sink=sink,
                     run_id=run_id,
+                    app=app,
+                    decision_id=did,
+                    is_retry=bool(rt.pending_trigger_reason),
                     append=True,
                 )
             )
@@ -461,8 +565,48 @@ class PairedBinaryMonitor:
         no_book: LegBook,
         sink: JsonlSink | None,
         run_id: RunId | None,
+        app: AppConfig | None = None,
+        decision_id: str | None = None,
+        is_retry: bool = False,
         append: bool = False,
     ) -> list[IntentWorkUnit]:
+        if app is not None:
+            ctx = trigger_to_context(trigger_type)
+            gate_result = should_block_paired_binary_decision(
+                app=app,
+                coord=coord,
+                cfg=self._cfg,
+                context=ctx,
+                size=qty,
+            )
+            if not gate_result.allowed:
+                if sink and run_id:
+                    emit_market_data_health_block(
+                        sink,
+                        run_id,
+                        block_reason=gate_result.block_reason or "decision_blocked",
+                        decision_context=ctx.value,
+                        readiness_state=gate_result.readiness_state,
+                        quality_verdict=gate_result.quality_verdict,
+                        quality_reasons=gate_result.quality_reasons,
+                        correlation_id=state.pair_correlation_id,
+                    )
+                    if gate_result.quality_verdict == "reject_decision" and trigger_type in (
+                        "timeout",
+                        "stop_loss",
+                        "stop",
+                    ):
+                        pb_facts.emit_manual_intervention_required(
+                            sink,
+                            run_id,
+                            state,
+                            yes_book,
+                            no_book,
+                            attempt_count=0,
+                            reason="exit_book_age_reject",
+                        )
+                return []
+
         result = try_build_exit(
             coord,
             self._cfg,
@@ -527,4 +671,28 @@ class PairedBinaryMonitor:
                 final_size=result.ctx.final_size,
             )
 
-        return [result.work]
+        did = decision_id
+        if app is not None and sink is not None and run_id is not None and did is None and not is_retry:
+            snap_type = "timeout_exit" if trigger_type == "timeout" else None
+            if snap_type is not None:
+                did = self._emit_trigger_snapshot(
+                    app=app,
+                    coord=coord,
+                    state=state,
+                    sink=sink,
+                    run_id=run_id,
+                    decision_type=snap_type,
+                    trigger_type=trigger_type,
+                )
+        did = did or new_decision_id()
+        extensions = dict(result.work.intent_fact_extensions or {})
+        extensions.update(
+            {
+                "decision_id": did,
+                "decision_type": "fak_retry" if is_retry else "exit_submit",
+                "trigger_type": trigger_type,
+                "pre_decision_snapshot_emitted": decision_id is not None or is_retry or trigger_type == "timeout",
+            }
+        )
+        work_unit = replace(result.work, intent_fact_extensions=extensions)
+        return [work_unit]

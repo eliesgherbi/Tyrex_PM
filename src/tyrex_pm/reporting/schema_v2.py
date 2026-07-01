@@ -91,5 +91,51 @@ FACT_TYPE_PAIRED_BINARY_PAIR_ENTRY_ABORTED_FLAT = "paired_binary_pair_entry_abor
 FACT_TYPE_PAIRED_BINARY_PAIR_ENTRY_MANUAL_INTERVENTION = "paired_binary_pair_entry_manual_intervention"
 FACT_TYPE_PAIRED_BINARY_ENTRY_TIMEOUT_UNWIND_RETRY = "paired_binary_entry_timeout_unwind_retry"
 
+# Phase 2 market WS shadow facts (M1)
+FACT_TYPE_MARKET_WS_CONNECTED = "market_ws_connected"
+FACT_TYPE_MARKET_WS_DISCONNECTED = "market_ws_disconnected"
+FACT_TYPE_WS_VS_REST_BOOK_COMPARE = "ws_vs_rest_book_compare"
+FACT_TYPE_OUT_OF_ORDER_EVENT = "out_of_order_event"
+FACT_TYPE_WS_SEQUENCE_GAP_DETECTED = "ws_sequence_gap_detected"
+
+# Phase 2 Group B observability (M3/M4/M7)
+FACT_TYPE_DATA_QUALITY_VERDICT = "data_quality_verdict"
+FACT_TYPE_EXECUTION_PLANNER_EVIDENCE = "execution_planner_evidence"
+FACT_TYPE_DECISION_SNAPSHOT = "decision_snapshot"
+FACT_TYPE_LATENCY_CHAIN = "latency_chain"
+FACT_TYPE_MARKET_READINESS_TRANSITION = "market_readiness_transition"
+FACT_TYPE_MARKET_DATA_HEALTH_BLOCK = "market_data_health_block"
+FACT_TYPE_PAIRED_BINARY_TICK_SOURCE = "paired_binary_tick_source"
+FACT_TYPE_REST_POLL_DISABLED = "rest_poll_disabled"
+FACT_TYPE_WS_PRIMARY_CUTOVER = "ws_primary_cutover"
+
+# Required payload keys per fact type (schema validation for tests).
+FACT_PAYLOAD_SCHEMA: dict[str, tuple[str, ...]] = {
+    FACT_TYPE_DATA_QUALITY_VERDICT: (
+        "decision_id",
+        "decision_context",
+        "verdict",
+        "reasons",
+        "profile_id",
+    ),
+    FACT_TYPE_EXECUTION_PLANNER_EVIDENCE: (
+        "decision_id",
+        "snapshot_id",
+        "book_age_ms",
+        "source",
+        "quality_verdict",
+    ),
+    FACT_TYPE_DECISION_SNAPSHOT: ("decision_id", "decision_type", "snapshot_ids"),
+    FACT_TYPE_LATENCY_CHAIN: ("decision_id",),
+}
+
+
+def validate_fact_payload(fact_type: str, payload: dict) -> list[str]:
+    """Return missing required keys for ``fact_type`` (empty if valid)."""
+    required = FACT_PAYLOAD_SCHEMA.get(fact_type)
+    if required is None:
+        return []
+    return [k for k in required if k not in payload]
+
 # Canonical key inside oms_submit / oms_cancel payloads for venue response summary string.
 OMS_RESULT_PAYLOAD_KEY = "oms_result"

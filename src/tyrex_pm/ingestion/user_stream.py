@@ -129,6 +129,11 @@ def apply_user_ws_message(
             from tyrex_pm.runtime.allocation_exit_lifecycle import process_user_ws_allocation_exit
 
             process_user_ws_allocation_exit(coord, msg)
+            asset = msg.get("asset_id")
+            if asset:
+                from tyrex_pm.runtime.market_update_coordinator import notify_coordinator_user_fill
+
+                notify_coordinator_user_fill(coord, asset)
         return
     if t in ("PLACEMENT", "UPDATE", "CANCELLATION"):
         _apply_order_event(wallet, msg, t, order_store)
@@ -198,6 +203,11 @@ async def run_user_ws_ingest(
                             continue
                         if isinstance(msg, dict):
                             apply_user_ws_message(coord.wallet, msg, coord.orders, coord)
+                            asset = msg.get("asset_id")
+                            if asset and str(msg.get("type", "")).upper() == "TRADE":
+                                from tyrex_pm.runtime.market_update_coordinator import notify_coordinator_user_fill
+
+                                notify_coordinator_user_fill(coord, asset)
                             if coord.scheduled_exit_demo_try_arm is not None:
                                 coord.scheduled_exit_demo_try_arm(source="websocket")
                 finally:
