@@ -65,6 +65,7 @@ PAIRED_ENTRY_STYLE_UNSUPPORTED = "paired_entry_style_unsupported"
 PAIR_PREFLIGHT_REJECTED = "pair_preflight_rejected"
 PLANNER_PASSIVE_EXIT = "planner_passive_exit"
 PLANNER_URGENT_EXIT_FAK = "planner_urgent_exit_fak"
+PLANNER_URGENT_EXIT_FOK = "planner_urgent_exit_fok"
 PLANNER_URGENT_EXIT_FALLBACK = "planner_urgent_exit_fallback"
 #: Urgent/protection exit denied because the book is stale (older than max_book_age_s).
 PLANNER_STALE_BOOK = "planner_stale_book"

@@ -13,6 +13,8 @@ One short README per implemented package under `src/tyrex_pm/`. Read these along
 | `risk/` | `RiskEngine` + per-policy modules + `planned_order.validate_planned_order` (final planned-order gate) | [risk/](risk/README.md) |
 | `execution/` | `ExecutionPlanner`, single-writer OMS, order builder/lifecycle, shadow + live backends | [execution/](execution/README.md) |
 | `protection/` | Reusable TP/SL overlay attached by `owner_id`; emits urgent `ExitIntent`s after `allocation_buy_applied` | [protection/](protection/README.md) |
+| `market_data/` | WS-authoritative book quality, executable depth, decision snapshots, readiness (Phase 2) | [market_data/](market_data/README.md) |
+| `survival/` | Phase 1 survivor damage control: floor, trailing, enforce dispatch, order policy (default off) | [survival/](survival/README.md) |
 | `state/` | `WalletStore`, `OrderStore`, `MarketStateStore`, `AllocationLedger`, `fill_state` finality helper, reconcile state machine | [state/](state/README.md) |
 | `runtime/` | App entrypoint, config loader, coordinator, supervisors, pipeline | [runtime/](runtime/README.md) |
 | `reporting/` | Fact schema, sinks, summarizer | [reporting/](reporting/README.md) |

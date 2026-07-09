@@ -1,0 +1,137 @@
+# Live tiny paired-binary — Phase 1 advisory validation overlay.
+#
+# DO NOT RUN with placeholder metadata. All fields below marked REQUIRED must be
+# pinned for a specific BTC 5m market before each advisory live run.
+#
+# Preflight (required before live):
+#   python scripts/preflight_phase1_live_scenario.py \
+#     --scenario live_paired_binary_phase1_tiny \
+#     --event-url "https://polymarket.com/event/btc-updown-5m-<START_TS>"
+#
+# Run (operator only) — pass --event-url to auto-fill market metadata:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/paired_binary.yaml \
+#     --scenario live_paired_binary_phase1_tiny \
+#     --event-url "https://polymarket.com/event/btc-updown-5m-<START_TS>" \
+#     --run-name paired_binary_phase1_tiny_$(date +%s)
+#
+# Alternatively pin only yes_token_id / no_token_id in the scenario; the runtime
+# will resolve condition_id, timestamps, and market_id from Gamma when the rest
+# are still placeholders.
+#
+# All survival modules advisory by default. For enforce experiments use dedicated profiles:
+#   live_paired_binary_phase1_advisory | _target_only | _trailing_enforce | _stall_enforce
+
+execution_mode: live
+
+strategy:
+  paired_binary:
+    # REQUIRED — replace before live (preflight rejects shadow_test_market / placeholders)
+    market_id: "btc_5m_<YYYYMMDD_HHMM>"
+    condition_id: "<required>"
+    event_start_ts: null  # REQUIRED unix timestamp — e.g. 1782936600
+    event_end_ts: null    # REQUIRED unix timestamp — must be > event_start_ts
+    yes_token_id: "<required>"
+    no_token_id: "<required>"
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: true
+      recovery_on_reconnect: true
+    quality:
+      enforcement_mode: enforce
+      require_ws_primary_for_entry: true
+      allow_rest_recovery_for_exit: true
+      allow_rest_recovery_for_entry: false
+      market_profile: crypto_5m
+    features:
+      v0_enabled: true
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+      use_executable_depth: true
+  observability:
+    emit_decision_snapshot: true
+  strategy_lifecycle:
+    mode: market_aware
+    exit_clock_source: event_end_ts
+    max_runtime_s: null
+    fallback_max_runtime_s: 900
+    flatten_before_event_end_s: 20
+    block_new_entry_phases: [near_close, closed]
+    emit_unknown_market_end_warning: true
+    min_survival_window_s: 45
+  paired_binary:
+    poll_interval_s: 1.0
+    max_decision_rate_per_market_ms: 75
+    open_exposure_on_max_runtime: force_reduce_only_exit
+    open_exposure_timeout_s: 300
+    survivor_on_max_runtime: force_reduce_only_exit
+    survivor_timeout_s: 300
+    allow_terminal_state_resume: false
+    stop_background_tasks_after_strategy_done: true
+    market_timing_diagnostics:
+      enabled: true
+      near_close_window_s: 45
+  allocation_ledger:
+    clamp_grace_s_after_buy: 90
+  survival:
+    enabled: true
+    target_policy:
+      mode: dynamic
+    observability:
+      min_emit_interval_s: 5
+      emit_on_verdict_change: true
+      emit_on_target_mode_change: true
+      emit_on_material_price_change_ticks: 1
+    reachability:
+      enforcement_mode: advisory
+    stall_exit:
+      enabled: true
+      enforcement_mode: advisory
+    trailing_stop:
+      enabled: true
+      enforcement_mode: advisory
+    economics:
+      enabled: true
+      enforcement_mode: advisory
+    kill_switches:
+      enabled: true
+      per_pair_max_loss_usd: "0.50"
+      daily_max_loss_usd: "5.00"
+      max_failed_lifecycle_count: 3
+      max_consecutive_no_entry: 10
+      max_bad_market_quality_streak: 5
+      max_manual_intervention_count: 2
+      persist_daily: true
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "15"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "20"
+    portfolio_cap_usd: "30"
+  exits:
+    allow_reduce_only_mark_fallback: true
+    require_fresh_book_for_mark_fallback: true
+    urgent_exit_max_book_age_s: 0.5
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  readiness:
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+    require_heartbeat_live: true
+    require_user_ws_live: true

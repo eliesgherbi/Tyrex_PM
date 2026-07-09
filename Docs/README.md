@@ -11,7 +11,10 @@ Polymarket-native trading stack. Documentation is grouped by audience.
 | **Changing code** | [developer_guide.md](developer_guide.md) · [modules/README.md](modules/README.md) — ownership, conventions, extension points. |
 | **Setting up the dev env** | [DEVELOPMENT.md](DEVELOPMENT.md) — install, run, test, lint. |
 | **Tuning configuration** | [CONFIG_MODEL.md](CONFIG_MODEL.md) — every YAML key + scenario layering. |
+| **Phase 1 survival (paired-binary)** | [Implementation/Survivor_target/phase1_parameter_guide.md](Implementation/Survivor_target/phase1_parameter_guide.md) · [modules/survival/README.md](modules/survival/README.md) |
+| **Phase 2 WS backbone** | [Implementation/WebSocket_event_driven_backbone/phase_2.md](Implementation/WebSocket_event_driven_backbone/phase_2.md) · [modules/market_data/README.md](modules/market_data/README.md) |
 | **Reading `facts.jsonl`** | [reporting_fact_model.md](reporting_fact_model.md) — fact catalog, joins, dedup. |
+| **Normalizing recordings → Parquet** | [DATA_LAKE.md](DATA_LAKE.md) — M2B.3 offline data lake schema and CLI. |
 | **Debugging a live race** | [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) — venue truth, reconcile state machine, in-flight reservations. |
 
 ## Top-level documents
@@ -32,16 +35,18 @@ Polymarket-native trading stack. Documentation is grouped by audience.
 
 ## Historical / planning notes
 
-[Implementation/](Implementation/) — rebuild plans and sell-feature phase docs.
+[Implementation/](Implementation/) — rebuild plans, Phase 2 WS backbone, Phase 1 survival milestones.
 
-**Current sell/exit phase status (2026-05-21):**
+**Current program status (2026-07):**
 
-| Phase | Status |
-|-------|--------|
-| P3.5 live validation hardening | Complete |
-| P4 allocation ledger | Complete — live validated (`allocation_test_live_auto_1`) |
-| P4.1 resting SELL lifecycle | Complete |
-| P5 guru allocation-aware SELL | **Code + shadow/unit complete** — live guru validation pending |
-| P6 TP/SL overlays | Deferred |
+| Program | Status | Doc hub |
+|---------|--------|---------|
+| Phase 2 WS-primary backbone | **Complete** (M8 cutover, M9 baseline) | [WebSocket_event_driven_backbone/phase_2.md](Implementation/WebSocket_event_driven_backbone/phase_2.md) |
+| Phase 4.6 paired binary | **Live-validated** | [architecture_enhance/phase_4_6_…](Implementation/architecture_enhance/phase_4_6_paired_binary_strategy_production_protection.md) |
+| Phase 1 survival (damage control) | **Implemented**; enforce opt-in via scenarios | [Survivor_target/phase1_parameter_guide.md](Implementation/Survivor_target/phase1_parameter_guide.md) |
+| P4 allocation ledger | Complete | — |
+| P4 protection (TP/SL overlay) | Complete (separate from Phase 1 survival trailing) | [modules/protection/README.md](modules/protection/README.md) |
+| P5 guru allocation-aware SELL | Code complete; live guru validation pending | — |
+| Legacy sell_feature P6 TP/SL | Superseded by `protection/` overlay | [Implementation/sell_feature/README.md](Implementation/sell_feature/README.md) |
 
-See [Implementation/sell_feature/README.md](Implementation/sell_feature/README.md).
+See [Implementation/sell_feature/README.md](Implementation/sell_feature/README.md) for older sell-phase history.

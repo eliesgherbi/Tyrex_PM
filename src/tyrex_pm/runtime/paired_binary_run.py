@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 import uuid
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from tyrex_pm.core.enums import ExecutionMode, Side
 from tyrex_pm.core.ids import RunId, TokenId
@@ -14,7 +17,25 @@ from tyrex_pm.core.models import EnterIntent
 from tyrex_pm.core.time import monotonic_s
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import FACT_TYPE_HEALTH
-from tyrex_pm.runtime.config import AppConfig, PairedBinaryStrategyConfig
+from tyrex_pm.runtime.config import (
+    AppConfig,
+    OPEN_EXPOSURE_ON_MAX_RUNTIME_CONTINUE,
+    OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE,
+    PairedBinaryStrategyConfig,
+)
+from tyrex_pm.runtime.paired_binary_shutdown import (
+    build_open_exposure_snapshot,
+    effective_open_exposure_policy,
+    handle_open_exposure_at_shutdown,
+    phase_has_open_exposure,
+    SHUTDOWN_FLATTEN_REASON,
+    MARKET_CLOSE_FLATTEN_REASON,
+)
+from tyrex_pm.runtime.strategy_lifecycle import (
+    MarketLifecycleGuard,
+    StrategyRuntimePolicy,
+    clock_is_known,
+)
 from tyrex_pm.runtime.entry_qty_reconcile import PairEntryQtyReconcile, reconcile_pair_entry_qty
 from tyrex_pm.runtime.intent_work import IntentWorkUnit
 from tyrex_pm.runtime.market_data_runtime import bootstrap_market_state, inject_fixture_book
@@ -74,15 +95,127 @@ from tyrex_pm.market_data.quality import DecisionContext
 from tyrex_pm.market_data.readiness_runtime import emit_market_data_health_block, refresh_market_readiness
 from tyrex_pm.strategies.paired_binary.monitor import PairedBinaryMonitor
 from tyrex_pm.strategies.paired_binary.sizing import build_exit_work_unit, clamp_exit_size
+from tyrex_pm.strategies.paired_binary.market_timing import build_market_timing_snapshot, MarketTimingSnapshot
+from tyrex_pm.strategies.paired_binary.no_entry_summary import build_no_entry_summary, had_pair_entry
+from tyrex_pm.survival.kill_switch_runtime import (
+    apply_kill_switch_force_flatten,
+    apply_kill_switch_hard_stop,
+    emit_kill_switch_fact,
+    finalize_kill_switch_counters,
+    init_kill_switch_manager,
+)
+from tyrex_pm.survival.kill_switches import KillSwitchManager
 from tyrex_pm.strategies.paired_binary.state import (
     PairedBinaryPhase,
     PairedBinaryRuntimeState,
+    PersistStateResult,
     persistence_path,
     save_persisted_state,
 )
 from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
 
 log = logging.getLogger(__name__)
+
+FORCE_EXIT_GRACE_S = 30.0
+
+
+def _load_sink_rows(sink) -> list[dict[str, Any]]:
+    path = getattr(sink, "_path", None)
+    if path is None:
+        return []
+    facts_path = Path(path)
+    if not facts_path.is_file():
+        return []
+    return [
+        json.loads(line)
+        for line in facts_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _persist_state_safe(
+    *,
+    sink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    persist_path: Path,
+) -> PersistStateResult:
+    result = save_persisted_state(persist_path, state)
+    if not result.success:
+        pb_facts.emit_state_persist_failed(sink, run_id, state, result)
+        log.log(
+            logging.ERROR if result.severity == "error" else logging.WARNING,
+            "paired_binary state persist failed path=%s attempts=%s severity=%s error=%s",
+            result.path,
+            result.attempts,
+            result.severity,
+            result.error_message,
+        )
+    return result
+
+
+def _maybe_emit_market_timing(
+    *,
+    app: AppConfig,
+    run_id: RunId,
+    coord,
+    sink,
+    cfg: PairedBinaryStrategyConfig,
+    timing_diag: dict[str, Any],
+) -> None:
+    mtd = app.runtime.paired_binary.market_timing_diagnostics
+    if not mtd.enabled:
+        return
+    snap = build_market_timing_snapshot(
+        market_id=cfg.market_id,
+        yes_token_id=cfg.yes_token_id,
+        no_token_id=cfg.no_token_id,
+        condition_id=cfg.condition_id,
+        event_start_ts=cfg.event_start_ts,
+        event_end_ts=cfg.event_end_ts,
+        near_close_window_s=mtd.near_close_window_s,
+        coord=coord,
+    )
+    timing_diag["last_phase"] = snap.phase
+    if timing_diag.get("last_emitted_phase") == snap.phase and timing_diag.get("emitted_once"):
+        return
+    pb_facts.emit_market_timing(sink, run_id, snap)
+    timing_diag["last_emitted_phase"] = snap.phase
+    timing_diag["emitted_once"] = True
+
+
+def _strategy_runtime_policy_from_app(app: AppConfig) -> StrategyRuntimePolicy:
+    sl = app.runtime.strategy_lifecycle
+    return StrategyRuntimePolicy(
+        enabled=sl.enabled,
+        mode=sl.mode,
+        exit_clock_source=sl.exit_clock_source,
+        max_runtime_s=sl.max_runtime_s,
+        fallback_max_runtime_s=sl.fallback_max_runtime_s,
+        flatten_before_event_end_s=sl.flatten_before_event_end_s,
+        block_new_entry_phases=sl.block_new_entry_phases,
+        emit_unknown_market_end_warning=sl.emit_unknown_market_end_warning,
+        min_survival_window_s=sl.min_survival_window_s,
+    )
+
+
+def _build_timing_snapshot(app: AppConfig, cfg: PairedBinaryStrategyConfig, coord) -> MarketTimingSnapshot:
+    mtd = app.runtime.paired_binary.market_timing_diagnostics
+    return build_market_timing_snapshot(
+        market_id=cfg.market_id,
+        yes_token_id=cfg.yes_token_id,
+        no_token_id=cfg.no_token_id,
+        condition_id=cfg.condition_id,
+        event_start_ts=cfg.event_start_ts,
+        event_end_ts=cfg.event_end_ts,
+        near_close_window_s=mtd.near_close_window_s,
+        coord=coord,
+    )
+
+
+async def _unwind_leg_for_shutdown(**kwargs) -> UnwindLegResult:
+    kwargs.setdefault("reason", SHUTDOWN_FLATTEN_REASON)
+    return await _unwind_leg(**kwargs)
 
 
 def _entry_eval_input(cfg: PairedBinaryStrategyConfig, yes_book: LegBook, no_book: LegBook) -> EntryEvalInput:
@@ -572,6 +705,7 @@ async def _unwind_leg(
     apply_local_shadow_fill: bool,
     live_clob_client,
     book: LegBook | None = None,
+    decision_id: str | None = None,
 ) -> UnwindLegResult:
     yes_book, no_book = _books(coord, cfg)
     if book is None:
@@ -601,6 +735,7 @@ async def _unwind_leg(
         leg_correlation_id=leg_corr,
         reason=reason,
         sizing=sizing,
+        decision_id=decision_id,
     )
     if w is None:
         return UnwindLegResult(
@@ -1154,13 +1289,44 @@ def _update_post_exit_state(
     run_id: RunId | None = None,
     yes_book: LegBook | None = None,
     no_book: LegBook | None = None,
+    survival=None,
+    seconds_to_close: float | None = None,
 ) -> None:
     ledger = coord.allocation_ledger
     if ledger is None:
         return
     yes_qty = ledger.get_available_allocated(cfg.owner_id, TokenId(cfg.yes_token_id))
     no_qty = ledger.get_available_allocated(cfg.owner_id, TokenId(cfg.no_token_id))
+    phase_before = state.phase
     if yes_qty <= 0 and no_qty <= 0:
+        if sink and run_id and not state.resolution_exit_reported:
+            from tyrex_pm.strategies.paired_binary.resolution_exit import (
+                detect_survivor_resolution_exit,
+                resolution_accounting_payload,
+                venue_position_qty,
+            )
+
+            ctx = detect_survivor_resolution_exit(
+                state,
+                phase_before=phase_before,
+                yes_qty=yes_qty,
+                no_qty=no_qty,
+                venue_yes_qty=venue_position_qty(coord, cfg.owner_id, cfg.yes_token_id),
+                venue_no_qty=venue_position_qty(coord, cfg.owner_id, cfg.no_token_id),
+            )
+            if ctx is not None and yes_book is not None and no_book is not None:
+                acct = resolution_accounting_payload(
+                    ctx, cfg=cfg, state_after=PairedBinaryPhase.DONE.value
+                )
+                pb_facts.emit_resolution_exit_accounting(
+                    sink,
+                    run_id,
+                    state,
+                    yes_book,
+                    no_book,
+                    cfg=cfg,
+                    accounting_payload=acct,
+                )
         state.phase = PairedBinaryPhase.DONE
         return
 
@@ -1181,10 +1347,32 @@ def _update_post_exit_state(
                 state.phase = PairedBinaryPhase.ONLY_NO_ACTIVE
                 state.effective_qty = no_qty
                 if fill is not None and state.yes.triggered and yes_book and no_book and sink and run_id:
-                    old, new = reprice_survivor_after_loser_exit(
-                        state, cfg, loser_leg="yes", loser_exit_fill=fill
+                    outcome = reprice_survivor_after_loser_exit(
+                        state,
+                        cfg,
+                        loser_leg="yes",
+                        loser_exit_fill=fill,
+                        survival=survival,
+                        seconds_to_close=seconds_to_close,
+                        survivor_bid=no_book.bid,
                     )
-                    if old != new and new is not None:
+                    old, new = outcome.old_target, outcome.new_target
+                    if survival is not None and survival.enabled and outcome.survival_result is not None:
+                        raw = state.survivor_leg_state or {}
+                        floor_raw = raw.get("hard_floor_price")
+                        if floor_raw is not None:
+                            pb_facts.emit_simplified_survivor_setup_facts(
+                                sink,
+                                run_id,
+                                state,
+                                yes_book,
+                                no_book,
+                                survivor_leg="no",
+                                recovery=outcome.survival_result,
+                                floor_price=Decimal(str(floor_raw)),
+                                enforcement_mode=survival.survivor_floor.enforcement_mode,
+                            )
+                    elif old != new and new is not None:
                         from tyrex_pm.strategies.paired_binary.pnl import reprice_survivor_target_after_loser_exit
 
                         plan = reprice_survivor_target_after_loser_exit(
@@ -1225,10 +1413,32 @@ def _update_post_exit_state(
                 state.phase = PairedBinaryPhase.ONLY_YES_ACTIVE
                 state.effective_qty = yes_qty
                 if fill is not None and state.no.triggered and yes_book and no_book and sink and run_id:
-                    old, new = reprice_survivor_after_loser_exit(
-                        state, cfg, loser_leg="no", loser_exit_fill=fill
+                    outcome = reprice_survivor_after_loser_exit(
+                        state,
+                        cfg,
+                        loser_leg="no",
+                        loser_exit_fill=fill,
+                        survival=survival,
+                        seconds_to_close=seconds_to_close,
+                        survivor_bid=yes_book.bid,
                     )
-                    if old != new and new is not None:
+                    old, new = outcome.old_target, outcome.new_target
+                    if survival is not None and survival.enabled and outcome.survival_result is not None:
+                        raw = state.survivor_leg_state or {}
+                        floor_raw = raw.get("hard_floor_price")
+                        if floor_raw is not None:
+                            pb_facts.emit_simplified_survivor_setup_facts(
+                                sink,
+                                run_id,
+                                state,
+                                yes_book,
+                                no_book,
+                                survivor_leg="yes",
+                                recovery=outcome.survival_result,
+                                floor_price=Decimal(str(floor_raw)),
+                                enforcement_mode=survival.survivor_floor.enforcement_mode,
+                            )
+                    elif old != new and new is not None:
                         from tyrex_pm.strategies.paired_binary.pnl import reprice_survivor_target_after_loser_exit
 
                         plan = reprice_survivor_target_after_loser_exit(
@@ -1314,71 +1524,425 @@ async def run_paired_binary_loop(
 
     ticks = 0
     max_ticks = max(1, int(cfg.max_runtime_s / poll_interval)) if cfg.max_runtime_s else 10_000
+    lifecycle_policy = _strategy_runtime_policy_from_app(app)
+    pb_rt = app.runtime.paired_binary
+    open_exposure_policy = effective_open_exposure_policy(pb_rt)
+    open_exposure_extension_deadline: float | None = None
+    open_exposure_shutdown_handled = False
+    pre_close_flatten_handled = False
+    force_exit_grace_ticks: int | None = None
+    open_exposure_extension_started_mono: float | None = None
+    last_runtime_decision_reason: str | None = None
+    lifecycle_entry_block: list[str | None] = [None]
 
-    while ticks < max_ticks:
-        if stop is not None and stop.is_set():
-            break
-        if state.is_terminal():
-            break
+    loop_event = "paired_binary_loop_stopped"
+    loop_error: str | None = None
+    loop_started_mono = monotonic_s()
+    lifecycle_guard = MarketLifecycleGuard(lifecycle_policy, loop_started_mono=loop_started_mono)
+    timing_diag: dict[str, Any] = {}
+    kill_mgr = init_kill_switch_manager(app, state_dir=state_dir)
+    monitor_trigger = "poll"
+    try:
+        while True:
+            if stop is not None and stop.is_set():
+                break
+            if state.is_terminal():
+                break
 
-        tick_lock = coordinator.tick_lock if coordinator is not None else None
-        if tick_lock is not None:
-            await tick_lock.acquire()
-        try:
-            await _paired_binary_tick_body(
-                app=app,
-                run_id=run_id,
-                coord=coord,
-                sink=sink,
-                oms=oms,
-                cfg=cfg,
-                state=state,
-                strategy=strategy,
-                monitor=monitor,
-                persist_path=persist_path,
-                apply_local_shadow_fill=apply_local_shadow_fill,
-                live_clob_client=live_clob_client,
-                coordinator=coordinator,
-                token_ids=token_ids,
+            if kill_mgr is not None:
+                kill_mgr.reset_daily_if_needed(time.time())
+                ks_decision = kill_mgr.check(owner_id=cfg.owner_id, pair_id=cfg.market_id)
+                if ks_decision.triggered:
+                    yes_book_ks, no_book_ks = _books(coord, cfg)
+                    if apply_kill_switch_hard_stop(state=state, decision=ks_decision):
+                        emit_kill_switch_fact(
+                            sink=sink,
+                            run_id=run_id,
+                            state=state,
+                            yes_book=yes_book_ks,
+                            no_book=no_book_ks,
+                            cfg=cfg,
+                            decision=ks_decision,
+                        )
+                        break
+                    if await apply_kill_switch_force_flatten(
+                        app=app,
+                        run_id=run_id,
+                        coord=coord,
+                        sink=sink,
+                        oms=oms,
+                        strategy=strategy,
+                        cfg=cfg,
+                        state=state,
+                        yes_book=yes_book_ks,
+                        no_book=no_book_ks,
+                        apply_local_shadow_fill=apply_local_shadow_fill,
+                        live_clob_client=live_clob_client,
+                        unwind_leg_fn=_unwind_leg_for_shutdown,
+                        decision=ks_decision,
+                    ):
+                        break
+
+            timing_snap = _build_timing_snapshot(app, cfg, coord)
+            now = monotonic_s()
+
+            if lifecycle_policy.enabled:
+                if (
+                    lifecycle_guard.consume_fallback_warning_eligibility()
+                    and not clock_is_known(timing_snap)
+                ):
+                    pb_facts.emit_strategy_runtime_fallback_max_runtime(
+                        sink,
+                        run_id,
+                        fallback_max_runtime_s=lifecycle_policy.fallback_max_runtime_s,
+                        elapsed_s=now - loop_started_mono,
+                        warning="event_end_ts unknown; using fallback_max_runtime_s process control",
+                    )
+
+                loop_dec = lifecycle_guard.should_continue_loop(
+                    snapshot=timing_snap,
+                    has_open_exposure=phase_has_open_exposure(state.phase),
+                    strategy_terminal=False,
+                    operator_stop=False,
+                )
+                if loop_dec.reason != last_runtime_decision_reason:
+                    pb_facts.emit_strategy_runtime_decision(
+                        sink,
+                        run_id,
+                        continue_loop=loop_dec.continue_loop,
+                        reason=loop_dec.reason,
+                        clock_known=loop_dec.clock_known,
+                        seconds_to_close=loop_dec.seconds_to_close,
+                        event_end_ts=timing_snap.event_end_ts,
+                        phase=timing_snap.phase,
+                    )
+                    last_runtime_decision_reason = loop_dec.reason
+                if not loop_dec.continue_loop:
+                    break
+
+                if (
+                    not pre_close_flatten_handled
+                    and phase_has_open_exposure(state.phase)
+                ):
+                    pre_close = lifecycle_guard.should_pre_close_flatten(
+                        timing_snap,
+                        has_open_exposure=True,
+                    )
+                    if pre_close.required:
+                        yes_book, no_book = _books(coord, cfg)
+
+                        from tyrex_pm.survival.enforcement_dispatch import (
+                            abandon_pending_survival_exit_intent,
+                            has_pending_survival_exit_intent,
+                        )
+
+                        if has_pending_survival_exit_intent(state):
+                            ctx = abandon_pending_survival_exit_intent(
+                                state, reason="pre_close_flatten_preempted"
+                            )
+                            survivor_leg = None
+                            if state.phase == PairedBinaryPhase.ONLY_YES_ACTIVE:
+                                survivor_leg = "yes"
+                            elif state.phase == PairedBinaryPhase.ONLY_NO_ACTIVE:
+                                survivor_leg = "no"
+                            pb_facts.emit_survival_enforce_exit_abandoned(
+                                sink,
+                                run_id,
+                                state,
+                                yes_book,
+                                no_book,
+                                payload={
+                                    "reason": "pre_close_flatten_preempted",
+                                    "module": ctx.get("module"),
+                                    "trigger_type": ctx.get("trigger_type"),
+                                    "survivor_leg": survivor_leg,
+                                    "attempt_count": ctx.get("attempt_count"),
+                                },
+                            )
+
+                        exposure_snap = build_open_exposure_snapshot(
+                            state,
+                            cfg,
+                            coord,
+                            yes_book,
+                            no_book,
+                            configured_policy=open_exposure_policy,
+                            shutdown_reason=MARKET_CLOSE_FLATTEN_REASON,
+                        )
+                        pb_facts.emit_strategy_lifecycle_pre_close_flatten_required(
+                            sink,
+                            run_id,
+                            state,
+                            yes_book,
+                            no_book,
+                            seconds_to_close=pre_close.seconds_to_close,
+                            flatten_before_event_end_s=lifecycle_policy.flatten_before_event_end_s,
+                            exposure_snapshot=exposure_snap,
+                        )
+                        await handle_open_exposure_at_shutdown(
+                            app=app,
+                            run_id=run_id,
+                            coord=coord,
+                            sink=sink,
+                            oms=oms,
+                            strategy=strategy,
+                            cfg=cfg,
+                            state=state,
+                            yes_book=yes_book,
+                            no_book=no_book,
+                            apply_local_shadow_fill=apply_local_shadow_fill,
+                            live_clob_client=live_clob_client,
+                            unwind_leg_fn=_unwind_leg_for_shutdown,
+                            shutdown_reason=MARKET_CLOSE_FLATTEN_REASON,
+                        )
+                        pre_close_flatten_handled = True
+                        if state.is_terminal():
+                            break
+                        continue
+
+            tick_lock = coordinator.tick_lock if coordinator is not None else None
+            event_correlation = None
+            if app.runtime.observability.emit_event_correlation:
+                from tyrex_pm.strategies.paired_binary.facts import resolve_event_correlation
+
+                event_correlation = resolve_event_correlation(
+                    app, coord, monitor_trigger=monitor_trigger
+                )
+            if tick_lock is not None:
+                await tick_lock.acquire()
+            try:
+                await _paired_binary_tick_body(
+                    app=app,
+                    run_id=run_id,
+                    coord=coord,
+                    sink=sink,
+                    oms=oms,
+                    cfg=cfg,
+                    state=state,
+                    strategy=strategy,
+                    monitor=monitor,
+                    persist_path=persist_path,
+                    apply_local_shadow_fill=apply_local_shadow_fill,
+                    live_clob_client=live_clob_client,
+                    coordinator=coordinator,
+                    token_ids=token_ids,
+                    timing_diag=timing_diag,
+                    lifecycle_guard=lifecycle_guard if lifecycle_policy.enabled else None,
+                    timing_snap=timing_snap if lifecycle_policy.enabled else None,
+                    lifecycle_entry_block=lifecycle_entry_block,
+                    kill_mgr=kill_mgr,
+                    monitor_trigger=monitor_trigger,
+                    event_correlation=event_correlation,
+                )
+                ticks += 1
+            finally:
+                if tick_lock is not None and tick_lock.locked():
+                    tick_lock.release()
+
+            if cfg.entry_dry_run:
+                break
+
+            if state.phase == PairedBinaryPhase.BOTH_LEGS_ACTIVE and cfg.stop_after_entry:
+                break
+            if state.is_terminal():
+                break
+
+            tick_budget_exhausted = ticks >= max_ticks
+            if lifecycle_policy.enabled:
+                if lifecycle_guard.suppress_strategy_max_runtime_tick_cap(timing_snap):
+                    tick_budget_exhausted = False
+                elif lifecycle_guard.uses_fallback_runtime(timing_snap):
+                    tick_budget_exhausted = lifecycle_guard.is_fallback_runtime_exhausted(
+                        timing_snap, now_mono=now
+                    )
+                elif (fixed_s := lifecycle_guard.fixed_duration_runtime_s()) is not None:
+                    tick_budget_exhausted = (now - loop_started_mono) >= fixed_s
+            if force_exit_grace_ticks is not None and ticks < force_exit_grace_ticks:
+                tick_budget_exhausted = False
+
+            now = monotonic_s()
+            extension_elapsed = (
+                open_exposure_extension_deadline is not None
+                and open_exposure_extension_started_mono is not None
+                and now >= open_exposure_extension_deadline
             )
-            ticks += 1
-        finally:
-            if tick_lock is not None and tick_lock.locked():
-                tick_lock.release()
 
-        if cfg.entry_dry_run:
-            break
+            if tick_budget_exhausted and phase_has_open_exposure(state.phase):
+                if open_exposure_policy == OPEN_EXPOSURE_ON_MAX_RUNTIME_CONTINUE:
+                    if open_exposure_extension_deadline is None:
+                        yes_book, no_book = _books(coord, cfg)
+                        result = await handle_open_exposure_at_shutdown(
+                            app=app,
+                            run_id=run_id,
+                            coord=coord,
+                            sink=sink,
+                            oms=oms,
+                            strategy=strategy,
+                            cfg=cfg,
+                            state=state,
+                            yes_book=yes_book,
+                            no_book=no_book,
+                            apply_local_shadow_fill=apply_local_shadow_fill,
+                            live_clob_client=live_clob_client,
+                            unwind_leg_fn=_unwind_leg_for_shutdown,
+                            extension_elapsed=False,
+                        )
+                        if result.continue_loop:
+                            open_exposure_extension_started_mono = now
+                            open_exposure_extension_deadline = now + float(
+                                pb_rt.open_exposure_timeout_s
+                            )
+                        tick_budget_exhausted = False
+                    elif not extension_elapsed:
+                        tick_budget_exhausted = False
+                    elif not open_exposure_shutdown_handled:
+                        yes_book, no_book = _books(coord, cfg)
+                        await handle_open_exposure_at_shutdown(
+                            app=app,
+                            run_id=run_id,
+                            coord=coord,
+                            sink=sink,
+                            oms=oms,
+                            strategy=strategy,
+                            cfg=cfg,
+                            state=state,
+                            yes_book=yes_book,
+                            no_book=no_book,
+                            apply_local_shadow_fill=apply_local_shadow_fill,
+                            live_clob_client=live_clob_client,
+                            unwind_leg_fn=_unwind_leg_for_shutdown,
+                            emit_open_exposure_fact=False,
+                            extension_elapsed=True,
+                        )
+                        open_exposure_shutdown_handled = True
+                        if state.is_terminal():
+                            break
+                        continue
+                elif not open_exposure_shutdown_handled:
+                    yes_book, no_book = _books(coord, cfg)
+                    await handle_open_exposure_at_shutdown(
+                        app=app,
+                        run_id=run_id,
+                        coord=coord,
+                        sink=sink,
+                        oms=oms,
+                        strategy=strategy,
+                        cfg=cfg,
+                        state=state,
+                        yes_book=yes_book,
+                        no_book=no_book,
+                        apply_local_shadow_fill=apply_local_shadow_fill,
+                        live_clob_client=live_clob_client,
+                        unwind_leg_fn=_unwind_leg_for_shutdown,
+                    )
+                    open_exposure_shutdown_handled = True
+                    if (
+                        open_exposure_policy == OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE
+                        and not state.is_terminal()
+                    ):
+                        force_exit_grace_ticks = ticks + max(
+                            1, int(FORCE_EXIT_GRACE_S / poll_interval)
+                        )
+                    if state.is_terminal():
+                        break
+                    if open_exposure_policy != OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE:
+                        break
+                    continue
+                elif force_exit_grace_ticks is not None and ticks >= force_exit_grace_ticks:
+                    if not state.is_terminal():
+                        yes_book, no_book = _books(coord, cfg)
+                        pb_facts.emit_manual_intervention_required(
+                            sink,
+                            run_id,
+                            state,
+                            yes_book,
+                            no_book,
+                            attempt_count=0,
+                            reason="shutdown_force_flatten_timeout",
+                        )
+                        transition_phase(
+                            state,
+                            PairedBinaryPhase.FAILED,
+                            reason="shutdown_force_flatten_timeout",
+                        )
+                    break
+            elif tick_budget_exhausted:
+                break
 
-        if state.phase == PairedBinaryPhase.BOTH_LEGS_ACTIVE and cfg.stop_after_entry:
-            break
-        if state.is_terminal():
-            break
-
-        if coordinator is not None:
-            tick_source, coalesce = await coordinator.wait_for_update(
-                token_ids, timeout_s=poll_interval
-            )
-            pb_facts.emit_paired_binary_tick_source(
-                sink,
-                run_id,
-                state,
-                tick_source=tick_source,
-                coalesce_count=coalesce,
-            )
-        else:
-            await asyncio.sleep(cfg.tick_interval_s)
-
-    sink.write(
-        make_fact(
-            FACT_TYPE_HEALTH,
-            str(run_id),
-            {
-                "event": "paired_binary_loop_stopped",
-                "ticks": ticks,
-                "final_state": state.phase.value,
-            },
+            if coordinator is not None:
+                tick_source, coalesce = await coordinator.wait_for_update(
+                    token_ids, timeout_s=poll_interval
+                )
+                monitor_trigger = "ws_book_update" if tick_source == "event_wake" else "poll"
+                pb_facts.emit_paired_binary_tick_source(
+                    sink,
+                    run_id,
+                    state,
+                    tick_source=tick_source,
+                    coalesce_count=coalesce,
+                )
+            else:
+                await asyncio.sleep(cfg.tick_interval_s)
+    except asyncio.CancelledError:
+        loop_event = "paired_binary_loop_interrupted"
+        raise
+    except KeyboardInterrupt:
+        loop_event = "paired_binary_loop_interrupted"
+        raise
+    except Exception as exc:
+        loop_event = "paired_binary_loop_failed"
+        loop_error = str(exc)
+        raise
+    finally:
+        _persist_state_safe(sink=sink, run_id=run_id, state=state, persist_path=persist_path)
+        duration_s = monotonic_s() - loop_started_mono
+        fact_rows = _load_sink_rows(sink)
+        summary = build_no_entry_summary(
+            fact_rows,
+            run_id=str(run_id),
+            market_id=cfg.market_id,
+            yes_token_id=cfg.yes_token_id,
+            no_token_id=cfg.no_token_id,
+            ticks=ticks,
+            duration_s=duration_s,
+            final_state=state.phase.value,
+            last_market_timing_phase=timing_diag.get("last_phase"),
         )
-    )
+        if summary is not None:
+            pb_facts.emit_no_entry_summary(sink, run_id, summary)
+        fact_rows = _load_sink_rows(sink)
+        finalize_kill_switch_counters(
+            kill_mgr,
+            state=state,
+            had_entry=had_pair_entry(fact_rows, state.phase.value),
+            pnl=None,
+        )
+        from tyrex_pm.strategies.paired_binary.terminal_reporting import finalize_terminal_reporting
+
+        finalize_terminal_reporting(
+            sink=sink,
+            run_id=run_id,
+            state=state,
+            cfg=cfg,
+            app=app,
+            coord=coord,
+            fact_rows=fact_rows,
+        )
+        fact_rows = _load_sink_rows(sink)
+        payload: dict[str, object] = {
+            "event": loop_event,
+            "ticks": ticks,
+            "final_state": state.phase.value,
+        }
+        if loop_error is not None:
+            payload["error"] = loop_error
+        sink.write(
+            make_fact(
+                FACT_TYPE_HEALTH,
+                str(run_id),
+                payload,
+            )
+        )
     return ticks
 
 
@@ -1398,9 +1962,33 @@ async def _paired_binary_tick_body(
     live_clob_client: object | None,
     coordinator: MarketUpdateCoordinator | None,
     token_ids: list[TokenId],
+    timing_diag: dict[str, Any] | None = None,
+    lifecycle_guard: MarketLifecycleGuard | None = None,
+    timing_snap: MarketTimingSnapshot | None = None,
+    lifecycle_entry_block: list[str | None] | None = None,
+    kill_mgr: KillSwitchManager | None = None,
+    monitor_trigger: str = "poll",
+    event_correlation=None,
 ) -> None:
+    if timing_diag is None:
+        timing_diag = {}
+    _maybe_emit_market_timing(
+        app=app,
+        run_id=run_id,
+        coord=coord,
+        sink=sink,
+        cfg=cfg,
+        timing_diag=timing_diag,
+    )
     refresh_market_readiness(coord, app, cfg, sink=sink, run_id=run_id)
     yes_book, no_book = _books(coord, cfg)
+    if cfg.use_fixture_book and state.phase in {
+        PairedBinaryPhase.BOTH_LEGS_FILLED,
+        PairedBinaryPhase.ACTIVATION_PENDING_RECHECK,
+        PairedBinaryPhase.BOTH_LEGS_ACTIVE,
+    }:
+        _inject_fixture_books(coord, cfg)
+        yes_book, no_book = _books(coord, cfg)
 
     if state.phase == PairedBinaryPhase.IDLE:
         if cfg.entry_dry_run:
@@ -1446,6 +2034,36 @@ async def _paired_binary_tick_body(
                     slippage_buffer=ev.slippage_buffer,
                 )
             return
+        if lifecycle_guard is not None and timing_snap is not None:
+            block = lifecycle_guard.should_block_new_entry(timing_snap)
+            if block.blocked:
+                if lifecycle_entry_block is not None and lifecycle_entry_block[0] != block.reason:
+                    pb_facts.emit_strategy_lifecycle_entry_blocked(
+                        sink,
+                        run_id,
+                        state,
+                        yes_book,
+                        no_book,
+                        reason=block.reason or "blocked",
+                        phase=block.phase,
+                        seconds_to_close=timing_snap.seconds_to_close,
+                        min_survival_window_s=lifecycle_guard.policy.min_survival_window_s,
+                    )
+                    lifecycle_entry_block[0] = block.reason
+                return
+        if kill_mgr is not None:
+            ks_decision = kill_mgr.check(owner_id=cfg.owner_id, pair_id=cfg.market_id)
+            if kill_mgr.blocks_entry(ks_decision):
+                emit_kill_switch_fact(
+                    sink=sink,
+                    run_id=run_id,
+                    state=state,
+                    yes_book=yes_book,
+                    no_book=no_book,
+                    cfg=cfg,
+                    decision=ks_decision,
+                )
+                return
         state.pair_correlation_id = f"paired_binary_{uuid.uuid4().hex[:12]}"
         await _submit_entry_intents(
             app=app,
@@ -1460,7 +2078,7 @@ async def _paired_binary_tick_body(
             apply_local_shadow_fill=apply_local_shadow_fill,
             live_clob_client=live_clob_client,
         )
-        save_persisted_state(persist_path, state)
+        _persist_state_safe(sink=sink, run_id=run_id, state=state, persist_path=persist_path)
 
     elif state.phase == PairedBinaryPhase.BOTH_ENTRY_PENDING:
         action = await tick_pair_entry_pending(
@@ -1628,7 +2246,15 @@ async def _paired_binary_tick_body(
         PairedBinaryPhase.EXITING_NO,
         PairedBinaryPhase.EXITING_BOTH,
     }:
-        work = monitor.tick(coord, state, sink=sink, run_id=run_id, app=app)
+        work = monitor.tick(
+            coord,
+            state,
+            sink=sink,
+            run_id=run_id,
+            app=app,
+            monitor_trigger=monitor_trigger,
+            event_correlation=event_correlation,
+        )
         for w in work:
             leg = (w.intent_fact_extensions or {}).get("leg", "yes")
             await process_intent_work_unit(
@@ -1642,8 +2268,83 @@ async def _paired_binary_tick_body(
                 apply_local_shadow_fill=apply_local_shadow_fill,
                 live_clob_client=live_clob_client,
             )
+            ext = w.intent_fact_extensions or {}
+            if ext.get("survival_resting_cancel"):
+                from tyrex_pm.survival.enforcement_dispatch import mark_resting_cancelled
+
+                cancel_oid = str(ext.get("cancel_order_id") or "")
+                mark_resting_cancelled(state)
+                yes_book, no_book = _books(coord, cfg)
+                pb_facts.emit_survival_exit_resting_order_cancelled(
+                    sink,
+                    run_id,
+                    state,
+                    yes_book,
+                    no_book,
+                    payload={
+                        "module": (state.survivor_leg_state or {}).get("enforce_module", "trailing_stop"),
+                        "survivor_leg": leg,
+                        "order_id": cancel_oid,
+                        "cancel_order_id": cancel_oid,
+                        "reason": (state.survivor_leg_state or {}).get(
+                            "survival_shutdown_cancel_reason", "resting_cancel_ack"
+                        ),
+                    },
+                )
+                continue
             if getattr(strategy, "last_exit_submitted_leg", None) == leg:
-                confirm_exit_submitted(state, leg)  # type: ignore[arg-type]
+                if ext.get("survival_exit") and getattr(strategy, "last_exit_submitted_resting", False):
+                    from tyrex_pm.survival.enforcement_dispatch import mark_resting_order_placed
+
+                    oid = getattr(strategy, "last_exit_venue_order_id", None) or f"local:{leg}"
+                    ttl = ext.get("survival_local_ttl_s")
+                    if ttl is None and app.survival.enforcement.order_policy.managed_rest_enabled:
+                        ttl = app.survival.enforcement.order_policy.managed_rest_local_ttl_s
+                    mark_resting_order_placed(
+                        state,
+                        order_id=str(oid),
+                        local_ttl_s=float(ttl) if ttl is not None else None,
+                    )
+                    yes_book, no_book = _books(coord, cfg)
+                    pb_facts.emit_survival_exit_resting_order_placed(
+                        sink,
+                        run_id,
+                        state,
+                        yes_book,
+                        no_book,
+                        payload={
+                            "module": ext.get("survival_module", "trailing_stop"),
+                            "trigger_type": ext.get("survival_trigger_type", "survival_trailing_stop"),
+                            "survivor_leg": leg,
+                            "order_type": ext.get("survival_order_type", "GTC"),
+                            "policy_mode": ext.get("survival_policy_mode"),
+                            "order_id": str(oid),
+                            "local_ttl_s": ttl,
+                        },
+                    )
+                else:
+                    confirm_exit_submitted(state, leg)  # type: ignore[arg-type]
+                    if ext.get("survival_exit"):
+                        from tyrex_pm.survival.enforcement_dispatch import clear_enforce_in_flight
+
+                        clear_enforce_in_flight(state)
+            elif (
+                getattr(strategy, "last_exit_blocked_leg", None) == leg
+                and getattr(strategy, "last_exit_blocked_reason", None) == "OMS_REJECTED"
+                and ext.get("survival_exit")
+            ):
+                from tyrex_pm.survival.enforcement_dispatch import handle_survival_exit_oms_reject
+
+                handle_survival_exit_oms_reject(
+                    state,
+                    leg=str(leg),
+                    trigger_type=str(
+                        ext.get("survival_trigger_type")
+                        or ext.get("paired_binary_reason")
+                        or "survival_trailing_stop"
+                    ),
+                    error_msg=getattr(strategy, "last_exit_oms_error", None),
+                )
         _update_post_exit_state(
             state,
             cfg,
@@ -1652,8 +2353,18 @@ async def _paired_binary_tick_body(
             run_id=run_id,
             yes_book=yes_book,
             no_book=no_book,
+            survival=app.survival,
+            seconds_to_close=timing_snap.seconds_to_close if timing_snap is not None else None,
         )
         if state.phase == PairedBinaryPhase.DONE:
-            pb_facts.emit_realized_pnl(sink, run_id, state, yes_book, no_book)
+            pb_facts.emit_realized_pnl(
+                sink,
+                run_id,
+                state,
+                yes_book,
+                no_book,
+                coord=coord,
+                fill_reconciliation_cfg=app.execution.fill_reconciliation,
+            )
             pb_facts.emit_done(sink, run_id, state, yes_book, no_book)
 

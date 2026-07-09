@@ -1,0 +1,228 @@
+{
+  "decisions": {
+    "event_driven_vs_fixed_cadence": "favor_event_driven (provisional)",
+    "timestamp_used": "source_ts with recv_ts fallback",
+    "pair_stop_loss_buffer_candidate": "insufficient",
+    "trail_distance_candidate": "insufficient",
+    "survivor_floor_buffer_candidate": "insufficient",
+    "insufficient_latency_prior": true,
+    "median_near_close_spread": 0.01,
+    "candidate_disable_near_close_s": "insufficient",
+    "candidate_flatten_before_event_end_s": "insufficient",
+    "post_close_tradability_verdict": "limited (provisional)"
+  },
+  "bucket_rows": [
+    {
+      "bucket_id": "jump|btc_5m_20260705_1705",
+      "n_observations": 923,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1710",
+      "n_observations": 783,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1715",
+      "n_observations": 870,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1720",
+      "n_observations": 713,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1725",
+      "n_observations": 777,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1730",
+      "n_observations": 1003,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1735",
+      "n_observations": 713,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1740",
+      "n_observations": 689,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1745",
+      "n_observations": 637,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1750",
+      "n_observations": 1206,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1755",
+      "n_observations": 695,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1800",
+      "n_observations": 863,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1805",
+      "n_observations": 784,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1810",
+      "n_observations": 609,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1815",
+      "n_observations": 664,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1820",
+      "n_observations": 714,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1825",
+      "n_observations": 624,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1830",
+      "n_observations": 754,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1835",
+      "n_observations": 697,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1840",
+      "n_observations": 790,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1845",
+      "n_observations": 759,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1850",
+      "n_observations": 1082,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1855",
+      "n_observations": 840,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1900",
+      "n_observations": 895,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1905",
+      "n_observations": 814,
+      "n_markets": 1,
+      "sufficient": true
+    },
+    {
+      "bucket_id": "jump|btc_5m_20260705_1910",
+      "n_observations": 530,
+      "n_markets": 1,
+      "sufficient": true
+    }
+  ],
+  "confidence": "low",
+  "total_sample_size": 20428,
+  "per_bucket_samples": {
+    "jump|btc_5m_20260705_1705": 923,
+    "jump|btc_5m_20260705_1710": 783,
+    "jump|btc_5m_20260705_1715": 870,
+    "jump|btc_5m_20260705_1720": 713,
+    "jump|btc_5m_20260705_1725": 777,
+    "jump|btc_5m_20260705_1730": 1003,
+    "jump|btc_5m_20260705_1735": 713,
+    "jump|btc_5m_20260705_1740": 689,
+    "jump|btc_5m_20260705_1745": 637,
+    "jump|btc_5m_20260705_1750": 1206,
+    "jump|btc_5m_20260705_1755": 695,
+    "jump|btc_5m_20260705_1800": 863,
+    "jump|btc_5m_20260705_1805": 784,
+    "jump|btc_5m_20260705_1810": 609,
+    "jump|btc_5m_20260705_1815": 664,
+    "jump|btc_5m_20260705_1820": 714,
+    "jump|btc_5m_20260705_1825": 624,
+    "jump|btc_5m_20260705_1830": 754,
+    "jump|btc_5m_20260705_1835": 697,
+    "jump|btc_5m_20260705_1840": 790,
+    "jump|btc_5m_20260705_1845": 759,
+    "jump|btc_5m_20260705_1850": 1082,
+    "jump|btc_5m_20260705_1855": 840,
+    "jump|btc_5m_20260705_1900": 895,
+    "jump|btc_5m_20260705_1905": 814,
+    "jump|btc_5m_20260705_1910": 530
+  },
+  "provisional": true,
+  "latency_prior": {
+    "p50_event_to_decision_ms": null,
+    "p90_event_to_decision_ms": null,
+    "p95_event_to_decision_ms": null,
+    "p50_decision_to_submit_ms": null,
+    "p90_decision_to_submit_ms": null,
+    "p95_decision_to_submit_ms": null,
+    "p50_submit_to_ack_ms": null,
+    "p90_submit_to_ack_ms": null,
+    "p95_submit_to_ack_ms": null,
+    "p50_total_trigger_to_ack_ms": null,
+    "p90_total_trigger_to_ack_ms": null,
+    "p95_total_trigger_to_ack_ms": null,
+    "source_runs": [],
+    "available_fields": [],
+    "missing_fields": [
+      "decision_to_submit",
+      "event_to_decision",
+      "submit_to_ack",
+      "total_trigger_to_ack"
+    ],
+    "confidence": "low",
+    "sample_count_latency_chain": 0,
+    "partial_submit_to_ack_only": false
+  }
+}

@@ -127,6 +127,19 @@ A strategy **may** read allocation via `coord.allocation_ledger` (read-only) and
 
 Production TP/SL is the [`protection/`](modules/protection/README.md) overlay — never inline in a strategy. Build a `ProtectionPolicy`, and after the BUY reaches `allocation_buy_applied` (CONFIRMED), call `ProtectionMonitor.register(owner_id=..., ...)`. Tick it against `MarketStateStore`; returned urgent `ExitIntent` work units run through the same `process_intent_work_unit` path (RiskEngine → ExecutionPlanner → `validate_planned_order` → OMS).
 
+### 4.2c Extend survival (Phase 1 paired-binary)
+
+Survival logic lives under `survival/` and is invoked from `strategies/paired_binary/monitor.py` — **not** from generic strategy `on_signal`.
+
+1. Add evaluation in the appropriate module (`survivor_floor.py`, `trailing_stop.py`, …) returning a typed evaluation dataclass.
+2. Wire into `survival/advisory.py::evaluate_survival_advisory` enforce precedence (floor before trailing).
+3. If OMS dispatch is needed, extend `enforcement_dispatch.py` and emit facts via `strategies/paired_binary/facts.py`.
+4. Add config fields to `Survival*Config` in `runtime/config.py` with safe defaults (`advisory`, disabled).
+5. Add fact constants to `reporting/schema_v2.py` and validator rules in `scripts/validate_paired_binary_phase2_live_run.py`.
+6. Document in [modules/survival/README.md](modules/survival/README.md).
+
+Do **not** bypass quality gates or RiskEngine for enforce exits.
+
 ### 4.3 Add a new venue
 
 Drop a sibling package under `venue/<name>/` mirroring `venue/polymarket/` (REST clients, WS handlers, normalizers, auth, env helpers). Replace `clob_bridge.PyClobBridge` with the new venue's bridge in `LiveOMS`. The `OMSBackend` Protocol in `execution/adapters.py` is intentionally tiny so any `submit / cancel` backend plugs in. If the venue exposes per-market truth (tick / min-size / fees), mirror `venue/polymarket/market_info.py`: define a frozen dataclass + cache, surface a snapshot through `RiskContext.market_info`, and let the existing `risk.venue_min_size` and `execution.order_builder` boundaries consume it — V2-native code paths already handle the "no cache wired" fallback.

@@ -1,0 +1,65 @@
+# Rich BTC 5m recorder — PM + Binance + RTDS Chainlink (M2B.3-A).
+#
+# Run:
+#   python -m tyrex_pm.runtime.app record --scenario config/scenarios/record_btc5m_rich.yaml
+#
+# Requires:
+#   pip install 'tyrex-pm[record]'   # zstd
+#   pip install 'tyrex-pm[live]'     # websockets
+
+execution_mode: shadow
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    event_backbone:
+      enabled: true
+      reorder_buffer_ms: 75
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: false
+      recovery_on_reconnect: false
+
+  recording:
+    enabled: true
+    output_dir: var/recordings
+    discovery_enabled: true
+    discovery_poll_s: 25
+    heartbeat_stall_s: 120
+    heartbeat_interval_s: 30
+    compress: true
+    tap_in_live: false
+    post_close_grace_s: 60
+    skip_expired_markets: true
+    pre_open_recording_lead_s: 60
+    segment_max_mb: 64
+    segment_max_s: 300
+
+  external_btc:
+    enabled: true
+    symbol: BTCUSDT
+    venue: binance
+    streams:
+      - bookTicker
+      - aggTrade
+    reconnect_backoff_s: 3
+    clock_sync_interval_s: 60
+
+  reference_prices:
+    enabled: true
+    venue: polymarket_rtds
+    feeds:
+      - chainlink
+    symbols:
+      - btc/usd
+    emit_price_to_beat: true
+    price_to_beat_max_lag_ms: 5000
+    reconnect_backoff_s: 3
+
+strategy:
+  kind: paired_binary
+  enabled: false

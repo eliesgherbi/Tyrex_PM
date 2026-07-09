@@ -10,6 +10,10 @@ Wires everything together. The only module allowed to import freely across layer
 | `config.py` | YAML loader + `AppConfig` parsing (see [CONFIG_MODEL.md](../../CONFIG_MODEL.md)) |
 | `coordinator.py` | `RuntimeCoordinator` — holds `WalletStore`, `OrderStore`, `AllocationLedger`, `HealthRuntime`, dedup signatures. Builds `RiskContext` per call |
 | `pipeline.py` | Guru signal → strategy → risk → OMS → **allocation ledger hooks** → reconcile + facts. `process_intent_work_unit`, `process_new_guru_signals` |
+| `paired_binary_run.py` | Long-running paired-binary loop: WS event wake, monitor tick, lifecycle guard, pre-close flatten |
+| `paired_binary_recovery.py` / `paired_binary_shutdown.py` | State recovery, open-exposure shutdown flatten |
+| `strategy_lifecycle.py` | Market-aware entry block / pre-close flatten |
+| `market_data_runtime.py` | REST bootstrap, fixture inject, WS cutover helpers |
 | `allocation_runtime.py` | Owner resolution, `clamp_planned_to_allocated`, buy/sell/reserve/clamp mutations + `allocation_ledger` facts |
 | `allocation_exit_lifecycle.py` | P4.1 resting SELL fill promotion via WS/reconcile |
 | `live_supervisor.py` | Background async loops for live mode: `supervised_heartbeat_loop`, `venue_refresh_loop`, `provisional_repair_probe_loop`, `user_ws_staleness_loop` |

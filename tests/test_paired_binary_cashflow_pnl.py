@@ -13,6 +13,7 @@ from tyrex_pm.core.ids import RunId
 from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_PAIRED_BINARY_PRICE_BASED_PNL_ESTIMATE,
     FACT_TYPE_PAIRED_BINARY_REALIZED_PNL,
+    FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_TENTATIVE,
     FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_UNAVAILABLE,
 )
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
@@ -66,6 +67,8 @@ def _state_with_cashflows(
     state = PairedBinaryRuntimeState(
         phase=PairedBinaryPhase.DONE,
         effective_qty=Decimal(qty),
+        yes_token_id=YES,
+        no_token_id=NO,
         yes_entry=Decimal("0.53"),
         no_entry=Decimal("0.48"),
         pair_correlation_id="pair-1",
@@ -205,10 +208,13 @@ def test_realized_pnl_fact_includes_cashflow_sources(tmp_path: Path) -> None:
     with JsonlSink(sink_path) as sink:
         emit_realized_pnl(sink, RunId("run-1"), state, _leg_book(YES), _leg_book(NO))
     facts = _read_facts(sink_path)
-    assert len(facts) == 1
-    assert facts[0]["fact_type"] == FACT_TYPE_PAIRED_BINARY_REALIZED_PNL
-    payload = facts[0]["payload"]
-    assert payload["yes_entry_cash_source"] == SOURCE_OMS_MATCH_EVIDENCE
+    types = [f["fact_type"] for f in facts]
+    assert FACT_TYPE_PAIRED_BINARY_REALIZED_PNL not in types
+    assert FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_TENTATIVE in types
+    pnl_fact = next(f for f in facts if f["fact_type"] == FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_TENTATIVE)
+    payload = pnl_fact["payload"]
+    assert payload["yes_entry_cash_source"] == "oms_ack"
+    assert payload["pnl_status"] == "tentative"
     assert payload["pnl_total"] == "-0.35"
     assert payload["yes_exit_avg_price"] == "0.57"
     assert payload["no_exit_avg_price"] == "0.37"

@@ -1,0 +1,14 @@
+{
+  "partition": "E:\\polymarket\\Tyrex_PM\\var\\parquet\\date=2026-07-05",
+  "clean_markets": "E:\\polymarket\\Tyrex_PM\\research\\output\\m2b4\\clean_markets.csv",
+  "latency_prior": "E:\\polymarket\\Tyrex_PM\\research\\output\\m2b4\\latency_prior.json",
+  "markets_included": 26,
+  "exploratory_traces": [
+    "01_exploratory_trace.json",
+    "02_exploratory_trace.json",
+    "03_exploratory_trace.json",
+    "04_exploratory_trace.json",
+    "05_exploratory_trace.json",
+    "06_exploratory_trace.json"
+  ]
+}

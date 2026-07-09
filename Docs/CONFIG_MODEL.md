@@ -241,7 +241,86 @@ execution:                              # P3 architecture_enhance (dark-launched
 | `supervisors.adoption_grace_s` | Window in which a fresh venue order id with no local row is allowed to adopt onto a no-vid provisional submit |
 | `logging.level` | Python logging level for the process |
 
-See [LIVE_ARCHITECTURE.md §3](LIVE_ARCHITECTURE.md#3-reconcile-state-machine) for how these knobs interact.
+See [LIVE_ARCHITECTURE.md §3](LIVE_ARCHITECTURE.md#3-reconcile-pipeline) for how these knobs interact.
+
+### 4.1 Survival (Phase 1)
+
+Under `runtime.survival` in scenario overlays. **Defaults:** `enabled: false`; all module `enforcement_mode: advisory`; `stall_exit.enabled: false`.
+
+```yaml
+runtime:
+  survival:
+    enabled: true
+    monitor_mode: ws_event          # ws_event | hybrid | poll
+    survivor_floor:
+      enabled: true
+      enforcement_mode: advisory    # advisory | enforce
+      mode: winner_entry_price
+      floor_buffer: "0.00"
+      require_fresh_book: true
+      max_spread: "0.04"
+      min_depth_fraction: "0.8"
+    recovery_level:
+      desired_buffer: "0.00"
+      activation_buffer: "0.00"
+    trailing_stop:
+      enabled: true
+      enforcement_mode: enforce       # scenario-specific; global default advisory
+      activation_mode: loss_recovered
+      trail_distance: "0.025"
+      arm_delay_s: 5.0
+    exit_planning:
+      require_executable_evidence: true
+      min_depth_fraction: "0.8"
+    enforcement:
+      retry_quality_rejects: false    # global default; true in trailing-enforce scenarios
+      max_quality_reject_retries: 10
+      quality_reject_retry_backoff_s: 0.25
+      abandon_quality_reject_after_s: 10
+      order_policy:
+        mode: fak_retry
+        max_fak_retries: 3
+        reprice_on_retry: true
+    stall_exit:
+      enabled: false                  # legacy path; off in simplified Phase 1
+```
+
+| Key | Meaning |
+|-----|---------|
+| `survival.enabled` | Master toggle; false = no survival evaluation |
+| `monitor_mode` | `ws_event` wakes monitor on book updates; `poll` uses tick interval only |
+| `*.enforcement_mode` | `advisory` = facts only; `enforce` = OMS reduce-only exit on trigger |
+| `enforcement.retry_quality_rejects` | Latch pending intent when enforce skipped for `quality_reject` |
+| `enforcement.order_policy.*` | FAK retry / managed REST for survival exits |
+
+Full operator guide: [Implementation/Survivor_target/phase1_parameter_guide.md](Implementation/Survivor_target/phase1_parameter_guide.md).
+
+### 4.2 Strategy lifecycle (paired-binary)
+
+Under `runtime.strategy_lifecycle`:
+
+```yaml
+runtime:
+  strategy_lifecycle:
+    mode: market_aware
+    flatten_before_event_end_s: 20
+    block_new_entry_phases: [near_close, closed]
+    min_survival_window_s: 45
+```
+
+Pre-close flatten **preempts** pending survival exit intents (`survival_enforce_exit_abandoned` reason `pre_close_flatten_preempted`).
+
+### 4.3 Market data (Phase 2 extensions)
+
+When `market_data.enabled: true`, scenarios may also set:
+
+| Key | Meaning |
+|-----|---------|
+| `market_data.mode` | `ws_primary` for live paired-binary (REST bootstrap + recovery only) |
+| `market_data.quality.enforcement_mode` | `enforce` applies gate rejections |
+| `market_data.quality.require_ws_primary_for_entry` | Block entry on non-WS book source |
+
+Paired with `execution.planner.enabled: true` for executable depth at submit time.
 
 ---
 
@@ -282,6 +361,8 @@ Built-in scenarios in `config/scenarios/`:
 | `shadow_guru.yaml` | Default development / golden-test mode | `execution_mode: shadow`, fast guru poll (`1 s`), large synthetic USDC bootstrap |
 | `live_guru.yaml` | Live guru-follow on Polymarket | `execution_mode: live` only (inherits risk defaults from `config/risk/default.yaml`) |
 | `live_attest.yaml` | One-shot post + cancel attestation | `capital.enabled: false`, `venue_min_size.enabled: false`, relaxed `notional` band, `require_user_ws_live: false` |
+| `live_paired_binary_phase1_trailing_enforce.yaml` | Phase 1 survival experiment: trailing enforce + quality-reject retry | `survival.enabled: true`, `trailing_stop.enforcement_mode: enforce`, `survivor_floor.enforcement_mode: advisory` |
+| `live_paired_binary_tiny.yaml` / `live_paired_binary_ws_primary*.yaml` | Phase 2 WS-primary paired-binary live | `market_data.mode: ws_primary`, planner enabled |
 
 Add new scenarios as small overlays — never duplicate the defaults wholesale.
 

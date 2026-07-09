@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "market_id": "external/btc_binance",
+  "yes_token_id": "external_btc",
+  "no_token_id": "external_btc",
+  "recording_started_ts": "2026-07-03T12:00:04+00:00",
+  "recording_ended_ts": "2026-07-03T12:05:00+00:00",
+  "compressed": false,
+  "dropped_events": 0,
+  "segments": [
+    {
+      "path": "events-00001.jsonl",
+      "event_count": 2,
+      "first_recv_ts": "2026-07-03T12:00:04+00:00",
+      "last_recv_ts": "2026-07-03T12:00:05+00:00",
+      "bytes": 50
+    }
+  ],
+  "event_types_seen": {
+    "external_btc_tick": 1,
+    "clock_sync": 1
+  },
+  "gaps": [],
+  "git_sha": "test",
+  "scenario": "golden",
+  "linked_run_ids": []
+}

@@ -1,0 +1,25 @@
+{
+  "p50_event_to_decision_ms": null,
+  "p90_event_to_decision_ms": null,
+  "p95_event_to_decision_ms": null,
+  "p50_decision_to_submit_ms": null,
+  "p90_decision_to_submit_ms": null,
+  "p95_decision_to_submit_ms": null,
+  "p50_submit_to_ack_ms": null,
+  "p90_submit_to_ack_ms": null,
+  "p95_submit_to_ack_ms": null,
+  "p50_total_trigger_to_ack_ms": null,
+  "p90_total_trigger_to_ack_ms": null,
+  "p95_total_trigger_to_ack_ms": null,
+  "source_runs": [],
+  "available_fields": [],
+  "missing_fields": [
+    "decision_to_submit",
+    "event_to_decision",
+    "submit_to_ack",
+    "total_trigger_to_ack"
+  ],
+  "confidence": "low",
+  "sample_count_latency_chain": 0,
+  "partial_submit_to_ack_only": false
+}

@@ -12,9 +12,11 @@ store stays empty and every read is reported stale. Shadow WS (M1) writes a
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from tyrex_pm.core.events import EventType, MarketEvent
 from tyrex_pm.core.ids import TokenId
 from tyrex_pm.core.time import utc_now
 from tyrex_pm.market_data.models import BookLevel, BookSource
@@ -70,7 +72,13 @@ def _apply_changes_to_side(
     return [BookLevel(p, s) for p, s in merged.items()]
 
 
-def apply_price_change(store: MarketStateStore, msg: dict[str, Any], *, source: str = BookSource.WEBSOCKET) -> bool:
+def apply_price_change(
+    store: MarketStateStore,
+    msg: dict[str, Any],
+    *,
+    source: str = BookSource.WEBSOCKET,
+    received_ts: datetime | None = None,
+) -> bool:
     """Apply a ``price_change`` delta on top of the current book for the token.
 
     Supports legacy ``changes`` + top-level ``asset_id`` and Polymarket
@@ -97,7 +105,7 @@ def apply_price_change(store: MarketStateStore, msg: dict[str, Any], *, source: 
             }
             if ch.get("hash") is not None:
                 delta["hash"] = ch.get("hash")
-            applied = apply_price_change(store, delta, source=source) or applied
+            applied = apply_price_change(store, delta, source=source, received_ts=received_ts) or applied
         return applied
 
     asset = msg.get("asset_id") or msg.get("market")
@@ -128,7 +136,7 @@ def apply_price_change(store: MarketStateStore, msg: dict[str, Any], *, source: 
         bids,
         asks,
         source=source,
-        received_ts=utc_now(),
+        received_ts=received_ts if received_ts is not None else utc_now(),
         exchange_ts=parse_exchange_ts(msg.get("timestamp")),
         book_hash=str(msg["hash"]) if msg.get("hash") is not None else None,
     )
@@ -140,6 +148,7 @@ def apply_book_message(
     msg: dict[str, Any],
     *,
     source: str = BookSource.WEBSOCKET,
+    received_ts: datetime | None = None,
 ) -> bool:
     parsed = parse_book_message(msg)
     if parsed is None:
@@ -150,11 +159,51 @@ def apply_book_message(
         bids,
         asks,
         source=source,
-        received_ts=utc_now(),
+        received_ts=received_ts if received_ts is not None else utc_now(),
         exchange_ts=meta.get("exchange_ts"),
         book_hash=meta.get("book_hash"),
     )
     return True
+
+
+def project_event(
+    store: MarketStateStore,
+    event: MarketEvent,
+    *,
+    source: str = BookSource.WEBSOCKET,
+) -> str | None:
+    """Apply a canonical :class:`MarketEvent` to ``store``.
+
+    Returns ``snapshot_id`` when a book event is applied, else ``None``.
+    """
+    if event.event_type == EventType.WS_SEQ_GAP:
+        if event.token_id is not None:
+            store.set_reconnect_gap(event.token_id, True)
+        return None
+
+    raw = event.payload.get("raw")
+    if not isinstance(raw, dict):
+        return None
+
+    applied = False
+    if event.event_type == EventType.BOOK_SNAPSHOT:
+        applied = apply_book_message(store, raw, source=source, received_ts=event.recv_ts)
+    elif event.event_type == EventType.BOOK_DELTA:
+        applied = apply_price_change(store, raw, source=source, received_ts=event.recv_ts)
+    else:
+        return None
+
+    if not applied:
+        return None
+    token_id = event.token_id
+    if token_id is None:
+        parsed = parse_book_message(raw)
+        if parsed is not None:
+            token_id = parsed[0]
+    if token_id is None:
+        return None
+    cap = store.capture(token_id)
+    return cap.snapshot_id if cap is not None else None
 
 
 def apply_market_message(

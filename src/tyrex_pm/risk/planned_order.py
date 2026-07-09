@@ -38,6 +38,11 @@ from tyrex_pm.execution.models import ExecutionPlan
 from tyrex_pm.risk import capital, deployment, inventory, kill_switch, venue_min_size
 from tyrex_pm.risk.deployment import RiskConfigCaps
 from tyrex_pm.risk.exits import apply_reduce_only_mark_fallback
+from tyrex_pm.risk.reduce_only_notional import (
+    build_bypass_denied_fact,
+    evaluate_reduce_only_min_notional_bypass,
+    resolve_context_attempted,
+)
 from tyrex_pm.runtime.config import AppConfig
 
 
@@ -50,6 +55,9 @@ def validate_planned_order(
     ctx: RiskContext,
     *,
     app: AppConfig,
+    reduce_only_context: str | None = None,
+    intent_extensions: dict | None = None,
+    exit_book_evidence: dict | None = None,
 ) -> RiskDecision:
     r = app.risk
     work = plan.intent
@@ -73,7 +81,45 @@ def validate_planned_order(
     notional = work.size * price
     ext["planned_notional_usd"] = str(notional)
     if notional < r.notional.min_usd:
-        return _deny(rc.NOTIONAL_BELOW_MIN, ext)
+        decision_id = None
+        if intent_extensions:
+            decision_id = intent_extensions.get("decision_id")
+        if decision_id is None and plan.book_evidence:
+            pe = plan.book_evidence.get("planner_evidence")
+            if isinstance(pe, dict):
+                decision_id = pe.get("decision_id")
+        bypass = evaluate_reduce_only_min_notional_bypass(
+            work,
+            ctx,
+            min_usd=r.notional.min_usd,
+            reduce_only_context=reduce_only_context,
+            intent_extensions=intent_extensions,
+            exit_book_evidence=exit_book_evidence or plan.book_evidence,
+            decision_id=str(decision_id) if decision_id else None,
+        )
+        if bypass.allowed:
+            ext = {
+                **ext,
+                "reduce_only_min_notional_bypass": True,
+                "reduce_only_bypass_context": (bypass.fact_payload or {}).get("context"),
+            }
+            if bypass.fact_payload:
+                ext["reduce_only_bypass_fact"] = bypass.fact_payload
+        else:
+            if resolve_context_attempted(
+                reduce_only_context=reduce_only_context,
+                intent_extensions=intent_extensions,
+            ):
+                ext["reduce_only_bypass_denied_fact"] = build_bypass_denied_fact(
+                    work,
+                    min_usd=r.notional.min_usd,
+                    deny_reason=bypass.deny_reason or "context_not_allowed",
+                    reduce_only_context=reduce_only_context,
+                    intent_extensions=intent_extensions,
+                    exit_book_evidence=exit_book_evidence or plan.book_evidence,
+                    decision_id=str(decision_id) if decision_id else None,
+                )
+            return _deny(rc.NOTIONAL_BELOW_MIN, ext)
     if notional > r.notional.max_usd:
         if r.notional.max_policy == "cap":
             # The planner should have respected the cap; a plan above it is a bug.

@@ -30,6 +30,11 @@ from tyrex_pm.risk import (
 from tyrex_pm.risk.deployment import RiskConfigCaps
 from tyrex_pm.risk.evidence_format import s_usd, s_usd_map
 from tyrex_pm.risk.exits import apply_reduce_only_mark_fallback
+from tyrex_pm.risk.reduce_only_notional import (
+    build_bypass_denied_fact,
+    evaluate_reduce_only_min_notional_bypass,
+    resolve_context_attempted,
+)
 from tyrex_pm.runtime.config import AppConfig
 
 
@@ -40,6 +45,9 @@ def evaluate_intent(
     app: AppConfig,
     run_id: RunId,
     exit_book_evidence: dict | None = None,
+    reduce_only_context: str | None = None,
+    intent_extensions: dict | None = None,
+    decision_id: str | None = None,
 ) -> RiskDecision:
     r = app.risk
 
@@ -74,6 +82,41 @@ def evaluate_intent(
             max_usd=r.notional.max_usd,
             max_policy=r.notional.max_policy,
         )
+        if deny == rc.NOTIONAL_BELOW_MIN:
+            bypass = evaluate_reduce_only_min_notional_bypass(
+                intent,
+                ctx,
+                min_usd=r.notional.min_usd,
+                reduce_only_context=reduce_only_context,
+                intent_extensions=intent_extensions,
+                exit_book_evidence=exit_book_evidence,
+                decision_id=decision_id,
+            )
+            if bypass.allowed:
+                deny = None
+                ext = {
+                    **ext,
+                    "reduce_only_min_notional_bypass": True,
+                    "reduce_only_bypass_context": (bypass.fact_payload or {}).get("context"),
+                }
+                if bypass.fact_payload:
+                    ext["reduce_only_bypass_fact"] = bypass.fact_payload
+            elif bypass.deny_reason and resolve_context_attempted(
+                reduce_only_context=reduce_only_context,
+                intent_extensions=intent_extensions,
+            ):
+                ext = {
+                    **ext,
+                    "reduce_only_bypass_denied_fact": build_bypass_denied_fact(
+                        intent,
+                        min_usd=r.notional.min_usd,
+                        deny_reason=bypass.deny_reason,
+                        reduce_only_context=reduce_only_context,
+                        intent_extensions=intent_extensions,
+                        exit_book_evidence=exit_book_evidence,
+                        decision_id=decision_id,
+                    ),
+                }
         # Always carry the in-flight reservation summary on the decision (approve OR deny)
         # so the ``risk_decision`` fact is self-contained for operator audit. The deployment +
         # capital gates further down use the same set; here we just surface the totals

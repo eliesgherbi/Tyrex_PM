@@ -1,0 +1,2 @@
+{"event_type":"book_snapshot","token_id":"tok-gap","venue_cursor":"0xbbb","source_ts":"2026-07-03T12:00:01+00:00","recv_ts":"2026-07-03T12:00:01.001+00:00","payload":{"raw":{"hash":"0xbbb"}}}
+{"event_type":"book_delta","token_id":"tok-gap","venue_cursor":"0xaaa","source_ts":"2026-07-03T12:00:01.100+00:00","recv_ts":"2026-07-03T12:00:01.101+00:00","payload":{"raw":{"hash":"0xaaa"}}}

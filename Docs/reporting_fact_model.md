@@ -332,3 +332,29 @@ jq -c 'select(.fact_type=="reconcile" and .payload.reconcile_blocks_live==true) 
 ```
 
 The `correlation_id` is the cheap join key; a single guru trade typically produces one of each: `guru_signal`, `intent_created`, `risk_decision`, then `oms_submit` / `oms_reject` / `oms_cancel` (or one `strategy_skip`).
+
+---
+
+## 7. Event correlation fields (Phase 2B M2B.0-C)
+
+When `runtime.observability.emit_event_correlation` is **true** (default **false**), material decision facts may include these **optional** payload keys:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `trigger_event_id` | `str \| null` | `MarketEvent.event_id` from the WS book update that woke the coordinator (`null` on poll/timer ticks) |
+| `event_recv_ts` | ISO8601 `str \| null` | Venue receive timestamp of the triggering event |
+| `decision_wall_ts` | ISO8601 `str` | Wall-clock UTC timestamp when the decision fact was emitted |
+
+**Preserved fields (unchanged):** `decision_ts` remains a **monotonic float** in `LatencyTracker` / latency samples; `monitor_trigger`, `tick_source`, `trigger_to_submit_ms`, and related latency keys are not renamed.
+
+**Fact types that may carry correlation (when flag on):**
+
+- `decision_snapshot`
+- `latency_chain`
+- `survival_monitor_evaluated`
+- `survivor_hard_floor_triggered`
+- `survival_enforce_exit_requested`
+
+When the flag is **off**, these keys are **absent** — payloads match pre-M2B.0-C shape. Validators must not require the new keys.
+
+**Requires** `runtime.market_data.event_backbone.enabled: true` (or `TYREX_EVENT_BACKBONE=1`) for non-null `trigger_event_id` in live WS-primary runs.

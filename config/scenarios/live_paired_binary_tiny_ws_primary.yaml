@@ -52,6 +52,14 @@ runtime:
   paired_binary:
     poll_interval_s: 1.0
     max_decision_rate_per_market_ms: 75
+    open_exposure_on_max_runtime: force_reduce_only_exit
+    open_exposure_timeout_s: 300
+    survivor_on_max_runtime: force_reduce_only_exit
+    survivor_timeout_s: 300
+    allow_terminal_state_resume: false
+    market_timing_diagnostics:
+      enabled: true
+      near_close_window_s: 45
   allocation_ledger:
     clamp_grace_s_after_buy: 90
 

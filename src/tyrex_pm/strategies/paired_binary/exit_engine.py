@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
+from tyrex_pm.core.enums import OrderStyle
 from tyrex_pm.core.ids import TokenId
+from tyrex_pm.core.models import URGENCY_URGENT
 from tyrex_pm.runtime.config import PairedBinaryStrategyConfig
 from tyrex_pm.runtime.coordinator import RuntimeCoordinator
 from tyrex_pm.runtime.intent_work import IntentWorkUnit
@@ -25,7 +27,15 @@ from tyrex_pm.strategies.paired_binary.state import (
     PairedBinaryRuntimeState,
 )
 
-TriggerType = Literal["stop_loss", "take_profit", "timeout"]
+TriggerType = Literal[
+    "stop_loss",
+    "take_profit",
+    "timeout",
+    "survival_trailing_stop",
+    "survival_stall_exit",
+    "survival_economics_exit",
+    "survival_hard_floor",
+]
 ExitLeg = Literal["yes", "no"]
 BlockReason = Literal[
     "NO_SELLABLE_INVENTORY",
@@ -223,21 +233,52 @@ def prepare_no_stop_trigger(
     state.phase = PairedBinaryPhase.STOP_PENDING_NO
 
 
+@dataclass(frozen=True)
+class RepriceSurvivorOutcome:
+    old_target: Decimal | None
+    new_target: Decimal | None
+    survival_result: object | None = None
+
+
 def reprice_survivor_after_loser_exit(
     state: PairedBinaryRuntimeState,
     cfg: PairedBinaryStrategyConfig,
     *,
     loser_leg: ExitLeg,
     loser_exit_fill: Decimal,
-) -> tuple[Decimal | None, Decimal | None]:
-    """Reprice survivor target using realized loser loss. Returns (old_target, new_target)."""
+    survival=None,
+    seconds_to_close: float | None = None,
+    survivor_bid: Decimal | None = None,
+) -> RepriceSurvivorOutcome:
+    """Reprice survivor target using realized loser loss."""
     if state.pair_cost is None or state.yes_entry is None or state.no_entry is None:
-        return None, None
+        return RepriceSurvivorOutcome(None, None)
+
+    if loser_leg == "yes":
+        old = state.no_target
+    else:
+        old = state.yes_target
+
+    if survival is not None and survival.enabled:
+        from tyrex_pm.survival.recovery_level import setup_simplified_survivor_after_loser_exit
+
+        setup = setup_simplified_survivor_after_loser_exit(
+            state,
+            cfg,
+            survival,
+            loser_leg=loser_leg,
+            loser_exit_fill=loser_exit_fill,
+            survivor_bid=survivor_bid,
+            seconds_to_close=seconds_to_close,
+        )
+        if setup is None:
+            return RepriceSurvivorOutcome(old, None)
+        recovery, _floor = setup
+        return RepriceSurvivorOutcome(old, recovery.breakeven_price, recovery)
 
     if loser_leg == "yes":
         survivor_entry = state.no_entry
         loser_entry = state.yes_entry
-        old = state.no_target
         plan = reprice_survivor_target_after_loser_exit(
             survivor_entry=survivor_entry,
             loser_entry=loser_entry,
@@ -249,11 +290,10 @@ def reprice_survivor_after_loser_exit(
         )
         state.no_planned_target = plan.planned_target
         state.no_target = plan.trigger_target
-        return old, plan.trigger_target
+        return RepriceSurvivorOutcome(old, plan.trigger_target)
 
     survivor_entry = state.yes_entry
     loser_entry = state.no_entry
-    old = state.yes_target
     plan = reprice_survivor_target_after_loser_exit(
         survivor_entry=survivor_entry,
         loser_entry=loser_entry,
@@ -265,7 +305,13 @@ def reprice_survivor_after_loser_exit(
     )
     state.yes_planned_target = plan.planned_target
     state.yes_target = plan.trigger_target
-    return old, plan.trigger_target
+    return RepriceSurvivorOutcome(old, plan.trigger_target)
+
+
+def prepare_survival_enforce_trigger(state: PairedBinaryRuntimeState, leg: ExitLeg, trigger_type: TriggerType) -> None:
+    rt = leg_runtime(state, leg)
+    rt.pending_trigger_type = trigger_type
+    state.phase = pending_phase_for_leg(leg, "take_profit")
 
 
 def prepare_tp_trigger(state: PairedBinaryRuntimeState, leg: ExitLeg) -> None:
@@ -325,10 +371,17 @@ def try_build_exit(
     pair_id: str,
     book_stale: bool = False,
     target_price: Decimal | None = None,
+    order_style: OrderStyle | None = None,
+    limit_price: Decimal | None = None,
+    urgency: str | None = None,
+    extra_extensions: dict[str, object] | None = None,
 ) -> ExitBuildResult:
     owner = cfg.owner_id
     token_id = token_for_leg(cfg, leg)
     leg_rt = leg_runtime(state, leg)
+    style = order_style or cfg.exit_order_style
+    exit_price = limit_price if limit_price is not None else bid
+    exit_urgency = urgency if urgency is not None else URGENCY_URGENT
     planned_stop, trigger_stop = _stop_context_prices(state, leg)
     planned_target, trigger_target = _target_context_prices(state, leg)
     ref = state.yes_entry if leg == "yes" else state.no_entry
@@ -357,7 +410,7 @@ def try_build_exit(
         owner_id=owner,
         token_id=token_id,
         planned=qty,
-        exit_order_style=cfg.exit_order_style,
+        exit_order_style=style,
     )
     block = sizing_block_reason(sizing, book_stale=book_stale)
     ctx = ExitTriggerContext(
@@ -379,13 +432,13 @@ def try_build_exit(
     if block is not None:
         return ExitBuildResult(work=None, ctx=ctx, blocked=True)
 
-    leg_rt.last_exit_bid = bid
+    leg_rt.last_exit_bid = exit_price
     leg_corr = leg_rt.leg_correlation_id or f"{pair_id}:{leg}:exit"
     work = build_exit_work_unit(
         token_id=token_id,
         size=sizing.sellable_qty,
-        limit_price=bid,
-        order_style=cfg.exit_order_style,
+        limit_price=exit_price,
+        order_style=style,
         owner_id=owner,
         pair_correlation_id=pair_id,
         leg=leg,
@@ -396,8 +449,10 @@ def try_build_exit(
             owner_id=owner,
             token_id=token_id,
             planned=qty,
-            exit_order_style=cfg.exit_order_style,
+            exit_order_style=style,
         ),
+        urgency=exit_urgency,
+        extra_extensions=extra_extensions,
     )
     return ExitBuildResult(work=work, ctx=ctx, blocked=work is None)
 

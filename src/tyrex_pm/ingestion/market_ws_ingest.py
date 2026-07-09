@@ -17,7 +17,10 @@ from typing import Any
 
 from tyrex_pm.core.ids import RunId, TokenId
 from tyrex_pm.core.time import utc_now
-from tyrex_pm.ingestion.market_stream import apply_market_message
+from tyrex_pm.core.events import EventType, MarketEvent
+from tyrex_pm.ingestion.event_factory import build_market_event_from_ws
+from tyrex_pm.ingestion.market_stream import apply_market_message, project_event
+from tyrex_pm.ingestion.sequencer import MarketSequencer
 from tyrex_pm.market_data.models import BookSource, RawMarketEvent, SourceQuality
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import (
@@ -49,6 +52,16 @@ def market_ws_shadow_enabled(*, env: os._Environ[str] | None = None, config_flag
 def market_ws_primary_enabled(*, env: os._Environ[str] | None = None, config_flag: bool = False) -> bool:
     env_map = env or os.environ
     raw = str(env_map.get("TYREX_MARKET_WS_PRIMARY", "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return config_flag
+
+
+def event_backbone_enabled(*, env: os._Environ[str] | None = None, config_flag: bool = False) -> bool:
+    env_map = env or os.environ
+    raw = str(env_map.get("TYREX_EVENT_BACKBONE", "")).strip().lower()
     if raw in {"1", "true", "yes", "on"}:
         return True
     if raw in {"0", "false", "no", "off"}:
@@ -122,6 +135,39 @@ def _compare_books(
     _emit(sink, run_id, FACT_TYPE_WS_VS_REST_BOOK_COMPARE, payload)
 
 
+def _emit_sequence_gap_facts(
+    *,
+    token_id: TokenId,
+    book_hash: str,
+    last_book_hash: str,
+    store: MarketStateStore,
+    sink: JsonlSink | None,
+    run_id: RunId | str | None,
+    primary_mode: bool,
+    on_sequence_gap: Callable[[TokenId], Any] | None,
+) -> None:
+    _emit(
+        sink,
+        run_id,
+        FACT_TYPE_OUT_OF_ORDER_EVENT,
+        {
+            "token_id": str(token_id),
+            "book_hash": book_hash,
+            "last_book_hash": last_book_hash,
+        },
+    )
+    if primary_mode:
+        store.set_reconnect_gap(token_id, True)
+        _emit(
+            sink,
+            run_id,
+            FACT_TYPE_WS_SEQUENCE_GAP_DETECTED,
+            {"token_id": str(token_id), "reason": "out_of_order"},
+        )
+        if on_sequence_gap is not None:
+            on_sequence_gap(token_id)
+
+
 def _handle_sequence(
     store: MarketStateStore,
     token_id: TokenId,
@@ -139,26 +185,16 @@ def _handle_sequence(
     if last is not None and book_hash == last:
         return False
     if last is not None and book_hash < last:
-        _emit(
-            sink,
-            run_id,
-            FACT_TYPE_OUT_OF_ORDER_EVENT,
-            {
-                "token_id": str(token_id),
-                "book_hash": book_hash,
-                "last_book_hash": last,
-            },
+        _emit_sequence_gap_facts(
+            token_id=token_id,
+            book_hash=book_hash,
+            last_book_hash=last,
+            store=store,
+            sink=sink,
+            run_id=run_id,
+            primary_mode=primary_mode,
+            on_sequence_gap=on_sequence_gap,
         )
-        if primary_mode:
-            store.set_reconnect_gap(token_id, True)
-            _emit(
-                sink,
-                run_id,
-                FACT_TYPE_WS_SEQUENCE_GAP_DETECTED,
-                {"token_id": str(token_id), "reason": "out_of_order"},
-            )
-            if on_sequence_gap is not None:
-                on_sequence_gap(token_id)
         return False
     return True
 
@@ -188,12 +224,17 @@ async def run_market_ws_ingest(
     on_ws_connected: Callable[[], Any] | None = None,
     on_ws_disconnected: Callable[[], Any] | None = None,
     on_book_applied: Callable[[TokenId], Any] | None = None,
+    on_market_event_applied: Callable[[MarketEvent], Any] | None = None,
+    on_market_event_emitted: Callable[[MarketEvent], Any] | None = None,
     sink: JsonlSink | None = None,
     run_id: RunId | str | None = None,
     url: str | None = None,
     reconnect_backoff_s: float = 3.0,
     compare_interval_s: float = 5.0,
     on_gap_recovery: Callable[[], Any] | None = None,
+    event_backbone_config_flag: bool = False,
+    event_backbone_market_id: str | None = None,
+    event_backbone_reorder_buffer_ms: float = 75.0,
 ) -> None:
     """Market WS ingest — shadow (M1) or WS-primary authoritative (M8)."""
     ws_url = (url or os.environ.get("TYREX_MARKET_WS_URL") or DEFAULT_MARKET_WS_URL).strip()
@@ -225,6 +266,11 @@ async def run_market_ws_ingest(
     local_counter = 0
     last_compare = 0.0
     had_sequence = False
+    use_event_backbone = event_backbone_enabled(config_flag=event_backbone_config_flag)
+    sequencer: MarketSequencer | None = None
+    if use_event_backbone:
+        market_key = event_backbone_market_id or (str(token_ids[0]) if token_ids else "default")
+        sequencer = MarketSequencer(market_key, reorder_buffer_ms=event_backbone_reorder_buffer_ms)
 
     async def _invoke(cb: Callable[[], Any] | None) -> None:
         if cb is None:
@@ -276,6 +322,94 @@ async def run_market_ws_ingest(
                             )
                             if on_raw_event is not None:
                                 on_raw_event(event)
+                            if use_event_backbone and sequencer is not None:
+                                market_event = build_market_event_from_ws(
+                                    msg,
+                                    received_ts=received_ts,
+                                    connection_id=connection_id,
+                                    local_counter=local_counter,
+                                    market_id=sequencer.market_id,
+                                )
+                                if market_event is None:
+                                    continue
+                                if market_event.venue_cursor:
+                                    had_sequence = True
+                                for out_event in sequencer.ingest(market_event):
+                                    if on_market_event_emitted is not None:
+                                        on_market_event_emitted(out_event)
+                                    sequence_gap = False
+
+                                    def _on_sequence_gap(token_id: TokenId) -> None:
+                                        nonlocal sequence_gap
+                                        sequence_gap = True
+                                        _on_gap(token_id)
+
+                                    if out_event.event_type == EventType.WS_SEQ_GAP:
+                                        project_event(write_store, out_event)
+                                        gap_tid = out_event.token_id
+                                        if gap_tid is not None:
+                                            payload = out_event.payload
+                                            _emit_sequence_gap_facts(
+                                                token_id=gap_tid,
+                                                book_hash=str(
+                                                    payload.get("received_venue_cursor") or ""
+                                                ),
+                                                last_book_hash=str(
+                                                    payload.get("last_venue_cursor") or ""
+                                                ),
+                                                store=write_store,
+                                                sink=sink,
+                                                run_id=run_id,
+                                                primary_mode=primary_mode,
+                                                on_sequence_gap=_on_sequence_gap
+                                                if primary_mode
+                                                else None,
+                                            )
+                                        if (
+                                            primary_mode
+                                            and on_gap_recovery is not None
+                                            and sequence_gap
+                                        ):
+                                            await _invoke(on_gap_recovery)
+                                        continue
+                                    if not out_event.is_book_event():
+                                        if on_market_event_applied is not None:
+                                            result = on_market_event_applied(out_event)
+                                            if asyncio.iscoroutine(result):
+                                                await result
+                                        continue
+                                    applied = project_event(write_store, out_event) is not None
+                                    if not applied:
+                                        continue
+                                    tid = out_event.token_id
+                                    if primary_mode and tid is not None:
+                                        cap = write_store.capture(tid)
+                                        if (
+                                            cap is not None
+                                            and cap.source_quality == SourceQuality.WS_PRIMARY
+                                        ):
+                                            write_store.set_reconnect_gap(tid, False)
+                                    if on_book_applied is not None and tid is not None:
+                                        result = on_book_applied(tid)
+                                        if asyncio.iscoroutine(result):
+                                            await result
+                                    if on_market_event_applied is not None:
+                                        result = on_market_event_applied(out_event)
+                                        if asyncio.iscoroutine(result):
+                                            await result
+                                    if not primary_mode and shadow_store is not None:
+                                        now_mono = asyncio.get_event_loop().time()
+                                        if now_mono - last_compare >= compare_interval_s:
+                                            last_compare = now_mono
+                                            for tid_str in token_ids:
+                                                _compare_books(
+                                                    token_id=TokenId(str(tid_str)),
+                                                    authoritative=authoritative_store,
+                                                    shadow=shadow_store,
+                                                    sink=sink,
+                                                    run_id=run_id,
+                                                )
+                                continue
                             asset = msg.get("asset_id")
                             if asset is None and msg.get("price_changes"):
                                 pcs = msg.get("price_changes") or []

@@ -34,6 +34,53 @@ The official runtime spine is **generic and procedural** (`Signal → Strategy �
 | **Fail-closed risk** | `RiskEngine.evaluate_intent` returns a `RiskDecision` with a stable `reason_code`. Missing prices, stale wallet, drift, missing capital all deny. |
 | **Reporting is first-class** | Every decision emits a fact to `facts.jsonl` keyed by `run_id` + `correlation_id`. |
 | **Quantized USD evidence** | `risk/evidence_format.py` standardizes 6-decimal USD strings in facts so reports are diff-friendly. |
+| **WS-authoritative books (Phase 2)** | Live paired-binary decisions use WebSocket-primary `MarketStateStore`; REST is bootstrap/recovery, not entry when WS is healthy. |
+| **Survival is opt-in (Phase 1)** | `runtime.survival.enabled` defaults `false`; enforce modes default `advisory` until scenario overlays enable them. |
+
+---
+
+## 2.1 Phase 2 — WS event-driven backbone (infrastructure)
+
+Phase 2 replaced REST-polled books with a **WebSocket-authoritative** market-data layer for paired-binary live runs. Strategy logic is unchanged; decisions run on fresher books with executable depth and quality evidence.
+
+| Layer | Package / module | Responsibility |
+|-------|------------------|----------------|
+| Ingestion | `ingestion/market_stream.py` | WS book updates → `MarketStateStore` |
+| Store | `state/market_store.py` | Per-token snapshots, staleness, reconnect_gap flags |
+| Quality | `market_data/quality.py` | Context-aware gates (`ENTRY`, `STOP`, `URGENT_EXIT`, …) |
+| Executable depth | `market_data/executable_book.py` | Sweep VWAP, depth-at-size for planner + survival |
+| Planner | `execution/planner.py` | Order style/price between risk and OMS |
+| Scheduler | `runtime/paired_binary_run.py` | Event-driven monitor wake on WS book updates |
+| Readiness | `market_data/readiness_runtime.py` | Pause/resume on gap; block entry when not trading |
+
+**Validator:** `scripts/validate_m8_ws_primary_run.py`, `scripts/validate_paired_binary_phase2_live_run.py`.
+
+Deep dive: [Implementation/WebSocket_event_driven_backbone/phase_2.md](Implementation/WebSocket_event_driven_backbone/phase_2.md).
+
+---
+
+## 2.2 Phase 1 — Survival damage control (paired-binary)
+
+Phase 1 adds an **optional** survivor-management layer after the loser leg stops out. Default config leaves it disabled; live experiment scenarios enable it explicitly.
+
+**Simplified mechanical sequence** (current Phase 1 profiles):
+
+```text
+entry → pair stop → survivor hard floor (advisory) → recovery level → trailing (enforce) → order policy
+```
+
+| Module | Default enforcement | Role |
+|--------|---------------------|------|
+| `survivor_floor` | `advisory` | Floor at winner entry (+ buffer); facts only unless `enforce` |
+| `trailing_stop` | `advisory` (global); `enforce` in trailing-enforce scenarios | Arm after breakeven recovery; exit on trail-floor breach |
+| `enforcement.order_policy` | — | FAK retry, optional managed REST |
+| `enforcement.retry_quality_rejects` | `false` globally | Latch + WS retry on pre-submit quality reject (scenario opt-in) |
+
+Survival exits flow: `PairedBinaryMonitor` → `survival/advisory.py` → `enforcement_dispatch.py` → `IntentWorkUnit` → existing pipeline.
+
+**Not in default Phase 1 path:** `target_policy`, `stall_exit`, `reachability` scoring as primary exit drivers (code retained for earlier milestones).
+
+Deep dive: [Implementation/Survivor_target/phase1_parameter_guide.md](Implementation/Survivor_target/phase1_parameter_guide.md).
 
 ---
 
@@ -113,9 +160,9 @@ flowchart TB
 
 Component owners (one writer each): `runtime.app` wires everything; `RuntimeCoordinator` holds shared state; supervisors (heartbeat, venue refresh, provisional repair, user-WS staleness) are the only producers of their respective truth deltas.
 
-**Non-guru CLI paths.** `simple_signal_test` (`fixture_signal_run.py`) proves Phase 1 + optional Phase 3 normal entry. `validation_harness` (`validation_harness_run.py`, Phase 4.5) exercises urgent exit, stale-book deny, protection registration/trigger, and live-read-only market data — paths `simple_signal_test` cannot reach. Live wiring adds `FinalityWaiter` (allocation-final wait after BUY) and `ProtectionSupervisor` (periodic protection tick loop). **Phase 4.6** adds `paired_binary` — production strategy with long-running monitor loop. Entry uses reconciled qty (user-WS finality primary; allocation clamp grace prevents REST lag zeroing). Status: **implemented · shadow-validated · live PB-Level 2/3 ready for re-run** ([phase_4_6 §18](Implementation/architecture_enhance/phase_4_6_paired_binary_strategy_production_protection.md#18-live-truth-sources-and-monitoring-reliability)).
+**Non-guru CLI paths.** `simple_signal_test` (`fixture_signal_run.py`) proves Phase 1 + optional Phase 3 normal entry. `validation_harness` (`validation_harness_run.py`, Phase 4.5) exercises urgent exit, stale-book deny, protection registration/trigger, and live-read-only market data. **Phase 4.6** adds `paired_binary` — production paired-leg strategy with long-running monitor loop, WS-primary books (Phase 2), optional survival layer (Phase 1). Entry uses reconciled qty (user-WS finality primary; allocation clamp grace prevents REST lag zeroing). Status: **implemented · shadow- and live-validated** ([phase_4_6 §18](Implementation/architecture_enhance/phase_4_6_paired_binary_strategy_production_protection.md#18-live-truth-sources-and-monitoring-reliability)).
 
-**Market data + protection runtime (P4.5).** When `market_data.enabled`, `app.py` attaches `MarketStateStore` and starts REST bootstrap/refresh (`market_data_runtime.py`). When `protection.enabled`, `protection_runtime.py` initializes `ProtectionMonitor` and registers after allocation-final BUY fills via the pipeline hook.
+**Market data + protection runtime (P4.5 / Phase 2).** When `market_data.enabled`, `app.py` attaches `MarketStateStore`, WS ingestion, and readiness tracking. When `protection.enabled`, `protection_runtime.py` initializes `ProtectionMonitor`. Paired-binary and survival read books from `MarketStateStore` on every monitor tick (event-driven when `survival.monitor_mode: ws_event`).
 
 ---
 
@@ -140,7 +187,9 @@ Component owners (one writer each): `runtime.app` wires everything; `RuntimeCoor
 | **risk** | Fail-closed `RiskEngine` + per-policy modules + planned-order validator. | `engine.py`, `planned_order.py`, `pretrade.py`, `deployment.py`, `capital.py`, `inventory.py`, `concurrency.py`, `health.py`, `kill_switch.py`, `venue_min_size.py`, `in_flight.py`, `evidence_format.py` |
 | **execution** | Planner, OMS, order builder, lifecycle, cancel manager, slippage / liquidity guards. | `planner.py`, `models.py`, `oms.py`, `live_oms.py`, `adapters.py`, `order_builder.py`, `order_lifecycle.py`, `cancel_manager.py`, `router.py`, `slippage.py`, `liquidity_guard.py` |
 | **protection** | Reusable TP/SL overlay (P4): registers after `allocation_buy_applied`, emits urgent `ExitIntent`s. | `config.py`, `registry.py`, `monitor.py`, `trigger_eval.py`, `sizing.py`, `lifecycle.py` |
-| **runtime** | App entrypoint, config loading, coordinator, supervisors, modes. | `app.py`, `config.py`, `coordinator.py`, `pipeline.py`, `fixture_signal_run.py`, `validation_harness_run.py`, `validation_harness_live.py`, `finality_waiter.py`, `protection_supervisor.py`, `market_data_runtime.py`, `protection_runtime.py`, `paired_binary_run.py` (P4.6 design), `live_supervisor.py`, `supervisors.py`, `health_runtime.py`, `healthchecks.py`, `live_attest.py`, `risk_contexts.py`, `dependency_graph.py`, `modes.py` |
+| **market_data** | Phase 2: quality gates, executable book, decision snapshots, readiness. | `quality.py`, `executable_book.py`, `readiness.py`, `decision_snapshot.py`, `features.py` |
+| **survival** | Phase 1: survivor floor, trailing, exit planning, enforce dispatch, order policy (default off). | `advisory.py`, `survivor_floor.py`, `trailing_stop.py`, `exit_planning.py`, `enforcement_dispatch.py`, `order_policy.py` |
+| **runtime** | App entrypoint, config loading, coordinator, supervisors, modes. | `app.py`, `config.py`, `coordinator.py`, `pipeline.py`, `paired_binary_run.py`, `paired_binary_recovery.py`, `paired_binary_shutdown.py`, `strategy_lifecycle.py`, `market_data_runtime.py`, `protection_runtime.py`, … |
 | **reporting** | Facts schema + sinks + summarizer. | `facts.py`, `schema_v2.py`, `oms_payload.py`, `summarize.py`, `sinks/jsonl.py` |
 
 Per-module READMEs live under [modules/](modules/README.md).
@@ -319,6 +368,8 @@ risk:
 
 ## 12. Where to read next
 
+- **Phase 2 WS backbone:** [Implementation/WebSocket_event_driven_backbone/phase_2.md](Implementation/WebSocket_event_driven_backbone/phase_2.md) · [modules/market_data/README.md](modules/market_data/README.md)
+- **Phase 1 survival:** [Implementation/Survivor_target/phase1_parameter_guide.md](Implementation/Survivor_target/phase1_parameter_guide.md) · [modules/survival/README.md](modules/survival/README.md)
 - **How risk decides:** [modules/risk/README.md](modules/risk/README.md)
 - **Why a fact appeared (or didn't):** [reporting_fact_model.md](reporting_fact_model.md)
 - **Why a venue order appeared "unmatched":** [LIVE_ARCHITECTURE.md](LIVE_ARCHITECTURE.md) §3 (reconcile)

@@ -47,6 +47,7 @@ FACT_TYPE_PAIRED_BINARY_WINNER_TARGET = "paired_binary_winner_target"
 FACT_TYPE_PAIRED_BINARY_TIMEOUT_EXIT = "paired_binary_timeout_exit"
 FACT_TYPE_PAIRED_BINARY_UNWIND = "paired_binary_unwind"
 FACT_TYPE_PAIRED_BINARY_DONE = "paired_binary_done"
+FACT_TYPE_PAIRED_BINARY_TERMINAL_SUMMARY = "paired_binary_terminal_summary"
 FACT_TYPE_PAIRED_BINARY_RECOVERED = "paired_binary_recovered"
 FACT_TYPE_PAIRED_BINARY_ENTRY_QTY_RECONCILED = "paired_binary_entry_qty_reconciled"
 FACT_TYPE_PAIRED_BINARY_ENTRY_TIMEOUT_UNWIND = "paired_binary_entry_timeout_unwind"
@@ -64,6 +65,13 @@ FACT_TYPE_PAIRED_BINARY_WINNER_TARGET_PLAN = "paired_binary_winner_target_plan"
 FACT_TYPE_PAIRED_BINARY_WINNER_TARGET_REPRICED = "paired_binary_winner_target_repriced"
 FACT_TYPE_PAIRED_BINARY_REALIZED_PNL = "paired_binary_realized_pnl"
 FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_UNAVAILABLE = "paired_binary_realized_pnl_unavailable"
+FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_TENTATIVE = "paired_binary_realized_pnl_tentative"
+FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_RECONCILED = "paired_binary_realized_pnl_reconciled"
+FACT_TYPE_OMS_FILL_RECONCILED = "oms_fill_reconciled"
+FACT_TYPE_OMS_FILL_DISCREPANCY_DETECTED = "oms_fill_discrepancy_detected"
+FACT_TYPE_PAIRED_BINARY_SURVIVOR_RESOLVED_WITHOUT_OMS_EXIT = "paired_binary_survivor_resolved_without_oms_exit"
+FACT_TYPE_PAIRED_BINARY_RESOLUTION_EXIT_ACCOUNTING = "paired_binary_resolution_exit_accounting"
+FACT_TYPE_STRATEGY_TERMINAL_SAFE_TO_STOP = "strategy_terminal_safe_to_stop"
 FACT_TYPE_PAIRED_BINARY_PRICE_BASED_PNL_ESTIMATE = "paired_binary_price_based_pnl_estimate"
 FACT_TYPE_PAIRED_BINARY_ACTIVATION_REJECTED_LOSS_BUDGET = "paired_binary_activation_rejected_loss_budget"
 FACT_TYPE_PAIRED_BINARY_ACTIVATION_GAP_RECHECK = "paired_binary_activation_gap_recheck"
@@ -103,11 +111,118 @@ FACT_TYPE_DATA_QUALITY_VERDICT = "data_quality_verdict"
 FACT_TYPE_EXECUTION_PLANNER_EVIDENCE = "execution_planner_evidence"
 FACT_TYPE_DECISION_SNAPSHOT = "decision_snapshot"
 FACT_TYPE_LATENCY_CHAIN = "latency_chain"
+# Optional payload keys when runtime.observability.emit_event_correlation=true:
+# trigger_event_id (str|null), event_recv_ts (ISO8601|null), decision_wall_ts (ISO8601|null)
 FACT_TYPE_MARKET_READINESS_TRANSITION = "market_readiness_transition"
 FACT_TYPE_MARKET_DATA_HEALTH_BLOCK = "market_data_health_block"
 FACT_TYPE_PAIRED_BINARY_TICK_SOURCE = "paired_binary_tick_source"
 FACT_TYPE_REST_POLL_DISABLED = "rest_poll_disabled"
 FACT_TYPE_WS_PRIMARY_CUTOVER = "ws_primary_cutover"
+
+# Phase 2 operational hardening — reduce-only min-notional bypass audit trail
+FACT_TYPE_REDUCE_ONLY_MIN_NOTIONAL_BYPASS = "reduce_only_min_notional_bypass"
+FACT_TYPE_REDUCE_ONLY_MIN_NOTIONAL_BYPASS_DENIED = "reduce_only_min_notional_bypass_denied"
+
+# Paired binary survivor max-runtime policy facts
+FACT_TYPE_PAIRED_BINARY_OPEN_SURVIVOR_AT_MAX_RUNTIME = "paired_binary_open_survivor_at_max_runtime"
+FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_STARTED = "paired_binary_survivor_force_exit_started"
+FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_DONE = "paired_binary_survivor_force_exit_done"
+FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_FAILED = "paired_binary_survivor_force_exit_failed"
+FACT_TYPE_PAIRED_BINARY_SURVIVOR_RUNTIME_EXTENSION = "paired_binary_survivor_runtime_extension"
+FACT_TYPE_PAIRED_BINARY_OPEN_EXPOSURE_AT_SHUTDOWN = "paired_binary_open_exposure_at_shutdown"
+FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_STARTED = "paired_binary_shutdown_force_flatten_started"
+FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_DONE = "paired_binary_shutdown_force_flatten_done"
+FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_FAILED = "paired_binary_shutdown_force_flatten_failed"
+FACT_TYPE_PAIRED_BINARY_SHUTDOWN_RUNTIME_EXTENSION = "paired_binary_shutdown_runtime_extension"
+FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_CHECKED = "paired_binary_state_recovery_checked"
+FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_APPLIED = "paired_binary_state_recovery_applied"
+FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_IGNORED = "paired_binary_state_recovery_ignored"
+FACT_TYPE_PAIRED_BINARY_TERMINAL_STATE_RESET = "paired_binary_terminal_state_reset"
+FACT_TYPE_PAIRED_BINARY_STATE_PERSIST_FAILED = "paired_binary_state_persist_failed"
+FACT_TYPE_PAIRED_BINARY_MARKET_TIMING = "paired_binary_market_timing"
+FACT_TYPE_PAIRED_BINARY_NO_ENTRY_SUMMARY = "paired_binary_no_entry_summary"
+FACT_TYPE_VENUE_REDUCE_ONLY_TOO_SMALL = "venue_reduce_only_too_small"
+
+# Phase 1 M0 — strategy lifecycle runtime facts
+FACT_TYPE_STRATEGY_RUNTIME_DECISION = "strategy_runtime_decision"
+FACT_TYPE_STRATEGY_RUNTIME_FALLBACK_MAX_RUNTIME = "strategy_runtime_fallback_max_runtime"
+FACT_TYPE_STRATEGY_LIFECYCLE_ENTRY_BLOCKED = "strategy_lifecycle_entry_blocked"
+FACT_TYPE_STRATEGY_LIFECYCLE_PRE_CLOSE_FLATTEN_REQUIRED = "strategy_lifecycle_pre_close_flatten_required"
+
+# Phase 1 M1/M2 — survival target and executable exit facts
+FACT_TYPE_SURVIVOR_TARGET_SELECTED = "survivor_target_selected"
+FACT_TYPE_SURVIVOR_TARGET_DOWNGRADED = "survivor_target_downgraded"
+FACT_TYPE_SURVIVOR_TARGET_UNREACHABLE = "survivor_target_unreachable"
+FACT_TYPE_SURVIVOR_TARGET_IMPOSSIBLE = "survivor_target_impossible"
+FACT_TYPE_SURVIVOR_EXECUTABLE_EXIT_EVALUATED = "survivor_executable_exit_evaluated"
+
+# Phase 1 M3–M5 — survival advisory facts
+FACT_TYPE_SURVIVOR_REACHABILITY_SCORED = "survivor_reachability_scored"
+FACT_TYPE_SURVIVOR_PROGRESS_EVALUATED = "survivor_progress_evaluated"
+FACT_TYPE_SURVIVOR_STALL_DETECTED = "survivor_stall_detected"
+FACT_TYPE_SURVIVOR_TRAILING_STOP_ARMED = "survivor_trailing_stop_armed"
+FACT_TYPE_SURVIVOR_TRAILING_STOP_TRIGGERED = "survivor_trailing_stop_triggered"
+FACT_TYPE_SURVIVOR_ECONOMICS_EVALUATED = "survivor_economics_evaluated"
+FACT_TYPE_SURVIVOR_EARLY_EXIT_TRIGGERED = "survivor_early_exit_triggered"
+FACT_TYPE_SURVIVAL_ENFORCE_EXIT_REQUESTED = "survival_enforce_exit_requested"
+FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SUBMITTED = "survival_enforce_exit_submitted"
+FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SKIPPED = "survival_enforce_exit_skipped"
+FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_SCHEDULED = "survival_enforce_exit_retry_scheduled"
+FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_ATTEMPTED = "survival_enforce_exit_retry_attempted"
+FACT_TYPE_SURVIVAL_ENFORCE_EXIT_ABANDONED = "survival_enforce_exit_abandoned"
+FACT_TYPE_SURVIVAL_EXIT_ORDER_TYPE_SELECTED = "survival_exit_order_type_selected"
+FACT_TYPE_SURVIVAL_EXIT_ORDER_REPRICED = "survival_exit_order_repriced"
+FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_PLACED = "survival_exit_resting_order_placed"
+FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_CANCEL_REQUESTED = "survival_exit_resting_order_cancel_requested"
+FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_CANCELLED = "survival_exit_resting_order_cancelled"
+FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_REPLACED = "survival_exit_resting_order_replaced"
+FACT_TYPE_SURVIVAL_EXIT_ORDER_POLICY_ABANDONED = "survival_exit_order_policy_abandoned"
+FACT_TYPE_SURVIVOR_HARD_FLOOR_SET = "survivor_hard_floor_set"
+FACT_TYPE_SURVIVOR_HARD_FLOOR_TRIGGERED = "survivor_hard_floor_triggered"
+FACT_TYPE_SURVIVOR_RECOVERY_LEVEL_COMPUTED = "survivor_recovery_level_computed"
+FACT_TYPE_SURVIVAL_MONITOR_EVALUATED = "survival_monitor_evaluated"
+FACT_TYPE_KILL_SWITCH_TRIGGERED = "kill_switch_triggered"
+
+# Phase 1 fact contract (M7 validator / replay).
+PHASE1_SURVIVAL_FACT_TYPES: tuple[str, ...] = (
+    FACT_TYPE_SURVIVOR_EXECUTABLE_EXIT_EVALUATED,
+    FACT_TYPE_SURVIVOR_TRAILING_STOP_ARMED,
+    FACT_TYPE_SURVIVOR_TRAILING_STOP_TRIGGERED,
+    FACT_TYPE_SURVIVOR_HARD_FLOOR_SET,
+    FACT_TYPE_SURVIVOR_HARD_FLOOR_TRIGGERED,
+    FACT_TYPE_SURVIVOR_RECOVERY_LEVEL_COMPUTED,
+    FACT_TYPE_SURVIVAL_MONITOR_EVALUATED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_REQUESTED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SUBMITTED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SKIPPED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_SCHEDULED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_ATTEMPTED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_ABANDONED,
+    FACT_TYPE_SURVIVAL_EXIT_ORDER_TYPE_SELECTED,
+    FACT_TYPE_STRATEGY_RUNTIME_DECISION,
+    FACT_TYPE_STRATEGY_RUNTIME_FALLBACK_MAX_RUNTIME,
+    FACT_TYPE_STRATEGY_LIFECYCLE_ENTRY_BLOCKED,
+    FACT_TYPE_STRATEGY_LIFECYCLE_PRE_CLOSE_FLATTEN_REQUIRED,
+    FACT_TYPE_KILL_SWITCH_TRIGGERED,
+)
+
+PHASE1_SURVIVAL_EVIDENCE_KEYS: tuple[str, ...] = (
+    "selected_target",
+    "target_mode",
+    "current_executable_bid",
+    "touch_bid",
+    "sweep_vwap",
+    "depth_fraction",
+    "seconds_to_close",
+    "elapsed_since_loser_exit",
+    "progress_ratio",
+    "reachability_verdict",
+    "economics_verdict",
+    "decision_action",
+    "enforcement_mode",
+    "snapshot_id",
+    "planner_evidence_ref",
+)
 
 # Required payload keys per fact type (schema validation for tests).
 FACT_PAYLOAD_SCHEMA: dict[str, tuple[str, ...]] = {

@@ -1,0 +1,12 @@
+DECISION OUTPUT:
+- btc_led_trigger_research: insufficient
+- binance_vs_chainlink_role: Binance=reaction; Chainlink=settlement reference
+- pm_reaction_lag_estimate_ms: insufficient
+- clock_sync_p90_ms: 4233.386
+- divergence_census_useful: not_useful
+- liquidity_at_strike_warning: no-go
+- confidence: low
+- total_sample_size: 0
+- provisional: true
+- provisional_reason: sample below stability threshold; M2B.1-B long-run gate pending
+- required_follow_up: Validate via M2B.5 replay on larger accepted recorder artifact

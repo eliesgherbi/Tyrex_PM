@@ -1,0 +1,11 @@
+DECISION OUTPUT:
+- breakeven_gated_arming: insufficient
+- reachability_gated_arming: insufficient
+- ratchet_module: insufficient
+- never_armed_and_lost_proxy_rate: insufficient
+- entry_cost_filter_candidate: insufficient
+- confidence: low
+- total_sample_size: 26
+- provisional: true
+- provisional_reason: sample below stability threshold; M2B.1-B long-run gate pending
+- required_follow_up: Validate via M2B.5 replay on larger accepted recorder artifact

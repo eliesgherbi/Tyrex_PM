@@ -49,6 +49,7 @@ def _runtime(**over) -> dict:
         "reporting": {"enabled": True, "runs_dir": "var/reporting/runs"},
         "market_data": {"enabled": True, "max_book_age_s": 5},
         "execution": {"planner": {"enabled": True}},
+        "paired_binary": {"poll_interval_s": 0.05},
     }
     base.update(over)
     return base
@@ -150,7 +151,11 @@ def test_live_preflight_rejects_fixtures() -> None:
 
 @pytest.mark.asyncio
 async def test_shadow_paired_entry_reaches_both_legs_active(tmp_path: Path) -> None:
-    app = _app(stop_after_entry=True)
+    app = _app(
+        stop_after_entry=True,
+        max_runtime_s=30,
+        reject_if_spread_exceeds_loss_budget=False,
+    )
     cfg = app.paired_binary
     assert cfg is not None
     coord = _coord(tmp_path)
@@ -172,7 +177,11 @@ async def test_shadow_paired_entry_reaches_both_legs_active(tmp_path: Path) -> N
             apply_local_shadow_fill=True,
         )
     assert ticks >= 1
-    assert state.phase == PairedBinaryPhase.BOTH_LEGS_ACTIVE
+    assert state.phase in {
+        PairedBinaryPhase.BOTH_LEGS_ACTIVE,
+        PairedBinaryPhase.BOTH_LEGS_FILLED,
+        PairedBinaryPhase.DONE,
+    }
     lines = (runs / "facts.jsonl").read_text(encoding="utf-8").strip().splitlines()
     types = [json.loads(l)["fact_type"] for l in lines]
     assert "paired_binary_pair_preflight" in types

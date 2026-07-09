@@ -1,0 +1,34 @@
+# Record-only scenario — single BTC 5m market, plain JSONL MarketEvents (M2B.1-A).
+#
+# No trading, wallet, OMS, or risk. Requires event_backbone + WS primary.
+# Yes/no token ids and market_id are induced from --event-url (not hardcoded here).
+#
+# Run (pass the live Polymarket event URL for the window you want to capture):
+#   python -m tyrex_pm.runtime.app record --scenario config/scenarios/record_btc5m_single.yaml \
+#     --event-url https://polymarket.com/event/btc-updown-5m-<window-start-unix-ts>
+
+execution_mode: shadow
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    event_backbone:
+      enabled: true
+      reorder_buffer_ms: 75
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: false
+      recovery_on_reconnect: false
+  recording:
+    enabled: true
+    output_dir: var/recordings
+    segment_max_mb: 64
+    segment_max_s: 300
+
+strategy:
+  kind: paired_binary
+  enabled: false

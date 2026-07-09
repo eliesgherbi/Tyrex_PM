@@ -1,0 +1,43 @@
+DECISION OUTPUT:
+- event_driven_vs_fixed_cadence: favor_event_driven (provisional)
+- timestamp_used: source_ts with recv_ts fallback
+- pair_stop_loss_buffer_candidate: insufficient
+- trail_distance_candidate: insufficient
+- survivor_floor_buffer_candidate: insufficient
+- insufficient_latency_prior: True
+- median_near_close_spread: 0.01
+- candidate_disable_near_close_s: insufficient
+- candidate_flatten_before_event_end_s: insufficient
+- post_close_tradability_verdict: limited (provisional)
+- confidence: low
+- total_sample_size: 20428
+- per_bucket_sample[jump|btc_5m_20260705_1705]: 923
+- per_bucket_sample[jump|btc_5m_20260705_1710]: 783
+- per_bucket_sample[jump|btc_5m_20260705_1715]: 870
+- per_bucket_sample[jump|btc_5m_20260705_1720]: 713
+- per_bucket_sample[jump|btc_5m_20260705_1725]: 777
+- per_bucket_sample[jump|btc_5m_20260705_1730]: 1003
+- per_bucket_sample[jump|btc_5m_20260705_1735]: 713
+- per_bucket_sample[jump|btc_5m_20260705_1740]: 689
+- per_bucket_sample[jump|btc_5m_20260705_1745]: 637
+- per_bucket_sample[jump|btc_5m_20260705_1750]: 1206
+- per_bucket_sample[jump|btc_5m_20260705_1755]: 695
+- per_bucket_sample[jump|btc_5m_20260705_1800]: 863
+- per_bucket_sample[jump|btc_5m_20260705_1805]: 784
+- per_bucket_sample[jump|btc_5m_20260705_1810]: 609
+- per_bucket_sample[jump|btc_5m_20260705_1815]: 664
+- per_bucket_sample[jump|btc_5m_20260705_1820]: 714
+- per_bucket_sample[jump|btc_5m_20260705_1825]: 624
+- per_bucket_sample[jump|btc_5m_20260705_1830]: 754
+- per_bucket_sample[jump|btc_5m_20260705_1835]: 697
+- per_bucket_sample[jump|btc_5m_20260705_1840]: 790
+- per_bucket_sample[jump|btc_5m_20260705_1845]: 759
+- per_bucket_sample[jump|btc_5m_20260705_1850]: 1082
+- per_bucket_sample[jump|btc_5m_20260705_1855]: 840
+- per_bucket_sample[jump|btc_5m_20260705_1900]: 895
+- per_bucket_sample[jump|btc_5m_20260705_1905]: 814
+- per_bucket_sample[jump|btc_5m_20260705_1910]: 530
+- provisional: true
+- provisional_reason: sample below stability threshold; M2B.1-B long-run gate pending
+- required_follow_up: Validate via M2B.5 replay on larger accepted recorder artifact
+- insufficient_latency_prior: True

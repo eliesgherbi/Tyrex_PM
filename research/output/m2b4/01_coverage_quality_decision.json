@@ -1,0 +1,12 @@
+{
+  "decisions": {
+    "clean_markets_artifact": "research/output/m2b4/clean_markets.csv",
+    "markets_total": 27,
+    "markets_included": 26,
+    "label_validity_verdict": "acceptable_proxy",
+    "gap_rate_usability_verdict": "diagnostic_only",
+    "gap_rate_usable_as_feature": true,
+    "min_stable_sample_markets": 500,
+    "current_sample_provisional": true
+  }
+}

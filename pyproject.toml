@@ -27,12 +27,21 @@ live = [
   "py-builder-relayer-client>=0.0.2rc1",
   "eth_abi>=5.0.0",
 ]
+record = [
+  "zstandard>=0.22",
+]
+research = [
+  "pandas>=2.2",
+  "pyarrow>=15",
+]
 
 [project.scripts]
 tyrex-pm = "tyrex_pm.runtime.app:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["tyrex_pm*", "research*"]
+exclude = ["tests*", "var*", "config*", "scripts*", "Docs*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,0 +1,14 @@
+{
+  "decisions": {
+    "fak_reprice_ladder_candidate": [
+      0.01,
+      0.02,
+      0.03
+    ],
+    "min_depth_fraction_candidate": 0.05,
+    "liquidity_vacuum_warning": "no-go"
+  },
+  "confidence": "low",
+  "total_sample_size": 89824,
+  "provisional": true
+}

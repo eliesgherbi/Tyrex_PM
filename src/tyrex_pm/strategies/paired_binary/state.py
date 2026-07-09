@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
-from dataclasses import asdict, dataclass, field
+import time
+import uuid
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -39,6 +40,41 @@ class PairedBinaryPhase(str, Enum):
 
 
 TERMINAL_PHASES = frozenset({PairedBinaryPhase.DONE, PairedBinaryPhase.FAILED})
+
+OPEN_EXPOSURE_PERSIST_PHASES = frozenset(
+    {
+        PairedBinaryPhase.BOTH_ENTRY_PENDING,
+        PairedBinaryPhase.YES_ENTRY_PENDING,
+        PairedBinaryPhase.NO_ENTRY_PENDING,
+        PairedBinaryPhase.BOTH_LEGS_FILLED,
+        PairedBinaryPhase.BOTH_LEGS_ACTIVE,
+        PairedBinaryPhase.ONLY_YES_ACTIVE,
+        PairedBinaryPhase.ONLY_NO_ACTIVE,
+        PairedBinaryPhase.EXITING_YES,
+        PairedBinaryPhase.EXITING_NO,
+        PairedBinaryPhase.EXITING_BOTH,
+        PairedBinaryPhase.UNWIND_PENDING,
+    }
+)
+
+
+@dataclass(frozen=True)
+class PersistStateResult:
+    success: bool
+    path: Path
+    tmp_path: Path | None = None
+    attempts: int = 0
+    error_type: str | None = None
+    error_message: str | None = None
+    severity: str = "warning"
+
+
+def state_has_open_exposure(state: PairedBinaryRuntimeState) -> bool:
+    return state.phase in OPEN_EXPOSURE_PERSIST_PHASES
+
+
+def persist_failure_severity(state: PairedBinaryRuntimeState) -> str:
+    return "error" if state_has_open_exposure(state) else "warning"
 
 
 @dataclass
@@ -120,6 +156,9 @@ class PairedBinaryRuntimeState:
     pair_entry_submit_deadline_ts: float | None = None
     pair_entry_resting_deadline_ts: float | None = None
     dedup_keys: set[str] = field(default_factory=set)
+    survivor_leg_state: dict[str, Any] | None = None
+    survival_emit_cache: dict[str, Any] = field(default_factory=dict)
+    resolution_exit_reported: bool = False
 
     def is_terminal(self) -> bool:
         return self.phase in TERMINAL_PHASES
@@ -213,10 +252,17 @@ def load_persisted_state(path: Path) -> PairedBinaryRuntimeState | None:
         pair_entry_saga_phase=raw.get("pair_entry_saga_phase"),
         pair_entry_submit_deadline_ts=raw.get("pair_entry_submit_deadline_ts"),
         pair_entry_resting_deadline_ts=raw.get("pair_entry_resting_deadline_ts"),
+        survivor_leg_state=raw.get("survivor_leg_state"),
     )
 
 
-def save_persisted_state(path: Path, state: PairedBinaryRuntimeState) -> None:
+def save_persisted_state(
+    path: Path,
+    state: PairedBinaryRuntimeState,
+    *,
+    max_attempts: int = 5,
+    retry_base_delay_s: float = 0.025,
+) -> PersistStateResult:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
@@ -304,18 +350,60 @@ def save_persisted_state(path: Path, state: PairedBinaryRuntimeState) -> None:
         "pair_entry_saga_phase": state.pair_entry_saga_phase,
         "pair_entry_submit_deadline_ts": state.pair_entry_submit_deadline_ts,
         "pair_entry_resting_deadline_ts": state.pair_entry_resting_deadline_ts,
+        "survivor_leg_state": state.survivor_leg_state,
     }
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    severity = persist_failure_severity(state)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, path)
-    except Exception:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        _safe_unlink(tmp)
+        return PersistStateResult(
+            success=False,
+            path=path,
+            tmp_path=tmp,
+            attempts=0,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            severity=severity,
+        )
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            os.replace(tmp, path)
+            return PersistStateResult(success=True, path=path, tmp_path=tmp, attempts=attempt, severity=severity)
+        except (PermissionError, OSError) as exc:
+            winerr = getattr(exc, "winerror", None)
+            if winerr not in (5, 32, None) and not isinstance(exc, PermissionError):
+                last_error = exc
+                break
+            last_error = exc
+            if attempt < max_attempts:
+                time.sleep(retry_base_delay_s * attempt)
+
+    _safe_unlink(tmp)
+    err = last_error or RuntimeError("persist replace failed")
+    return PersistStateResult(
+        success=False,
+        path=path,
+        tmp_path=tmp,
+        attempts=max_attempts,
+        error_type=type(err).__name__,
+        error_message=str(err),
+        severity=severity,
+    )
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        if path.exists():
+            os.unlink(path)
+    except OSError:
+        pass
 
 
 def yes_token(state: PairedBinaryRuntimeState) -> TokenId:

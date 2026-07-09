@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "recording_started_ts": "2026-07-03T12:00:00+00:00",
+  "recording_ended_ts": "2026-07-03T12:05:00+00:00",
+  "expected_market_count": 1,
+  "recorded_market_count": 1,
+  "coverage_pct": 100.0,
+  "markets": [
+    {
+      "market_id": "btc_5m_20260703_1200",
+      "status": "recorded",
+      "event_count": 4,
+      "dropped_events": 0,
+      "gap_count": 0,
+      "first_recv_ts": "2026-07-03T12:00:00+00:00",
+      "last_recv_ts": "2026-07-03T12:00:03+00:00"
+    }
+  ]
+}

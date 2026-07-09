@@ -39,20 +39,25 @@ Wired in `runtime/app.py` via `validation_harness_run.run_validation_harness_onc
 | tiny-live-order | `normal_entry`, `urgent_exit` (with prior allocation) |
 | live-read-only | `market_data_readonly` |
 
-## `paired_binary/` (Phase 4.6 production strategy — design only)
+## `paired_binary/` (Phase 4.6 + Phase 2 WS + Phase 1 survival)
+
+Production paired-leg strategy for BTC 5-minute Polymarket markets. Long-running loop via `runtime/paired_binary_run.py`.
 
 | File | Purpose |
 |------|---------|
-| `config.py` | `PairedBinaryConfig` — market, tokens, pair cost/spread gates, stop/target, hold time, entry timeout |
-| `strategy.py` | Entry evaluation facade; emits paired BUY intents only |
+| `strategy.py` | Entry facade; emits paired BUY intents |
 | `state.py` | Explicit state machine + persistence (`var/state/paired_binary/<owner_id>.json`) |
-| `entry_eval.py` | Pure pair_cost / spread / freshness gate |
-| `lifecycle.py` | State transitions, entry VWAP, winner targets |
-| `monitor.py` | `PairedBinaryMonitor.tick` → urgent `ExitIntent`s (stop-loss, take-profit, timeout, entry unwind) |
-| `exit_engine.py` | Sellability gate, stop reference, trigger-pending, exit build/dispatch helpers |
-| `facts.py` | Deduped paired-binary facts including trigger/submit/retry lifecycle |
+| `monitor.py` | `PairedBinaryMonitor.tick` → stop/TP/timeout/survival enforce `IntentWorkUnit`s |
+| `exit_engine.py` | Trigger pending, FAK retry, sellability gate |
+| `entry_eval.py` | Pair cost / spread / quality gate |
+| `facts.py` | Paired-binary + survival fact emitters |
+| `market_timing.py` | Event-end clock diagnostics |
 
-Wired in `runtime/app.py` via `paired_binary_run.run_paired_binary_loop`. Long-running loop: `MarketStateStore` → entry → **reconciled entry qty** (user-WS finality + ledger repair) → monitor tick → `process_intent_work_unit`. **Not a validation harness** — first production path integrating periodic monitoring outside `validation_harness`.
+**Phase 2:** reads YES/NO books from WS-primary `MarketStateStore`; event-driven ticks when `survival.monitor_mode: ws_event`.
+
+**Phase 1 (optional):** when `runtime.survival.enabled`, monitor delegates survivor phase to `survival/advisory.py` — hard floor (typically advisory), trailing (enforce in experiment scenarios), quality-reject retry, FAK order policy.
+
+Wired: `runtime/app.py` → `paired_binary_run.run_paired_binary_loop`.
 
 ### Live truth sources and monitoring reliability
 
@@ -84,9 +89,10 @@ Strategy YAML defaults (`pair_stop_loss_pct: 0.02`, `pair_take_profit_pct: 0.05`
 
 | Readiness | Status |
 |-----------|--------|
-| unit + integration tests | 29 tests green |
-| shadow CLI | **shadow-validated** (`shadow_paired_binary`) |
-| live PB-Level 1–5 | **live-ready** — operator runs pending |
+| unit + integration tests | green |
+| shadow CLI | validated |
+| live WS-primary (Phase 2) | validated — `validate_paired_binary_phase2_live_run.py` |
+| Phase 1 survival trailing enforce | live experiment scenarios only; defaults off |
 
 ## `tp_sl_test/` (TP/SL regression harness)
 

@@ -421,9 +421,14 @@ class ExecutionPlanner:
         if worst is None:
             return _fallback_or_deny(rc.PLANNER_MISSING_BOOK)
 
+        style = intent.order_style if intent.order_style in (OrderStyle.FAK, OrderStyle.FOK) else OrderStyle.FAK
+        style_label = "FOK" if style == OrderStyle.FOK else "FAK"
+        planner_reason = (
+            rc.PLANNER_URGENT_EXIT_FOK if style == OrderStyle.FOK else rc.PLANNER_URGENT_EXIT_FAK
+        )
         evidence.update(
             {
-                "execution_style": "FAK",
+                "execution_style": style_label,
                 "best_bid": _s(market_state.best_bid(token)),
                 "best_ask": _s(market_state.best_ask(token)),
                 "worst_acceptable_price": str(worst),
@@ -440,11 +445,11 @@ class ExecutionPlanner:
                     "quality_verdict": quality_report.verdict.value if quality_report else None,
                 }
             )
-        final = restyle_intent(intent, order_style=OrderStyle.FAK, limit_price=worst)
+        final = restyle_intent(intent, order_style=style, limit_price=worst)
         return self._approved_plan(
             approved,
             final,
-            reason=rc.PLANNER_URGENT_EXIT_FAK,
+            reason=planner_reason,
             urgency=URGENCY_URGENT,
             evidence=self._attach_evidence(
                 evidence, planner_evidence=planner_evidence, quality_report=quality_report

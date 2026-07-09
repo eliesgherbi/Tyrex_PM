@@ -47,6 +47,9 @@ def build_exit_work_unit(
     leg_correlation_id: str,
     reason: str,
     sizing: ExitSizing,
+    decision_id: str | None = None,
+    urgency: str = URGENCY_URGENT,
+    extra_extensions: dict[str, object] | None = None,
 ) -> IntentWorkUnit | None:
     if size <= 0:
         return None
@@ -56,7 +59,7 @@ def build_exit_work_unit(
         size=size,
         limit_price=limit_price,
         order_style=order_style,
-        urgency=URGENCY_URGENT,
+        urgency=urgency,
     )
     ext: dict[str, object] = {
         "source": PAIRED_BINARY_INTENT_SOURCE,
@@ -65,8 +68,13 @@ def build_exit_work_unit(
         "leg": leg,
         "leg_correlation_id": leg_correlation_id,
         "paired_binary_reason": reason,
+        "reduce_only_context": reason,
         "paired_binary_sizing": sizing.to_evidence(),
     }
+    if decision_id is not None:
+        ext["decision_id"] = decision_id
+    if extra_extensions:
+        ext.update(extra_extensions)
     return IntentWorkUnit(
         intent=exit_intent,
         correlation_id=leg_correlation_id,

@@ -30,7 +30,7 @@
 | `src/tyrex_pm/runtime/coordinator.py` | `market_state: object \| None` on coordinator | Injection point for store v2 / shadow | M1, M2 | Typing loose | — | Typed `MarketStateStore` reference | audit_done |
 | `src/tyrex_pm/runtime/pipeline.py` | `ExecutionPlanner.plan(..., market_state=coord.market_state)`; exit book evidence via `build_exit_book_evidence_for_intent` | Planner must receive quality-gated executable view | M3, M4, M7 | Stale plan on retry | `tests/test_execution_planner.py` | Fresh snapshot per FAK retry | change_planned |
 | `src/tyrex_pm/runtime/pair_entry_saga.py` | Entry planning with `coord.market_state` | FAK entry uses same stale store | M3, M4 | Entry on stale book | `tests/test_pair_entry_saga.py` | ENTRY requires DataQuality PASS | change_planned |
-| `src/tyrex_pm/runtime/paired_binary_recovery.py` | Recovery reads `read_leg_book` for context | Recovery must respect WS-primary policy | M8 | Re-entry on REST-only | `tests/test_paired_binary_robustness.py` | No new risk from REST recovery | change_planned |
+| `src/tyrex_pm/runtime/paired_binary_recovery.py` | Market-aware recovery: token-pair identity, terminal reset, wallet bootstrap independent of lifecycle | Prevents 0-tick no-op on new market after DONE | Phase 2 hardening | Wrong resume on crash | `test_paired_binary_state_recovery_*.py`, `test_paired_binary_terminal_state_reset.py` | Recovery facts + IDLE reset default | **implemented** |
 | `src/tyrex_pm/runtime/validation_harness_run.py` | Harness bootstrap + readonly market loop | Pattern for M1 smoke | M1 | — | `tests/test_live_harness_wiring.py` | Shadow ingest smoke | change_planned |
 | `src/tyrex_pm/runtime/protection_runtime.py` | Protection tick wiring (no direct store logic) | Shares poll cadence with main loop | M6 | — | `tests/test_protection_runtime_wiring.py` | Event wake includes protection | audit_done |
 | `src/tyrex_pm/runtime/config.py` | `market_data.max_book_age_s`, planner `max_book_age_s`, `urgent_exit_max_book_age_s` | M3 `crypto_5m` profile binds here | M3 | Config drift | config tests | Profile documented | change_planned |
@@ -103,6 +103,11 @@
 | `tests/test_paired_binary_activation_latency_facts.py` | activation snapshots | M7 | **implemented** |
 | `tests/test_paired_binary_stop_tp_decision_facts.py` | TP/exit planner evidence | M7 | **implemented** |
 | `tests/test_paired_binary_robustness.py` | exit book evidence | M3/M4 | audit_done |
+| `tests/test_paired_binary_state_recovery_identity.py` | market-aware recovery same-pair | Phase 2 hardening | **implemented** |
+| `tests/test_paired_binary_state_recovery_token_mismatch.py` | token mismatch ignores lifecycle | Phase 2 hardening | **implemented** |
+| `tests/test_paired_binary_terminal_state_reset.py` | terminal DONE/FAILED reset | Phase 2 hardening | **implemented** |
+| `tests/test_paired_binary_loop_health_facts.py` | loop stopped/failed health | Phase 2 hardening | **implemented** |
+| `tests/test_paired_binary_open_exposure_force_flatten_validation.py` | BOTH_LEGS_ACTIVE max_runtime flatten | Phase 2 hardening | **implemented** |
 | `tests/test_pair_entry_saga.py` | saga + `read_leg_book` | M3 entry gate | audit_done |
 | `tests/test_live_harness_wiring.py` | market_state in harness | M1 | audit_done |
 | `tests/test_protection_supervisor.py` | protection + store | M3 | audit_done |

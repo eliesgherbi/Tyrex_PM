@@ -473,6 +473,9 @@ class PairedBinaryStrategyConfig:
     pair_entry_submit_timeout_s: float = 5.0
     pair_entry_fill_timeout_s: float = 10.0
     pair_entry_resting_timeout_s: float = 2.0
+    condition_id: str | None = None
+    event_start_ts: float | None = None
+    event_end_ts: float | None = None
 
 
 @dataclass(frozen=True)
@@ -598,8 +601,16 @@ class ExecutionPlannerConfig:
 
 
 @dataclass(frozen=True)
+class FillReconciliationConfig:
+    price_tolerance: float = 0.001
+    cash_tolerance_usd: float = 0.01
+    require_final_for_realized_pnl: bool = True
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     planner: ExecutionPlannerConfig = ExecutionPlannerConfig()
+    fill_reconciliation: FillReconciliationConfig = FillReconciliationConfig()
 
 
 @dataclass(frozen=True)
@@ -640,9 +651,69 @@ class MarketDataHealthConfig:
 
 
 @dataclass(frozen=True)
+class MarketDataEventBackboneConfig:
+    """Phase 2B M2B.0-B — WS MarketEvent path behind default-off flag."""
+
+    enabled: bool = False
+    reorder_buffer_ms: float = 75.0
+    emit_rest_recovery: bool = True
+
+
+@dataclass(frozen=True)
 class ObservabilityConfig:
     emit_decision_snapshot: bool = True
     sample_raw_events: int = 0
+    emit_event_correlation: bool = False
+
+
+@dataclass(frozen=True)
+class RecordingConfig:
+    """Phase 2B M2B.1-A/B — record-only MarketEvent persistence."""
+
+    enabled: bool = False
+    output_dir: str = "var/recordings"
+    segment_max_mb: int = 64
+    segment_max_s: int = 300
+    queue_maxsize: int = 10_000
+    batch_size: int = 100
+    batch_flush_ms: int = 50
+    market_id: str | None = None
+    yes_token_id: str | None = None
+    no_token_id: str | None = None
+    discovery_enabled: bool = False
+    discovery_poll_s: float = 25.0
+    heartbeat_stall_s: float = 120.0
+    heartbeat_interval_s: float = 30.0
+    compress: bool = False
+    tap_in_live: bool = False
+    post_close_grace_s: float = 60.0
+    skip_expired_markets: bool = True
+    pre_open_recording_lead_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class ExternalBtcConfig:
+    """M2B.2 — read-only external BTC feed (record mode only)."""
+
+    enabled: bool = False
+    symbol: str = "BTCUSDT"
+    streams: tuple[str, ...] = ("bookTicker", "aggTrade")
+    venue: str = "binance"
+    reconnect_backoff_s: float = 3.0
+    clock_sync_interval_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class ReferencePricesConfig:
+    """M2B.3-A — read-only Polymarket RTDS reference prices (record mode only)."""
+
+    enabled: bool = False
+    venue: str = "polymarket_rtds"
+    feeds: tuple[str, ...] = ("chainlink",)
+    symbols: tuple[str, ...] = ("btc/usd",)
+    emit_price_to_beat: bool = True
+    price_to_beat_max_lag_ms: float = 5000.0
+    reconnect_backoff_s: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -664,13 +735,442 @@ class MarketDataConfig:
     features: MarketDataFeaturesConfig = MarketDataFeaturesConfig()
     quality: MarketDataQualityConfig = MarketDataQualityConfig()
     health: MarketDataHealthConfig = MarketDataHealthConfig()
+    event_backbone: MarketDataEventBackboneConfig = MarketDataEventBackboneConfig()
     market_profiles: dict[str, dict[str, object]] | None = None
+
+
+@dataclass(frozen=True)
+class MarketTimingDiagnosticsConfig:
+    enabled: bool = True
+    near_close_window_s: float = 45.0
+
+
+@dataclass(frozen=True)
+class StrategyLifecycleConfig:
+    """Phase 1 M0 — market-aware loop clock. ``enabled=False`` when YAML block absent."""
+
+    enabled: bool = False
+    mode: str = "market_aware"
+    exit_clock_source: str = "event_end_ts"
+    max_runtime_s: float | None = None
+    fallback_max_runtime_s: float = 900.0
+    flatten_before_event_end_s: float = 20.0
+    block_new_entry_phases: frozenset[str] = frozenset({"near_close", "closed"})
+    emit_unknown_market_end_warning: bool = True
+    min_survival_window_s: float = 45.0
+
+
+@dataclass(frozen=True)
+class SurvivalTargetPolicyConfig:
+    mode: str = "dynamic"
+    small_loss_max_usd_per_pair: Decimal = Decimal("0.05")
+    small_profit_min_usd_per_pair: Decimal = Decimal("0.03")
+    max_reasonable_exit_price: Decimal = Decimal("0.98")
+    slippage_buffer: Decimal | None = None
+    estimated_fee_bps: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class SurvivalExitPlanningConfig:
+    require_executable_evidence: bool = True
+    allow_partial_survival_exit: bool = True
+    min_depth_fraction: Decimal = Decimal("0.8")
+    max_book_age_s: float | None = None
+
+
+@dataclass(frozen=True)
+class ReachabilityWeightsConfig:
+    distance_to_target: Decimal = Decimal("0.25")
+    time_remaining: Decimal = Decimal("0.25")
+    spread: Decimal = Decimal("0.15")
+    depth_at_size: Decimal = Decimal("0.20")
+    book_velocity: Decimal = Decimal("0.10")
+    quality_stability: Decimal = Decimal("0.05")
+
+
+@dataclass(frozen=True)
+class ReachabilityConfig:
+    enforcement_mode: str = "advisory"
+    reachable_min_score: Decimal = Decimal("0.65")
+    weak_min_score: Decimal = Decimal("0.35")
+    weights: ReachabilityWeightsConfig = ReachabilityWeightsConfig()
+
+
+@dataclass(frozen=True)
+class StallExitConfig:
+    enabled: bool = False
+    enforcement_mode: str = "advisory"
+    min_progress_ratio: Decimal = Decimal("0.35")
+    stall_threshold_fraction: Decimal = Decimal("0.40")
+    check_after_s: float = 20.0
+    max_stall_s: float = 60.0
+    action_when_stalled: str = "downgrade"
+
+
+@dataclass(frozen=True)
+class SurvivorFloorConfig:
+    enabled: bool = True
+    enforcement_mode: str = "advisory"
+    mode: str = "winner_entry_price"
+    floor_buffer: Decimal = Decimal("0.00")
+    require_fresh_book: bool = True
+    max_spread: Decimal = Decimal("0.04")
+    min_depth_fraction: Decimal = Decimal("0.8")
+
+
+@dataclass(frozen=True)
+class RecoveryLevelConfig:
+    desired_buffer: Decimal = Decimal("0")
+    slippage_buffer: Decimal | None = None
+    activation_buffer: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class TrailingStopConfig:
+    enabled: bool = True
+    enforcement_mode: str = "advisory"
+    activation_mode: str = "loss_recovered"
+    recovery_buffer: Decimal = Decimal("0.00")
+    arm_after_executable_gain: Decimal = Decimal("0.02")
+    trail_distance: Decimal = Decimal("0.03")
+    trail_distance_mode: str = "absolute"
+    min_profit_lock: Decimal = Decimal("0.01")
+    arm_delay_s: float = 5.0
+    require_fresh_book: bool = True
+    max_spread: Decimal = Decimal("0.04")
+    min_depth_fraction: Decimal = Decimal("0.8")
+    disable_near_close_s: float = 30.0
+    max_book_age_s: float | None = None
+
+
+@dataclass(frozen=True)
+class EconomicsConfig:
+    enabled: bool = True
+    enforcement_mode: str = "advisory"
+    min_acceptable_net_usd_per_pair: Decimal = Decimal("-0.02")
+    estimated_fee_bps: Decimal = Decimal("0")
+    reject_entry_if_expected_net_below: Decimal | None = None
+    exit_survivor_if_expected_net_below: Decimal | None = Decimal("-0.05")
+
+
+@dataclass(frozen=True)
+class SurvivalObservabilityConfig:
+    min_emit_interval_s: float = 5.0
+    emit_on_verdict_change: bool = True
+    emit_on_target_mode_change: bool = True
+    emit_on_material_price_change_ticks: int = 1
+
+
+@dataclass(frozen=True)
+class SurvivalKillSwitchConfig:
+    enabled: bool = False
+    per_pair_max_loss_usd: Decimal = Decimal("0.50")
+    daily_max_loss_usd: Decimal = Decimal("5.00")
+    max_failed_lifecycle_count: int = 3
+    max_consecutive_no_entry: int = 10
+    max_bad_market_quality_streak: int = 5
+    max_manual_intervention_count: int = 2
+    persist_daily: bool = True
+
+
+@dataclass(frozen=True)
+class SurvivalExitOrderPolicyConfig:
+    mode: str = "fak_retry"
+    initial_order_type: str = "FAK"
+    retry_order_type: str = "FAK"
+    max_fak_retries: int = 3
+    reprice_on_retry: bool = True
+    sell_reprice_ticks: tuple[int, ...] = (0, 1, 3)
+    buy_reprice_ticks: tuple[int, ...] = (0, 1, 3)
+    allow_partial_retry: bool = True
+    managed_rest_enabled: bool = False
+    managed_rest_order_type: str = "GTC"
+    managed_rest_local_ttl_s: float = 2.0
+    managed_rest_max_attempts: int = 2
+    managed_rest_cancel_replace: bool = True
+    disable_managed_rest_when_seconds_to_close_lt: float = 30.0
+    urgent_when_seconds_to_close_lt: float = 20.0
+    post_only_for_survival_exit: bool = False
+
+
+@dataclass(frozen=True)
+class SurvivalEnforcementConfig:
+    order_policy: SurvivalExitOrderPolicyConfig = SurvivalExitOrderPolicyConfig()
+    retry_quality_rejects: bool = False
+    max_quality_reject_retries: int = 10
+    quality_reject_retry_backoff_s: float = 0.25
+    abandon_quality_reject_after_s: float = 10.0
+
+
+@dataclass(frozen=True)
+class SurvivalConfig:
+    enabled: bool = False
+    monitor_mode: str = "hybrid"
+    target_policy: SurvivalTargetPolicyConfig = SurvivalTargetPolicyConfig()
+    exit_planning: SurvivalExitPlanningConfig = SurvivalExitPlanningConfig()
+    survivor_floor: SurvivorFloorConfig = SurvivorFloorConfig()
+    recovery_level: RecoveryLevelConfig = RecoveryLevelConfig()
+    reachability: ReachabilityConfig = ReachabilityConfig()
+    stall_exit: StallExitConfig = StallExitConfig()
+    trailing_stop: TrailingStopConfig = TrailingStopConfig()
+    economics: EconomicsConfig = EconomicsConfig()
+    kill_switches: SurvivalKillSwitchConfig = SurvivalKillSwitchConfig()
+    observability: SurvivalObservabilityConfig = SurvivalObservabilityConfig()
+    enforcement: SurvivalEnforcementConfig = SurvivalEnforcementConfig()
+
+
+def _parse_tick_tuple(raw: object, default: tuple[int, ...]) -> tuple[int, ...]:
+    if raw is None:
+        return default
+    if isinstance(raw, (list, tuple)):
+        return tuple(int(x) for x in raw)
+    return default
+
+
+def _parse_survival_order_policy(raw: dict[str, Any] | None) -> SurvivalExitOrderPolicyConfig:
+    r = raw or {}
+    return SurvivalExitOrderPolicyConfig(
+        mode=str(r.get("mode", "fak_retry")),
+        initial_order_type=str(r.get("initial_order_type", "FAK")),
+        retry_order_type=str(r.get("retry_order_type", "FAK")),
+        max_fak_retries=int(r.get("max_fak_retries", 3)),
+        reprice_on_retry=bool(r.get("reprice_on_retry", True)),
+        sell_reprice_ticks=_parse_tick_tuple(r.get("sell_reprice_ticks"), (0, 1, 3)),
+        buy_reprice_ticks=_parse_tick_tuple(r.get("buy_reprice_ticks"), (0, 1, 3)),
+        allow_partial_retry=bool(r.get("allow_partial_retry", True)),
+        managed_rest_enabled=bool(r.get("managed_rest_enabled", False)),
+        managed_rest_order_type=str(r.get("managed_rest_order_type", "GTC")),
+        managed_rest_local_ttl_s=float(r.get("managed_rest_local_ttl_s", 2.0)),
+        managed_rest_max_attempts=int(r.get("managed_rest_max_attempts", 2)),
+        managed_rest_cancel_replace=bool(r.get("managed_rest_cancel_replace", True)),
+        disable_managed_rest_when_seconds_to_close_lt=float(
+            r.get("disable_managed_rest_when_seconds_to_close_lt", 30)
+        ),
+        urgent_when_seconds_to_close_lt=float(r.get("urgent_when_seconds_to_close_lt", 20)),
+        post_only_for_survival_exit=bool(r.get("post_only_for_survival_exit", False)),
+    )
+
+
+def _parse_survival_enforcement(raw: dict[str, Any] | None) -> SurvivalEnforcementConfig:
+    r = raw or {}
+    op = r.get("order_policy") or {}
+    return SurvivalEnforcementConfig(
+        order_policy=_parse_survival_order_policy(op),
+        retry_quality_rejects=bool(r.get("retry_quality_rejects", False)),
+        max_quality_reject_retries=int(r.get("max_quality_reject_retries", 10)),
+        quality_reject_retry_backoff_s=float(r.get("quality_reject_retry_backoff_s", 0.25)),
+        abandon_quality_reject_after_s=float(r.get("abandon_quality_reject_after_s", 10.0)),
+    )
+
+
+def _parse_reachability_weights(raw: dict[str, Any] | None) -> ReachabilityWeightsConfig:
+    w = raw or {}
+    return ReachabilityWeightsConfig(
+        distance_to_target=_dec(w, "distance_to_target", "0.25"),
+        time_remaining=_dec(w, "time_remaining", "0.25"),
+        spread=_dec(w, "spread", "0.15"),
+        depth_at_size=_dec(w, "depth_at_size", "0.20"),
+        book_velocity=_dec(w, "book_velocity", "0.10"),
+        quality_stability=_dec(w, "quality_stability", "0.05"),
+    )
+
+
+def _parse_survival_config(raw: dict[str, Any] | None) -> SurvivalConfig:
+    if not raw:
+        return SurvivalConfig()
+    tp_raw = raw.get("target_policy") or {}
+    ep_raw = raw.get("exit_planning") or {}
+    reach_raw = raw.get("reachability") or {}
+    stall_raw = raw.get("stall_exit") or {}
+    trail_raw = raw.get("trailing_stop") or {}
+    floor_raw = raw.get("survivor_floor") or {}
+    recovery_raw = raw.get("recovery_level") or {}
+    econ_raw = raw.get("economics") or {}
+    slippage_raw = tp_raw.get("slippage_buffer")
+    slippage = None if slippage_raw in (None, "") else _dec(tp_raw, "slippage_buffer", "0")
+    max_book_raw = ep_raw.get("max_book_age_s")
+    max_book = None if max_book_raw in (None, "") else float(max_book_raw)
+    trail_max_book_raw = trail_raw.get("max_book_age_s")
+    trail_max_book = None if trail_max_book_raw in (None, "") else float(trail_max_book_raw)
+    reject_entry_raw = econ_raw.get("reject_entry_if_expected_net_below")
+    reject_entry = (
+        None if reject_entry_raw in (None, "") else _dec(econ_raw, "reject_entry_if_expected_net_below", "0")
+    )
+    exit_survivor_raw = econ_raw.get("exit_survivor_if_expected_net_below")
+    exit_survivor = (
+        None if exit_survivor_raw in (None, "")
+        else _dec(econ_raw, "exit_survivor_if_expected_net_below", "-0.05")
+    )
+    ks_raw = raw.get("kill_switches") or {}
+    obs_raw = raw.get("observability") or {}
+    enf_raw = raw.get("enforcement") or {}
+    recovery_slippage_raw = recovery_raw.get("slippage_buffer")
+    recovery_slippage = None if recovery_slippage_raw in (None, "") else _dec(recovery_raw, "slippage_buffer", "0")
+    return SurvivalConfig(
+        enabled=bool(raw.get("enabled", False)),
+        monitor_mode=str(raw.get("monitor_mode", "hybrid")),
+        target_policy=SurvivalTargetPolicyConfig(
+            mode=str(tp_raw.get("mode", "dynamic")),
+            small_loss_max_usd_per_pair=_dec(tp_raw, "small_loss_max_usd_per_pair", "0.05"),
+            small_profit_min_usd_per_pair=_dec(tp_raw, "small_profit_min_usd_per_pair", "0.03"),
+            max_reasonable_exit_price=_dec(tp_raw, "max_reasonable_exit_price", "0.98"),
+            slippage_buffer=slippage,
+            estimated_fee_bps=_dec(tp_raw, "estimated_fee_bps", "0"),
+        ),
+        exit_planning=SurvivalExitPlanningConfig(
+            require_executable_evidence=bool(ep_raw.get("require_executable_evidence", True)),
+            allow_partial_survival_exit=bool(ep_raw.get("allow_partial_survival_exit", True)),
+            min_depth_fraction=_dec(ep_raw, "min_depth_fraction", "0.8"),
+            max_book_age_s=max_book,
+        ),
+        survivor_floor=SurvivorFloorConfig(
+            enabled=bool(floor_raw.get("enabled", True)),
+            enforcement_mode=str(floor_raw.get("enforcement_mode", "advisory")),
+            mode=str(floor_raw.get("mode", "winner_entry_price")),
+            floor_buffer=_dec(floor_raw, "floor_buffer", "0"),
+            require_fresh_book=bool(floor_raw.get("require_fresh_book", True)),
+            max_spread=_dec(floor_raw, "max_spread", "0.04"),
+            min_depth_fraction=_dec(floor_raw, "min_depth_fraction", "0.8"),
+        ),
+        recovery_level=RecoveryLevelConfig(
+            desired_buffer=_dec(recovery_raw, "desired_buffer", "0"),
+            slippage_buffer=recovery_slippage,
+            activation_buffer=_dec(recovery_raw, "activation_buffer", "0"),
+        ),
+        reachability=ReachabilityConfig(
+            enforcement_mode=str(reach_raw.get("enforcement_mode", "advisory")),
+            reachable_min_score=_dec(reach_raw, "reachable_min_score", "0.65"),
+            weak_min_score=_dec(reach_raw, "weak_min_score", "0.35"),
+            weights=_parse_reachability_weights(reach_raw.get("weights")),
+        ),
+        stall_exit=StallExitConfig(
+            enabled=bool(stall_raw.get("enabled", False)),
+            enforcement_mode=str(stall_raw.get("enforcement_mode", "advisory")),
+            min_progress_ratio=_dec(stall_raw, "min_progress_ratio", "0.35"),
+            stall_threshold_fraction=_dec(stall_raw, "stall_threshold_fraction", "0.40"),
+            check_after_s=float(stall_raw.get("check_after_s", 20)),
+            max_stall_s=float(stall_raw.get("max_stall_s", 60)),
+            action_when_stalled=str(stall_raw.get("action_when_stalled", "downgrade")),
+        ),
+        trailing_stop=TrailingStopConfig(
+            enabled=bool(trail_raw.get("enabled", True)),
+            enforcement_mode=str(trail_raw.get("enforcement_mode", "advisory")),
+            activation_mode=str(trail_raw.get("activation_mode", "loss_recovered")),
+            recovery_buffer=_dec(trail_raw, "recovery_buffer", "0"),
+            arm_after_executable_gain=_dec(trail_raw, "arm_after_executable_gain", "0.02"),
+            trail_distance=_dec(trail_raw, "trail_distance", "0.03"),
+            trail_distance_mode=str(trail_raw.get("trail_distance_mode", "absolute")),
+            min_profit_lock=_dec(trail_raw, "min_profit_lock", "0.01"),
+            arm_delay_s=float(trail_raw.get("arm_delay_s", 5)),
+            require_fresh_book=bool(trail_raw.get("require_fresh_book", True)),
+            max_spread=_dec(trail_raw, "max_spread", "0.04"),
+            min_depth_fraction=_dec(trail_raw, "min_depth_fraction", "0.8"),
+            disable_near_close_s=float(trail_raw.get("disable_near_close_s", 30)),
+            max_book_age_s=trail_max_book,
+        ),
+        economics=EconomicsConfig(
+            enabled=bool(econ_raw.get("enabled", True)),
+            enforcement_mode=str(econ_raw.get("enforcement_mode", "advisory")),
+            min_acceptable_net_usd_per_pair=_dec(econ_raw, "min_acceptable_net_usd_per_pair", "-0.02"),
+            estimated_fee_bps=_dec(econ_raw, "estimated_fee_bps", "0"),
+            reject_entry_if_expected_net_below=reject_entry,
+            exit_survivor_if_expected_net_below=exit_survivor,
+        ),
+        kill_switches=SurvivalKillSwitchConfig(
+            enabled=bool(ks_raw.get("enabled", False)),
+            per_pair_max_loss_usd=_dec(ks_raw, "per_pair_max_loss_usd", "0.50"),
+            daily_max_loss_usd=_dec(ks_raw, "daily_max_loss_usd", "5.00"),
+            max_failed_lifecycle_count=int(ks_raw.get("max_failed_lifecycle_count", 3)),
+            max_consecutive_no_entry=int(ks_raw.get("max_consecutive_no_entry", 10)),
+            max_bad_market_quality_streak=int(ks_raw.get("max_bad_market_quality_streak", 5)),
+            max_manual_intervention_count=int(ks_raw.get("max_manual_intervention_count", 2)),
+            persist_daily=bool(ks_raw.get("persist_daily", True)),
+        ),
+        observability=SurvivalObservabilityConfig(
+            min_emit_interval_s=float(obs_raw.get("min_emit_interval_s", 5)),
+            emit_on_verdict_change=bool(obs_raw.get("emit_on_verdict_change", True)),
+            emit_on_target_mode_change=bool(obs_raw.get("emit_on_target_mode_change", True)),
+            emit_on_material_price_change_ticks=int(obs_raw.get("emit_on_material_price_change_ticks", 1)),
+        ),
+        enforcement=_parse_survival_enforcement(enf_raw),
+    )
 
 
 @dataclass(frozen=True)
 class PairedBinaryRuntimeConfig:
     poll_interval_s: float = 1.0
     max_decision_rate_per_market_ms: int = 75
+    #: Policy when tick budget / ``max_runtime_s`` elapses with open paired-binary exposure.
+    open_exposure_on_max_runtime: str = "force_reduce_only_exit"
+    #: Extra monitor window when ``open_exposure_on_max_runtime=continue_until_open_exposure_timeout``.
+    open_exposure_timeout_s: float = 300.0
+    #: Legacy alias — if set in YAML without ``open_exposure_on_max_runtime``, used as fallback.
+    survivor_on_max_runtime: str = "force_reduce_only_exit"
+    #: Legacy alias for ``open_exposure_timeout_s``.
+    survivor_timeout_s: float = 300.0
+    #: When false (default), terminal persisted lifecycle (DONE/FAILED) resets to IDLE on same token pair.
+    allow_terminal_state_resume: bool = False
+    market_timing_diagnostics: MarketTimingDiagnosticsConfig = MarketTimingDiagnosticsConfig()
+    stop_background_tasks_after_strategy_done: bool = False
+
+
+OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE = "force_reduce_only_exit"
+OPEN_EXPOSURE_ON_MAX_RUNTIME_MANUAL = "manual_intervention"
+OPEN_EXPOSURE_ON_MAX_RUNTIME_CONTINUE = "continue_until_open_exposure_timeout"
+VALID_OPEN_EXPOSURE_ON_MAX_RUNTIME = frozenset(
+    {
+        OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE,
+        OPEN_EXPOSURE_ON_MAX_RUNTIME_MANUAL,
+        OPEN_EXPOSURE_ON_MAX_RUNTIME_CONTINUE,
+    }
+)
+
+# Back-compat aliases (survivor-specific names delegate to open-exposure policy).
+SURVIVOR_ON_MAX_RUNTIME_FORCE = OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE
+SURVIVOR_ON_MAX_RUNTIME_MANUAL = OPEN_EXPOSURE_ON_MAX_RUNTIME_MANUAL
+SURVIVOR_ON_MAX_RUNTIME_CONTINUE = "continue_until_survivor_timeout"
+VALID_SURVIVOR_ON_MAX_RUNTIME = VALID_OPEN_EXPOSURE_ON_MAX_RUNTIME | {SURVIVOR_ON_MAX_RUNTIME_CONTINUE}
+
+
+def _normalize_open_exposure_policy(raw: object) -> str:
+    key = str(raw or OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE).strip()
+    if key == SURVIVOR_ON_MAX_RUNTIME_CONTINUE:
+        return OPEN_EXPOSURE_ON_MAX_RUNTIME_CONTINUE
+    return key
+
+
+def _parse_strategy_lifecycle_config(runtime: dict[str, Any]) -> StrategyLifecycleConfig:
+    sl_raw = runtime.get("strategy_lifecycle")
+    if not isinstance(sl_raw, dict):
+        return StrategyLifecycleConfig(enabled=False)
+
+    phases_raw = sl_raw.get("block_new_entry_phases")
+    if isinstance(phases_raw, (list, tuple)):
+        phases = frozenset(str(p) for p in phases_raw)
+    else:
+        phases = frozenset({"near_close", "closed"})
+
+    max_rt = sl_raw.get("max_runtime_s")
+    max_runtime_s: float | None
+    if max_rt in (None, "", "null"):
+        max_runtime_s = None
+    else:
+        max_runtime_s = float(max_rt)
+
+    fallback_raw = sl_raw.get("fallback_max_runtime_s", 900)
+    fallback = float(fallback_raw) if fallback_raw not in (None, "", "null") else 900.0
+
+    return StrategyLifecycleConfig(
+        enabled=True,
+        mode=str(sl_raw.get("mode", "market_aware")),
+        exit_clock_source=str(sl_raw.get("exit_clock_source", "event_end_ts")),
+        max_runtime_s=max_runtime_s,
+        fallback_max_runtime_s=fallback,
+        flatten_before_event_end_s=float(sl_raw.get("flatten_before_event_end_s", 20)),
+        block_new_entry_phases=phases,
+        emit_unknown_market_end_warning=bool(sl_raw.get("emit_unknown_market_end_warning", True)),
+        min_survival_window_s=float(sl_raw.get("min_survival_window_s", 45)),
+    )
 
 
 @dataclass(frozen=True)
@@ -693,7 +1193,11 @@ class RuntimeConfig:
     allocation_ledger: AllocationLedgerConfig
     market_data: MarketDataConfig = MarketDataConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    recording: RecordingConfig = RecordingConfig()
+    external_btc: ExternalBtcConfig = ExternalBtcConfig()
+    reference_prices: ReferencePricesConfig = ReferencePricesConfig()
     paired_binary: PairedBinaryRuntimeConfig = PairedBinaryRuntimeConfig()
+    strategy_lifecycle: StrategyLifecycleConfig = StrategyLifecycleConfig()
 
 
 @dataclass(frozen=True)
@@ -718,6 +1222,8 @@ class AppConfig:
     protection: ProtectionRuntimeConfig | None = None
     #: Execution layer config (P3 architecture_enhance): planner enable + book policy.
     execution: ExecutionConfig = ExecutionConfig()
+    #: Phase 1 survival primitives — default disabled; no behavior change when false.
+    survival: SurvivalConfig = SurvivalConfig()
     #: Loaded strategy YAML ``kind`` (selects the runtime loop in ``runtime/app.py``).
     strategy_kind: str = STRATEGY_KIND_GURU_FOLLOW
 
@@ -1078,6 +1584,9 @@ def _parse_paired_binary_strategy(strategy: dict[str, Any]) -> PairedBinaryStrat
     fn_bid = pb.get("fixture_no_bid")
     fn_ask = pb.get("fixture_no_ask")
     _reject_paired_binary_deprecated_keys(pb)
+    cond_raw = pb.get("condition_id")
+    start_raw = pb.get("event_start_ts")
+    end_raw = pb.get("event_end_ts")
     return PairedBinaryStrategyConfig(
         enabled=enabled,
         owner_id=owner_id,
@@ -1131,6 +1640,9 @@ def _parse_paired_binary_strategy(strategy: dict[str, Any]) -> PairedBinaryStrat
         pair_entry_submit_timeout_s=float(pb.get("pair_entry_submit_timeout_s", pb.get("entry_fill_timeout_s", 5))),
         pair_entry_fill_timeout_s=float(pb.get("pair_entry_fill_timeout_s", pb.get("entry_fill_timeout_s", 10))),
         pair_entry_resting_timeout_s=float(pb.get("pair_entry_resting_timeout_s", 2)),
+        condition_id=str(cond_raw).strip() if cond_raw not in (None, "") else None,
+        event_start_ts=float(start_raw) if start_raw not in (None, "") else None,
+        event_end_ts=float(end_raw) if end_raw not in (None, "") else None,
     )
 
 
@@ -1401,9 +1913,20 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
     feat_raw = md_raw.get("features") or {}
     qual_raw = md_raw.get("quality") or {}
     health_raw = md_raw.get("health") or {}
+    eb_raw = md_raw.get("event_backbone") or {}
     profiles_raw = md_raw.get("market_profiles")
     obs_raw = runtime.get("observability") or {}
+    rec_raw = runtime.get("recording") or {}
+    ext_btc_raw = runtime.get("external_btc") or {}
+    ref_prices_raw = runtime.get("reference_prices") or {}
     pb_rt_raw = runtime.get("paired_binary") or {}
+    mtd_raw = pb_rt_raw.get("market_timing_diagnostics") or {}
+    if not isinstance(mtd_raw, dict):
+        mtd_raw = {}
+    market_timing_diagnostics = MarketTimingDiagnosticsConfig(
+        enabled=bool(mtd_raw.get("enabled", True)),
+        near_close_window_s=float(mtd_raw.get("near_close_window_s", 45)),
+    )
     market_data = MarketDataConfig(
         enabled=bool(md_raw.get("enabled", False)),
         max_book_age_s=float(md_raw.get("max_book_age_s", 5)),
@@ -1434,8 +1957,14 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
             max_reconnects_per_hour=int(health_raw.get("max_reconnects_per_hour", 10)),
             max_p95_book_age_ms=int(health_raw.get("max_p95_book_age_ms", 2000)),
         ),
+        event_backbone=MarketDataEventBackboneConfig(
+            enabled=bool(eb_raw.get("enabled", False)),
+            reorder_buffer_ms=float(eb_raw.get("reorder_buffer_ms", 75)),
+            emit_rest_recovery=bool(eb_raw.get("emit_rest_recovery", True)),
+        ),
         market_profiles=dict(profiles_raw) if isinstance(profiles_raw, dict) else None,
     )
+    strategy_lifecycle = _parse_strategy_lifecycle_config(runtime)
     rt = RuntimeConfig(
         execution_mode=execution_mode,
         reporting=ReportingConfig(
@@ -1456,11 +1985,67 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
         observability=ObservabilityConfig(
             emit_decision_snapshot=bool(obs_raw.get("emit_decision_snapshot", True)),
             sample_raw_events=int(obs_raw.get("sample_raw_events", 0)),
+            emit_event_correlation=bool(obs_raw.get("emit_event_correlation", False)),
+        ),
+        recording=RecordingConfig(
+            enabled=bool(rec_raw.get("enabled", False)),
+            output_dir=str(rec_raw.get("output_dir", "var/recordings")),
+            segment_max_mb=int(rec_raw.get("segment_max_mb", 64)),
+            segment_max_s=int(rec_raw.get("segment_max_s", 300)),
+            queue_maxsize=int(rec_raw.get("queue_maxsize", 10_000)),
+            batch_size=int(rec_raw.get("batch_size", 100)),
+            batch_flush_ms=int(rec_raw.get("batch_flush_ms", 50)),
+            market_id=str(rec_raw["market_id"]) if rec_raw.get("market_id") else None,
+            yes_token_id=str(rec_raw["yes_token_id"]) if rec_raw.get("yes_token_id") else None,
+            no_token_id=str(rec_raw["no_token_id"]) if rec_raw.get("no_token_id") else None,
+            discovery_enabled=bool(rec_raw.get("discovery_enabled", False)),
+            discovery_poll_s=float(rec_raw.get("discovery_poll_s", 25.0)),
+            heartbeat_stall_s=float(rec_raw.get("heartbeat_stall_s", 120.0)),
+            heartbeat_interval_s=float(rec_raw.get("heartbeat_interval_s", 30.0)),
+            compress=bool(rec_raw.get("compress", False)),
+            tap_in_live=bool(rec_raw.get("tap_in_live", False)),
+            post_close_grace_s=float(rec_raw.get("post_close_grace_s", 60.0)),
+            skip_expired_markets=bool(rec_raw.get("skip_expired_markets", True)),
+            pre_open_recording_lead_s=float(rec_raw.get("pre_open_recording_lead_s", 60.0)),
+        ),
+        external_btc=ExternalBtcConfig(
+            enabled=bool(ext_btc_raw.get("enabled", False)),
+            symbol=str(ext_btc_raw.get("symbol", "BTCUSDT")),
+            streams=tuple(str(s) for s in (ext_btc_raw.get("streams") or ["bookTicker", "aggTrade"])),
+            venue=str(ext_btc_raw.get("venue", "binance")),
+            reconnect_backoff_s=float(ext_btc_raw.get("reconnect_backoff_s", 3.0)),
+            clock_sync_interval_s=float(ext_btc_raw.get("clock_sync_interval_s", 60.0)),
+        ),
+        reference_prices=ReferencePricesConfig(
+            enabled=bool(ref_prices_raw.get("enabled", False)),
+            venue=str(ref_prices_raw.get("venue", "polymarket_rtds")),
+            feeds=tuple(str(f) for f in (ref_prices_raw.get("feeds") or ["chainlink"])),
+            symbols=tuple(str(s) for s in (ref_prices_raw.get("symbols") or ["btc/usd"])),
+            emit_price_to_beat=bool(ref_prices_raw.get("emit_price_to_beat", True)),
+            price_to_beat_max_lag_ms=float(ref_prices_raw.get("price_to_beat_max_lag_ms", 5000.0)),
+            reconnect_backoff_s=float(ref_prices_raw.get("reconnect_backoff_s", 3.0)),
         ),
         paired_binary=PairedBinaryRuntimeConfig(
             poll_interval_s=float(pb_rt_raw.get("poll_interval_s", 1.0)),
             max_decision_rate_per_market_ms=int(pb_rt_raw.get("max_decision_rate_per_market_ms", 75)),
+            open_exposure_on_max_runtime=_normalize_open_exposure_policy(
+                pb_rt_raw.get("open_exposure_on_max_runtime")
+                or pb_rt_raw.get("survivor_on_max_runtime", OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE)
+            ),
+            open_exposure_timeout_s=float(
+                pb_rt_raw.get("open_exposure_timeout_s", pb_rt_raw.get("survivor_timeout_s", 300))
+            ),
+            survivor_on_max_runtime=str(
+                pb_rt_raw.get("survivor_on_max_runtime", OPEN_EXPOSURE_ON_MAX_RUNTIME_FORCE)
+            ),
+            survivor_timeout_s=float(pb_rt_raw.get("survivor_timeout_s", 300)),
+            allow_terminal_state_resume=bool(pb_rt_raw.get("allow_terminal_state_resume", False)),
+            market_timing_diagnostics=market_timing_diagnostics,
+            stop_background_tasks_after_strategy_done=bool(
+                pb_rt_raw.get("stop_background_tasks_after_strategy_done", False)
+            ),
         ),
+        strategy_lifecycle=strategy_lifecycle,
     )
     return rsk, rt
 
@@ -1483,7 +2068,13 @@ def _parse_execution_config(
             "execution.planner.enabled requires market_data.enabled "
             "(the planner needs a market data provider)"
         )
-    return ExecutionConfig(planner=planner)
+    fr_raw = ex_raw.get("fill_reconciliation") or {}
+    fill_reconciliation = FillReconciliationConfig(
+        price_tolerance=float(fr_raw.get("price_tolerance", 0.001)),
+        cash_tolerance_usd=float(fr_raw.get("cash_tolerance_usd", 0.01)),
+        require_final_for_realized_pnl=bool(fr_raw.get("require_final_for_realized_pnl", True)),
+    )
+    return ExecutionConfig(planner=planner, fill_reconciliation=fill_reconciliation)
 
 
 def _finalize_app_config(
@@ -1502,7 +2093,10 @@ def _finalize_app_config(
 ) -> AppConfig:
     rsk, rt = _build_risk_runtime(risk, runtime)
     execution = _parse_execution_config(runtime, rt.market_data)
+    survival = _parse_survival_config(runtime.get("survival"))
     raw = {"risk": risk, "strategy": strategy_raw, "runtime": runtime}
+    if survival.enabled or runtime.get("survival"):
+        raw["survival"] = runtime.get("survival") or {"enabled": survival.enabled}
     app = AppConfig(
         strategy=strat,
         risk=rsk,
@@ -1516,6 +2110,7 @@ def _finalize_app_config(
         paired_binary=paired_binary,
         protection=protection,
         execution=execution,
+        survival=survival,
         strategy_kind=strategy_kind,
     )
     from tyrex_pm.runtime.paired_binary_live import (
@@ -1735,6 +2330,8 @@ def load_app_config(
             risk = _deep_merge(risk, sc["risk"])
         if "runtime" in sc:
             runtime = _deep_merge(runtime, sc["runtime"])
+        if "survival" in sc:
+            runtime = _deep_merge(runtime, {"survival": sc["survival"]})
         if "strategy" in sc:
             strategy = _deep_merge(strategy, sc["strategy"])
         # scenario top-level keys

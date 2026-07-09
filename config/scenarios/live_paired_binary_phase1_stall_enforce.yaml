@@ -1,0 +1,70 @@
+# Phase 1 stall enforce — ONLY stall_exit.enforcement_mode=enforce.
+# Default action_when_stalled=downgrade applies target downgrade (no OMS).
+# Set action_when_stalled: exit_market for market exit tests.
+
+execution_mode: live
+
+strategy:
+  paired_binary:
+    market_id: "btc_5m_<YYYYMMDD_HHMM>"
+    condition_id: "<required>"
+    event_start_ts: null
+    event_end_ts: null
+    yes_token_id: "<required>"
+    no_token_id: "<required>"
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    websocket:
+      primary_enabled: true
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: true
+    quality:
+      enforcement_mode: enforce
+      allow_rest_recovery_for_exit: true
+      market_profile: crypto_5m
+  execution:
+    planner:
+      enabled: true
+      use_executable_depth: true
+  strategy_lifecycle:
+    mode: market_aware
+    exit_clock_source: event_end_ts
+    max_runtime_s: null
+    flatten_before_event_end_s: 20
+    min_survival_window_s: 45
+  paired_binary:
+    poll_interval_s: 1.0
+    stop_background_tasks_after_strategy_done: true
+  survival:
+    enabled: true
+    target_policy:
+      mode: dynamic
+    reachability:
+      enforcement_mode: advisory
+    stall_exit:
+      enabled: true
+      enforcement_mode: enforce
+      action_when_stalled: downgrade
+    trailing_stop:
+      enabled: true
+      enforcement_mode: advisory
+    economics:
+      enabled: true
+      enforcement_mode: advisory
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "15"
+  deployment:
+    token_cap_usd: "20"
+    portfolio_cap_usd: "30"
+  venue_min_size:
+    enabled: true
+    default_min_size: "5"
+  readiness:
+    require_wallet_sync: true

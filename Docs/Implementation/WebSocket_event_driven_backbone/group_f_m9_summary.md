@@ -98,3 +98,5 @@ Machine-readable comparison: `var/reporting/m9/phase2_comparison.json`
 **`PHASE_2_COMPLETE`**
 
 Optional hardening (not blocking): run Option B substituted REST controls to replace RECONSTRUCTED controls; rerun treatment on `live_paired_binary_tiny.yaml` for scenario-matched comparison.
+
+**Post-M9 operational hardening (2026-06-29):** market-aware paired-binary state recovery, loop health facts, open-exposure force-flatten fixture validation — see [phase2_final_operational_hardening.md](phase2_final_operational_hardening.md).

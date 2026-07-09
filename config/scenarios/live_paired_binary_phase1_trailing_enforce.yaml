@@ -1,0 +1,182 @@
+# Phase 1 trailing enforce — ONLY trailing_stop.enforcement_mode=enforce.
+# Mechanical sequence: survivor floor → recovery → trailing (post-recovery).
+#
+# Price-unit note (Polymarket binary tokens trade on a 0.00–1.00 scale):
+#   trail_distance, recovery_buffer, floor_buffer, max_spread
+#   are ABSOLUTE price deltas (e.g. 0.03 = 3 cents), NOT percentages.
+#
+# Preflight:
+#   python scripts/preflight_phase1_live_scenario.py ^
+#     --scenario live_paired_binary_phase1_trailing_enforce ^
+#     --event-url "https://polymarket.com/event/btc-updown-5m-<START_TS>"
+#
+# Run:
+#   python -m tyrex_pm.runtime.app run ^
+#     --strategy config/strategies/paired_binary.yaml ^
+#     --scenario live_paired_binary_phase1_trailing_enforce ^
+#     --event-url "https://polymarket.com/event/btc-updown-5m-<START_TS>" ^
+#     --run-name phase1_trailing_enforce_<unix_ts>
+
+execution_mode: live
+
+strategy:
+  paired_binary:
+    market_id: "btc_5m_<YYYYMMDD_HHMM>"
+    condition_id: "<required>"
+    event_start_ts: null
+    event_end_ts: null
+    yes_token_id: "<required>"
+    no_token_id: "<required>"
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: true
+      recovery_on_reconnect: true
+    quality:
+      enforcement_mode: enforce
+      require_ws_primary_for_entry: true
+      allow_rest_recovery_for_exit: true
+      allow_rest_recovery_for_entry: false
+      market_profile: crypto_5m
+    features:
+      v0_enabled: true
+  execution:
+    planner:
+      enabled: true
+      require_fresh_book_for_urgent: true
+      max_book_age_s: 5
+      use_executable_depth: true
+  observability:
+    emit_decision_snapshot: true
+  strategy_lifecycle:
+    mode: market_aware
+    exit_clock_source: event_end_ts
+    max_runtime_s: null
+    fallback_max_runtime_s: 900
+    flatten_before_event_end_s: 20
+    block_new_entry_phases: [near_close, closed]
+    emit_unknown_market_end_warning: true
+    min_survival_window_s: 45
+  paired_binary:
+    poll_interval_s: 1.0
+    max_decision_rate_per_market_ms: 75
+    open_exposure_on_max_runtime: force_reduce_only_exit
+    open_exposure_timeout_s: 300
+    survivor_on_max_runtime: force_reduce_only_exit
+    survivor_timeout_s: 300
+    allow_terminal_state_resume: false
+    stop_background_tasks_after_strategy_done: true
+    market_timing_diagnostics:
+      enabled: true
+      near_close_window_s: 45
+  allocation_ledger:
+    clamp_grace_s_after_buy: 90
+  survival:
+    enabled: true
+    monitor_mode: ws_event # ws_event , poll ,hybrid
+
+    survivor_floor:
+      enabled: true
+      enforcement_mode: enforce #enforce or advisory
+      mode: winner_entry_price
+      floor_buffer: "0.00"
+      require_fresh_book: true
+      max_spread: "0.04"
+      min_depth_fraction: "0.8"
+
+    recovery_level:
+      enabled: true
+      desired_buffer: "0.00"
+      activation_buffer: "0.00"
+
+    trailing_stop:
+      enabled: true
+      enforcement_mode: enforce
+      activation_mode: loss_recovered
+      recovery_buffer: "0.00"
+      trail_distance: "0.2"
+      trail_distance_mode: absolute
+      min_profit_lock: "0.01"
+      arm_delay_s: 5.0
+      require_fresh_book: true
+      max_spread: "0.04"
+      min_depth_fraction: "0.8"
+      disable_near_close_s: 30.0
+
+    reachability:
+      enforcement_mode: advisory
+
+    economics:
+      enforcement_mode: advisory
+
+    exit_planning:
+      require_executable_evidence: true
+      allow_partial_survival_exit: true
+      min_depth_fraction: "0.8"
+
+    enforcement:
+      retry_quality_rejects: true
+      max_quality_reject_retries: 10
+      quality_reject_retry_backoff_s: 0.25
+      abandon_quality_reject_after_s: 10
+      order_policy:
+        mode: fak_retry
+        initial_order_type: FAK
+        retry_order_type: FAK
+        max_fak_retries: 3
+        reprice_on_retry: true
+        sell_reprice_ticks: [0, 1, 3]
+        buy_reprice_ticks: [0, 1, 3]
+        allow_partial_retry: true
+        managed_rest_enabled: false
+        managed_rest_order_type: GTC
+        managed_rest_local_ttl_s: 2.0
+        managed_rest_max_attempts: 2
+        managed_rest_cancel_replace: true
+        disable_managed_rest_when_seconds_to_close_lt: 30
+        urgent_when_seconds_to_close_lt: 20
+        post_only_for_survival_exit: false
+
+    observability:
+      min_emit_interval_s: 5.0
+      emit_on_verdict_change: true
+      emit_on_material_price_change_ticks: 1
+
+    kill_switches:
+      enabled: true
+      per_pair_max_loss_usd: "0.50"
+      daily_max_loss_usd: "5.00"
+      max_failed_lifecycle_count: 3
+      max_consecutive_no_entry: 10
+      max_bad_market_quality_streak: 5
+      max_manual_intervention_count: 2
+      persist_daily: true
+
+risk:
+  notional:
+    min_usd: "1"
+    max_usd: "15"
+    max_policy: cap
+  deployment:
+    token_cap_usd: "20"
+    portfolio_cap_usd: "30"
+  exits:
+    allow_reduce_only_mark_fallback: true
+    require_fresh_book_for_mark_fallback: true
+    urgent_exit_max_book_age_s: 0.5
+  venue_min_size:
+    enabled: true
+    policy: deny
+    default_min_size: "5"
+  readiness:
+    require_wallet_sync: true
+    max_wallet_age_s_live: 120
+    require_heartbeat_live: true
+    require_user_ws_live: true

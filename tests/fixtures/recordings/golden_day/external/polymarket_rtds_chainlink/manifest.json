@@ -1,0 +1,11 @@
+{
+  "market_id": "external/polymarket_rtds_chainlink",
+  "segments": [
+    {
+      "path": "events-00001.jsonl",
+      "event_count": 1
+    }
+  ],
+  "dropped_events": 0,
+  "compressed": false
+}

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from tyrex_pm.core.enums import Side
 from tyrex_pm.core.ids import RunId
+from tyrex_pm.core.time import utc_now
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_PAIRED_BINARY_DONE,
+    FACT_TYPE_PAIRED_BINARY_TERMINAL_SUMMARY,
     FACT_TYPE_PAIRED_BINARY_ENTRY_EVAL,
     FACT_TYPE_PAIRED_BINARY_ENTRY_QTY_RECONCILED,
     FACT_TYPE_PAIRED_BINARY_ENTRY_SKIP,
@@ -26,6 +31,55 @@ from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_PAIRED_BINARY_EMERGENCY_UNWIND_RETRY,
     FACT_TYPE_PAIRED_BINARY_EMERGENCY_UNWIND_DONE,
     FACT_TYPE_PAIRED_BINARY_MANUAL_INTERVENTION_REQUIRED,
+    FACT_TYPE_PAIRED_BINARY_OPEN_SURVIVOR_AT_MAX_RUNTIME,
+    FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_STARTED,
+    FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_DONE,
+    FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_FAILED,
+    FACT_TYPE_PAIRED_BINARY_SURVIVOR_RUNTIME_EXTENSION,
+    FACT_TYPE_PAIRED_BINARY_OPEN_EXPOSURE_AT_SHUTDOWN,
+    FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_STARTED,
+    FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_DONE,
+    FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_FAILED,
+    FACT_TYPE_PAIRED_BINARY_SHUTDOWN_RUNTIME_EXTENSION,
+    FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_CHECKED,
+    FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_APPLIED,
+    FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_IGNORED,
+    FACT_TYPE_PAIRED_BINARY_TERMINAL_STATE_RESET,
+    FACT_TYPE_PAIRED_BINARY_STATE_PERSIST_FAILED,
+    FACT_TYPE_PAIRED_BINARY_MARKET_TIMING,
+    FACT_TYPE_STRATEGY_LIFECYCLE_ENTRY_BLOCKED,
+    FACT_TYPE_STRATEGY_LIFECYCLE_PRE_CLOSE_FLATTEN_REQUIRED,
+    FACT_TYPE_STRATEGY_RUNTIME_DECISION,
+    FACT_TYPE_STRATEGY_RUNTIME_FALLBACK_MAX_RUNTIME,
+    FACT_TYPE_SURVIVOR_EXECUTABLE_EXIT_EVALUATED,
+    FACT_TYPE_SURVIVOR_TARGET_DOWNGRADED,
+    FACT_TYPE_SURVIVOR_TARGET_IMPOSSIBLE,
+    FACT_TYPE_SURVIVOR_TARGET_SELECTED,
+    FACT_TYPE_SURVIVOR_TARGET_UNREACHABLE,
+    FACT_TYPE_SURVIVOR_REACHABILITY_SCORED,
+    FACT_TYPE_SURVIVOR_PROGRESS_EVALUATED,
+    FACT_TYPE_SURVIVOR_STALL_DETECTED,
+    FACT_TYPE_SURVIVOR_TRAILING_STOP_ARMED,
+    FACT_TYPE_SURVIVOR_TRAILING_STOP_TRIGGERED,
+    FACT_TYPE_SURVIVOR_HARD_FLOOR_SET,
+    FACT_TYPE_SURVIVOR_HARD_FLOOR_TRIGGERED,
+    FACT_TYPE_SURVIVOR_RECOVERY_LEVEL_COMPUTED,
+    FACT_TYPE_SURVIVAL_MONITOR_EVALUATED,
+    FACT_TYPE_SURVIVOR_ECONOMICS_EVALUATED,
+    FACT_TYPE_SURVIVOR_EARLY_EXIT_TRIGGERED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_REQUESTED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SUBMITTED,
+    FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SKIPPED,
+    FACT_TYPE_SURVIVAL_EXIT_ORDER_TYPE_SELECTED,
+    FACT_TYPE_SURVIVAL_EXIT_ORDER_REPRICED,
+    FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_PLACED,
+    FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_CANCEL_REQUESTED,
+    FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_CANCELLED,
+    FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_REPLACED,
+    FACT_TYPE_SURVIVAL_EXIT_ORDER_POLICY_ABANDONED,
+    FACT_TYPE_KILL_SWITCH_TRIGGERED,
+    FACT_TYPE_PAIRED_BINARY_NO_ENTRY_SUMMARY,
+    FACT_TYPE_VENUE_REDUCE_ONLY_TOO_SMALL,
     FACT_TYPE_PAIRED_BINARY_LATENCY_SAMPLE,
     FACT_TYPE_PAIRED_BINARY_BOOK_CAPTURE_QUALITY,
     FACT_TYPE_PAIRED_BINARY_PAIR_PREFLIGHT,
@@ -50,6 +104,13 @@ from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_PAIRED_BINARY_PNL_PLAN,
     FACT_TYPE_PAIRED_BINARY_REALIZED_PNL,
     FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_UNAVAILABLE,
+    FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_TENTATIVE,
+    FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_RECONCILED,
+    FACT_TYPE_OMS_FILL_RECONCILED,
+    FACT_TYPE_OMS_FILL_DISCREPANCY_DETECTED,
+    FACT_TYPE_PAIRED_BINARY_SURVIVOR_RESOLVED_WITHOUT_OMS_EXIT,
+    FACT_TYPE_PAIRED_BINARY_RESOLUTION_EXIT_ACCOUNTING,
+    FACT_TYPE_STRATEGY_TERMINAL_SAFE_TO_STOP,
     FACT_TYPE_PAIRED_BINARY_PRICE_BASED_PNL_ESTIMATE,
     FACT_TYPE_PAIRED_BINARY_RECOVERED,
     FACT_TYPE_PAIRED_BINARY_STATE_CHANGE,
@@ -61,8 +122,72 @@ from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_PAIRED_BINARY_WINNER_TARGET_PLAN,
     FACT_TYPE_PAIRED_BINARY_WINNER_TARGET_REPRICED,
 )
+
+__all__ = [
+    "EventCorrelationContext",
+    "build_event_correlation_fields",
+    "record_wake_market_event",
+    "resolve_event_correlation",
+]
+
+
+@dataclass(frozen=True)
+class EventCorrelationContext:
+    """Optional market-event correlation metadata for material decision facts."""
+
+    trigger_event_id: str | None = None
+    event_recv_ts: datetime | None = None
+
+
+def _iso8601(ts: datetime | None) -> str | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).isoformat()
+
+
+def build_event_correlation_fields(
+    correlation: EventCorrelationContext | None,
+    *,
+    enabled: bool,
+    decision_wall_ts: datetime | None = None,
+) -> dict[str, Any]:
+    if not enabled:
+        return {}
+    wall = decision_wall_ts or utc_now()
+    ctx = correlation or EventCorrelationContext()
+    return {
+        "trigger_event_id": ctx.trigger_event_id,
+        "event_recv_ts": _iso8601(ctx.event_recv_ts),
+        "decision_wall_ts": _iso8601(wall),
+    }
+
+
+def record_wake_market_event(coord, event) -> None:
+    coord.last_wake_event_id = event.event_id
+    coord.last_wake_event_recv_ts = event.recv_ts
+
+
+def resolve_event_correlation(app, coord, *, monitor_trigger: str) -> EventCorrelationContext:
+    if monitor_trigger == "ws_book_update":
+        return EventCorrelationContext(
+            trigger_event_id=getattr(coord, "last_wake_event_id", None),
+            event_recv_ts=getattr(coord, "last_wake_event_recv_ts", None),
+        )
+    return EventCorrelationContext()
+
+
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
+from tyrex_pm.runtime.config import FillReconciliationConfig as RuntimeFillReconciliationConfig
 from tyrex_pm.runtime.config import PairedBinaryStrategyConfig
+from tyrex_pm.execution.fill_reconciliation import (
+    FillReconciliationConfig,
+    ReconciledPnL,
+    ReconciledTradeCashflows,
+    compute_reconciled_pnl,
+    reconcile_paired_binary_cashflows,
+)
 from tyrex_pm.strategies.paired_binary.entry_eval import EntryEvalInput, LegBook
 from tyrex_pm.strategies.paired_binary.exit_engine import ExitTriggerContext, LegSellability
 from tyrex_pm.strategies.paired_binary.pnl import (
@@ -71,8 +196,10 @@ from tyrex_pm.strategies.paired_binary.pnl import (
 )
 from tyrex_pm.strategies.paired_binary.state import (
     PairedBinaryRuntimeState,
+    PersistStateResult,
     leg_entry_avg_price,
     leg_exit_avg_price,
+    state_has_open_exposure,
 )
 from tyrex_pm.runtime.entry_qty_reconcile import LegEntryQtyReconcile, PairEntryQtyReconcile
 from tyrex_pm.strategies.paired_binary.entry_price import EntryPriceMismatch
@@ -139,6 +266,32 @@ def base_payload(state: PairedBinaryRuntimeState, yes: LegBook, no: LegBook) -> 
     }
     out.update(_book_payload(yes, no))
     return out
+
+
+def should_emit_survival_periodic(
+    state: PairedBinaryRuntimeState,
+    fact_kind: str,
+    *,
+    fingerprint: str,
+    min_emit_interval_s: float,
+    emit_on_change: bool = True,
+    now_mono: float | None = None,
+) -> bool:
+    """Time/change-based dedup for periodic survival advisory facts."""
+    from tyrex_pm.core.time import monotonic_s
+
+    now = monotonic_s() if now_mono is None else now_mono
+    cache = state.survival_emit_cache
+    prev = cache.get(fact_kind) or {}
+    last_ts = float(prev.get("ts", 0))
+    last_fp = str(prev.get("fp", ""))
+    if emit_on_change and fingerprint != last_fp:
+        cache[fact_kind] = {"ts": now, "fp": fingerprint}
+        return True
+    if now - last_ts >= min_emit_interval_s:
+        cache[fact_kind] = {"ts": now, "fp": fingerprint}
+        return True
+    return False
 
 
 def should_emit(state: PairedBinaryRuntimeState, dedup_key: str) -> bool:
@@ -381,10 +534,17 @@ def emit_done(
     state: PairedBinaryRuntimeState,
     yes: LegBook,
     no: LegBook,
+    *,
+    completion_reason: str | None = None,
+    decision_id: str | None = None,
 ) -> None:
     if not should_emit(state, "done"):
         return
     payload = base_payload(state, yes, no)
+    if completion_reason is not None:
+        payload["completion_reason"] = completion_reason
+    if decision_id is not None:
+        payload["decision_id"] = decision_id
     _write_fact(
         sink,
         make_fact(
@@ -393,6 +553,71 @@ def emit_done(
             payload,
             correlation_id=state.pair_correlation_id,
         )
+    )
+
+
+def emit_terminal_summary(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    summary: dict[str, Any],
+) -> None:
+    if not should_emit(state, "terminal_summary"):
+        return
+    payload = base_payload(state, yes, no)
+    payload.update(summary)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_TERMINAL_SUMMARY,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_failed_unwind_pnl_unavailable(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    summary: dict[str, Any],
+) -> None:
+    if not should_emit(state, "realized_pnl_unavailable"):
+        return
+    reason = summary.get("pnl_unavailable_reason") or "activation_unwind_failed_or_incomplete"
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "reason": reason,
+            "final_state": state.phase.value,
+            "phase": state.phase.value,
+            "pnl_status": summary.get("pnl_status") or "unavailable",
+            "missing_fields": _cashflow_pnl_missing_fields(state),
+            "available_sources": _available_cashflow_sources(state),
+            "emergency_unwind_attempted": summary.get("emergency_unwind_attempted"),
+            "emergency_unwind_done": summary.get("emergency_unwind_done"),
+            "open_exposure_after_unwind": summary.get("open_exposure_after_unwind"),
+            "unwind_status": summary.get("unwind_status"),
+            "flatness_verified": summary.get("flatness_verified"),
+            "manual_reconciliation_required": True,
+            **_pnl_cashflow_snapshot(state),
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_UNAVAILABLE,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
     )
 
 
@@ -418,6 +643,1037 @@ def emit_recovered(
             payload,
             correlation_id=state.pair_correlation_id,
         )
+    )
+
+
+def emit_state_recovery_checked(
+    sink: JsonlSink,
+    run_id: RunId,
+    payload: dict[str, Any],
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_CHECKED, str(run_id), payload),
+    )
+
+
+def emit_state_recovery_applied(
+    sink: JsonlSink,
+    run_id: RunId,
+    payload: dict[str, Any],
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_APPLIED, str(run_id), payload),
+    )
+
+
+def emit_state_recovery_ignored(
+    sink: JsonlSink,
+    run_id: RunId,
+    payload: dict[str, Any],
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_STATE_RECOVERY_IGNORED, str(run_id), payload),
+    )
+
+
+def emit_terminal_state_reset(
+    sink: JsonlSink,
+    run_id: RunId,
+    payload: dict[str, Any],
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_TERMINAL_STATE_RESET, str(run_id), payload),
+    )
+
+
+def emit_state_persist_failed(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    result: PersistStateResult,
+) -> None:
+    payload = {
+        "path": str(result.path),
+        "tmp_path": str(result.tmp_path) if result.tmp_path is not None else None,
+        "attempts": result.attempts,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+        "state": state.phase.value,
+        "has_open_exposure": state_has_open_exposure(state),
+        "severity": result.severity,
+    }
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_STATE_PERSIST_FAILED, str(run_id), payload),
+    )
+
+
+def emit_market_timing(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    snapshot,
+) -> None:
+    payload = {
+        "market_id": snapshot.market_id,
+        "condition_id": snapshot.condition_id,
+        "yes_token_id": snapshot.yes_token_id,
+        "no_token_id": snapshot.no_token_id,
+        "event_start_ts": snapshot.event_start_ts,
+        "event_end_ts": snapshot.event_end_ts,
+        "now_ts": snapshot.now_ts,
+        "phase": snapshot.phase,
+        "seconds_to_start": snapshot.seconds_to_start,
+        "seconds_to_close": snapshot.seconds_to_close,
+        "near_close_window_s": snapshot.near_close_window_s,
+        "source": snapshot.source,
+    }
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_MARKET_TIMING, str(run_id), payload),
+    )
+
+
+def emit_strategy_runtime_decision(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    *,
+    continue_loop: bool,
+    reason: str,
+    clock_known: bool,
+    seconds_to_close: float | None,
+    event_end_ts: float | None,
+    phase: str | None,
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_STRATEGY_RUNTIME_DECISION,
+            str(run_id),
+            {
+                "continue_loop": continue_loop,
+                "reason": reason,
+                "clock_known": clock_known,
+                "seconds_to_close": seconds_to_close,
+                "event_end_ts": event_end_ts,
+                "phase": phase,
+            },
+        ),
+    )
+
+
+def emit_strategy_runtime_fallback_max_runtime(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    *,
+    fallback_max_runtime_s: float,
+    elapsed_s: float,
+    warning: str,
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_STRATEGY_RUNTIME_FALLBACK_MAX_RUNTIME,
+            str(run_id),
+            {
+                "fallback_max_runtime_s": fallback_max_runtime_s,
+                "elapsed_s": elapsed_s,
+                "warning": warning,
+            },
+        ),
+    )
+
+
+def emit_strategy_lifecycle_entry_blocked(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    reason: str,
+    phase: str | None,
+    seconds_to_close: float | None,
+    min_survival_window_s: float,
+) -> None:
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "reason": reason,
+            "phase": phase,
+            "seconds_to_close": seconds_to_close,
+            "min_survival_window_s": min_survival_window_s,
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_STRATEGY_LIFECYCLE_ENTRY_BLOCKED, str(run_id), payload),
+    )
+
+
+def emit_strategy_lifecycle_pre_close_flatten_required(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    seconds_to_close: float | None,
+    flatten_before_event_end_s: float,
+    exposure_snapshot: dict[str, Any],
+) -> None:
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "seconds_to_close": seconds_to_close,
+            "flatten_before_event_end_s": flatten_before_event_end_s,
+            "exposure_snapshot": exposure_snapshot,
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_STRATEGY_LIFECYCLE_PRE_CLOSE_FLATTEN_REQUIRED, str(run_id), payload),
+    )
+
+
+def emit_survivor_target_selected(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update({"survivor_leg": survivor_leg, **payload})
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_SURVIVOR_TARGET_SELECTED, str(run_id), base),
+    )
+
+
+def emit_survivor_target_downgraded(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    from_mode: str,
+    to_mode: str,
+    classification: str,
+) -> None:
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "from_mode": from_mode,
+            "to_mode": to_mode,
+            "classification": classification,
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_SURVIVOR_TARGET_DOWNGRADED, str(run_id), payload),
+    )
+
+
+def emit_survivor_target_impossible(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    mode: str,
+    required_survivor_exit_price: Decimal,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(
+        {
+            "mode": mode,
+            "required_survivor_exit_price": str(required_survivor_exit_price),
+            **payload,
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_SURVIVOR_TARGET_IMPOSSIBLE, str(run_id), base),
+    )
+
+
+def emit_survivor_target_unreachable(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    mode: str,
+    required_survivor_exit_price: Decimal,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(
+        {
+            "mode": mode,
+            "required_survivor_exit_price": str(required_survivor_exit_price),
+            **payload,
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_SURVIVOR_TARGET_UNREACHABLE, str(run_id), base),
+    )
+
+
+def emit_survivor_executable_exit_evaluated(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_SURVIVOR_EXECUTABLE_EXIT_EVALUATED, str(run_id), base),
+    )
+
+
+def emit_kill_switch_triggered(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    switch_name: str,
+    threshold: Decimal | int | None,
+    current_value: Decimal | int | None,
+    action: str,
+    pair_id: str,
+    owner_id: str,
+    reason: str,
+) -> None:
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "switch_name": switch_name,
+            "threshold": str(threshold) if threshold is not None else None,
+            "current_value": str(current_value) if current_value is not None else None,
+            "action": action,
+            "pair_id": pair_id,
+            "owner_id": owner_id,
+            "reason": reason,
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_KILL_SWITCH_TRIGGERED, str(run_id), payload),
+    )
+
+
+def emit_survival_target_selection_facts(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    result,
+) -> None:
+    from tyrex_pm.survival.facts import target_plan_payload
+    from tyrex_pm.survival.models import SurvivorTargetClassification
+
+    plan = result.plan
+    emit_survivor_target_selected(
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        survivor_leg=survivor_leg,
+        payload=target_plan_payload(plan),
+    )
+    for failed in result.failed_attempts:
+        fp = target_plan_payload(failed)
+        if failed.classification == SurvivorTargetClassification.IMPOSSIBLE:
+            emit_survivor_target_impossible(
+                sink,
+                run_id,
+                state,
+                yes,
+                no,
+                mode=failed.mode.value,
+                required_survivor_exit_price=failed.required_survivor_exit_price,
+                payload=fp,
+            )
+        elif failed.classification == SurvivorTargetClassification.UNREALISTIC:
+            emit_survivor_target_unreachable(
+                sink,
+                run_id,
+                state,
+                yes,
+                no,
+                mode=failed.mode.value,
+                required_survivor_exit_price=failed.required_survivor_exit_price,
+                payload=fp,
+            )
+    for from_mode, to_mode in result.downgrades:
+        cls = "impossible_or_unrealistic"
+        emit_survivor_target_downgraded(
+            sink,
+            run_id,
+            state,
+            yes,
+            no,
+            from_mode=from_mode.value,
+            to_mode=to_mode.value,
+            classification=cls,
+        )
+
+
+def emit_survival_advisory_facts(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survival,
+    exit_eval,
+    reachability,
+    stall,
+    trailing,
+    economics,
+    requested_qty,
+) -> None:
+    from tyrex_pm.survival.facts import build_survival_evidence_payload, exit_evaluation_payload
+
+    base = base_payload(state, yes, no)
+    base["survivor_leg"] = survivor_leg
+    exit_payload = exit_evaluation_payload(exit_eval, requested_qty=requested_qty)
+    obs = survival.observability
+    min_interval = float(obs.min_emit_interval_s)
+
+    exec_fp = f"{exit_payload.get('snapshot_id')}:{exit_payload.get('current_executable_bid')}"
+    if should_emit_survival_periodic(
+        state,
+        "surv_exec",
+        fingerprint=exec_fp,
+        min_emit_interval_s=min_interval,
+        emit_on_change=True,
+    ):
+        emit_survivor_executable_exit_evaluated(
+            sink,
+            run_id,
+            state,
+            yes,
+            no,
+            payload=exit_payload,
+        )
+
+    reach_fp = f"{reachability.verdict.value}:{_price_bucket(reachability.score, 2)}"
+    if should_emit_survival_periodic(
+        state,
+        "surv_reach",
+        fingerprint=reach_fp,
+        min_emit_interval_s=min_interval,
+        emit_on_change=obs.emit_on_verdict_change,
+    ):
+        rp = build_survival_evidence_payload(
+            selected_target=state.yes_target if survivor_leg == "yes" else state.no_target,
+            target_mode=(state.survivor_leg_state or {}).get("selected_mode"),
+            enforcement_mode=survival.reachability.enforcement_mode,
+            extra={
+                "reachability_verdict": reachability.verdict.value,
+                "score": str(reachability.score),
+                **reachability.evidence,
+                **exit_payload,
+            },
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_REACHABILITY_SCORED, str(run_id), {**base, **rp}),
+        )
+
+    prog_fp = f"{_price_bucket(stall.progress_to_target, 2)}:{int(float(stall.elapsed_fraction) * 10)}"
+    if should_emit_survival_periodic(
+        state,
+        "surv_progress",
+        fingerprint=prog_fp,
+        min_emit_interval_s=min_interval,
+        emit_on_change=True,
+    ):
+        pp = build_survival_evidence_payload(
+            enforcement_mode=survival.stall_exit.enforcement_mode,
+            extra={
+                "progress_ratio": str(stall.progress_to_target),
+                "elapsed_fraction": str(stall.elapsed_fraction),
+                **stall.evidence,
+                **exit_payload,
+            },
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_PROGRESS_EVALUATED, str(run_id), {**base, **pp}),
+        )
+
+    if stall.stalled and should_emit(state, "surv_stall_detected"):
+        sp = build_survival_evidence_payload(
+            decision_action=stall.action.value if stall.action else "advisory_only",
+            enforcement_mode=survival.stall_exit.enforcement_mode,
+            extra={**stall.evidence, **exit_payload},
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_STALL_DETECTED, str(run_id), {**base, **sp}),
+        )
+
+    if trailing.armed_transition and should_emit(state, "surv_trail_armed"):
+        tp = build_survival_evidence_payload(
+            enforcement_mode=survival.trailing_stop.enforcement_mode,
+            extra={**trailing.evidence, **exit_payload},
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_TRAILING_STOP_ARMED, str(run_id), {**base, **tp}),
+        )
+
+    if trailing.triggered_transition and should_emit(state, "surv_trail_triggered"):
+        tp = build_survival_evidence_payload(
+            decision_action="triggered",
+            enforcement_mode=survival.trailing_stop.enforcement_mode,
+            extra={**trailing.evidence, **exit_payload},
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_TRAILING_STOP_TRIGGERED, str(run_id), {**base, **tp}),
+        )
+
+    econ_fp = f"{economics.verdict.value}:{_price_bucket(economics.expected_net_per_pair, 3)}"
+    if should_emit_survival_periodic(
+        state,
+        "surv_econ",
+        fingerprint=econ_fp,
+        min_emit_interval_s=min_interval,
+        emit_on_change=obs.emit_on_verdict_change,
+    ):
+        ep = build_survival_evidence_payload(
+            enforcement_mode=survival.economics.enforcement_mode,
+            extra={
+                "economics_verdict": economics.verdict.value,
+                **economics.evidence,
+                **exit_payload,
+            },
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_ECONOMICS_EVALUATED, str(run_id), {**base, **ep}),
+        )
+
+    if economics.verdict.value == "exit_survivor_early" and should_emit(state, "surv_early_exit"):
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_SURVIVOR_EARLY_EXIT_TRIGGERED,
+                str(run_id),
+                {**base, **economics.evidence, "enforcement_mode": survival.economics.enforcement_mode},
+            ),
+        )
+
+
+def emit_simplified_survivor_setup_facts(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    recovery,
+    floor_price: Decimal,
+    enforcement_mode: str,
+) -> None:
+    """Emit recovery level + hard floor facts immediately after loser exit."""
+    base = base_payload(state, yes, no)
+    base["survivor_leg"] = survivor_leg
+    recovery_payload = {
+        "survivor_leg": survivor_leg,
+        "total_entry_cash": str(recovery.total_entry_cash),
+        "loser_exit_cash": str(recovery.loser_exit_cash),
+        "survivor_qty": str(recovery.survivor_qty),
+        "breakeven_price": str(recovery.breakeven_price),
+        "activation_price": str(recovery.activation_price),
+        "desired_buffer": str(recovery.desired_buffer),
+        "slippage_buffer": str(recovery.slippage_buffer),
+    }
+    if should_emit(state, "surv_recovery_computed"):
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_SURVIVOR_RECOVERY_LEVEL_COMPUTED,
+                str(run_id),
+                {**base, **recovery_payload},
+            ),
+        )
+    floor_payload = {
+        "survivor_leg": survivor_leg,
+        "survivor_entry_price": str(
+            state.yes_entry if survivor_leg == "yes" else state.no_entry
+        ),
+        "floor_price": str(floor_price),
+        "enforcement_mode": enforcement_mode,
+        "reason": "loser_exit",
+    }
+    if should_emit(state, "surv_hard_floor_set"):
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_SURVIVOR_HARD_FLOOR_SET,
+                str(run_id),
+                {**base, **floor_payload},
+            ),
+        )
+
+
+def emit_simplified_survival_facts(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survival,
+    exit_eval,
+    floor,
+    trailing,
+    breakeven: Decimal | None,
+    requested_qty,
+    monitor_mode: str,
+    monitor_trigger: str,
+    evaluation_latency_ms: int,
+    book_age_ms: int | None,
+    event_correlation: EventCorrelationContext | None = None,
+    emit_event_correlation: bool = False,
+) -> None:
+    """Phase 1 simplified survival facts: floor, trailing, monitor eval."""
+    from tyrex_pm.survival.facts import build_survival_evidence_payload, exit_evaluation_payload
+
+    base = base_payload(state, yes, no)
+    base["survivor_leg"] = survivor_leg
+    exit_payload = exit_evaluation_payload(exit_eval, requested_qty=requested_qty)
+    corr_fields = build_event_correlation_fields(
+        event_correlation or getattr(state, "_event_correlation_context", None),
+        enabled=emit_event_correlation or getattr(state, "_emit_event_correlation", False),
+        decision_wall_ts=utc_now(),
+    )
+    obs = survival.observability
+    min_interval = float(obs.min_emit_interval_s)
+
+    exec_fp = f"{exit_payload.get('snapshot_id')}:{exit_payload.get('current_executable_bid')}"
+    if should_emit_survival_periodic(
+        state,
+        "surv_exec",
+        fingerprint=exec_fp,
+        min_emit_interval_s=min_interval,
+        emit_on_change=True,
+    ):
+        emit_survivor_executable_exit_evaluated(
+            sink,
+            run_id,
+            state,
+            yes,
+            no,
+            payload=exit_payload,
+        )
+
+    floor_reason = floor.reason
+    if floor_reason in {"hard_floor_breach", "advisory_only"}:
+        fp = build_survival_evidence_payload(
+            enforcement_mode=survival.survivor_floor.enforcement_mode,
+            extra={
+                **floor.evidence,
+                **exit_payload,
+                "reason": floor_reason,
+            },
+        )
+        if should_emit(state, "surv_hard_floor_triggered"):
+            _write_fact(
+                sink,
+                make_fact(
+                    FACT_TYPE_SURVIVOR_HARD_FLOOR_TRIGGERED,
+                    str(run_id),
+                    {**base, **fp, **corr_fields},
+                ),
+            )
+
+    if trailing.armed_transition and should_emit(state, "surv_trail_armed"):
+        tp = build_survival_evidence_payload(
+            enforcement_mode=survival.trailing_stop.enforcement_mode,
+            extra={
+                **trailing.evidence,
+                **exit_payload,
+                "breakeven_price": str(breakeven) if breakeven is not None else None,
+            },
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_TRAILING_STOP_ARMED, str(run_id), {**base, **tp}),
+        )
+
+    if trailing.triggered_transition and should_emit(state, "surv_trail_triggered"):
+        tp = build_survival_evidence_payload(
+            decision_action="triggered",
+            enforcement_mode=survival.trailing_stop.enforcement_mode,
+            extra={**trailing.evidence, **exit_payload},
+        )
+        _write_fact(
+            sink,
+            make_fact(FACT_TYPE_SURVIVOR_TRAILING_STOP_TRIGGERED, str(run_id), {**base, **tp}),
+        )
+
+    monitor_fp = f"{monitor_trigger}:{monitor_mode}:{exec_fp}"
+    if should_emit_survival_periodic(
+        state,
+        "surv_monitor",
+        fingerprint=monitor_fp,
+        min_emit_interval_s=min_interval,
+        emit_on_change=True,
+    ):
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_SURVIVAL_MONITOR_EVALUATED,
+                str(run_id),
+                {
+                    **base,
+                    "mode": monitor_mode,
+                    "trigger": monitor_trigger,
+                    "book_age_ms": book_age_ms,
+                    "evaluation_latency_ms": evaluation_latency_ms,
+                    **corr_fields,
+                },
+            ),
+        )
+
+
+def emit_survival_enforce_exit_requested(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_SURVIVAL_ENFORCE_EXIT_REQUESTED,
+            str(run_id),
+            base,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survival_enforce_exit_submitted(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SUBMITTED,
+            str(run_id),
+            base,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survival_enforce_exit_skipped(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_SURVIVAL_ENFORCE_EXIT_SKIPPED,
+            str(run_id),
+            base,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survival_enforce_exit_retry_scheduled(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    from tyrex_pm.reporting.schema_v2 import FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_SCHEDULED
+
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_SCHEDULED,
+            str(run_id),
+            base,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survival_enforce_exit_retry_attempted(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    from tyrex_pm.reporting.schema_v2 import FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_ATTEMPTED
+
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_SURVIVAL_ENFORCE_EXIT_RETRY_ATTEMPTED,
+            str(run_id),
+            base,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survival_enforce_exit_abandoned(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    from tyrex_pm.reporting.schema_v2 import FACT_TYPE_SURVIVAL_ENFORCE_EXIT_ABANDONED
+
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_SURVIVAL_ENFORCE_EXIT_ABANDONED,
+            str(run_id),
+            base,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def _emit_survival_order_policy_fact(
+    fact_type: str,
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    base = base_payload(state, yes, no)
+    base.update(payload)
+    _write_fact(
+        sink,
+        make_fact(fact_type, str(run_id), base, correlation_id=state.pair_correlation_id),
+    )
+
+
+def emit_survival_exit_order_type_selected(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_ORDER_TYPE_SELECTED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_survival_exit_order_repriced(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_ORDER_REPRICED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_survival_exit_resting_order_placed(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_PLACED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_survival_exit_resting_order_cancel_requested(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_CANCEL_REQUESTED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_survival_exit_resting_order_cancelled(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_CANCELLED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_survival_exit_resting_order_replaced(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_RESTING_ORDER_REPLACED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_survival_exit_order_policy_abandoned(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    payload: dict[str, Any],
+) -> None:
+    _emit_survival_order_policy_fact(
+        FACT_TYPE_SURVIVAL_EXIT_ORDER_POLICY_ABANDONED,
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        payload=payload,
+    )
+
+
+def emit_no_entry_summary(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    summary: dict[str, Any],
+) -> None:
+    _write_fact(
+        sink,
+        make_fact(FACT_TYPE_PAIRED_BINARY_NO_ENTRY_SUMMARY, str(run_id), summary),
     )
 
 
@@ -828,15 +2084,411 @@ def emit_manual_intervention_required(
     *,
     attempt_count: int,
     reason: str,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     if not should_emit(state, "manual_intervention_required"):
         return
     payload = base_payload(state, yes, no)
     payload.update({"attempt_count": attempt_count, "reason": reason})
+    if extra:
+        payload.update(extra)
     _write_fact(
         sink,
         make_fact(
             FACT_TYPE_PAIRED_BINARY_MANUAL_INTERVENTION_REQUIRED,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def _survivor_runtime_payload(
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survivor_token_id: str,
+    survivor_qty: Decimal,
+    entry_price: Decimal | None,
+    configured_policy: str,
+    reason: str,
+    decision_id: str | None = None,
+) -> dict[str, Any]:
+    book = yes if survivor_leg == "yes" else no
+    bid = book.bid
+    ask = book.ask
+    est_notional = (survivor_qty * bid) if bid is not None else None
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "state": state.phase.value,
+            "survivor_leg": survivor_leg,
+            "survivor_token_id": survivor_token_id,
+            "survivor_qty": str(survivor_qty),
+            "entry_price": str(entry_price) if entry_price is not None else None,
+            "last_bid": str(bid) if bid is not None else None,
+            "last_ask": str(ask) if ask is not None else None,
+            "estimated_notional": str(est_notional) if est_notional is not None else None,
+            "configured_policy": configured_policy,
+            "reason": reason,
+            "decision_id": decision_id,
+        }
+    )
+    return payload
+
+
+def emit_open_survivor_at_max_runtime(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survivor_token_id: str,
+    survivor_qty: Decimal,
+    entry_price: Decimal | None,
+    configured_policy: str,
+    reason: str = "max_runtime_open_survivor",
+    decision_id: str | None = None,
+) -> None:
+    payload = _survivor_runtime_payload(
+        state,
+        yes,
+        no,
+        survivor_leg=survivor_leg,
+        survivor_token_id=survivor_token_id,
+        survivor_qty=survivor_qty,
+        entry_price=entry_price,
+        configured_policy=configured_policy,
+        reason=reason,
+        decision_id=decision_id,
+    )
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_OPEN_SURVIVOR_AT_MAX_RUNTIME,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survivor_runtime_extension(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survivor_token_id: str,
+    survivor_qty: Decimal,
+    entry_price: Decimal | None,
+    configured_policy: str,
+    survivor_timeout_s: float,
+    reason: str = "max_runtime_open_survivor",
+) -> None:
+    payload = _survivor_runtime_payload(
+        state,
+        yes,
+        no,
+        survivor_leg=survivor_leg,
+        survivor_token_id=survivor_token_id,
+        survivor_qty=survivor_qty,
+        entry_price=entry_price,
+        configured_policy=configured_policy,
+        reason=reason,
+    )
+    payload["survivor_timeout_s"] = survivor_timeout_s
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SURVIVOR_RUNTIME_EXTENSION,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survivor_force_exit_started(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survivor_token_id: str,
+    survivor_qty: Decimal,
+    entry_price: Decimal | None,
+    configured_policy: str,
+    decision_id: str | None = None,
+    reason: str = "max_runtime_open_survivor",
+) -> None:
+    payload = _survivor_runtime_payload(
+        state,
+        yes,
+        no,
+        survivor_leg=survivor_leg,
+        survivor_token_id=survivor_token_id,
+        survivor_qty=survivor_qty,
+        entry_price=entry_price,
+        configured_policy=configured_policy,
+        reason=reason,
+        decision_id=decision_id,
+    )
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_STARTED,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survivor_force_exit_done(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survivor_token_id: str,
+    survivor_qty: Decimal,
+    entry_price: Decimal | None,
+    configured_policy: str,
+    decision_id: str | None = None,
+    reason: str = "max_runtime_open_survivor",
+) -> None:
+    payload = _survivor_runtime_payload(
+        state,
+        yes,
+        no,
+        survivor_leg=survivor_leg,
+        survivor_token_id=survivor_token_id,
+        survivor_qty=survivor_qty,
+        entry_price=entry_price,
+        configured_policy=configured_policy,
+        reason=reason,
+        decision_id=decision_id,
+    )
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_DONE,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def _shutdown_exposure_payload(
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    payload = base_payload(state, yes, no)
+    payload.update(snapshot)
+    return payload
+
+
+def emit_open_exposure_at_shutdown(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    snapshot: dict[str, Any],
+) -> None:
+    payload = _shutdown_exposure_payload(state, yes, no, snapshot=snapshot)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_OPEN_EXPOSURE_AT_SHUTDOWN,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_shutdown_runtime_extension(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    snapshot: dict[str, Any],
+    open_exposure_timeout_s: float,
+) -> None:
+    payload = _shutdown_exposure_payload(state, yes, no, snapshot=snapshot)
+    payload["open_exposure_timeout_s"] = open_exposure_timeout_s
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SHUTDOWN_RUNTIME_EXTENSION,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_shutdown_force_flatten_started(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    snapshot: dict[str, Any],
+) -> None:
+    payload = _shutdown_exposure_payload(state, yes, no, snapshot=snapshot)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_STARTED,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_shutdown_force_flatten_done(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    snapshot: dict[str, Any],
+) -> None:
+    payload = _shutdown_exposure_payload(state, yes, no, snapshot=snapshot)
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_DONE,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_shutdown_force_flatten_failed(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    snapshot: dict[str, Any],
+    failure_reason: str,
+) -> None:
+    payload = _shutdown_exposure_payload(state, yes, no, snapshot=snapshot)
+    payload["failure_reason"] = failure_reason
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SHUTDOWN_FORCE_FLATTEN_FAILED,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_venue_reduce_only_reject_if_applicable(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    leg: str,
+    failure_reason: str,
+    decision_id: str | None = None,
+) -> None:
+    reason_lower = failure_reason.lower()
+    venue_min = (
+        "below_venue_min_size" in reason_lower
+        or "venue_min" in reason_lower
+        or "min_size" in reason_lower
+        or "too_small" in reason_lower
+        or "notional" in reason_lower
+        or "oms_reject" in reason_lower
+    )
+    if not venue_min:
+        return
+    token_id = state.yes_token_id if leg == "yes" else state.no_token_id
+    payload = base_payload(state, yes, no)
+    payload.update(
+        {
+            "leg": leg,
+            "token_id": token_id,
+            "failure_reason": failure_reason,
+            "decision_id": decision_id,
+            "context": "shutdown_flatten",
+        }
+    )
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_VENUE_REDUCE_ONLY_TOO_SMALL,
+            str(run_id),
+            payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+
+
+def emit_survivor_force_exit_failed(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    survivor_leg: str,
+    survivor_token_id: str,
+    survivor_qty: Decimal,
+    entry_price: Decimal | None,
+    configured_policy: str,
+    failure_reason: str,
+    decision_id: str | None = None,
+    reason: str = "max_runtime_open_survivor",
+) -> None:
+    payload = _survivor_runtime_payload(
+        state,
+        yes,
+        no,
+        survivor_leg=survivor_leg,
+        survivor_token_id=survivor_token_id,
+        survivor_qty=survivor_qty,
+        entry_price=entry_price,
+        configured_policy=configured_policy,
+        reason=reason,
+        decision_id=decision_id,
+    )
+    payload["failure_reason"] = failure_reason
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SURVIVOR_FORCE_EXIT_FAILED,
             str(run_id),
             payload,
             correlation_id=state.pair_correlation_id,
@@ -1445,6 +3097,87 @@ def _cashflow_pnl_missing_fields(state: PairedBinaryRuntimeState) -> list[str]:
     return missing
 
 
+def _pnl_unavailable_reason(missing_fields: list[str], *, resolution_exit: bool = False) -> str:
+    if resolution_exit:
+        return "resolution_cashflow_missing"
+    missing = set(missing_fields)
+    entry_fields = {"yes_entry_cash", "no_entry_cash", "yes_entry_qty", "no_entry_qty"}
+    exit_fields = {"yes_exit_cash", "no_exit_cash", "yes_exit_qty", "no_exit_qty"}
+    if missing & entry_fields:
+        return "missing_entry_cashflow"
+    if missing & exit_fields:
+        return "missing_exit_cashflow"
+    if missing:
+        return "allocation_mismatch"
+    return "partial_venue_fill_unknown"
+
+
+def emit_resolution_exit_accounting(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    cfg: PairedBinaryStrategyConfig,
+    accounting_payload: dict[str, object],
+) -> None:
+    if sink is None or state.resolution_exit_reported:
+        return
+    base = base_payload(state, yes, no)
+    survivor_payload = {**base, **accounting_payload}
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_SURVIVOR_RESOLVED_WITHOUT_OMS_EXIT,
+            str(run_id),
+            survivor_payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_PAIRED_BINARY_RESOLUTION_EXIT_ACCOUNTING,
+            str(run_id),
+            survivor_payload,
+            correlation_id=state.pair_correlation_id,
+        ),
+    )
+    state.resolution_exit_reported = True
+
+
+def emit_strategy_terminal_safe_to_stop(
+    sink: JsonlSink | None,
+    run_id: RunId,
+    *,
+    final_state: str,
+    message: str,
+) -> None:
+    if sink is None:
+        return
+    _write_fact(
+        sink,
+        make_fact(
+            FACT_TYPE_STRATEGY_TERMINAL_SAFE_TO_STOP,
+            str(run_id),
+            {
+                "final_state": final_state,
+                "message": message,
+            },
+        ),
+    )
+
+
+def _pnl_cashflow_snapshot(state: PairedBinaryRuntimeState) -> dict[str, str | None]:
+    return {
+        "entry_yes_cashflow": str(state.yes.entry_cash) if state.yes.entry_cash is not None else None,
+        "entry_no_cashflow": str(state.no.entry_cash) if state.no.entry_cash is not None else None,
+        "exit_yes_cashflow": str(state.yes.exit_cash) if state.yes.exit_cash is not None else None,
+        "exit_no_cashflow": str(state.no.exit_cash) if state.no.exit_cash is not None else None,
+    }
+
+
 def _available_cashflow_sources(state: PairedBinaryRuntimeState) -> dict[str, str | None]:
     return {
         "yes_entry_cash_source": state.yes.entry_cash_source,
@@ -1467,6 +3200,8 @@ def emit_realized_pnl_unavailable(
     state: PairedBinaryRuntimeState,
     yes: LegBook,
     no: LegBook,
+    *,
+    decision_id: str | None = None,
 ) -> None:
     if not should_emit(state, "realized_pnl_unavailable"):
         return
@@ -1474,14 +3209,29 @@ def emit_realized_pnl_unavailable(
     if not missing:
         return
     payload = base_payload(state, yes, no)
+    resolution = state.resolution_exit_reported
     payload.update(
         {
+            "reason": _pnl_unavailable_reason(missing, resolution_exit=resolution),
             "missing_fields": missing,
             "available_sources": _available_cashflow_sources(state),
             "state_phase": state.phase.value,
             "pair_correlation_id": state.pair_correlation_id,
+            "yes_qty": str(state.effective_qty),
+            "no_qty": str(state.effective_qty),
+            **_pnl_cashflow_snapshot(state),
         }
     )
+    if resolution:
+        payload.update(
+            {
+                "terminal_reason": "market_resolution_without_oms_exit",
+                "pnl_status": "resolution_cashflow_missing",
+                "manual_reconciliation_required": True,
+            }
+        )
+    if decision_id is not None:
+        payload["decision_id"] = decision_id
     _write_fact(
         sink,
         make_fact(
@@ -1542,24 +3292,35 @@ def emit_price_based_pnl_estimate(
     )
 
 
-def emit_realized_pnl(
-    sink: JsonlSink,
-    run_id: RunId,
+def _runtime_fill_recon_cfg(
+    cfg: RuntimeFillReconciliationConfig | FillReconciliationConfig | None,
+) -> FillReconciliationConfig:
+    if cfg is None:
+        return FillReconciliationConfig()
+    if isinstance(cfg, FillReconciliationConfig):
+        return cfg
+    return FillReconciliationConfig(
+        price_tolerance=Decimal(str(cfg.price_tolerance)),
+        cash_tolerance_usd=Decimal(str(cfg.cash_tolerance_usd)),
+        require_final_for_realized_pnl=cfg.require_final_for_realized_pnl,
+    )
+
+
+def _pnl_payload_from_reconciled(
     state: PairedBinaryRuntimeState,
     yes: LegBook,
     no: LegBook,
-) -> None:
-    if not should_emit(state, "realized_pnl"):
-        return
-    result = realized_pnl_from_cashflows(state)
-    if result is None:
-        emit_realized_pnl_unavailable(sink, run_id, state, yes, no)
-        emit_price_based_pnl_estimate(sink, run_id, state, yes, no)
-        return
-    yes_entry_avg = leg_entry_avg_price(state.yes)
-    no_entry_avg = leg_entry_avg_price(state.no)
-    yes_exit_avg = leg_exit_avg_price(state.yes)
-    no_exit_avg = leg_exit_avg_price(state.no)
+    reconciled: ReconciledPnL,
+    *,
+    pnl_status: str,
+    decision_id: str | None = None,
+) -> dict[str, Any]:
+    cf = reconciled.cashflows
+    assert cf.entry_yes and cf.entry_no and cf.exit_yes and cf.exit_no
+    yes_entry_avg = cf.entry_yes.avg_price
+    no_entry_avg = cf.entry_no.avg_price
+    yes_exit_avg = cf.exit_yes.avg_price
+    no_exit_avg = cf.exit_no.avg_price
     pair_entry_avg_cost = None
     pair_exit_avg_value = None
     if yes_entry_avg is not None and no_entry_avg is not None:
@@ -1567,45 +3328,223 @@ def emit_realized_pnl(
     if yes_exit_avg is not None and no_exit_avg is not None:
         pair_exit_avg_value = yes_exit_avg + no_exit_avg
     expected = state.expected_pnl_total
-    delta = result.pnl_total - expected if expected is not None else None
+    delta = (
+        reconciled.pnl_total - expected
+        if expected is not None and reconciled.pnl_total is not None
+        else None
+    )
     payload = base_payload(state, yes, no)
     payload.update(
         {
-            "yes_entry_cash": str(result.yes_entry_cash),
-            "no_entry_cash": str(result.no_entry_cash),
-            "yes_exit_cash": str(result.yes_exit_cash),
-            "no_exit_cash": str(result.no_exit_cash),
-            "yes_entry_qty": str(result.yes_entry_qty),
-            "no_entry_qty": str(result.no_entry_qty),
-            "yes_exit_qty": str(result.yes_exit_qty),
-            "no_exit_qty": str(result.no_exit_qty),
+            "pnl_status": pnl_status,
+            "yes_entry_cash": str(cf.entry_yes.cash),
+            "no_entry_cash": str(cf.entry_no.cash),
+            "yes_exit_cash": str(cf.exit_yes.cash),
+            "no_exit_cash": str(cf.exit_no.cash),
+            "yes_entry_qty": str(cf.entry_yes.qty),
+            "no_entry_qty": str(cf.entry_no.qty),
+            "yes_exit_qty": str(cf.exit_yes.qty),
+            "no_exit_qty": str(cf.exit_no.qty),
             "yes_entry_avg_price": str(yes_entry_avg) if yes_entry_avg is not None else None,
             "no_entry_avg_price": str(no_entry_avg) if no_entry_avg is not None else None,
             "yes_exit_avg_price": str(yes_exit_avg) if yes_exit_avg is not None else None,
             "no_exit_avg_price": str(no_exit_avg) if no_exit_avg is not None else None,
             "pair_entry_avg_cost": str(pair_entry_avg_cost) if pair_entry_avg_cost is not None else None,
             "pair_exit_avg_value": str(pair_exit_avg_value) if pair_exit_avg_value is not None else None,
-            "buy_cash_total": str(result.buy_cash_total),
-            "sell_cash_total": str(result.sell_cash_total),
-            "pnl_total": str(result.pnl_total),
-            "pnl_per_pair": str(result.pnl_per_pair),
-            "effective_pair_qty": str(result.effective_pair_qty),
-            "yes_entry_cash_source": state.yes.entry_cash_source,
-            "no_entry_cash_source": state.no.entry_cash_source,
-            "yes_exit_cash_source": state.yes.exit_cash_source,
-            "no_exit_cash_source": state.no.exit_cash_source,
+            "buy_cash_total": str(reconciled.buy_cash_total),
+            "sell_cash_total": str(reconciled.sell_cash_total),
+            "pnl_total": str(reconciled.pnl_total) if reconciled.pnl_total is not None else None,
+            "pnl_per_pair": str(reconciled.pnl_per_pair) if reconciled.pnl_per_pair is not None else None,
+            "effective_pair_qty": str(state.effective_qty),
+            "yes_entry_cash_source": cf.entry_yes.source.value,
+            "no_entry_cash_source": cf.entry_no.source.value,
+            "yes_exit_cash_source": cf.exit_yes.source.value,
+            "no_exit_cash_source": cf.exit_no.source.value,
+            "cashflow_confidence": reconciled.evidence.get("cashflow_confidence"),
+            "cashflow_sources": reconciled.evidence.get("cashflow_sources"),
+            "missing_fields": list(reconciled.missing_fields),
+            "discrepancies": list(cf.discrepancies),
+            "manual_reconciliation_required": cf.has_discrepancy or pnl_status != "final",
             "expected_pnl_total": str(expected) if expected is not None else None,
             "pnl_delta_vs_plan": str(delta) if delta is not None else None,
         }
     )
+    if decision_id is not None:
+        payload["decision_id"] = decision_id
+    return payload
+
+
+def _emit_fill_reconciliation_facts(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    cashflows: ReconciledTradeCashflows,
+    *,
+    cfg: FillReconciliationConfig,
+) -> None:
+    local_slots = {
+        "entry_yes": (state.yes.entry_cash, state.yes.entry_qty, state.yes.entry_cash_source, Side.BUY),
+        "entry_no": (state.no.entry_cash, state.no.entry_qty, state.no.entry_cash_source, Side.BUY),
+        "exit_yes": (state.yes.exit_cash, state.yes.exit_qty, state.yes.exit_cash_source, Side.SELL),
+        "exit_no": (state.no.exit_cash, state.no.exit_qty, state.no.exit_cash_source, Side.SELL),
+    }
+
+    for disc in cashflows.discrepancies:
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_OMS_FILL_DISCREPANCY_DETECTED,
+                str(run_id),
+                disc,
+                correlation_id=state.pair_correlation_id,
+            ),
+        )
+
+    for slot_name, cf in (
+        ("entry_yes", cashflows.entry_yes),
+        ("entry_no", cashflows.entry_no),
+        ("exit_yes", cashflows.exit_yes),
+        ("exit_no", cashflows.exit_no),
+    ):
+        if cf is None:
+            continue
+        local_cash, local_qty, local_src, _side = local_slots[slot_name]
+        local_price = (local_cash / local_qty) if local_cash is not None and local_qty and local_qty > 0 else None
+        venue_cash = cf.cash if cf.confidence.value == "final" else None
+        venue_price = cf.avg_price if cf.confidence.value == "final" else None
+        price_delta = None
+        cash_delta = None
+        if local_price is not None and venue_price is not None:
+            price_delta = str(abs(local_price - venue_price))
+        if local_cash is not None and venue_cash is not None:
+            cash_delta = str(abs(local_cash - venue_cash))
+        payload = {
+            "order_id": cf.order_id,
+            "token_id": cf.token_id,
+            "side": cf.side,
+            "leg": cf.leg,
+            "qty": str(cf.qty),
+            "avg_price": str(cf.avg_price) if cf.avg_price is not None else None,
+            "cash": str(cf.cash) if cf.cash is not None else None,
+            "source": cf.source.value,
+            "confidence": cf.confidence.value,
+            "trade_ids": list(cf.trade_ids),
+            "local_cash": str(local_cash) if local_cash is not None else None,
+            "local_cash_source": local_src,
+            "venue_cash": str(venue_cash) if venue_cash is not None else None,
+            "price_delta": price_delta,
+            "cash_delta": cash_delta,
+            "slot": slot_name,
+        }
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_OMS_FILL_RECONCILED,
+                str(run_id),
+                payload,
+                correlation_id=state.pair_correlation_id,
+            ),
+        )
+
+
+def emit_realized_pnl(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    coord=None,
+    fill_reconciliation_cfg: RuntimeFillReconciliationConfig | FillReconciliationConfig | None = None,
+    decision_id: str | None = None,
+) -> None:
+    if not should_emit(state, "realized_pnl"):
+        return
+    recon_cfg = _runtime_fill_recon_cfg(fill_reconciliation_cfg)
+    cashflows = reconcile_paired_binary_cashflows(state, coord=coord, cfg=recon_cfg)
+    reconciled = compute_reconciled_pnl(
+        cashflows,
+        effective_qty=state.effective_qty,
+        cfg=recon_cfg,
+    )
+    _emit_fill_reconciliation_facts(sink, run_id, state, cashflows, cfg=recon_cfg)
+
+    if reconciled.status == "unavailable":
+        emit_realized_pnl_unavailable(sink, run_id, state, yes, no, decision_id=decision_id)
+        emit_price_based_pnl_estimate(sink, run_id, state, yes, no)
+        return
+
+    payload = _pnl_payload_from_reconciled(
+        state,
+        yes,
+        no,
+        reconciled,
+        pnl_status=reconciled.status,
+        decision_id=decision_id,
+    )
+
+    if reconciled.status == "final":
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_PAIRED_BINARY_REALIZED_PNL,
+                str(run_id),
+                payload,
+                correlation_id=state.pair_correlation_id,
+            ),
+        )
+        _write_fact(
+            sink,
+            make_fact(
+                FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_RECONCILED,
+                str(run_id),
+                payload,
+                correlation_id=state.pair_correlation_id,
+            ),
+        )
+        return
+
     _write_fact(
         sink,
         make_fact(
-            FACT_TYPE_PAIRED_BINARY_REALIZED_PNL,
+            FACT_TYPE_PAIRED_BINARY_REALIZED_PNL_TENTATIVE,
             str(run_id),
             payload,
             correlation_id=state.pair_correlation_id,
         ),
+    )
+
+
+def emit_shutdown_completion_reporting(
+    sink: JsonlSink,
+    run_id: RunId,
+    state: PairedBinaryRuntimeState,
+    yes: LegBook,
+    no: LegBook,
+    *,
+    coord=None,
+    fill_reconciliation_cfg: RuntimeFillReconciliationConfig | FillReconciliationConfig | None = None,
+    decision_id: str | None = None,
+) -> None:
+    """Emit DONE + realized PnL (or explicit unavailable) after successful shutdown flatten."""
+    emit_realized_pnl(
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        coord=coord,
+        fill_reconciliation_cfg=fill_reconciliation_cfg,
+        decision_id=decision_id,
+    )
+    emit_done(
+        sink,
+        run_id,
+        state,
+        yes,
+        no,
+        completion_reason="shutdown_force_flatten",
+        decision_id=decision_id,
     )
 
 
@@ -1994,13 +3933,17 @@ def emit_decision_snapshot(
     *,
     snapshot,
     correlation_id: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> None:
+    payload = snapshot.to_payload()
+    if extra_payload:
+        payload.update(extra_payload)
     _write_fact(
         sink,
         make_fact(
             "decision_snapshot",
             str(run_id),
-            snapshot.to_payload(),
+            payload,
             correlation_id=correlation_id,
         ),
     )
@@ -2012,13 +3955,17 @@ def emit_latency_chain(
     *,
     chain,
     correlation_id: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
 ) -> None:
+    payload = chain.to_payload()
+    if extra_payload:
+        payload.update(extra_payload)
     _write_fact(
         sink,
         make_fact(
             "latency_chain",
             str(run_id),
-            chain.to_payload(),
+            payload,
             correlation_id=correlation_id,
         ),
     )

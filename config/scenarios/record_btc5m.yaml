@@ -1,0 +1,45 @@
+# Multi-market BTC 5m record-only scenario (M2B.1-B).
+#
+# Discovers active/upcoming BTC 5m markets automatically; no --event-url required.
+# Writes compressed JSONL segments, heartbeat.json, and coverage_report.json.
+#
+# Run:
+#   python -m tyrex_pm.runtime.app record --scenario config/scenarios/record_btc5m.yaml
+#
+# Requires optional compression dependency:
+#   pip install 'tyrex-pm[record]'
+
+execution_mode: shadow
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    event_backbone:
+      enabled: true
+      reorder_buffer_ms: 75
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: false
+      recovery_on_reconnect: false
+  recording:
+    enabled: true
+    output_dir: var/recordings
+    discovery_enabled: true
+    discovery_poll_s: 25
+    heartbeat_stall_s: 120
+    heartbeat_interval_s: 30
+    compress: true
+    tap_in_live: false
+    post_close_grace_s: 60
+    skip_expired_markets: true
+    pre_open_recording_lead_s: 60
+    segment_max_mb: 64
+    segment_max_s: 300
+
+strategy:
+  kind: paired_binary
+  enabled: false

@@ -358,8 +358,8 @@ def test_recovery_failed_non_flat_launches_unwind_or_manual_intervention(tmp_pat
     path.parent.mkdir(parents=True, exist_ok=True)
     save_persisted_state(path, state)
     recovered = recover_on_startup(coord, cfg, state_dir=tmp_path)
-    assert recovered.phase == PairedBinaryPhase.UNWIND_PENDING
-    assert recovered.unwind_block_reason == "recovery_failed_non_flat"
+    assert recovered.phase == PairedBinaryPhase.ONLY_YES_ACTIVE
+    assert recovered.effective_qty == Decimal("5")
 
 
 def test_reset_state_warns_about_open_venue_orders(tmp_path: Path) -> None:

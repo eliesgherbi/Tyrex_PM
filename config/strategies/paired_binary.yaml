@@ -7,8 +7,8 @@ enabled: true
 paired_binary:
   owner_id: paired_binary
   market_id: "shadow_test_market"
-  yes_token_id: "30445296239882028846481347781729758345596160398893716161347680048648162958944"
-  no_token_id: "79072907826285075425027727431895357014716567274543635309335594579505470821276"
+  yes_token_id: "60623465405255973232915789757360817490886260321202505048709097730361810974033"
+  no_token_id: "39973642943404485458661593289415231607414175313101347321562244976405845796515"
 
   position_size: "5"
   max_pair_entry_cost: "1.015"
@@ -30,7 +30,7 @@ paired_binary:
   entry_price_mismatch_tolerance: "0.005"
   entry_price_mismatch_abort_threshold: "0.02"
 
-  max_holding_time_s: 299
+  max_holding_time_s: 10000
 
   entry_order_style: FAK
   exit_order_style: FAK
@@ -48,6 +48,6 @@ paired_binary:
   run_once: false
   max_markets: 1
   tick_interval_s: 0.2
-  max_runtime_s: 300
+  max_runtime_s: 330
 
   use_fixture_book: false

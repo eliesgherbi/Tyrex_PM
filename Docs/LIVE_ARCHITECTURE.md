@@ -18,11 +18,26 @@ What Polymarket says **right now**. Owned by `state.WalletStore`, populated from
 | **REST `/data/orders`** (resting orders backstop) | `venue.polymarket.clob_wallet_sync.refresh_wallet_from_clob` | every `TYREX_VENUE_REFRESH_S` (default = `runtime.reconcile_interval_s`, 30 s) |
 | **REST `/balance-allowance`** (Polymarket USD + per-exchange allowances) | `clob_wallet_sync.refresh_wallet_from_clob` | with the open-orders refresh |
 | **REST `/data-api/positions`** (position safety net) | `venue.polymarket.positions_sync.refresh_positions_from_data_api` | with the venue refresh loop, when a wallet address is resolvable |
-| **Market WebSocket** (books / trades) | `ingestion.market_stream` (scaffolded; not consumed by current strategies) | event-driven |
+| **Market WebSocket** (books / trades) | `ingestion/market_stream` | event-driven; **WS-primary** for paired-binary when `market_data.mode: ws_primary` |
 
 `WalletStore.open_orders` is a **merged view**: user WS wins; REST rows fill ids WS hasn't seen yet; tombstones suppress stale REST rows for ids WS has already declared terminal.
 
-### 1.2 Local truth
+### 1.2 Market book truth (Phase 2)
+
+For paired-binary with `market_data.enabled` and WS-primary mode:
+
+| Source | Role |
+|--------|------|
+| **Market WebSocket** | Authoritative best bid/ask, depth, `reconnect_gap` |
+| **REST bootstrap** | Initial book at startup |
+| **REST recovery** | Exit contexts when WS paused (`rest_recovery_exit_allowed`) |
+| **Fixture inject** | Shadow / harness only |
+
+`MarketStateStore.capture()` feeds planner, entry eval, and survival exit planning. Material decisions log `snapshot_id`, `book_age_ms`, `source`, `quality_verdict`.
+
+Readiness pauses new **entry** on `reconnect_gap`. Survival enforce may retry pre-submit quality rejects on subsequent WS ticks (`URGENT_EXIT` context).
+
+### 1.3 Local truth
 
 What this bot believes about its own session. Owned by `state.OrderStore`:
 

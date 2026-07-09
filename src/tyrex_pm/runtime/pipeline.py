@@ -51,6 +51,8 @@ from tyrex_pm.reporting.schema_v2 import (
     FACT_TYPE_OMS_REJECT,
     FACT_TYPE_OMS_SUBMIT,
     FACT_TYPE_RECONCILE,
+    FACT_TYPE_REDUCE_ONLY_MIN_NOTIONAL_BYPASS,
+    FACT_TYPE_REDUCE_ONLY_MIN_NOTIONAL_BYPASS_DENIED,
     FACT_TYPE_RISK,
     FACT_TYPE_SIGNAL_RECEIVED,
     FACT_TYPE_STRATEGY_SKIP,
@@ -351,6 +353,43 @@ def _execution_plan_payload(result: ExecutionPlanResult, *, client_order_id: str
     return payload
 
 
+def _emit_reduce_only_bypass_facts(
+    sink: JsonlSink,
+    *,
+    run_id: str,
+    correlation_id: str,
+    extensions: dict | None,
+) -> None:
+    if not extensions:
+        return
+    bypass = extensions.get("reduce_only_bypass_fact")
+    if isinstance(bypass, dict):
+        sink.write(
+            make_fact(
+                FACT_TYPE_REDUCE_ONLY_MIN_NOTIONAL_BYPASS,
+                run_id,
+                bypass,
+                correlation_id=correlation_id,
+            )
+        )
+    denied = extensions.get("reduce_only_bypass_denied_fact")
+    if isinstance(denied, dict):
+        sink.write(
+            make_fact(
+                FACT_TYPE_REDUCE_ONLY_MIN_NOTIONAL_BYPASS_DENIED,
+                run_id,
+                denied,
+                correlation_id=correlation_id,
+            )
+        )
+
+
+def _reduce_only_context_from_extensions(intent_extensions: dict | None) -> str | None:
+    ext = intent_extensions or {}
+    raw = ext.get("reduce_only_context") or ext.get("paired_binary_reason")
+    return str(raw) if raw else None
+
+
 def _infer_decision_context(ap: ApprovedIntent) -> str:
     intent = ap.intent
     if isinstance(intent, EnterIntent):
@@ -597,7 +636,14 @@ def _run_execution_planner(
     if not result.approved or result.plan is None:
         return None
     plan: ExecutionPlan = result.plan
-    final = validate_planned_order(plan, risk_ctx, app=app)
+    final = validate_planned_order(
+        plan,
+        risk_ctx,
+        app=app,
+        reduce_only_context=_reduce_only_context_from_extensions(intent_extensions),
+        intent_extensions=intent_extensions,
+        exit_book_evidence=plan.book_evidence,
+    )
     planned_payload: dict = {
         "approved": final.approved,
         "reason_codes": list(final.reason_codes),
@@ -605,6 +651,12 @@ def _run_execution_planner(
     }
     if final.extensions:
         planned_payload.update(final.extensions)
+    _emit_reduce_only_bypass_facts(
+        sink,
+        run_id=rid,
+        correlation_id=corr,
+        extensions=final.extensions,
+    )
     sink.write(
         make_fact(
             FACT_TYPE_RISK,
@@ -666,6 +718,11 @@ async def process_intent_work_unit(
         app=app,
         run_id=run_id,
         exit_book_evidence=exit_book_evidence,
+        reduce_only_context=_reduce_only_context_from_extensions(intent_extensions),
+        intent_extensions=intent_extensions,
+        decision_id=str(intent_extensions.get("decision_id"))
+        if intent_extensions.get("decision_id")
+        else None,
     )
     risk_payload: dict = {
         "approved": decision.approved,
@@ -674,6 +731,12 @@ async def process_intent_work_unit(
     }
     if decision.extensions:
         risk_payload.update(decision.extensions)
+    _emit_reduce_only_bypass_facts(
+        sink,
+        run_id=rid,
+        correlation_id=corr,
+        extensions=decision.extensions,
+    )
     sink.write(
         make_fact(
             FACT_TYPE_RISK,
@@ -840,6 +903,8 @@ async def process_intent_work_unit(
                     token_id=str(ap.intent.token_id),
                     error_payload=reject_payload,
                     intent_extensions=intent_extensions,
+                    sink=sink,
+                    run_id=rid,
                 )
             reconcile_coordinator(coord, sink, rid)
             return
@@ -1210,12 +1275,15 @@ def _notify_paired_binary_exit(
     *,
     submitted: bool,
     reason: str | None = None,
+    error_detail: str | None = None,
     match_evidence: dict | None = None,
     ap: object | None = None,
     apply_local_shadow_fill: bool = False,
 ) -> None:
     from tyrex_pm.core.models import ExitIntent
+    from tyrex_pm.runtime.allocation_runtime import should_apply_allocation_sell_on_submit
     from tyrex_pm.runtime.allocation_ids import PAIRED_BINARY_INTENT_SOURCE
+    from tyrex_pm.state.entry_fill_lifecycle import is_resting_ack
     from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
 
     if not isinstance(strategy, PairedBinaryStrategy):
@@ -1239,9 +1307,19 @@ def _notify_paired_binary_exit(
                 limit_price=intent.limit_price,
             )
     if submitted:
-        strategy.notify_exit_submitted(leg=str(leg))
+        resting = False
+        if match_evidence is not None:
+            resting = is_resting_ack(match_evidence) and not should_apply_allocation_sell_on_submit(
+                match_evidence, apply_local_shadow_fill=apply_local_shadow_fill
+            )
+        v_oid = None
+        if match_evidence:
+            raw_oid = match_evidence.get("venue_order_id") or match_evidence.get("order_id")
+            if raw_oid:
+                v_oid = str(raw_oid)
+        strategy.notify_exit_submitted(leg=str(leg), resting=resting, venue_order_id=v_oid)
     elif reason:
-        strategy.notify_exit_blocked(leg=str(leg), reason=reason)
+        strategy.notify_exit_blocked(leg=str(leg), reason=reason, error_detail=error_detail)
 
 
 def _handle_intent_risk_denied(
@@ -1292,6 +1370,8 @@ def _handle_sell_oms_reject(
     token_id: str,
     error_payload: dict,
     intent_extensions: dict[str, object] | None = None,
+    sink: JsonlSink | None = None,
+    run_id: str | None = None,
 ) -> None:
     emit_exit_lifecycle(
         coord,
@@ -1307,12 +1387,43 @@ def _handle_sell_oms_reject(
         strategy.tp_sl_state.mark_exit_terminal("sell_oms_reject")
     elif isinstance(strategy, AllocationTestStrategy):
         strategy.notify_sell_oms_reject()
+    err_msg = str(error_payload.get("error_msg") or error_payload.get("error") or "")
     _notify_paired_binary_exit(
         strategy,
         intent_extensions,
         submitted=False,
         reason="OMS_REJECTED",
+        error_detail=err_msg or None,
     )
+    ext = intent_extensions or {}
+    ctx = _reduce_only_context_from_extensions(intent_extensions)
+    if (
+        sink is not None
+        and run_id is not None
+        and ctx in {"shutdown_flatten", "manual_flatten", "urgent_exit"}
+    ):
+        from tyrex_pm.reporting.schema_v2 import FACT_TYPE_VENUE_REDUCE_ONLY_TOO_SMALL
+        from tyrex_pm.strategies.paired_binary.strategy import PairedBinaryStrategy
+
+        if isinstance(strategy, PairedBinaryStrategy) and strategy._state is not None:
+            ext = intent_extensions or {}
+            leg = str(ext.get("leg") or "")
+            err_msg = str(error_payload.get("error_msg") or error_payload.get("error") or "")
+            sink.write(
+                make_fact(
+                    FACT_TYPE_VENUE_REDUCE_ONLY_TOO_SMALL,
+                    run_id,
+                    {
+                        "leg": leg,
+                        "token_id": token_id,
+                        "failure_reason": err_msg or "OMS_REJECTED",
+                        "decision_id": ext.get("decision_id"),
+                        "context": ctx,
+                        "status_code": error_payload.get("status_code"),
+                    },
+                    correlation_id=corr,
+                )
+            )
 
 
 async def refresh_wallet_coordinated_after_live_submit(

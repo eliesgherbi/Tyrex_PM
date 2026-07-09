@@ -29,25 +29,46 @@ class PairedBinaryStrategy:
         self.cfg = cfg
         self._state: PairedBinaryRuntimeState | None = None
         self.last_exit_submitted_leg: str | None = None
+        self.last_exit_submitted_resting: bool = False
+        self.last_exit_venue_order_id: str | None = None
         self.last_exit_blocked_leg: str | None = None
         self.last_exit_blocked_reason: str | None = None
+        self.last_exit_oms_error: str | None = None
 
     def bind_state(self, state: PairedBinaryRuntimeState) -> None:
         self._state = state
         self.last_exit_submitted_leg = None
+        self.last_exit_submitted_resting = False
+        self.last_exit_venue_order_id = None
         self.last_exit_blocked_leg = None
         self.last_exit_blocked_reason = None
+        self.last_exit_oms_error = None
 
     @property
     def owner_id(self) -> str:
         return self.cfg.owner_id
 
-    def notify_exit_submitted(self, *, leg: str) -> None:
+    def notify_exit_submitted(
+        self,
+        *,
+        leg: str,
+        resting: bool = False,
+        venue_order_id: str | None = None,
+    ) -> None:
         self.last_exit_submitted_leg = leg
+        self.last_exit_submitted_resting = resting
+        self.last_exit_venue_order_id = venue_order_id
 
-    def notify_exit_blocked(self, *, leg: str, reason: str) -> None:
+    def notify_exit_blocked(
+        self,
+        *,
+        leg: str,
+        reason: str,
+        error_detail: str | None = None,
+    ) -> None:
         self.last_exit_blocked_leg = leg
         self.last_exit_blocked_reason = reason
+        self.last_exit_oms_error = error_detail
 
     def notify_buy_submitted(
         self,

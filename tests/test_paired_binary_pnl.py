@@ -259,12 +259,13 @@ def test_realized_loser_loss_reprices_winner_target() -> None:
         cfg.slippage_buffer,
     )
     state.no_target = initial.trigger_target
-    old, new = reprice_survivor_after_loser_exit(
+    outcome = reprice_survivor_after_loser_exit(
         state,
         cfg,
         loser_leg="yes",
         loser_exit_fill=Decimal("0.40"),
     )
+    old, new = outcome.old_target, outcome.new_target
     assert old == initial.trigger_target
     assert new is not None
     assert new > old

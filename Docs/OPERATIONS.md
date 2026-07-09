@@ -12,6 +12,7 @@ Three subcommands, all backed by `tyrex_pm.runtime.app`:
 
 ```bash
 tyrex-pm run [...]            # strategy loop (guru poll, fixture replay, or harness — see strategy kind)
+tyrex-pm record [...]         # record-only MarketEvent JSONL (no trading; M2B.1-A)
 tyrex-pm live-attest [...]    # one-shot live submit + cancel attestation
 tyrex-pm reset-state [...]    # clear local on-disk state (V2 cutover hygiene)
 # Equivalent: python -m tyrex_pm.runtime.app <cmd> [...]
@@ -146,6 +147,27 @@ See [phase_4_6_paired_binary_strategy_production_protection.md](Implementation/a
 
 **Stuck EXITING_* without open sell:** restart emits `paired_binary_recovered` with `recovery_action` (`exiting_no_retry_stop_pending`, etc.) and returns to `STOP_PENDING_*` for retry. Timeout re-evaluates all non-terminal monitor phases including pending/exiting.
 
+**Phase 1 survival — trailing enforce (live experiment, not default production):**
+
+```bash
+python -m tyrex_pm.runtime.app run \
+  --strategy config/strategies/paired_binary.yaml \
+  --scenario live_paired_binary_phase1_trailing_enforce \
+  --run-name "phase1_trailing_enforce_$(date +%s)"
+```
+
+Expect: `survivor_hard_floor_set` → `survivor_trailing_stop_armed` → `survivor_trailing_stop_triggered` → `survival_enforce_exit_submitted` → `paired_binary_done`. Profile uses `survivor_floor.enforcement_mode: advisory`, `trailing_stop.enforcement_mode: enforce`.
+
+Validate run:
+
+```bash
+python scripts/validate_paired_binary_phase2_live_run.py var/reporting/runs/<run_name>
+```
+
+Classifications include `PHASE1_TRAILING_ENFORCE_PASS`, `PHASE1_TRAILING_QUALITY_REJECT_PENDING_FAIL`. See [phase1_parameter_guide.md](Implementation/Survivor_target/phase1_parameter_guide.md).
+
+**Global defaults unchanged:** `survival.enabled: false`, module enforce modes `advisory`, `retry_quality_rejects: false` unless scenario enables them.
+
 ```yaml
 # optional scenario overlay
 runtime:
@@ -191,6 +213,116 @@ tyrex-pm reset-state --state-dir var/state    # explicit
 ```
 
 Currently removes: `guru_strategy_store.json` (guru watermark + dedup ledger). Run this before the first live process on a fresh V2 environment, and again after major venue cutovers that invalidate old open-order assumptions, so no stale guru cursor or pre-cutover local state leaks into startup. Bootstrap is also enforced in code: until the first successful V2 venue truth rebuild, `check_aggressive_readiness` denies with `bootstrap_not_complete`.
+
+### 1.4 `tyrex-pm record` (M2B.1-A / M2B.1-B)
+
+Record-only mode: subscribes to market WebSocket(s) and writes `MarketEvent` segments plus per-market `manifest.json`. **No trading, wallet, OMS, or risk.**
+
+Requires `runtime.recording.enabled: true`, `runtime.market_data.event_backbone.enabled: true`, and WS primary.
+
+#### Single-market (M2B.1-A)
+
+Scenario: `config/scenarios/record_btc5m_single.yaml`
+
+Pass `--event-url` with the live Polymarket event URL; yes/no token ids and `market_id` are induced from that URL.
+
+```bash
+python -m tyrex_pm.runtime.app record --scenario config/scenarios/record_btc5m_single.yaml \
+  --event-url https://polymarket.com/event/btc-updown-5m-<window-start-unix-ts>
+```
+
+Writes plain `.jsonl` segments unless `recording.compress: true`.
+
+#### Multi-market discovery (M2B.1-B)
+
+Scenario: `config/scenarios/record_btc5m.yaml`
+
+Discovers active/upcoming BTC 5m markets automatically (no `--event-url`). Requires optional compression extra:
+
+```bash
+pip install 'tyrex-pm[record]'
+python -m tyrex_pm.runtime.app record --scenario config/scenarios/record_btc5m.yaml
+```
+
+Output layout:
+
+```text
+var/recordings/<YYYY-MM-DD>/heartbeat.json
+var/recordings/<YYYY-MM-DD>/coverage_report.json
+var/recordings/<YYYY-MM-DD>/<market_id>/events-00001.jsonl[.zst]
+var/recordings/<YYYY-MM-DD>/<market_id>/manifest.json
+```
+
+**Heartbeat:** `heartbeat.json` at the day directory updates every `heartbeat_interval_s` (default 30s). Fields: `last_event_ts`, `event_count`, `dropped_events`, `active_market_count`, `stall_detected` (true when no writes for `heartbeat_stall_s`).
+
+**Coverage:** `coverage_report.json` is written on graceful shutdown. It is built from persisted per-market `manifest.json` files (not in-memory session state), with per-market status (`recorded` / `partial` / `missing` / `skipped`) and `coverage_pct`.
+
+**Per-market auto-stop:** recording stops each market at `event_end_ts + post_close_grace_s` (default 60s). Single-market mode with `--event-url` also exits automatically after that window.
+
+**Discovery timing guards:** expired markets (`event_end_ts + post_close_grace_s` already past) are skipped by default (`skip_expired_markets: true`). Future markets are not recorded until `event_start_ts - pre_open_recording_lead_s` (default 60s before open).
+
+Stop manually with Ctrl+C; `recording_ended_ts` is set on graceful shutdown.
+
+Config flags (defaults):
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `recording.discovery_enabled` | `false` | `true` in `record_btc5m.yaml` |
+| `recording.compress` | `false` | `true` in `record_btc5m.yaml`; needs `[record]` extra |
+| `recording.tap_in_live` | `false` | must stay false in M2B.1-B |
+| `recording.discovery_poll_s` | `25` | Gamma poll cadence |
+| `recording.heartbeat_stall_s` | `120` | stall alert threshold |
+| `recording.post_close_grace_s` | `60` | record after market close |
+| `recording.skip_expired_markets` | `true` | skip markets past close + grace at discovery |
+| `recording.pre_open_recording_lead_s` | `60` | earliest pre-open recording lead before window start |
+
+**External BTC feed (M2B.2):** optional read-only Binance public streams for record mode only.
+
+```yaml
+runtime:
+  external_btc:
+    enabled: false
+    symbol: BTCUSDT
+    streams: [bookTicker, aggTrade]
+    venue: binance
+```
+
+When enabled in `tyrex-pm record`, BTC events are written to a separate folder (not mixed into Polymarket market tapes):
+
+```text
+var/recordings/<YYYY-MM-DD>/external/btc_binance/events-00001.jsonl[.zst]
+var/recordings/<YYYY-MM-DD>/external/btc_binance/manifest.json
+```
+
+Event types: `external_btc_tick`, `clock_sync`. No trading credentials or order paths. Requires `pip install 'tyrex-pm[live]'` for `websockets`.
+
+**Joint PM + Binance scenario:** `config/scenarios/record_btc5m_external.yaml` (discovery + `external_btc.enabled: true`).
+
+**Rich recorder (M2B.3-A):** `config/scenarios/record_btc5m_rich.yaml` enables PM discovery, Binance external BTC, and Polymarket RTDS Chainlink reference prices with price-to-beat derivation.
+
+RTDS subscription must use `"type": "*"` (not `msg_type`) with filters as a JSON string, e.g. `"{\"symbol\":\"btc/usd\"}"`. See [`polymarket_data_coverage.md`](Implementation/phase2b_data_backbone/polymarket_data_coverage.md).
+
+```bash
+python -m tyrex_pm.runtime.app record --scenario config/scenarios/record_btc5m_rich.yaml
+```
+
+Additional output:
+
+```text
+var/recordings/<YYYY-MM-DD>/external/polymarket_rtds_chainlink/
+```
+
+Event types: `reference_price_tick`, `price_to_beat_observed` (per market). PM market-channel also records `last_trade_price`, `tick_size_change`, `best_bid_ask`, `market_resolved` when emitted (`custom_feature_enabled: true` on WS subscribe).
+
+Normalize with:
+
+```bash
+python -m research.normalize.run --recordings var/recordings/<day> --out var/parquet --include-external-btc --overwrite
+```
+
+See [`DATA_LAKE.md`](DATA_LAKE.md) and [`polymarket_data_coverage.md`](Implementation/phase2b_data_backbone/polymarket_data_coverage.md).
+
+**Note:** Recorder captures WS `MarketEvent`s only. `REST_RECOVERY_USED` remains open (see `open_followups.md`).
 
 ---
 
