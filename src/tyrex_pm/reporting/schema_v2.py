@@ -143,6 +143,21 @@ FACT_TYPE_PAIRED_BINARY_MARKET_TIMING = "paired_binary_market_timing"
 FACT_TYPE_PAIRED_BINARY_NO_ENTRY_SUMMARY = "paired_binary_no_entry_summary"
 FACT_TYPE_VENUE_REDUCE_ONLY_TOO_SMALL = "venue_reduce_only_too_small"
 
+# Z-Gap / generic signal feed facts (A0.2 payload contract; deduped emission in A0.5+)
+FACT_TYPE_SIGNAL_FEED_HEALTH = "signal_feed_health"
+FACT_TYPE_BASIS_COMPUTED = "basis_computed"
+FACT_TYPE_PRICE_TO_BEAT_OBSERVED = "price_to_beat_observed"
+FACT_TYPE_MODEL_STATE_SNAPSHOT = "model_state_snapshot"
+FACT_TYPE_FEE_MODEL_RESOLVED = "fee_model_resolved"
+FACT_TYPE_EDGE_EVALUATED = "edge_evaluated"
+FACT_TYPE_Z_GAP_ENTRY_EVAL = "z_gap_entry_eval"
+FACT_TYPE_Z_GAP_ENTRY_SKIP = "z_gap_entry_skip"
+FACT_TYPE_Z_GAP_TERMINAL_SUMMARY = "z_gap_terminal_summary"
+FACT_TYPE_CALIBRATION_SAMPLE = "calibration_sample"
+FACT_TYPE_CLOCK_SYNC = "clock_sync"
+FACT_TYPE_Z_GAP_WINDOW_SKIPPED_LATE_START = "z_gap_window_skipped_late_start"
+FACT_TYPE_Z_GAP_STARTUP_TIMING = "z_gap_startup_timing"
+
 # Phase 1 M0 — strategy lifecycle runtime facts
 FACT_TYPE_STRATEGY_RUNTIME_DECISION = "strategy_runtime_decision"
 FACT_TYPE_STRATEGY_RUNTIME_FALLBACK_MAX_RUNTIME = "strategy_runtime_fallback_max_runtime"

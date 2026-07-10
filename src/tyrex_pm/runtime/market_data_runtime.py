@@ -62,6 +62,11 @@ def resolve_market_token_ids(app: AppConfig) -> list[str]:
         for tid in (pb.yes_token_id, pb.no_token_id):
             if tid and tid not in ids:
                 ids.append(tid)
+    zg = getattr(app, "z_gap", None)
+    if zg is not None:
+        for tid in (zg.yes_token_id, zg.no_token_id):
+            if tid and tid not in ids:
+                ids.append(tid)
     return ids
 
 
@@ -73,6 +78,9 @@ async def bootstrap_market_state(
     source: str = BookSource.REST_BOOTSTRAP,
 ) -> int:
     """REST-bootstrap configured tokens into ``coord.market_state``."""
+    from tyrex_pm.runtime.time_authority import mark_feeds_started
+
+    mark_feeds_started(caller="bootstrap_market_state")
     if not app.runtime.market_data.enabled:
         return 0
     store = ensure_market_state_store(coord, app)

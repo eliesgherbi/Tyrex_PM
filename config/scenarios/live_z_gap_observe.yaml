@@ -1,0 +1,72 @@
+# Z-Gap Phase A — observe_only live scenario (default).
+#
+# Preflight (recommended before live):
+#   python scripts/preflight_clock_sanity.py
+#   python scripts/preflight_ptb_attestation.py --recording-dir <fresh_recording> --reference-k <K>
+#
+# Run (operator) — pass --event-url to auto-fill BTC 5m metadata:
+#   python -m tyrex_pm.runtime.app run \
+#     --strategy config/strategies/z_gap.yaml \
+#     --scenario live_z_gap_observe \
+#     --event-url "https://polymarket.com/event/btc-updown-5m-<START_TS>" \
+#     --run-name z_gap_observe_$(date +%s)
+
+execution_mode: live
+
+strategy:
+  z_gap:
+    entry_mode: observe_only
+    market_id: "btc_5m_<YYYYMMDD_HHMM>"
+    condition_id: "<required>"
+    event_start_ts: null
+    event_end_ts: null
+    yes_token_id: "<required>"
+    no_token_id: "<required>"
+    entry:
+      theta_take: "0.05"
+      z_band: ["0.8", "2.2"]
+      tau_band_s: [60, 210]
+      basis_max_bps: "3"
+      expected_slippage_ticks: 1
+      one_position_per_window: true
+      no_reentry_after_exit: true
+
+runtime:
+  signal_feeds:
+    enabled: true
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: true
+      recovery_on_reconnect: true
+  strategy_lifecycle:
+    mode: market_aware
+    exit_clock_source: event_end_ts
+    max_runtime_s: null
+    fallback_max_runtime_s: 900
+    flatten_before_event_end_s: 20
+    block_new_entry_phases: [near_close, closed]
+  external_btc:
+    enabled: true
+    symbol: BTCUSDT
+    streams: [bookTicker, aggTrade]
+  reference_prices:
+    enabled: true
+    feeds: [chainlink]
+    symbols: [btc/usd]
+    emit_price_to_beat: true
+    price_to_beat_max_lag_ms: 5000
+
+risk:
+  notional:
+    min_usd: "0.01"
+    max_usd: "5"
+    max_policy: deny
+  deployment:
+    token_cap_usd: "25"
+    portfolio_cap_usd: "100"

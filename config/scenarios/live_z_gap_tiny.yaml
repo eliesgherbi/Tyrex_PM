@@ -1,0 +1,55 @@
+# Z-Gap Phase A — future enforce scenario (GATED — do not run until all preflight gates pass).
+#
+# Required artifacts under var/reporting/z_gap/:
+#   fee_curve_spike.json
+#   binance_connectivity.json
+#   ptb_attestation.json          (fresh live recording; golden_day alone does NOT unlock)
+#   clock_sanity.json
+#   calibration_lite_review.json
+#   operator_enforce_approval.json
+#
+# Config load with entry_mode: enforce will fail closed unless all gates pass.
+#
+# Preflight:
+#   python scripts/preflight_ptb_attestation.py --recording-dir <fresh> --reference-k <K>
+#   python scripts/preflight_clock_sanity.py
+#
+# NOT FOR A0.1 LIVE USE — enforce loop arrives in A0.6+.
+
+execution_mode: live
+
+strategy:
+  z_gap:
+    entry_mode: enforce
+    market_id: "btc_5m_<YYYYMMDD_HHMM>"
+    condition_id: "<required>"
+    event_start_ts: null
+    event_end_ts: null
+    yes_token_id: "<required>"
+    no_token_id: "<required>"
+
+runtime:
+  market_data:
+    enabled: true
+    max_book_age_s: 5
+    websocket:
+      primary_enabled: true
+      shadow_enabled: false
+    rest:
+      poll_enabled: false
+      bootstrap_on_startup: true
+  strategy_lifecycle:
+    mode: market_aware
+    exit_clock_source: event_end_ts
+    max_runtime_s: null
+    fallback_max_runtime_s: 900
+    flatten_before_event_end_s: 20
+
+risk:
+  notional:
+    min_usd: "0.01"
+    max_usd: "5"
+    max_policy: deny
+  deployment:
+    token_cap_usd: "25"
+    portfolio_cap_usd: "100"

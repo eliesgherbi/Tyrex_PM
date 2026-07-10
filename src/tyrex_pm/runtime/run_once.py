@@ -44,6 +44,7 @@ from tyrex_pm.runtime.config import (
     STRATEGY_KIND_ALLOCATION_TEST,
     STRATEGY_KIND_GURU_FOLLOW,
     STRATEGY_KIND_PAIRED_BINARY,
+    STRATEGY_KIND_Z_GAP,
     STRATEGY_KIND_SELL_TEST,
     STRATEGY_KIND_SIMPLE_SIGNAL_TEST,
     STRATEGY_KIND_TP_SL_TEST,
@@ -138,7 +139,9 @@ async def execute_run(args: argparse.Namespace) -> int:
 
     event_url = getattr(args, "event_url", None)
     resolved_event_meta = None
-    if event_url or app.paired_binary is not None:
+    if app.strategy_kind == STRATEGY_KIND_PAIRED_BINARY and (
+        event_url or app.paired_binary is not None
+    ):
         from tyrex_pm.runtime.paired_binary_metadata import resolve_and_apply_paired_binary_metadata
         from tyrex_pm.venue.polymarket.event_metadata import EventMetadataError, EventMetadataLookupError
 
@@ -164,6 +167,31 @@ async def execute_run(args: argparse.Namespace) -> int:
                 app.paired_binary.no_token_id if app.paired_binary else "?",
                 app.paired_binary.event_start_ts if app.paired_binary else "?",
                 app.paired_binary.event_end_ts if app.paired_binary else "?",
+            )
+
+    if app.strategy_kind == STRATEGY_KIND_Z_GAP and (event_url or app.z_gap is not None):
+        from tyrex_pm.runtime.btc_5m_metadata import resolve_and_apply_btc_5m_metadata
+        from tyrex_pm.venue.polymarket.event_metadata import EventMetadataError, EventMetadataLookupError
+
+        try:
+            app, resolved_z_gap_meta = resolve_and_apply_btc_5m_metadata(app, event_url=event_url)
+        except (EventMetadataError, EventMetadataLookupError) as exc:
+            log.error("z_gap btc_5m metadata resolution failed: %s", exc)
+            return 2
+        except httpx.HTTPError as exc:
+            log.error("z_gap btc_5m metadata HTTP error: %r", exc)
+            return 2
+        if resolved_z_gap_meta is not None:
+            log.info(
+                "Resolved z_gap metadata from %s: market_id=%s condition_id=%s "
+                "yes=%s no=%s event_start_ts=%s event_end_ts=%s",
+                event_url or "token_ids",
+                resolved_z_gap_meta.market_id,
+                resolved_z_gap_meta.condition_id,
+                resolved_z_gap_meta.yes_token_id,
+                resolved_z_gap_meta.no_token_id,
+                resolved_z_gap_meta.event_start_ts,
+                resolved_z_gap_meta.event_end_ts,
             )
 
     run_id = RunId(str(uuid4()))
@@ -198,6 +226,7 @@ async def execute_run(args: argparse.Namespace) -> int:
     simple_signal_test_mode = strategy_kind == STRATEGY_KIND_SIMPLE_SIGNAL_TEST
     validation_harness_mode = strategy_kind == STRATEGY_KIND_VALIDATION_HARNESS
     paired_binary_mode = strategy_kind == STRATEGY_KIND_PAIRED_BINARY
+    z_gap_mode = strategy_kind == STRATEGY_KIND_Z_GAP
     strat: (
         GuruFollowStrategy
         | SellTestStrategy
@@ -266,6 +295,15 @@ async def execute_run(args: argparse.Namespace) -> int:
             app.paired_binary.yes_token_id,
             app.paired_binary.no_token_id,
             app.paired_binary.owner_id,
+        )
+    elif z_gap_mode:
+        assert app.z_gap is not None
+        strat = None
+        log.info(
+            "Loaded z_gap: entry_mode=%s market_id=%s owner_id=%s",
+            app.z_gap.entry_mode,
+            app.z_gap.market_id,
+            app.z_gap.owner_id,
         )
     elif strategy_kind == STRATEGY_KIND_GURU_FOLLOW:
         strat = GuruFollowStrategy(app.strategy)
@@ -361,6 +399,7 @@ async def execute_run(args: argparse.Namespace) -> int:
     iterations = 0
     last_guru_poll: dict | None = None
     exit_code = 0
+    signal_feed_state = None
     with JsonlSink(facts_path) as sink:
         coord.exit_lifecycle_run_id = str(run_id)
         coord.exit_lifecycle_sink = sink
@@ -374,6 +413,19 @@ async def execute_run(args: argparse.Namespace) -> int:
                     {"status": "started", "mode": app.runtime.execution_mode.value},
                 )
             )
+
+            if z_gap_mode and app.runtime.execution_mode == ExecutionMode.LIVE:
+                from tyrex_pm.runtime.time_authority import sample_offset
+
+                coord.time_authority = sample_offset()
+                log.info(
+                    "z_gap TimeAuthority sampled before feeds: sync_status=%s uncertainty_ms=%s "
+                    "samples_kept=%s source=%s",
+                    coord.time_authority.sync_status,
+                    coord.time_authority.uncertainty_ms,
+                    coord.time_authority.samples_kept,
+                    coord.time_authority.source,
+                )
 
             if app.runtime.execution_mode == ExecutionMode.LIVE and live_bridge is not None and live_clob is not None:
                 hb_interval = max(5.0, float(os.environ.get("TYREX_HEARTBEAT_INTERVAL_S", "8")))
@@ -908,6 +960,73 @@ async def execute_run(args: argparse.Namespace) -> int:
                             "One-shot shutdown after paired_binary terminal (final_state=%s)",
                             pb_state.phase.value,
                         )
+            elif z_gap_mode:
+                import time as _time
+
+                from tyrex_pm.runtime.signal_feed_runtime import (
+                    signal_feeds_requested,
+                    start_signal_feeds,
+                    stop_signal_feeds,
+                )
+                from tyrex_pm.runtime.z_gap_run import (
+                    ZGapStartupTimings,
+                    run_z_gap_observe_loop,
+                )
+                from tyrex_pm.strategies.z_gap.facts import (
+                    ZGapObserveRuntimeState,
+                    handle_feed_health_callback,
+                )
+
+                startup_t0 = _time.monotonic()
+                startup = ZGapStartupTimings()
+                if coord.time_authority is None:
+                    log.error("z_gap observe: TimeAuthority missing after pre-feed sync")
+
+                zg_observe_state = ZGapObserveRuntimeState()
+                signal_feed_state = None
+
+                def _zg_on_health(payload: dict) -> None:
+                    handle_feed_health_callback(sink, run_id, zg_observe_state, dict(payload))
+
+                feeds_t0 = _time.monotonic()
+                if signal_feeds_requested(app) and app.z_gap is not None:
+                    signal_feed_state = await start_signal_feeds(
+                        coord=coord,
+                        app=app,
+                        stop=stop_live,
+                        market_id=app.z_gap.market_id,
+                        event_start_ts=app.z_gap.event_start_ts,
+                        event_end_ts=app.z_gap.event_end_ts,
+                        on_health=_zg_on_health,
+                    )
+                    feeds_t1 = _time.monotonic()
+                    startup.binance_connect_ms = round((feeds_t1 - feeds_t0) * 1000.0, 1)
+                    startup.rtds_connect_ms = startup.binance_connect_ms
+                    startup.signal_state_ready_ms = startup.binance_connect_ms
+                    if signal_feed_state.price_to_beat_tracker is not None:
+                        startup.ptb_tracker_registered_ms = startup.binance_connect_ms
+                    log.info(
+                        "z_gap signal feeds started (external_btc=%s reference_prices=%s)",
+                        app.runtime.external_btc.enabled,
+                        app.runtime.reference_prices.enabled,
+                    )
+
+                startup.total_startup_ms = round((_time.monotonic() - startup_t0) * 1000.0, 1)
+
+                exit_code = await run_z_gap_observe_loop(
+                    app=app,
+                    run_id=run_id,
+                    coord=coord,
+                    sink=sink,
+                    stop=stop_live,
+                    signal_feed_state=signal_feed_state,
+                    runtime_state=zg_observe_state,
+                    time_authority=coord.time_authority,
+                    startup_timings=startup,
+                )
+                if signal_feed_state is not None:
+                    await stop_signal_feeds(signal_feed_state)
+                iterations = 0
             elif fixture_path is not None:  # noqa: E701 — keep elif chain readable
                 if app.runtime.execution_mode == ExecutionMode.LIVE:
                     log.error("Fixture replay is only supported in shadow mode")
@@ -1067,6 +1186,10 @@ async def execute_run(args: argparse.Namespace) -> int:
             )
         finally:
             stop_live.set()
+            if signal_feed_state is not None:
+                from tyrex_pm.runtime.signal_feed_runtime import stop_signal_feeds
+
+                await stop_signal_feeds(signal_feed_state)
             if live_tasks:
                 await asyncio.gather(*live_tasks, return_exceptions=True)
             if live_oms_writer is not None:

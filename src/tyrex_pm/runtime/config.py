@@ -39,6 +39,7 @@ STRATEGY_KIND_TP_SL_TEST = "tp_sl_test"
 STRATEGY_KIND_SIMPLE_SIGNAL_TEST = "simple_signal_test"
 STRATEGY_KIND_VALIDATION_HARNESS = "validation_harness"
 STRATEGY_KIND_PAIRED_BINARY = "paired_binary"
+STRATEGY_KIND_Z_GAP = "z_gap"
 _VALID_STRATEGY_KINDS = (
     STRATEGY_KIND_GURU_FOLLOW,
     STRATEGY_KIND_SELL_TEST,
@@ -47,6 +48,14 @@ _VALID_STRATEGY_KINDS = (
     STRATEGY_KIND_SIMPLE_SIGNAL_TEST,
     STRATEGY_KIND_VALIDATION_HARNESS,
     STRATEGY_KIND_PAIRED_BINARY,
+    STRATEGY_KIND_Z_GAP,
+)
+
+Z_GAP_ENTRY_MODE_OBSERVE_ONLY = "observe_only"
+Z_GAP_ENTRY_MODE_ENFORCE = "enforce"
+_VALID_Z_GAP_ENTRY_MODES = (
+    Z_GAP_ENTRY_MODE_OBSERVE_ONLY,
+    Z_GAP_ENTRY_MODE_ENFORCE,
 )
 
 VALIDATION_MODE_NORMAL_ENTRY = "normal_entry"
@@ -479,6 +488,53 @@ class PairedBinaryStrategyConfig:
 
 
 @dataclass(frozen=True)
+class ZGapSigmaConfig:
+    """EWMA sigma settings for Z-Gap fair-value model."""
+
+    estimator: str = "ewma"
+    half_life_s: float = 30.0
+    min_samples_s: float = 20.0
+    jump_guard: bool = True
+    jump_threshold_sigma: float = 4.0
+    sample_interval_s: float = 1.0
+    tau_floor_s: float = 1.0
+
+
+@dataclass(frozen=True)
+class ZGapEntryConfig:
+    """Entry gate thresholds for Z-Gap observe/enforce evaluation (A0.5)."""
+
+    theta_take: Decimal
+    z_band_lo: Decimal
+    z_band_hi: Decimal
+    tau_band_lo_s: float
+    tau_band_hi_s: float
+    basis_max_bps: Decimal
+    expected_slippage_ticks: int
+    one_position_per_window: bool
+    no_reentry_after_exit: bool
+    clock_drift_threshold_ms: float = 500.0
+
+
+@dataclass(frozen=True)
+class ZGapStrategyConfig:
+    """Z-Gap directional BTC 5m strategy (Phase A observe-only first)."""
+
+    enabled: bool
+    owner_id: str
+    entry_mode: str
+    market_id: str
+    yes_token_id: str
+    no_token_id: str
+    condition_id: str | None = None
+    event_start_ts: float | None = None
+    event_end_ts: float | None = None
+    run_once: bool = True
+    sigma: ZGapSigmaConfig = ZGapSigmaConfig()
+    entry: ZGapEntryConfig | None = None
+
+
+@dataclass(frozen=True)
 class NotionalConfig:
     min_usd: Decimal
     max_usd: Decimal
@@ -693,7 +749,7 @@ class RecordingConfig:
 
 @dataclass(frozen=True)
 class ExternalBtcConfig:
-    """M2B.2 — read-only external BTC feed (record mode only)."""
+    """M2B.2 — read-only external BTC feed (record mode + live signal_feeds)."""
 
     enabled: bool = False
     symbol: str = "BTCUSDT"
@@ -705,7 +761,7 @@ class ExternalBtcConfig:
 
 @dataclass(frozen=True)
 class ReferencePricesConfig:
-    """M2B.3-A — read-only Polymarket RTDS reference prices (record mode only)."""
+    """M2B.3-A — read-only Polymarket RTDS reference prices (record + live signal_feeds)."""
 
     enabled: bool = False
     venue: str = "polymarket_rtds"
@@ -714,6 +770,18 @@ class ReferencePricesConfig:
     emit_price_to_beat: bool = True
     price_to_beat_max_lag_ms: float = 5000.0
     reconnect_backoff_s: float = 3.0
+
+
+@dataclass(frozen=True)
+class SignalFeedsConfig:
+    """A0.2 — live external signal feed runtime (Binance + RTDS → SignalStateStore)."""
+
+    enabled: bool = False
+    binance_max_age_ms: float = 2000.0
+    chainlink_max_age_ms: float = 3000.0
+    book_ticker_fallback_stale_ms: float = 2000.0
+    ptb_late_threshold_ms: float = 2000.0
+    health_emit_interval_s: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1264,7 @@ class RuntimeConfig:
     recording: RecordingConfig = RecordingConfig()
     external_btc: ExternalBtcConfig = ExternalBtcConfig()
     reference_prices: ReferencePricesConfig = ReferencePricesConfig()
+    signal_feeds: SignalFeedsConfig = SignalFeedsConfig()
     paired_binary: PairedBinaryRuntimeConfig = PairedBinaryRuntimeConfig()
     strategy_lifecycle: StrategyLifecycleConfig = StrategyLifecycleConfig()
 
@@ -1219,6 +1288,7 @@ class AppConfig:
     simple_signal_test: SimpleSignalTestStrategyConfig | None = None
     validation_harness: ValidationHarnessStrategyConfig | None = None
     paired_binary: PairedBinaryStrategyConfig | None = None
+    z_gap: ZGapStrategyConfig | None = None
     protection: ProtectionRuntimeConfig | None = None
     #: Execution layer config (P3 architecture_enhance): planner enable + book policy.
     execution: ExecutionConfig = ExecutionConfig()
@@ -1646,6 +1716,80 @@ def _parse_paired_binary_strategy(strategy: dict[str, Any]) -> PairedBinaryStrat
     )
 
 
+def _parse_z_gap_sigma(raw: dict[str, Any] | None) -> ZGapSigmaConfig:
+    sg = raw or {}
+    if not isinstance(sg, dict):
+        sg = {}
+    return ZGapSigmaConfig(
+        estimator=str(sg.get("estimator", "ewma")).strip().lower(),
+        half_life_s=float(sg.get("half_life_s", 30)),
+        min_samples_s=float(sg.get("min_samples_s", 20)),
+        jump_guard=bool(sg.get("jump_guard", True)),
+        jump_threshold_sigma=float(sg.get("jump_threshold_sigma", 4.0)),
+        sample_interval_s=float(sg.get("sample_interval_s", 1)),
+        tau_floor_s=float(sg.get("tau_floor_s", 1)),
+    )
+
+
+def _parse_z_gap_entry(raw: dict[str, Any] | None) -> ZGapEntryConfig:
+    eg = raw or {}
+    if not isinstance(eg, dict):
+        eg = {}
+    z_band = eg.get("z_band") or ["0.8", "2.2"]
+    if not isinstance(z_band, (list, tuple)) or len(z_band) != 2:
+        raise ConfigError("z_gap.entry.z_band must be a two-element list")
+    tau_band = eg.get("tau_band_s") or [60, 210]
+    if not isinstance(tau_band, (list, tuple)) or len(tau_band) != 2:
+        raise ConfigError("z_gap.entry.tau_band_s must be a two-element list")
+    return ZGapEntryConfig(
+        theta_take=Decimal(str(eg.get("theta_take", "0.05"))),
+        z_band_lo=Decimal(str(z_band[0])),
+        z_band_hi=Decimal(str(z_band[1])),
+        tau_band_lo_s=float(tau_band[0]),
+        tau_band_hi_s=float(tau_band[1]),
+        basis_max_bps=Decimal(str(eg.get("basis_max_bps", "3"))),
+        expected_slippage_ticks=int(eg.get("expected_slippage_ticks", 1)),
+        one_position_per_window=bool(eg.get("one_position_per_window", True)),
+        no_reentry_after_exit=bool(eg.get("no_reentry_after_exit", True)),
+        clock_drift_threshold_ms=float(eg.get("clock_drift_threshold_ms", 500)),
+    )
+
+
+def _parse_z_gap_strategy(strategy: dict[str, Any]) -> ZGapStrategyConfig:
+    from tyrex_pm.runtime.allocation_ids import OWNER_Z_GAP
+
+    zg = strategy.get("z_gap") or {}
+    if not isinstance(zg, dict):
+        zg = {}
+    enabled = bool(strategy.get("enabled", zg.get("enabled", True)))
+    owner_id = str(zg.get("owner_id", OWNER_Z_GAP)).strip()
+    entry_mode = str(zg.get("entry_mode", Z_GAP_ENTRY_MODE_OBSERVE_ONLY)).strip().lower()
+    if entry_mode not in _VALID_Z_GAP_ENTRY_MODES:
+        raise ConfigError(
+            f"z_gap.entry_mode must be one of {', '.join(_VALID_Z_GAP_ENTRY_MODES)} (got {entry_mode!r})"
+        )
+    market_id = str(zg.get("market_id", "")).strip()
+    yes_token_id = str(zg.get("yes_token_id", "")).strip()
+    no_token_id = str(zg.get("no_token_id", "")).strip()
+    cond_raw = zg.get("condition_id")
+    start_raw = zg.get("event_start_ts")
+    end_raw = zg.get("event_end_ts")
+    return ZGapStrategyConfig(
+        enabled=enabled,
+        owner_id=owner_id,
+        entry_mode=entry_mode,
+        market_id=market_id,
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        condition_id=str(cond_raw).strip() if cond_raw not in (None, "") else None,
+        event_start_ts=float(start_raw) if start_raw not in (None, "") else None,
+        event_end_ts=float(end_raw) if end_raw not in (None, "") else None,
+        run_once=bool(zg.get("run_once", True)),
+        sigma=_parse_z_gap_sigma(zg.get("sigma")),
+        entry=_parse_z_gap_entry(zg.get("entry")),
+    )
+
+
 def _parse_protection_block(raw: dict[str, Any] | None, *, where: str) -> ProtectionRuntimeConfig | None:
     if not raw or not isinstance(raw, dict):
         return None
@@ -1919,6 +2063,7 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
     rec_raw = runtime.get("recording") or {}
     ext_btc_raw = runtime.get("external_btc") or {}
     ref_prices_raw = runtime.get("reference_prices") or {}
+    signal_feeds_raw = runtime.get("signal_feeds") or {}
     pb_rt_raw = runtime.get("paired_binary") or {}
     mtd_raw = pb_rt_raw.get("market_timing_diagnostics") or {}
     if not isinstance(mtd_raw, dict):
@@ -2025,6 +2170,16 @@ def _build_risk_runtime(risk: dict[str, Any], runtime: dict[str, Any]) -> tuple[
             price_to_beat_max_lag_ms=float(ref_prices_raw.get("price_to_beat_max_lag_ms", 5000.0)),
             reconnect_backoff_s=float(ref_prices_raw.get("reconnect_backoff_s", 3.0)),
         ),
+        signal_feeds=SignalFeedsConfig(
+            enabled=bool(signal_feeds_raw.get("enabled", False)),
+            binance_max_age_ms=float(signal_feeds_raw.get("binance_max_age_ms", 2000.0)),
+            chainlink_max_age_ms=float(signal_feeds_raw.get("chainlink_max_age_ms", 3000.0)),
+            book_ticker_fallback_stale_ms=float(
+                signal_feeds_raw.get("book_ticker_fallback_stale_ms", 2000.0)
+            ),
+            ptb_late_threshold_ms=float(signal_feeds_raw.get("ptb_late_threshold_ms", 2000.0)),
+            health_emit_interval_s=float(signal_feeds_raw.get("health_emit_interval_s", 5.0)),
+        ),
         paired_binary=PairedBinaryRuntimeConfig(
             poll_interval_s=float(pb_rt_raw.get("poll_interval_s", 1.0)),
             max_decision_rate_per_market_ms=int(pb_rt_raw.get("max_decision_rate_per_market_ms", 75)),
@@ -2089,6 +2244,7 @@ def _finalize_app_config(
     validation_harness: ValidationHarnessStrategyConfig | None = None,
     protection: ProtectionRuntimeConfig | None = None,
     paired_binary: PairedBinaryStrategyConfig | None = None,
+    z_gap: ZGapStrategyConfig | None = None,
     strategy_kind: str = STRATEGY_KIND_GURU_FOLLOW,
 ) -> AppConfig:
     rsk, rt = _build_risk_runtime(risk, runtime)
@@ -2108,6 +2264,7 @@ def _finalize_app_config(
         simple_signal_test=simple_signal_test,
         validation_harness=validation_harness,
         paired_binary=paired_binary,
+        z_gap=z_gap,
         protection=protection,
         execution=execution,
         survival=survival,
@@ -2122,6 +2279,9 @@ def _finalize_app_config(
     validate_validation_harness_live_config(app)
     validate_paired_binary_live_config(app)
     validate_paired_binary_required_wiring(app)
+    from tyrex_pm.runtime.z_gap_live import validate_z_gap_live_config
+
+    validate_z_gap_live_config(app)
     return app
 
 
@@ -2241,6 +2401,23 @@ def parse_app_config(*, risk: dict[str, Any], strategy: dict[str, Any], runtime:
             None,
             None,
             paired_binary=pb_cfg,
+            strategy_kind=kind_raw,
+        )
+    if kind_raw == STRATEGY_KIND_Z_GAP:
+        zg_cfg = _parse_z_gap_strategy(strategy)
+        strat = _placeholder_guru_strategy_config()
+        return _finalize_app_config(
+            strat,
+            risk,
+            runtime,
+            strategy,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            z_gap=zg_cfg,
             strategy_kind=kind_raw,
         )
 

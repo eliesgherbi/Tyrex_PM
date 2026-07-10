@@ -1,0 +1,36 @@
+# Z-Gap strategy — Phase A observe-only first (A0.1 scaffold).
+kind: z_gap
+
+enabled: true
+
+z_gap:
+  owner_id: z_gap
+  # Default entry mode; enforce is gated by preflight artifacts.
+  entry_mode: observe_only
+
+  market_id: "btc_5m_<YYYYMMDD_HHMM>"
+  condition_id: "<required>"
+  event_start_ts: null
+  event_end_ts: null
+  yes_token_id: "<required>"
+  no_token_id: "<required>"
+
+  run_once: true
+
+  sigma:
+    estimator: ewma
+    half_life_s: 30
+    min_samples_s: 20
+    jump_guard: true
+    jump_threshold_sigma: 4.0
+    sample_interval_s: 1
+    tau_floor_s: 1
+
+  entry:
+    theta_take: "0.05"
+    z_band: ["0.8", "2.2"]
+    tau_band_s: [60, 210]
+    basis_max_bps: "3"
+    expected_slippage_ticks: 1
+    one_position_per_window: true
+    no_reentry_after_exit: true

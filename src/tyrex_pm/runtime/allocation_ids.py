@@ -8,6 +8,7 @@ OWNER_TP_SL_TEST = "tp_sl_test"
 OWNER_SIMPLE_SIGNAL_TEST = "simple_signal_test"
 OWNER_VALIDATION_HARNESS = "validation_harness"
 OWNER_PAIRED_BINARY = "paired_binary"
+OWNER_Z_GAP = "z_gap"
 #: Owner id for production protection (TP/SL) exits when the protected owner is
 #: not otherwise known (P4). Protection normally reuses the protected position's
 #: owner id; this is the fallback bucket.

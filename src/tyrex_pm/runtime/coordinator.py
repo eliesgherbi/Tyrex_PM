@@ -75,6 +75,10 @@ class RuntimeCoordinator:
     market_update_coordinator: object | None = None
     #: M8 WS-primary: readiness state machine for paired-binary market data.
     market_readiness_tracker: object | None = None
+    #: A0.2: live external signal feeds (Binance + RTDS + PTB) for Z-Gap and future strategies.
+    signal_state: object | None = None
+    #: A0.5: application-level time authority (monotonic-anchored corrected UTC).
+    time_authority: object | None = None
 
     def holdings(self) -> dict[TokenId, Decimal]:
         return {tid: p.qty for tid, p in self.wallet.positions.items()}
