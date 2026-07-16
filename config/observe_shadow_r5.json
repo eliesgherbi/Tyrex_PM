@@ -34,6 +34,11 @@
     "persistence_path": "var/state/r5_shadow_snapshot.json",
     "cancel_unfilled_residual": false,
     "fee_rate": "0",
-    "fee_model_id": "shadow_zero_fee_v1"
+    "fee_model_id": "shadow_zero_fee_v1",
+    "entry_retry_cooldown_s": 5,
+    "entry_max_attempts": 3,
+    "exit_retry_cooldown_s": 3,
+    "exit_max_normal_retries": 3,
+    "exit_escalate_after": 2
   }
 }

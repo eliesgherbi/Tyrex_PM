@@ -183,58 +183,96 @@ class ReferenceMomentumStrategy:
         now = context.now or signal.observed_at
         market = context.snapshot.market
 
-        # Precedence: KILL → MARKET_CLOSE → MAX_HOLD → REVERSAL → FLAT
-        if life.state in {LifecycleState.ACTIVE, LifecycleState.EXIT_PENDING}:
+        busy_exit = {
+            LifecycleState.EXIT_REQUESTED,
+            LifecycleState.EXIT_PENDING,
+            LifecycleState.EXIT_RETRY_WAIT,
+        }
+
+        if life.state is LifecycleState.MANUAL_INTERVENTION:
+            self._last_direction = signal.direction
+            return TransitionResult(
+                decision=decision,
+                suppressed=True,
+                suppress_reason="MANUAL_INTERVENTION",
+            )
+
+        if life.state in busy_exit or life.state is LifecycleState.ACTIVE:
             inst = life.instrument_id
             if inst is None:
-                return TransitionResult(decision=decision, suppressed=True, suppress_reason="NO_INSTRUMENT")
+                return TransitionResult(
+                    decision=decision, suppressed=True, suppress_reason="NO_INSTRUMENT"
+                )
 
-            if context.kill_switch_active and life.state is LifecycleState.ACTIVE:
-                intent = self._flatten(signal, context, inst, "KILL_SWITCH")
-                self._last_direction = signal.direction
-                return TransitionResult(decision=decision, intents=[intent])
+            # Precedence: KILL → MARKET_CLOSE → MAX_HOLD → REVERSAL → FLAT
+            want_flatten = False
+            want_exit = False
+            reason = "ACTIVE_NO_EXIT"
+            escalate = False
 
-            if (
+            if context.kill_switch_active:
+                want_flatten = True
+                reason = "KILL_SWITCH"
+                escalate = True
+            elif (
                 market.event_end is not None
                 and context.flatten_before_close is not None
-                and life.state is LifecycleState.ACTIVE
                 and now >= market.event_end - context.flatten_before_close
             ):
-                intent = self._flatten(signal, context, inst, "MARKET_CLOSE_BOUNDARY")
-                self._last_direction = signal.direction
-                return TransitionResult(decision=decision, intents=[intent])
+                want_flatten = True
+                reason = "MARKET_CLOSE_BOUNDARY"
+                escalate = True
+            elif life.state is LifecycleState.ACTIVE:
+                if (
+                    life.activated_at is not None
+                    and context.max_hold is not None
+                    and now - life.activated_at >= context.max_hold
+                ):
+                    want_exit = True
+                    reason = "MAX_HOLD"
+                else:
+                    entry_was_up = inst == market.yes.instrument_id
+                    if signal.direction is Direction.DOWN and entry_was_up:
+                        want_exit = True
+                        reason = "SIGNAL_REVERSAL"
+                    elif signal.direction is Direction.UP and not entry_was_up:
+                        want_exit = True
+                        reason = "SIGNAL_REVERSAL"
+                    elif context.exit_on_flat and signal.direction is Direction.FLAT:
+                        want_exit = True
+                        reason = "SIGNAL_FLAT"
 
-            if (
-                life.activated_at is not None
-                and context.max_hold is not None
-                and life.state is LifecycleState.ACTIVE
-                and now - life.activated_at >= context.max_hold
+            if life.state in busy_exit and not escalate and not context.exit_escalate:
+                # One outstanding exit — suppress duplicates unless escalated.
+                self._last_direction = signal.direction
+                return TransitionResult(
+                    decision=decision,
+                    suppressed=True,
+                    suppress_reason="EXIT_ALREADY_OUTSTANDING",
+                )
+
+            if (want_flatten or want_exit or context.exit_escalate) and (
+                context.exit_allowed or escalate or context.exit_escalate
             ):
-                intent = self._exit(signal, context, inst, "MAX_HOLD")
+                if want_flatten or (
+                    context.exit_urgency == "URGENT" or escalate or context.exit_escalate
+                ):
+                    intent = self._flatten(
+                        signal,
+                        context,
+                        inst,
+                        reason if want_flatten else (context.exit_block_reason or reason),
+                    )
+                else:
+                    intent = self._exit(signal, context, inst, reason)
                 self._last_direction = signal.direction
                 return TransitionResult(decision=decision, intents=[intent])
-
-            if life.state is LifecycleState.ACTIVE:
-                # Reversal vs entry direction inferred from position instrument
-                entry_was_up = inst == market.yes.instrument_id
-                if signal.direction is Direction.DOWN and entry_was_up:
-                    intent = self._exit(signal, context, inst, "SIGNAL_REVERSAL")
-                    self._last_direction = signal.direction
-                    return TransitionResult(decision=decision, intents=[intent])
-                if signal.direction is Direction.UP and not entry_was_up:
-                    intent = self._exit(signal, context, inst, "SIGNAL_REVERSAL")
-                    self._last_direction = signal.direction
-                    return TransitionResult(decision=decision, intents=[intent])
-                if context.exit_on_flat and signal.direction is Direction.FLAT:
-                    intent = self._exit(signal, context, inst, "SIGNAL_FLAT")
-                    self._last_direction = signal.direction
-                    return TransitionResult(decision=decision, intents=[intent])
 
             self._last_direction = signal.direction
             return TransitionResult(
                 decision=decision,
                 suppressed=True,
-                suppress_reason="ACTIVE_NO_EXIT",
+                suppress_reason=context.exit_block_reason or reason,
             )
 
         if life.state is LifecycleState.ENTRY_PENDING:
@@ -253,8 +291,15 @@ class ReferenceMomentumStrategy:
                 suppress_reason="TERMINAL",
             )
 
-        # FLAT — entry eligibility
+        # FLAT — entry eligibility gated by host retry controller.
         if signal.direction in (Direction.UP, Direction.DOWN):
+            if not context.entry_allowed:
+                self._last_direction = signal.direction
+                return TransitionResult(
+                    decision=decision,
+                    suppressed=True,
+                    suppress_reason=context.entry_block_reason or "ENTRY_RETRY_WAIT",
+                )
             intent = self._build_enter_intent(signal, context, decision)
             self._last_direction = signal.direction
             self._last_intent_id = intent.intent_id.value

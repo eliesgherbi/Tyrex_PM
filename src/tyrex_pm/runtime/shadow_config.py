@@ -23,6 +23,12 @@ class ShadowConfig:
     cancel_unfilled_residual: bool = False
     fee_rate: Decimal = Decimal("0")
     fee_model_id: str = "shadow_zero_fee_v1"
+    # R5.1 retry policy
+    entry_retry_cooldown_s: float = 5.0
+    entry_max_attempts: int = 3
+    exit_retry_cooldown_s: float = 3.0
+    exit_max_normal_retries: int = 3
+    exit_escalate_after: int = 2
 
     def __post_init__(self) -> None:
         if self.max_position_notional <= 0 or self.max_total_exposure <= 0:
@@ -33,6 +39,10 @@ class ShadowConfig:
             raise ValueError("flatten_before_close must be >= 0")
         if self.fee_rate < 0:
             raise ValueError("fee_rate must be >= 0")
+        if self.entry_retry_cooldown_s <= 0 or self.exit_retry_cooldown_s <= 0:
+            raise ValueError("retry cooldowns must be > 0")
+        if self.entry_max_attempts < 1 or self.exit_max_normal_retries < 1:
+            raise ValueError("retry attempt caps must be >= 1")
 
     def fingerprint(self) -> str:
         payload = {
@@ -46,6 +56,11 @@ class ShadowConfig:
             "cancel_unfilled_residual": self.cancel_unfilled_residual,
             "fee_rate": str(self.fee_rate),
             "fee_model_id": self.fee_model_id,
+            "entry_retry_cooldown_s": self.entry_retry_cooldown_s,
+            "entry_max_attempts": self.entry_max_attempts,
+            "exit_retry_cooldown_s": self.exit_retry_cooldown_s,
+            "exit_max_normal_retries": self.exit_max_normal_retries,
+            "exit_escalate_after": self.exit_escalate_after,
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -75,4 +90,9 @@ def shadow_config_from_mapping(data: Mapping[str, Any]) -> ShadowConfig:
         cancel_unfilled_residual=bool(data.get("cancel_unfilled_residual", False)),
         fee_rate=Decimal(str(data.get("fee_rate", "0"))),
         fee_model_id=str(data.get("fee_model_id", "shadow_zero_fee_v1")),
+        entry_retry_cooldown_s=float(data.get("entry_retry_cooldown_s", 5.0)),
+        entry_max_attempts=int(data.get("entry_max_attempts", 3)),
+        exit_retry_cooldown_s=float(data.get("exit_retry_cooldown_s", 3.0)),
+        exit_max_normal_retries=int(data.get("exit_max_normal_retries", 3)),
+        exit_escalate_after=int(data.get("exit_escalate_after", 2)),
     )

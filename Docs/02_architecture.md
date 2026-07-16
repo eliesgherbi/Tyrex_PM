@@ -1,8 +1,8 @@
 # 02 — Architecture and ownership
 
-**Phase:** R5 (shadow OMS + portfolio + lifecycle)  
+**Phase:** R5.1 (unified TradingHost + retry)  
 **Engine:** Minimal Tyrex in-process dispatcher (no NautilusTrader)  
-**R4 checkpoint:** `9813001465db1fd188a4e00a3c82a24fa2cb4292`
+**R5 checkpoint:** `5cc1a306ee168f18df40e2107e78785d5a097364`
 
 ## Flow
 
@@ -34,7 +34,7 @@ R4 dry path remains when `shadow.enable_oms` is false/absent (`ObserveHost` only
 | `portfolio` | Long-only positions from fills |
 | `lifecycle` | Host-owned trade lifecycle |
 | `persistence` | Atomic JSON snapshot |
-| `runtime` | `ObserveHost` + `ShadowHost` + live runners |
+| `runtime` | `TradingHost`=`ObserveHost`; `ShadowHost` OMS hooks; shared `live_runner` |
 | `reporting` | JSONL facts |
 
 ## State ownership (non-competing)

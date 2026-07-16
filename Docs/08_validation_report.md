@@ -8,6 +8,7 @@
 | R2 | `ccccc969bb4877ae97e6e56c656b839739034425` | add deterministic event-driven core contracts |
 | R3 | `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9` | add read-only market data and momentum strategy slice |
 | R4 | `9813001465db1fd188a4e00a3c82a24fa2cb4292` | add intent risk and dry execution planning |
+| R5 | `5cc1a306ee168f18df40e2107e78785d5a097364` | add shadow oms portfolio lifecycle and recovery |
 
 `.env` SHA256 (unchanged): `27210C97AE37101DE48570130BBB517E572F3EB75160B5FC4C05CF178B91F772`  
 `var/` gitignored · no `old/` imports · no NautilusTrader
@@ -118,4 +119,34 @@ No private endpoints · no real order signing · no wallet credential reads · n
 4. Keep `ShadowOMS` for fixture/offline validation.  
 5. Still no Z-Gap strategy logic.
 
-**Stop before R6.**
+---
+
+## R5.1 stabilization report
+
+**R5 checkpoint:** `5cc1a306ee168f18df40e2107e78785d5a097364`  
+**Pytest:** **141 passed**
+
+### Host audit / unification
+
+- Single pipeline in `ObserveHost.evaluate_once` (`TradingHost` alias).
+- `ShadowHost` overrides only `_build_decision_context` and `_process_transition`.
+- Live path unified in `runtime/live_runner.py`.
+
+### Entry / exit retry
+
+- `RetryController`: cooldown + book fingerprint + attempt caps.
+- Exit outstanding suppresses storms; kill/market-close escalate.
+- Residual exposure → `EXIT_RETRY_WAIT` / `MANUAL_INTERVENTION`; `TERMINAL` only from `FLAT`.
+
+### Live-shadow (quiet windows)
+
+| Run | Market | Signals | Intents | Dup risk | Final |
+|-----|--------|---------|---------|----------|-------|
+| A | `btc-updown-5m-1784228700` | 1163 (FLAT/UNAVAILABLE only) | 0 | 0 | FLAT→TERMINAL |
+| B | `btc-updown-5m-1784229000` | 939 (FLAT/UNAVAILABLE only) | 0 | 0 | FLAT→TERMINAL |
+
+No directional transitions in these windows — retry storms not exercised live; unit/strategy tests cover retry gates. Duplicate risk denials: **0**. No false successful terminal with exposure.
+
+See `Docs/Implementation/r51_stabilization.md`.
+
+**Stop before R6 mutations; R6A/B may proceed for adapter + read-only only.**

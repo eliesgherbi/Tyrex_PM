@@ -1,4 +1,11 @@
-"""Authoritative trade lifecycle (host-owned; strategy reacts)."""
+"""Authoritative trade lifecycle (host-owned; strategy reacts).
+
+R5.1 states:
+  FLAT → ENTRY_PENDING → ACTIVE → EXIT_REQUESTED → EXIT_PENDING → FLAT
+                              ↘ EXIT_RETRY_WAIT ↗
+                              → MANUAL_INTERVENTION (residual, unrecoverable)
+  FLAT → TERMINAL (window end, flat only)
+"""
 
 from __future__ import annotations
 
@@ -23,7 +30,10 @@ class LifecycleState(str, Enum):
     FLAT = "FLAT"
     ENTRY_PENDING = "ENTRY_PENDING"
     ACTIVE = "ACTIVE"
+    EXIT_REQUESTED = "EXIT_REQUESTED"
     EXIT_PENDING = "EXIT_PENDING"
+    EXIT_RETRY_WAIT = "EXIT_RETRY_WAIT"
+    MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
     TERMINAL = "TERMINAL"
 
 
@@ -39,6 +49,16 @@ class LifecycleSnapshot:
     exit_order_id: OrderId | None
     activated_at: datetime | None
     updated_at: datetime | None
+
+
+_EXIT_BUSY = frozenset(
+    {
+        LifecycleState.EXIT_REQUESTED,
+        LifecycleState.EXIT_PENDING,
+        LifecycleState.EXIT_RETRY_WAIT,
+        LifecycleState.MANUAL_INTERVENTION,
+    }
+)
 
 
 class TradeLifecycle:
@@ -61,6 +81,9 @@ class TradeLifecycle:
     def state(self) -> LifecycleState:
         return self._state
 
+    def exit_busy(self) -> bool:
+        return self._state in _EXIT_BUSY
+
     def view(self) -> LifecycleSnapshot:
         return LifecycleSnapshot(
             state=self._state,
@@ -80,20 +103,52 @@ class TradeLifecycle:
         dispatcher.subscribe(OrderRejected, self.on_rejected, priority=self.PRIORITY)
         dispatcher.subscribe(OrderCanceled, self.on_canceled, priority=self.PRIORITY)
 
-    def note_entry_submitted(self, order_id: OrderId, instrument_id: InstrumentId, *, when: datetime) -> None:
+    def note_entry_submitted(
+        self, order_id: OrderId, instrument_id: InstrumentId, *, when: datetime
+    ) -> None:
         if self._state not in {LifecycleState.FLAT}:
             raise LifecycleError(f"cannot enter from {self._state.value}")
         self._set(LifecycleState.ENTRY_PENDING, when=when)
         self._entry_order_id = order_id
         self._instrument_id = instrument_id
 
+    def note_exit_requested(self, *, when: datetime) -> None:
+        if self._state not in {
+            LifecycleState.ACTIVE,
+            LifecycleState.EXIT_RETRY_WAIT,
+            LifecycleState.EXIT_REQUESTED,
+        }:
+            raise LifecycleError(f"cannot request exit from {self._state.value}")
+        self._set(LifecycleState.EXIT_REQUESTED, when=when)
+
     def note_exit_submitted(self, order_id: OrderId, *, when: datetime) -> None:
-        if self._state not in {LifecycleState.ACTIVE}:
+        if self._state not in {
+            LifecycleState.ACTIVE,
+            LifecycleState.EXIT_REQUESTED,
+            LifecycleState.EXIT_RETRY_WAIT,
+        }:
             raise LifecycleError(f"cannot exit from {self._state.value}")
         self._set(LifecycleState.EXIT_PENDING, when=when)
         self._exit_order_id = order_id
 
+    def note_exit_retry_wait(self, *, when: datetime) -> None:
+        if self._state not in {
+            LifecycleState.EXIT_REQUESTED,
+            LifecycleState.EXIT_PENDING,
+            LifecycleState.ACTIVE,
+        }:
+            raise LifecycleError(f"cannot exit-retry from {self._state.value}")
+        self._exit_order_id = None
+        self._set(LifecycleState.EXIT_RETRY_WAIT, when=when)
+
+    def note_manual_intervention(self, *, when: datetime) -> None:
+        self._set(LifecycleState.MANUAL_INTERVENTION, when=when)
+
     def mark_terminal(self, *, when: datetime) -> None:
+        if self._state not in {LifecycleState.FLAT}:
+            raise LifecycleError(
+                f"cannot mark TERMINAL from {self._state.value} with possible exposure"
+            )
         self._set(LifecycleState.TERMINAL, when=when)
 
     def on_fill(self, event: OrderPartiallyFilled | OrderFilled) -> None:
@@ -104,11 +159,14 @@ class TradeLifecycle:
         if self._state is LifecycleState.ENTRY_PENDING and qty > 0:
             self._activated_at = when
             self._set(LifecycleState.ACTIVE, when=when)
-        if self._state is LifecycleState.EXIT_PENDING:
+        if self._state in {
+            LifecycleState.EXIT_PENDING,
+            LifecycleState.EXIT_REQUESTED,
+            LifecycleState.EXIT_RETRY_WAIT,
+        }:
             if qty == 0:
                 self._clear_trade(when=when)
             elif self._exit_order_terminal():
-                # Partial exit filled/canceled with residual position.
                 self._exit_order_id = None
                 self._set(LifecycleState.ACTIVE, when=when)
         if self._state is LifecycleState.ACTIVE and qty == 0:
@@ -133,7 +191,7 @@ class TradeLifecycle:
                 qty = (
                     self._portfolio.net_quantity(self._instrument_id)
                     if self._instrument_id
-                    else 0
+                    else Decimal("0")
                 )
                 if qty > 0:
                     self._set(LifecycleState.ACTIVE, when=when)
@@ -141,7 +199,8 @@ class TradeLifecycle:
                     self._clear_trade(when=when)
         if self._exit_order_id and event.order_id.value == self._exit_order_id.value:
             if self._state is LifecycleState.EXIT_PENDING:
-                self._set(LifecycleState.ACTIVE, when=when)
+                self._exit_order_id = None
+                self._set(LifecycleState.EXIT_RETRY_WAIT, when=when)
 
     def on_canceled(self, event: OrderCanceled) -> None:
         when = event.ts_event
@@ -167,7 +226,8 @@ class TradeLifecycle:
                 if qty == 0:
                     self._clear_trade(when=when)
                 else:
-                    self._set(LifecycleState.ACTIVE, when=when)
+                    self._exit_order_id = None
+                    self._set(LifecycleState.EXIT_RETRY_WAIT, when=when)
 
     def _clear_trade(self, *, when: datetime) -> None:
         self._entry_order_id = None

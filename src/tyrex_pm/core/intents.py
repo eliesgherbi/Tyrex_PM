@@ -90,7 +90,7 @@ class EnterIntent:
             raise ValueError("reason_code must be non-empty")
 
     def semantic_key(self) -> str:
-        return "|".join(
+        base = "|".join(
             (
                 self.strategy_id.value,
                 self.market_id.value,
@@ -100,6 +100,8 @@ class EnterIntent:
                 self.outcome.value,
             )
         )
+        attempt_id = self.evidence.get("attempt_id")
+        return base if not attempt_id else f"{base}|{attempt_id}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -132,7 +134,7 @@ class ExitIntent:
         object.__setattr__(self, "evidence", dict(self.evidence))
 
     def semantic_key(self) -> str:
-        return "|".join(
+        base = "|".join(
             (
                 self.strategy_id.value,
                 self.market_id.value,
@@ -141,6 +143,8 @@ class ExitIntent:
                 "FLAT",
             )
         )
+        attempt_id = self.evidence.get("attempt_id")
+        return base if not attempt_id else f"{base}|{attempt_id}"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -192,7 +196,7 @@ class FlattenIntent:
         object.__setattr__(self, "evidence", dict(self.evidence))
 
     def semantic_key(self) -> str:
-        return "|".join(
+        base = "|".join(
             (
                 self.strategy_id.value,
                 self.market_id.value,
@@ -200,3 +204,5 @@ class FlattenIntent:
                 self.kind.value,
             )
         )
+        attempt_id = self.evidence.get("attempt_id")
+        return base if not attempt_id else f"{base}|{attempt_id}"

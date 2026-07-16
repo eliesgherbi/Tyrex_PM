@@ -443,21 +443,47 @@ class ObserveHost:
             self._emit_observe_decision(decision)
             return decision
 
-        transition = self.strategy.apply_transition(
-            signal,
-            DecisionContext(
-                run_id=self.run_id,
-                mode=self.config.risk.runtime_mode,
-                snapshot=snapshot,
-                target_notional=self.config.risk.target_notional,
-                max_price=self.config.risk.max_price,
-            ),
-        )
+        context = self._build_decision_context(snapshot, signal)
+        if context is None:
+            decision = self.strategy.evaluate(signal)
+            self.decisions.append(decision)
+            self._emit_observe_decision(decision)
+            return decision
+
+        transition = self.strategy.apply_transition(signal, context)
         decision = transition.decision
         self.decisions.append(decision)
         self._emit_observe_decision(decision)
-        self._handle_transition(signal, snapshot, transition)
+        self._process_transition(signal, snapshot, transition)
         return decision
+
+    def _build_decision_context(
+        self, snapshot: DecisionSnapshot, signal: DirectionalSignal
+    ) -> DecisionContext | None:
+        """R4 dry context hook — no lifecycle/portfolio/retry awareness.
+
+        Returns ``None`` when risk is not configured (evaluate-only path).
+        Subclasses (e.g. ``ShadowHost``) override this to add lifecycle and
+        retry-gate awareness for the R5 shadow path.
+        """
+        if self.config.risk is None:
+            return None
+        return DecisionContext(
+            run_id=self.run_id,
+            mode=self.config.risk.runtime_mode,
+            snapshot=snapshot,
+            target_notional=self.config.risk.target_notional,
+            max_price=self.config.risk.max_price,
+        )
+
+    def _process_transition(
+        self,
+        signal: DirectionalSignal,
+        snapshot: DecisionSnapshot,
+        transition,
+    ) -> None:
+        """Dry (R4) intent/risk/plan processing hook; overridden for shadow OMS."""
+        self._handle_transition(signal, snapshot, transition)
 
     def _emit_observe_decision(self, decision: ObserveDecision) -> None:
         self._emit(
@@ -601,6 +627,13 @@ class ObserveHost:
 
     def close(self) -> None:
         self.sink.close()
+
+
+# R5.1 host unification: ObserveHost is the single orchestration path
+# (snapshot -> freshness -> indicator -> signal -> strategy). Mode (dry vs
+# shadow OMS) only changes what ``_build_decision_context``/``_process_transition``
+# do; ``ShadowHost`` overrides those hooks rather than duplicating the pipeline.
+TradingHost = ObserveHost
 
 
 async def resolve_market_for_config(config: ObserveConfig) -> BinaryMarket:

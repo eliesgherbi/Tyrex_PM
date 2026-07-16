@@ -1,7 +1,18 @@
-"""R5 shadow host: observe path + OMS + portfolio + lifecycle + persistence."""
+"""R5.1 shadow host: single ObserveHost pipeline + OMS/lifecycle/retry hooks.
+
+``ShadowHost`` no longer duplicates the snapshot -> freshness -> indicator ->
+signal -> strategy pipeline. It reuses ``ObserveHost.evaluate_once`` and only
+overrides the two hooks that differ when ``shadow.enable_oms`` is set:
+
+* ``_build_decision_context`` — adds lifecycle + RetryController gates.
+* ``_process_transition`` — routes intents through OMS/portfolio instead of
+  the R4 dry path.
+"""
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -12,7 +23,6 @@ from tyrex_pm.adapters.polymarket.discovery import load_market_from_fixture
 from tyrex_pm.adapters.polymarket.fixture_source import PolymarketFixtureSource
 from tyrex_pm.core.clock import Clock, FakeClock, SystemClock
 from tyrex_pm.core.commands import (
-    CancelOrderCommand,
     ExecutionPolicy,
     SubmitOrderCommand,
     new_client_order_id,
@@ -26,6 +36,7 @@ from tyrex_pm.execution.fill_ledger import FillLedger
 from tyrex_pm.execution.order_store import OrderStore
 from tyrex_pm.execution.shadow_oms import ShadowFeeConfig, ShadowFillConfig, ShadowOMS
 from tyrex_pm.lifecycle.trade_lifecycle import LifecycleState, TradeLifecycle
+from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.persistence.snapshot import PersistenceError, StateSnapshotStore
 from tyrex_pm.planning.exit_planner import ExitPlanner
 from tyrex_pm.planning.plan import PlanStatus
@@ -33,15 +44,20 @@ from tyrex_pm.portfolio.portfolio import Portfolio
 from tyrex_pm.risk.context import BookReadiness, PortfolioRiskView, RiskConfigView, RiskContext
 from tyrex_pm.runtime.config import ObserveConfig, SourceMode
 from tyrex_pm.runtime.observe_host import ObserveHost, ObserveRunResult
-from tyrex_pm.signals.directional import Direction
+from tyrex_pm.runtime.retry_controller import ExitRetryPhase, RetryConfig, RetryController
+from tyrex_pm.signals.directional import Direction, DirectionalSignal
 from tyrex_pm.strategies.context import DecisionContext
 from tyrex_pm.strategies.framework_validation.reference_momentum import (
     ReferenceMomentumStrategy,
 )
 
+_EXIT_SETBACK_FROM = frozenset(
+    {LifecycleState.ACTIVE, LifecycleState.EXIT_REQUESTED, LifecycleState.EXIT_PENDING}
+)
+
 
 class ShadowHost(ObserveHost):
-    """Extends observe host with shadow execution when ``config.shadow.enable_oms``."""
+    """Thin OMS subclass of ``ObserveHost`` — wires OMS/portfolio/lifecycle/retry."""
 
     def __init__(
         self,
@@ -65,6 +81,19 @@ class ShadowHost(ObserveHost):
         self._persist: StateSnapshotStore | None = None
         self._recovered = False
         self.commands: list[Any] = []
+
+        retry_cfg = RetryConfig()
+        if config.shadow is not None:
+            from datetime import timedelta as _td
+
+            retry_cfg = RetryConfig(
+                entry_cooldown=_td(seconds=config.shadow.entry_retry_cooldown_s),
+                entry_max_attempts=config.shadow.entry_max_attempts,
+                exit_cooldown=_td(seconds=config.shadow.exit_retry_cooldown_s),
+                exit_max_normal_retries=config.shadow.exit_max_normal_retries,
+                exit_escalate_after=config.shadow.exit_escalate_after,
+            )
+        self.retry = RetryController(config=retry_cfg)
 
         if config.shadow is not None and config.shadow.enable_oms:
             fee = ShadowFeeConfig(
@@ -96,6 +125,10 @@ class ShadowHost(ObserveHost):
                 BookUpdated, self._on_book_updated, priority=50
             )
 
+    def _start_strategy(self, market) -> None:
+        super()._start_strategy(market)
+        self.retry.reset_market()
+
     def _on_book_updated(self, event: BookUpdated) -> None:
         if self.oms is not None:
             self.oms.on_book_updated(event.book)
@@ -108,6 +141,13 @@ class ShadowHost(ObserveHost):
         if new is LifecycleState.FLAT and prev is not LifecycleState.FLAT:
             # New entry eligibility after reject/cancel/flat — not signal-direction alone.
             self.strategy.bump_decision_epoch()
+            self.retry.on_flat()
+        elif new is LifecycleState.EXIT_RETRY_WAIT:
+            # Single bridge point for every path into EXIT_RETRY_WAIT — host-driven
+            # setbacks (plan/risk failure) and order-driven residuals (reject/cancel).
+            self.retry.note_exit_plan_failed(reason="LIFECYCLE_EXIT_SETBACK", now=when)
+            if self.retry.exit.phase is ExitRetryPhase.MANUAL_INTERVENTION:
+                self.lifecycle.note_manual_intervention(when=when)
         self._maybe_persist()
 
     def invalidate_shadow_books(self, *, reason: str) -> None:
@@ -176,65 +216,34 @@ class ShadowHost(ObserveHost):
             portfolio=self._portfolio_view(),
         )
 
-    def evaluate_once(self, *, causation_id=None):
-        if self.oms is None:
-            return super().evaluate_once(causation_id=causation_id)
+    # --- R5.1 hooks (ObserveHost.evaluate_once calls these) ---
 
-        snapshot = self.build_snapshot(causation_id=causation_id)
-        # Reuse parent signal path by temporarily calling pieces
-        self._emit(
-            "freshness_assessment",
-            {
-                "yes": snapshot.yes_freshness.reason_code.value,
-                "no": snapshot.no_freshness.reason_code.value,
-                "reference": snapshot.reference_freshness.reason_code.value,
-                "yes_age_ms": snapshot.yes_freshness.age_ms,
-                "no_age_ms": snapshot.no_freshness.age_ms,
-                "reference_age_ms": snapshot.reference_freshness.age_ms,
-            },
-            causation_id=causation_id,
+    def _book_fingerprint(self, snapshot: DecisionSnapshot, instrument_id) -> str | None:
+        """Hash of best bid/ask + touch sizes — used as a retry "material move" gate."""
+        if instrument_id is None:
+            return None
+        market = snapshot.market
+        quote = (
+            snapshot.yes_quote if instrument_id == market.yes.instrument_id else snapshot.no_quote
         )
-        momentum_value = None
-        momentum_ready = False
-        momentum_reason = "NO_REFERENCE"
-        if snapshot.reference is not None:
-            ind = self.momentum.update(snapshot.reference, source_event_id=causation_id)
-            momentum_value = ind.value.get("momentum")
-            momentum_ready = bool(ind.value.get("ready"))
-            momentum_reason = str(ind.value.get("reason"))
-            self._emit(
-                "indicator_result",
-                {
-                    "indicator_id": ind.indicator_id,
-                    "momentum": None if momentum_value is None else str(momentum_value),
-                    "ready": momentum_ready,
-                    "reason": momentum_reason,
-                },
-                causation_id=causation_id,
+        if quote.best_bid is None and quote.best_ask is None:
+            return None
+        raw = "|".join(
+            str(v)
+            for v in (
+                quote.best_bid,
+                quote.best_ask,
+                quote.bid_size_at_touch,
+                quote.ask_size_at_touch,
             )
-
-        from tyrex_pm.signals.directional import build_directional_signal
-
-        signal = build_directional_signal(
-            snapshot=snapshot,
-            momentum=momentum_value,
-            momentum_ready=momentum_ready,
-            momentum_reason=momentum_reason,
-            threshold=self.config.momentum_threshold,
-            max_spread=self.config.max_book_spread,
         )
-        self.signals.append(signal)
-        self._emit(
-            "signal",
-            {
-                "direction": signal.direction.value,
-                "reason_code": signal.reason_code,
-                "momentum": None if signal.momentum is None else str(signal.momentum),
-            },
-            causation_id=signal.causation_id,
-            strategy_id=ReferenceMomentumStrategy.STRATEGY_ID,
-        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    def _build_decision_context(
+        self, snapshot: DecisionSnapshot, signal: DirectionalSignal
+    ) -> DecisionContext | None:
+        if self.oms is None:
+            return super()._build_decision_context(snapshot, signal)
         assert self.config.risk is not None and self.config.shadow is not None
         life = self.lifecycle.view()
         pos_qty = (
@@ -242,28 +251,104 @@ class ShadowHost(ObserveHost):
             if life.instrument_id is None
             else self.portfolio.net_quantity(life.instrument_id)
         )
-        transition = self.strategy.apply_transition(
-            signal,
-            DecisionContext(
-                run_id=self.run_id,
-                mode=self.config.risk.runtime_mode,
-                snapshot=snapshot,
-                target_notional=self.config.risk.target_notional,
-                max_price=self.config.risk.max_price,
-                lifecycle=life,
-                position_quantity=pos_qty,
-                now=self.clock.now_utc(),
-                max_hold=self.config.shadow.max_hold,
-                flatten_before_close=self.config.shadow.flatten_before_close,
-                exit_on_flat=self.config.shadow.exit_on_flat,
-                kill_switch_active=self._kill_switch,
-            ),
+        now = self.clock.now_utc()
+
+        entry_instrument = None
+        if signal.direction is Direction.UP:
+            entry_instrument = snapshot.market.yes.instrument_id
+        elif signal.direction is Direction.DOWN:
+            entry_instrument = snapshot.market.no.instrument_id
+        if life.state is LifecycleState.FLAT and entry_instrument is not None:
+            self.retry.on_directional_transition(signal.direction.value)
+        entry_fp = self._book_fingerprint(snapshot, entry_instrument)
+        entry_allowed, entry_reason = self.retry.entry_allowed(now=now, book_fingerprint=entry_fp)
+
+        exit_fp = self._book_fingerprint(snapshot, life.instrument_id)
+        exit_outstanding = self.retry.exit_outstanding()
+        exit_allowed, exit_reason = self.retry.exit_allowed(
+            now=now, escalate=self._kill_switch, book_fingerprint=exit_fp
         )
-        decision = transition.decision
-        self.decisions.append(decision)
-        self._emit_observe_decision(decision)
+        # A retry attempt that clears cooldown while an exit is still outstanding
+        # must bypass the strategy's single-outstanding-exit suppression.
+        exit_escalate = exit_allowed and exit_outstanding
+
+        return DecisionContext(
+            run_id=self.run_id,
+            mode=self.config.risk.runtime_mode,
+            snapshot=snapshot,
+            target_notional=self.config.risk.target_notional,
+            max_price=self.config.risk.max_price,
+            lifecycle=life,
+            position_quantity=pos_qty,
+            now=now,
+            max_hold=self.config.shadow.max_hold,
+            flatten_before_close=self.config.shadow.flatten_before_close,
+            exit_on_flat=self.config.shadow.exit_on_flat,
+            kill_switch_active=self._kill_switch,
+            entry_allowed=entry_allowed,
+            entry_block_reason=None if entry_allowed else entry_reason,
+            exit_allowed=exit_allowed,
+            exit_block_reason=None if exit_allowed else exit_reason,
+            exit_escalate=exit_escalate,
+            exit_urgency=self.retry.exit.urgency,
+        )
+
+    def _process_transition(
+        self, signal: DirectionalSignal, snapshot: DecisionSnapshot, transition
+    ) -> None:
+        if self.oms is None:
+            super()._process_transition(signal, snapshot, transition)
+            return
         self._handle_shadow_transition(signal, snapshot, transition)
-        return decision
+
+    # --- Retry bookkeeping ---
+
+    def _attach_attempt_id(self, intent, snapshot, signal, now):
+        """Stamp evidence['attempt_id'] so each scheduled retry gets a unique
+        dedup semantic key — no ``dedup.forget`` needed for entry/exit retries.
+        """
+        if isinstance(intent, EnterIntent):
+            fp = self._book_fingerprint(snapshot, intent.instrument_id)
+            allowed, _ = self.retry.entry_allowed(now=now, book_fingerprint=fp)
+            if not allowed:
+                return intent
+            rec = self.retry.note_entry_attempt(
+                now=now,
+                direction=signal.direction.value,
+                book_fingerprint=fp,
+                reason=intent.reason_code,
+            )
+            return replace(intent, evidence={**intent.evidence, "attempt_id": rec.attempt_id})
+        if isinstance(intent, (ExitIntent, FlattenIntent)):
+            rec = self.retry.note_exit_request(
+                now=now,
+                reason=intent.reason_code,
+                urgency="URGENT" if isinstance(intent, FlattenIntent) else "NORMAL",
+                escalate=isinstance(intent, FlattenIntent),
+            )
+            return replace(intent, evidence={**intent.evidence, "attempt_id": rec.attempt_id})
+        return intent
+
+    def _note_intent_denied(self, intent, now: datetime) -> None:
+        if isinstance(intent, EnterIntent):
+            self.retry.note_entry_risk_denied()
+        elif isinstance(intent, (ExitIntent, FlattenIntent)):
+            self._note_exit_setback(reason="RISK_DENIED", when=now)
+
+    def _note_exit_setback(self, *, reason: str, when: datetime) -> None:
+        """Route an exit/flatten failure into lifecycle + retry bookkeeping.
+
+        Lifecycle transitions are the single source of truth: moving into
+        ``EXIT_RETRY_WAIT`` (here, or via order reject/cancel residuals) fires
+        ``_on_lifecycle_transition``, which advances ``RetryController`` and
+        escalates to ``MANUAL_INTERVENTION`` when retries are exhausted.
+        """
+        if self.lifecycle.state in _EXIT_SETBACK_FROM:
+            self.lifecycle.note_exit_retry_wait(when=when)
+        else:
+            self.retry.note_exit_plan_failed(reason=reason, now=when)
+            if self.retry.exit.phase is ExitRetryPhase.MANUAL_INTERVENTION:
+                self.lifecycle.note_manual_intervention(when=when)
 
     def _handle_shadow_transition(self, signal, snapshot, transition) -> None:
         if transition.suppressed and not transition.intents:
@@ -272,6 +357,8 @@ class ShadowHost(ObserveHost):
                 "ENTRY_PENDING",
                 "ACTIVE_NO_EXIT",
                 "ACTIVE_POSITION_BLOCKS_ENTRY",
+                "EXIT_ALREADY_OUTSTANDING",
+                "MANUAL_INTERVENTION",
             }:
                 self._emit(
                     "intent_suppressed",
@@ -284,7 +371,9 @@ class ShadowHost(ObserveHost):
                 )
             return
 
-        for intent in transition.intents:
+        now = self.clock.now_utc()
+        for raw_intent in transition.intents:
+            intent = self._attach_attempt_id(raw_intent, snapshot, signal, now)
             self.intents.append(intent)
             self._emit(
                 "intent_created",
@@ -338,6 +427,7 @@ class ShadowHost(ObserveHost):
                     },
                     causation_id=decision.causation_id,
                 )
+                self._note_intent_denied(intent, now)
                 continue
 
             self._emit(
@@ -366,7 +456,14 @@ class ShadowHost(ObserveHost):
             )
             self.plans.append(plan_result)
             if plan_result.status is not PlanStatus.PLANNED or plan_result.plan is None:
-                self.dedup.forget(intent.semantic_key())
+                self.retry.note_entry_plan_failed(
+                    reason=(
+                        "UNKNOWN"
+                        if plan_result.fail_reason is None
+                        else plan_result.fail_reason.value
+                    ),
+                    now=now,
+                )
                 self._emit(
                     "planning_failed",
                     {
@@ -414,6 +511,7 @@ class ShadowHost(ObserveHost):
             # Lifecycle must be ENTRY_PENDING before fill events from submit.
             oid = new_order_id()
             self.lifecycle.note_entry_submitted(oid, intent.instrument_id, when=now)
+            self.retry.note_entry_submitted()
             self.oms.submit(cmd, order_id=oid)
             self._maybe_persist()
             return
@@ -436,7 +534,14 @@ class ShadowHost(ObserveHost):
             )
             self.plans.append(plan_result)
             if plan_result.status is not PlanStatus.PLANNED or plan_result.plan is None:
-                self.dedup.forget(intent.semantic_key())
+                self._note_exit_setback(
+                    reason=(
+                        "UNKNOWN"
+                        if plan_result.fail_reason is None
+                        else plan_result.fail_reason.value
+                    ),
+                    when=now,
+                )
                 self._emit(
                     "planning_failed",
                     {
@@ -486,9 +591,11 @@ class ShadowHost(ObserveHost):
                 {"command_id": cmd.command_id.value, "kind": "SUBMIT"},
                 causation_id=cmd.causation_id,
             )
-            oid = new_order_id()
-            self.lifecycle.note_exit_submitted(oid, when=now)
-            self.oms.submit(cmd, order_id=oid)
+            self.lifecycle.note_exit_requested(when=now)
+            eid = new_order_id()
+            self.lifecycle.note_exit_submitted(eid, when=now)
+            self.retry.note_exit_submitted()
+            self.oms.submit(cmd, order_id=eid)
             self._maybe_persist()
 
     def _maybe_persist(self) -> None:
@@ -509,6 +616,7 @@ class ShadowHost(ObserveHost):
             "portfolio": self.portfolio.snapshot(),
             "lifecycle": self.lifecycle.snapshot(),
             "dedup_keys": self.dedup.snapshot(),
+            "retry": self.retry.snapshot(),
             "kill_switch": self._kill_switch,
             "strategy_epoch": self.strategy.decision_epoch,
             "strategy_last_direction": None
@@ -540,6 +648,7 @@ class ShadowHost(ObserveHost):
         self.portfolio.restore(payload.get("portfolio") or {})
         self.lifecycle.restore(payload.get("lifecycle") or {"state": "FLAT"})
         self.dedup.restore(payload.get("dedup_keys") or [])
+        self.retry.restore(payload.get("retry") or {})
         self._kill_switch = bool(payload.get("kill_switch", False))
         last_dir = payload.get("strategy_last_direction")
         self.strategy.restore_state(

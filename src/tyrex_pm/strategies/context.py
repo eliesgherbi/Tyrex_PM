@@ -37,3 +37,10 @@ class DecisionContext:
     flatten_before_close: timedelta | None = None
     exit_on_flat: bool = True
     kill_switch_active: bool = False
+    # R5.1 retry gates (host-owned RetryController)
+    entry_allowed: bool = True
+    entry_block_reason: str | None = None
+    exit_allowed: bool = True
+    exit_block_reason: str | None = None
+    exit_escalate: bool = False
+    exit_urgency: str = "NORMAL"
