@@ -7,8 +7,8 @@ Strategies receive normalized data, compute signals, emit typed intents, and rel
 ## Status
 
 **R1 complete:** historical implementation archived under [`old/`](old/) (checkpoint `630bac2`).  
-**R2 complete:** `core/` + `engine/` event contracts and in-process dispatcher (`tyrex-pm` 0.3.0).  
-Next: **R3** read-only market-data and observe strategy (not started).
+**R2 complete:** `core/` + `engine/` event contracts and dispatcher (checkpoint `ccccc96`).  
+**R3 complete:** read-only observe path — fixtures (R3A) + public live validation (R3B). Stop before R4 (intents/risk).
 
 NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_architecture_references.md`](Docs/06_architecture_references.md).
 
@@ -17,11 +17,12 @@ NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_archit
 ```bash
 pip install -e ".[dev]"
 tyrex-pm version
-tyrex-pm help
+tyrex-pm observe --config config/observe_fixture_r3.json
+tyrex-pm discover-btc-window --which next
 pytest
 ```
 
-Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). The R1 skeleton does not require venue credentials.
+Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). Public R3 observe does not require private keys.
 
 ## Documentation
 

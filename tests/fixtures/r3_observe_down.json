@@ -1,0 +1,43 @@
+{
+  "market": {
+    "market_id": "cond-fixture-down",
+    "condition_id": "cond-fixture-down",
+    "question": "Fixture DOWN",
+    "yes_token_id": "tok-yes-d",
+    "no_token_id": "tok-no-d",
+    "status": "ACTIVE",
+    "event_slug": "fixture-down"
+  },
+  "polymarket_events": [
+    {
+      "ts_received": "2026-07-16T12:01:00+00:00",
+      "payload": {
+        "event_type": "book",
+        "asset_id": "tok-yes-d",
+        "timestamp": "2026-07-16T12:01:00+00:00",
+        "bids": [{"price": "0.48", "size": "100"}],
+        "asks": [{"price": "0.52", "size": "100"}]
+      }
+    },
+    {
+      "ts_received": "2026-07-16T12:01:00+00:00",
+      "payload": {
+        "event_type": "book",
+        "asset_id": "tok-no-d",
+        "timestamp": "2026-07-16T12:01:00+00:00",
+        "bids": [{"price": "0.47", "size": "80"}],
+        "asks": [{"price": "0.53", "size": "90"}]
+      }
+    }
+  ],
+  "binance_events": [
+    {
+      "ts_received": "2026-07-16T12:01:10+00:00",
+      "payload": {"s": "BTCUSDT", "p": "100000", "T": 1784203270000}
+    },
+    {
+      "ts_received": "2026-07-16T12:01:20+00:00",
+      "payload": {"s": "BTCUSDT", "p": "99700", "T": 1784203280000}
+    }
+  ]
+}

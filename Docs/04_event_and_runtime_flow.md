@@ -1,13 +1,15 @@
 # 04 — Event and runtime flow
 
-**Phase:** R2 implemented semantics below.
+**Phase:** R3 observe path implemented.
 
 ## Event vs signal vs intent vs command
 
-| Kind | R2 status |
-|------|-----------|
-| Event | Implemented (`BookUpdated`, `ReferencePriceUpdated`, `TimerElapsed`) |
-| Signal | Envelope only (`Signal`) |
+| Kind | Status |
+|------|--------|
+| Ingress events | `BookSnapshotReceived`, `BookDeltaReceived`, `TickSizeChanged`, `ReferencePriceUpdated` |
+| Store view event | `BookUpdated` (complete reconstructed book) |
+| Signal | `DirectionalSignal` → `Signal` envelope |
+| Observe decision | `WOULD_ENTER_*` / `HOLD` / `SKIP` (not an intent) |
 | Intent | **Deferred to R4** |
 | Command / plan | **Deferred to R4–R5** |
 
@@ -22,27 +24,34 @@
 | `ts_received` | Local ingestion/creation time (UTC aware) |
 | `source` | `EventSource` enum |
 
-Derived events keep `correlation_id` and set `causation_id` to the parent `event_id`.
+Observe evaluations set `causation_id` to the triggering `ReferencePriceUpdated.event_id`. Facts propagate the same `correlation_id` / `run_id`.
 
-## BookUpdated payload choice
+## Book path (Option B)
 
-**Complete normalized `BookSnapshot`**, not deltas.
+```text
+venue book / price_change / tick_size_change
+  → adapter normalize (no authoritative book ownership)
+  → MarketStateStore apply
+       snapshot → replace book, initialized=true
+       delta without snapshot → recovery_required
+       tick_size_change / reconnect → invalidate until snapshot
+  → publish BookUpdated(complete BookSnapshot)
+```
 
-Trade-off: simpler and safer for the first read-only path; no pretend sequence/gap recovery. Separate delta events may be added later if adapters need them. Executable VWAP is **not** on the event — derived in R3 market-data.
+Executable VWAP / mid / spread are derived from store books at decision time — not attached to ingress events.
 
-## Dispatcher semantics
+## Freshness
 
-| Topic | Decision |
-|-------|----------|
-| Ordering | Priority desc, then subscription order |
-| Routing | **Exact type only** (no base-type fanout) |
-| Failure | Fail-fast `DispatchError`; stop remaining handlers |
-| Reentrant publish | Queue until current publication finishes |
-| Subscribe during publish | Snapshot handlers; mutations apply next event |
-| Duplicate callable | Rejected |
-| No subscribers | Valid; `delivered=0` |
-| Idempotency | **Not** in dispatcher — venue stores later (R5–R6) |
+Evaluated at decision time with the injected clock. Not a latched `is_fresh=True` store flag. Distinguishes `UNINITIALIZED`, `STALE`, `FUTURE_TIMESTAMP`, `FRESH`. Thresholds live in `FreshnessConfig`.
+
+## Dispatcher semantics (unchanged from R2)
+
+Priority desc, subscription order; exact-type routing; fail-fast; queued reentrant publish; handler list snapshotted; no venue idempotency.
+
+## Runtime host
+
+One `ObserveHost` composition root for fixture and live modes. Live adapters are swapped in by `run_live_observe`. BTC next-window slug selection is an operations helper (`discover-btc-window` / `next_btc_updown_slug`), not a second strategy loop.
 
 ## Modes
 
-observe / shadow / live-tiny remain application concerns (R3+). Mode must not change indicator/signal math.
+`observe` implemented (fixture + public live). `shadow` / `live-tiny` remain R4–R7. Mode must not change indicator/signal math.

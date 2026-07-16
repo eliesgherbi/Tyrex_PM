@@ -1,6 +1,13 @@
 """Core contracts: identifiers, time, events, snapshots, envelopes."""
 
 from tyrex_pm.core.clock import Clock, FakeClock, SystemClock, require_utc
+from tyrex_pm.core.book_events import (
+    BookDeltaReceived,
+    BookLevelDelta,
+    BookSide,
+    BookSnapshotReceived,
+    TickSizeChanged,
+)
 from tyrex_pm.core.events import (
     BookUpdated,
     Event,
@@ -27,8 +34,12 @@ from tyrex_pm.core.signals import Signal
 from tyrex_pm.core.snapshots import BookLevel, BookSnapshot, ReferencePriceSnapshot
 
 __all__ = [
+    "BookDeltaReceived",
     "BookLevel",
+    "BookLevelDelta",
+    "BookSide",
     "BookSnapshot",
+    "BookSnapshotReceived",
     "BookUpdated",
     "Clock",
     "CorrelationId",
@@ -48,6 +59,7 @@ __all__ = [
     "Signal",
     "StrategyId",
     "SystemClock",
+    "TickSizeChanged",
     "TimerElapsed",
     "TokenId",
     "new_correlation_id",

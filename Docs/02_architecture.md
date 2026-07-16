@@ -1,57 +1,80 @@
 # 02 — Architecture and ownership
 
-**Phase:** R2 implemented for `core/` + `engine/`  
-**Engine:** Minimal Tyrex in-process event-driven engine (no NautilusTrader)
+**Phase:** R3 implemented (read-only observe path)  
+**Engine:** Minimal Tyrex in-process event-driven engine (no NautilusTrader)  
+**R2 checkpoint:** `ccccc969bb4877ae97e6e56c656b839739034425`
 
-## Implemented flow (R2 primitives)
+## Implemented flow (R3)
 
 ```text
-(future Adapter)
-    → typed Event (BookUpdated | ReferencePriceUpdated | TimerElapsed)
-    → EventDispatcher.publish
-    → (future state owner / indicator / signal / strategy)
+MarketDiscovery (fixture | Gamma)
+    → BinaryMarket → InstrumentRegistry
+Polymarket adapter / fixture
+    → BookSnapshotReceived | BookDeltaReceived | TickSizeChanged
+    → MarketStateStore (authoritative book)
+    → BookUpdated (complete reconstructed view)
+Binance trade adapter / fixture
+    → ReferencePriceUpdated
+    → ReferenceDataStore
+ObserveHost (on reference update)
+    → DecisionSnapshot (immutable)
+    → FreshnessAssessment (derived, not latched)
+    → ShortHorizonMomentum + mid/spread views
+    → DirectionalSignal
+    → ReferenceMomentumStrategy (observe decision)
+    → FactEnvelope → JSONL sink
 ```
-
-R2 provides the contracts and dispatcher only. Adapters and strategies begin in R3+.
 
 ## Packages present
 
 | Package | Role |
 |---------|------|
-| `tyrex_pm.application` | CLI (R1) |
-| `tyrex_pm.core` | Ids, clock, events, snapshots, envelopes |
+| `tyrex_pm.application` | CLI (`version`, `observe`, `discover-btc-window`) |
+| `tyrex_pm.core` | Ids, clock, events, snapshots, envelopes, book ingress events |
 | `tyrex_pm.engine` | `EventDispatcher` |
+| `tyrex_pm.domain.polymarket` | `BinaryMarket`, `MarketRequest` |
+| `tyrex_pm.adapters.polymarket` | Normalize + fixture + Gamma discovery + market WS |
+| `tyrex_pm.adapters.binance` | Normalize + fixture + public trade WS |
+| `tyrex_pm.market_data` | Registry, book/reference stores, freshness, executable views, snapshot |
+| `tyrex_pm.indicators` | Short-horizon momentum (stateful) |
+| `tyrex_pm.signals` | Directional signal builder |
+| `tyrex_pm.strategies.framework_validation` | Observe-only `ReferenceMomentumStrategy` |
+| `tyrex_pm.reporting` | JSONL fact sink |
+| `tyrex_pm.runtime` | Config + observe composition root + live runner |
+| `tyrex_pm.operations` | BTC Up/Down window slug helpers (not a second runtime) |
 
-## State ownership (target; stores arrive R3+)
+**Merged:** BTC window selection lives under `operations` re-exporting discovery helpers rather than a separate package tree. No empty R4–R8 placeholders.
+
+## State ownership
 
 | State | Authoritative owner |
 |-------|---------------------|
-| Instruments | Instrument registry (R3+) |
-| Polymarket books | Market-state store (R3) |
-| Binance reference | Reference-data store (R3) |
-| Indicators | Indicator instances (R3) |
-| Signals | Immutable messages |
-| Orders / fills / positions | Portfolio path (R5) |
-| Facts | Reporting sink (R3+) |
+| Resolved market / YES-NO tokens | `InstrumentRegistry` |
+| Reconstructed books | `MarketStateStore` (Option B) |
+| Latest Binance reference | `ReferenceDataStore` |
+| Momentum rolling buffer | `ShortHorizonMomentum` |
+| Freshness | Derived at decision time via `assess_freshness` |
+| Facts | `JsonlFactSink` |
 
-The dispatcher transports events; it is **not** a state store and does **not** deduplicate venue events.
+The dispatcher transports events; it does **not** own market state.
+
+## Book protocol choice (Option B)
+
+Official Polymarket CLOB market channel publishes:
+
+- `book` — full snapshot
+- `price_change` — level deltas (`size` `"0"` removes)
+- `tick_size_change` — tick change (store invalidates until new snapshot)
+
+Therefore ingress events are snapshot/delta/tick; the **store** reconstructs. Adapters do not present a silently mutated book as a stateless snapshot.
+
+Legacy `old/.../market_ws.py` is a stub and is not imported.
 
 ## Dependency direction
 
-`application → (future strategies) → core ← engine`  
-
-`engine` may import `core`. `core` must not import `engine`, adapters, or strategies. Nothing imports `old/`.
-
-## Polymarket identity mapping
-
-| Concept | Type |
-|---------|------|
-| Market / condition | `MarketId` |
-| Tradable CLOB token | `TokenId` |
-| Framework instrument key | `InstrumentId` (typically token string) |
-| YES / NO | `OutcomeSide` on `Instrument` |
-| Window/slug | Not a core ID — scheduler concern in R3 |
+`application → runtime → strategies/signals/indicators/market_data/adapters → core`  
+`engine` may import `core`. Nothing imports `old/`. No NautilusTrader.
 
 ## Numeric policy
 
-Trading prices/quantities use `Decimal`. Floats rejected at construction. Venue tick rounding deferred to adapter/execution (R3–R6).
+Trading prices/quantities use `Decimal`. Venue tick rounding deferred past R3.

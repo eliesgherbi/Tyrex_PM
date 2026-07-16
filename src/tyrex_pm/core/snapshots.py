@@ -1,9 +1,8 @@
 """Immutable market snapshots for R3.
 
-BookUpdated carries a **complete normalized snapshot**, not a delta.
-Rationale: safer for the first read-only path; avoids pretending sequence
-numbers / gap recovery exist before adapters implement them. Deltas may be
-added later as a separate event type if needed.
+Ingress uses Option B events (``BookSnapshotReceived`` / ``BookDeltaReceived``).
+``BookUpdated`` is emitted by the market-state store as a **complete**
+reconstructed book view after applying venue messages.
 """
 
 from __future__ import annotations

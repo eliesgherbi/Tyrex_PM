@@ -1,0 +1,16 @@
+{
+  "mode": "live",
+  "output_path": "var/reporting/r3/live_observe_facts.jsonl",
+  "binance_symbol": "BTCUSDT",
+  "momentum_lookback_ms": 5000,
+  "momentum_threshold": "0.0002",
+  "max_book_spread": "0.20",
+  "freshness": {
+    "book_threshold_ms": 15000,
+    "reference_threshold_ms": 5000,
+    "future_tolerance_ms": 2000,
+    "timestamp_basis": "EVENT_TIME"
+  },
+  "runtime_duration_s": 45,
+  "event_slug": null
+}

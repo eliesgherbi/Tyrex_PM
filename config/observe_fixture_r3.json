@@ -1,0 +1,16 @@
+{
+  "mode": "fixture",
+  "fixture_path": "tests/fixtures/r3_observe_complete.json",
+  "output_path": "var/reporting/r3/fixture_observe_facts.jsonl",
+  "binance_symbol": "BTCUSDT",
+  "momentum_lookback_ms": 5000,
+  "momentum_threshold": "0.001",
+  "max_book_spread": "0.10",
+  "freshness": {
+    "book_threshold_ms": 60000,
+    "reference_threshold_ms": 60000,
+    "future_tolerance_ms": 500,
+    "timestamp_basis": "EVENT_TIME"
+  },
+  "runtime_duration_s": null
+}

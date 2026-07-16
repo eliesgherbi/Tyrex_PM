@@ -1,41 +1,72 @@
 # 03 — Module contracts
 
-**Phase:** R2 — `core` and `engine` implemented.
+**Phase:** R3 — read-only observe path implemented.
 
-## `tyrex_pm.application` (R1)
+## `tyrex_pm.application`
 
-CLI entry (`tyrex-pm version|help`). No venue I/O.
+CLI: `version`, `help`, `observe` (fixture|live), `discover-btc-window`.  
+CLI selects mode/paths/slug/duration; trading decisions stay in the host/strategy.
 
-## `tyrex_pm.core` (R2)
+## `tyrex_pm.core`
+
+R2 contracts plus R3 ingress:
 
 | Module | Contract |
 |--------|----------|
-| `ids` | `EventId`, `CorrelationId`, `InstrumentId`, `MarketId`, `TokenId`, `StrategyId`, `RunId` |
-| `clock` | `Clock`, `SystemClock`, `FakeClock`, `require_utc` |
-| `numerics` | Decimal helpers; reject float; Polymarket price ∈ [0,1] |
-| `instruments` | `Instrument`, `OutcomeSide` |
-| `snapshots` | `BookLevel`, `BookSnapshot` (full book), `ReferencePriceSnapshot` |
-| `events` | `Event`, `BookUpdated`, `ReferencePriceUpdated`, `TimerElapsed`, `EventSource` |
-| `indicators` | `IndicatorResult` envelope |
-| `signals` | `Signal` envelope (DirectionalSignal in R3) |
-| `facts` | `FactEnvelope` (JSONL sink in R3) |
+| `book_events` | `BookSnapshotReceived`, `BookDeltaReceived`, `TickSizeChanged`, `BookLevelDelta`, `BookSide` |
+| `events` | `BookUpdated` (store-emitted complete view), `ReferencePriceUpdated`, `TimerElapsed` |
+| `facts` / `signals` / `indicators` | Envelopes consumed by R3 builders |
 
-**Forbidden deps:** `engine`, adapters, strategies, `old`, NautilusTrader.
-
-**Deferred:** Intent hierarchy (R4), execution events (R5), WindowOpened/Closed (only if R3 scheduler needs them).
-
-## `tyrex_pm.engine` (R2)
+## `tyrex_pm.domain.polymarket`
 
 | Type | Contract |
 |------|----------|
-| `EventDispatcher` | subscribe / unsubscribe / publish |
-| `Subscription` | opaque handle |
-| `DispatchResult` | handler_count, delivered, queued_followups |
-| `DispatchError` | fail-fast handler failure |
+| `MarketRequest` | slug / url / condition_id / fixture_path |
+| `BinaryMarket` | condition, YES/NO instruments, timing, tick/min size, status |
+| `make_binary_instruments` | Token → Instrument mapping |
 
-**Allowed deps:** `tyrex_pm.core` only.  
-**Forbidden:** adapters, strategies, portfolio, `old`.
+No BTC/Z-Gap strategy logic in this domain module.
 
-## Planned later (not created)
+## `tyrex_pm.adapters`
 
-`adapters`, `market_data`, `indicators` (calc), `strategies`, `risk`, `execution`, `portfolio`, `lifecycle`, `operations`, `persistence`, `reporting`, `domain.polymarket` — when consumers exist.
+Protocols: `MarketDiscovery`, `MarketDataAdapter` (minimal).  
+**May:** connect, parse, validate venue fields, normalize, publish, reconnect, health.  
+**Must not:** momentum, signals, entry/exit, orders, portfolio, write facts directly.
+
+| Adapter | Notes |
+|---------|-------|
+| Polymarket normalize | Option B book/delta/tick |
+| Polymarket fixture source | Deterministic publish |
+| Gamma discovery | Public HTTP, User-Agent required |
+| Polymarket market WS | `wss://ws-subscriptions-clob.polymarket.com/ws/market` |
+| Binance normalize | `@trade` prints |
+| Binance trade WS | `wss://stream.binance.com:9443/ws/<symbol>@trade` |
+
+## `tyrex_pm.market_data`
+
+| Owner | Owns |
+|-------|------|
+| `InstrumentRegistry` | Resolved `BinaryMarket` |
+| `MarketStateStore` | Books, init/recovery, tick size |
+| `ReferenceDataStore` | Latest reference observation |
+| `freshness` | Decision-time `FreshnessAssessment` |
+| `executable` | Mid, spread, touch size, VWAP |
+| `DecisionSnapshot` | Immutable evaluation context |
+
+## `tyrex_pm.indicators` / `signals` / `strategies`
+
+- Momentum: \(m_t = P_t / P_{t-L} - 1\) (no interpolation; out-of-order ignored).
+- Directional: `UP|DOWN|FLAT|UNAVAILABLE`.
+- Strategy observe decisions: `WOULD_ENTER_UP|WOULD_ENTER_DOWN|HOLD|SKIP` (no intents).
+
+## `tyrex_pm.reporting`
+
+`JsonlFactSink` — append-only UTF-8 JSONL, schema_version=1, Decimal/datetime/enum/ID serialization, flush on append, failures propagate.
+
+## `tyrex_pm.runtime`
+
+`ObserveConfig` (validated thresholds, fingerprint), `ObserveHost` (fixture composition), `run_live_observe` (same host + live adapters).
+
+## Forbidden in R3
+
+Risk authorization, execution planning, OMS, orders, fills, portfolio, Z-Gap, PTB/Chainlink, imports from `old/`, NautilusTrader.
