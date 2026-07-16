@@ -481,12 +481,12 @@ def _emit_group_b_observability(
     trigger = ext.get("trigger_type")
     if trigger == "timeout":
         snap_decision_type = "timeout_exit"
-    elif context == DecisionContext.URGENT_EXIT:
+    elif context == "urgent_exit":
         snap_decision_type = "urgent_exit"
     elif ext.get("decision_type"):
         snap_decision_type = str(ext.get("decision_type"))
     else:
-        snap_decision_type = context.value
+        snap_decision_type = context if isinstance(context, str) else str(context)
     report = None
     if quality_raw:
         report = DataQualityReport(
@@ -1085,6 +1085,9 @@ async def process_intent_work_unit(
                 token_id=str(ap.intent.token_id),
                 outcome=sell_outcome,
             )
+            exit_hook = getattr(strategy, "on_exit_submit_ack", None)
+            if exit_hook is not None and callable(exit_hook):
+                exit_hook(ap=ap)
             if isinstance(strategy, SellTestStrategy):
                 strategy.sell_test_state.mark_sell_terminal("sell_submitted")
             elif isinstance(strategy, TpSlTestStrategy):
@@ -1127,6 +1130,17 @@ def _dispatch_post_buy_ack_hook(
     sell_test_hook = getattr(strategy, "on_buy_submit_ack", None)
     if sell_test_hook is not None and isinstance(strategy, (SellTestStrategy, TpSlTestStrategy)):
         sell_test_hook(
+            ap=ap,
+            parent_correlation_id=parent_correlation_id,
+            coord=coord,
+            execution_mode=app.runtime.execution_mode,
+            apply_local_shadow_fill=apply_local_shadow_fill,
+            match_evidence=match_evidence,
+        )
+        return
+    generic_hook = getattr(strategy, "on_buy_submit_ack", None)
+    if generic_hook is not None and callable(generic_hook):
+        generic_hook(
             ap=ap,
             parent_correlation_id=parent_correlation_id,
             coord=coord,

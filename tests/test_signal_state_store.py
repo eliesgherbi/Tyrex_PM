@@ -67,12 +67,32 @@ def test_ptb_update_stores_k_and_lag() -> None:
     assert snap.ptb_lag_ms == 120.0
 
 
-def test_snapshot_computes_ages() -> None:
+def test_snapshot_computes_ages_from_source_ts() -> None:
+    """Binance age uses venue source_ts when present (aligned with corrected-now freshness)."""
     store = SignalStateStore()
     now = _ts(5000)
     store.update_binance(Decimal("1"), source_ts=_ts(0), recv_ts=_ts(1000), stream="bookTicker")
     snap = store.snapshot(now=now)
+    assert snap.binance_age_ms == pytest.approx(5000.0)
+    assert snap.binance_freshness == FRESHNESS_STALE
+
+
+def test_snapshot_age_falls_back_to_recv_when_source_missing() -> None:
+    store = SignalStateStore()
+    now = _ts(5000)
+    store.update_binance(Decimal("1"), source_ts=None, recv_ts=_ts(1000), stream="bookTicker")
+    snap = store.snapshot(now=now)
     assert snap.binance_age_ms == pytest.approx(4000.0)
+    assert snap.binance_freshness == FRESHNESS_STALE
+
+
+def test_chainlink_snapshot_computes_age_from_source_ts() -> None:
+    store = SignalStateStore()
+    now = _ts(3000)
+    store.update_chainlink(Decimal("100"), source_ts=_ts(500), recv_ts=_ts(2000))
+    snap = store.snapshot(now=now)
+    assert snap.chainlink_age_ms == pytest.approx(2500.0)
+    assert snap.chainlink_freshness == FRESHNESS_FRESH
 
 
 def test_fresh_feeds_ready_for_observe() -> None:

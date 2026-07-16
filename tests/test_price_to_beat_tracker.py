@@ -16,6 +16,7 @@ from tyrex_pm.ingestion.price_to_beat_tracker import (
     PTB_STATUS_PENDING,
     PriceToBeatTracker,
     derive_ptb_from_chainlink_log,
+    derive_ptb_from_chainlink_log_ex,
 )
 from tyrex_pm.state.signal_state_store import FRESHNESS_OBSERVED, SignalStateStore
 
@@ -191,3 +192,44 @@ def test_register_applies_log_derivation(tmp_path: Path) -> None:
     payload = events[0].payload or {}
     assert payload.get("price_to_beat") == "63220.22"
     assert payload.get("status") == PTB_STATUS_OBSERVED_FROM_LOG
+
+
+def test_derive_from_log_skips_blank_and_malformed_rows(tmp_path: Path) -> None:
+    log_path = tmp_path / "chainlink_ticks.jsonl"
+    event_start = 1783634400.0
+    first_ts = datetime.fromtimestamp(event_start + 1.0, tz=timezone.utc)
+    second_ts = datetime.fromtimestamp(event_start + 2.0, tz=timezone.utc)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "source_ts": first_ts.isoformat(),
+                    "recv_ts": first_ts.isoformat(),
+                    "price": "11111.11",
+                }
+            )
+            + "\n"
+        )
+        fh.write("\n")
+        fh.write("{not valid json\n")
+        fh.write(
+            json.dumps(
+                {
+                    "source_ts": second_ts.isoformat(),
+                    "recv_ts": second_ts.isoformat(),
+                    "price": "22222.22",
+                }
+            )
+            + "\n"
+        )
+    derived, diagnostics = derive_ptb_from_chainlink_log_ex(
+        event_start_ts=event_start,
+        path=log_path,
+        max_lag_ms=5000.0,
+    )
+    assert derived is not None
+    assert derived.price == "11111.11"
+    assert diagnostics.skipped_blank_lines == 1
+    assert diagnostics.skipped_malformed_json == 1
+    assert diagnostics.had_parse_issues is True

@@ -25,6 +25,20 @@ ALL_ENFORCE_GATES = (
     GATE_OPERATOR_APPROVED,
 )
 
+STATIC_ENFORCE_GATES = (
+    GATE_FEE_CURVE_SPIKE,
+    GATE_BINANCE_CONNECTIVITY,
+    GATE_CLOCK_SANITY,
+    GATE_CALIBRATION_LITE,
+    GATE_OPERATOR_APPROVED,
+)
+
+DYNAMIC_ENFORCE_GATES = (GATE_PTB_ATTESTATION,)
+
+PREFLIGHT_PHASE_FULL = "full"
+PREFLIGHT_PHASE_STATIC = "static"
+PREFLIGHT_PHASE_DYNAMIC = "dynamic"
+
 
 @dataclass(frozen=True)
 class ZGapPreflightGates:
@@ -36,13 +50,30 @@ class ZGapPreflightGates:
     clock_sanity_passed: bool = False
     calibration_lite_reviewed: bool = False
     operator_approved_enforce: bool = False
+    ptb_boundary_status: str = "WAITING_FOR_BOUNDARY"
     blockers: tuple[str, ...] = ()
     artifacts_dir: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def static_enforce_allowed(self) -> bool:
+        return all(
+            (
+                self.fee_curve_spike_passed,
+                self.binance_connectivity_passed,
+                self.clock_sanity_passed,
+                self.calibration_lite_reviewed,
+                self.operator_approved_enforce,
+            )
+        )
+
+    @property
+    def dynamic_enforce_allowed(self) -> bool:
+        return self.ptb_attestation_passed
+
+    @property
     def enforce_allowed(self) -> bool:
-        return not self.blockers
+        return self.static_enforce_allowed and self.dynamic_enforce_allowed
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -82,9 +113,19 @@ def _binance_connectivity_passed(data: dict[str, Any] | None) -> tuple[bool, str
     return False, f"binance_connectivity not ok ({data.get('error') or 'ok=false'})"
 
 
-def _ptb_attestation_passed(data: dict[str, Any] | None) -> tuple[bool, str]:
+def _ptb_attestation_passed(
+    data: dict[str, Any] | None,
+    *,
+    pre_boundary: bool = False,
+) -> tuple[bool, str]:
     if data is None:
+        if pre_boundary:
+            return True, "waiting_for_boundary"
         return False, "missing ptb_attestation.json"
+    if pre_boundary and not data.get("attestation_pass"):
+        boundary_status = str(data.get("boundary_status") or "WAITING_FOR_BOUNDARY")
+        if boundary_status in {"WAITING_FOR_BOUNDARY", "PTB_PENDING"}:
+            return True, "waiting_for_boundary"
     if data.get("attestation_pass") is not True:
         reason = data.get("attestation_fail_reason") or "attestation_pass is not true"
         return False, f"ptb attestation failed: {reason}"
@@ -135,10 +176,22 @@ def _operator_approved_enforce(data: dict[str, Any] | None) -> tuple[bool, str]:
 
 def load_z_gap_preflight_gates(
     artifacts_dir: Path | str | None = None,
+    *,
+    phase: str = PREFLIGHT_PHASE_FULL,
+    pre_boundary: bool = False,
 ) -> ZGapPreflightGates:
     """Read preflight artifacts and evaluate enforce gate contract."""
     base = Path(artifacts_dir) if artifacts_dir is not None else DEFAULT_Z_GAP_PREFLIGHT_DIR
     base = base.resolve()
+
+    ptb_data = _read_json(base / "ptb_attestation.json")
+    ptb_passed, ptb_reason = _ptb_attestation_passed(ptb_data, pre_boundary=pre_boundary)
+    if pre_boundary and ptb_reason == "waiting_for_boundary":
+        ptb_boundary_status = "WAITING_FOR_BOUNDARY"
+    elif ptb_passed:
+        ptb_boundary_status = "PTB_LOCKED"
+    else:
+        ptb_boundary_status = "PTB_INVALID"
 
     checks: list[tuple[str, tuple[bool, str]]] = [
         (GATE_FEE_CURVE_SPIKE, _fee_curve_spike_passed(_read_json(base / "fee_curve_spike.json"))),
@@ -146,7 +199,7 @@ def load_z_gap_preflight_gates(
             GATE_BINANCE_CONNECTIVITY,
             _binance_connectivity_passed(_read_json(base / "binance_connectivity.json")),
         ),
-        (GATE_PTB_ATTESTATION, _ptb_attestation_passed(_read_json(base / "ptb_attestation.json"))),
+        (GATE_PTB_ATTESTATION, (ptb_passed, ptb_reason)),
         (GATE_CLOCK_SANITY, _clock_sanity_passed(_read_json(base / "clock_sanity.json"))),
         (
             GATE_CALIBRATION_LITE,
@@ -158,13 +211,19 @@ def load_z_gap_preflight_gates(
         ),
     ]
 
+    active_gates = ALL_ENFORCE_GATES
+    if phase == PREFLIGHT_PHASE_STATIC:
+        active_gates = STATIC_ENFORCE_GATES
+    elif phase == PREFLIGHT_PHASE_DYNAMIC:
+        active_gates = DYNAMIC_ENFORCE_GATES
+
     blockers: list[str] = []
     details: dict[str, Any] = {}
     gate_values: dict[str, bool] = {}
     for gate_name, (passed, reason) in checks:
         gate_values[gate_name] = passed
         details[gate_name] = {"passed": passed, "reason": reason}
-        if not passed and reason:
+        if gate_name in active_gates and not passed and reason and reason != "waiting_for_boundary":
             blockers.append(f"{gate_name}: {reason}")
 
     return ZGapPreflightGates(
@@ -174,6 +233,7 @@ def load_z_gap_preflight_gates(
         clock_sanity_passed=gate_values[GATE_CLOCK_SANITY],
         calibration_lite_reviewed=gate_values[GATE_CALIBRATION_LITE],
         operator_approved_enforce=gate_values[GATE_OPERATOR_APPROVED],
+        ptb_boundary_status=ptb_boundary_status,
         blockers=tuple(blockers),
         artifacts_dir=str(base),
         details=details,

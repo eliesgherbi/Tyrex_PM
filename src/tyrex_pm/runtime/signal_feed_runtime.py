@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 from tyrex_pm.core.events import EventType, MarketEvent
@@ -20,8 +23,76 @@ from tyrex_pm.runtime.signal_feed_facts import (
     build_signal_feed_health_from_snapshot,
 )
 from tyrex_pm.state.signal_state_store import SignalStateStore
+from tyrex_pm.state.z_gap_ptb_store import ZGapPtbStore
+from tyrex_pm.strategies.z_gap.ptb_policy import persist_ptb_selection, select_ptb_source
 
 log = logging.getLogger(__name__)
+
+
+def _load_ptb_reference_k() -> str | None:
+    base = Path(os.environ.get("Z_GAP_PREFLIGHT_DIR", "var/reporting/z_gap"))
+    path = base / "ptb_attestation.json"
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    ref = raw.get("K_reference") if isinstance(raw, dict) else None
+    return str(ref) if ref not in (None, "") else None
+
+
+def _apply_ptb_policy_to_store(
+    store: SignalStateStore,
+    *,
+    market_id: str,
+    event_start_ts: float,
+    event_end_ts: float,
+    log_derivation: Any = None,
+    live_price: str | None = None,
+    live_status: str | None = None,
+    live_lag_ms: float | None = None,
+    observed_ts: datetime | None = None,
+) -> dict[str, Any]:
+    ptb_store = ZGapPtbStore()
+    existing = ptb_store.load(market_id)
+    result = select_ptb_source(
+        market_id=market_id,
+        event_start_ts=event_start_ts,
+        event_end_ts=event_end_ts,
+        live_price=live_price,
+        live_status=live_status or "missing",
+        live_lag_ms=live_lag_ms,
+        log_derivation=log_derivation,
+        reference_k=_load_ptb_reference_k(),
+        existing=existing,
+    )
+    if result.usable and result.selected_k:
+        try:
+            persist_ptb_selection(result, store=ptb_store)
+            store.lock_price_to_beat(
+                Decimal(result.selected_k),
+                status="observed" if result.selected_source == "live_boundary" else "observed_from_log",
+                observed_ts=observed_ts,
+                lag_ms=result.live_boundary_lag_ms or result.log_boundary_lag_ms,
+            )
+        except ValueError:
+            result = select_ptb_source(
+                market_id=market_id,
+                event_start_ts=event_start_ts,
+                event_end_ts=event_end_ts,
+                live_price=live_price,
+                live_status=live_status or "missing",
+                live_lag_ms=live_lag_ms,
+                log_derivation=log_derivation,
+                reference_k=_load_ptb_reference_k(),
+                existing=existing,
+            )
+    payload = result.to_fact_payload()
+    payload["fact_kind"] = "z_gap_ptb_source_mismatch" if result.mismatch else "z_gap_ptb_source_selected"
+    if result.locked:
+        payload["lock_fact_kind"] = "z_gap_ptb_locked"
+    return payload
 
 
 def _decimal_price(raw: object) -> Decimal | None:
@@ -237,9 +308,24 @@ async def start_signal_feeds(
                 event_end_ts=event_end_ts,
                 now_ts=now_ts,
             )
-            if derived is not None and derived.price:
-                from decimal import Decimal
-
+            policy_payload = _apply_ptb_policy_to_store(
+                store,
+                market_id=market_id,
+                event_start_ts=event_start_ts,
+                event_end_ts=event_end_ts,
+                log_derivation=derived,
+                observed_ts=derived.source_ts if derived is not None else None,
+            )
+            if on_health is not None:
+                maybe = on_health({"kind": policy_payload.get("fact_kind"), **policy_payload})
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+                if policy_payload.get("lock_fact_kind"):
+                    lock_payload = {k: v for k, v in policy_payload.items() if k not in {"fact_kind", "lock_fact_kind"}}
+                    maybe2 = on_health({"kind": policy_payload["lock_fact_kind"], **lock_payload})
+                    if asyncio.iscoroutine(maybe2):
+                        await maybe2
+            elif not policy_payload.get("usable") and derived is not None and derived.price:
                 store.update_price_to_beat(
                     Decimal(derived.price),
                     status=derived.status,

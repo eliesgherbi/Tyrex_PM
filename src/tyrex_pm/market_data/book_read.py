@@ -80,11 +80,15 @@ def read_leg_book(
             spread=None,
             quality_status=QUALITY_MISSING,
         )
-    stale = market_state.is_stale(TokenId(tid), max_age_s=max_book_age_s)
+    stale = market_state.is_stale(TokenId(tid), max_age_s=max_book_age_s, now=now)
     ref_now = (
-        time_authority.corrected_now()
-        if time_authority is not None
-        else (now if now is not None else utc_now())
+        now
+        if now is not None
+        else (
+            time_authority.corrected_now()
+            if time_authority is not None
+            else utc_now()
+        )
     )
     age_ms = int(max(0.0, (ref_now - snap.ts).total_seconds()) * 1000)
     spread: Decimal | None = None

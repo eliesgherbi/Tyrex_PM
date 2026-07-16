@@ -1,0 +1,85 @@
+# Z-Gap A0.8 shadow enforce E2E dry-run scenario.
+# Used by scripts/run_z_gap_shadow_e2e.py and tests/test_z_gap_shadow_enforce_e2e.py
+
+execution_mode: shadow
+
+strategy:
+  kind: z_gap
+  enabled: true
+  z_gap:
+    entry_mode: enforce
+    market_id: "btc_5m_20260709_1200"
+    condition_id: "0xabc"
+    yes_token_id: "111"
+    no_token_id: "222"
+    event_start_ts: null
+    event_end_ts: null
+    sigma:
+      min_samples_s: 1
+      sample_interval_s: 0
+    entry:
+      theta_take: "0.05"
+      theta_fill_floor: "0.03"
+      z_band: ["0.8", "2.2"]
+      tau_band_s: [60, 210]
+      basis_max_bps: "3"
+      expected_slippage_ticks: 1
+      one_position_per_window: true
+      no_reentry_after_exit: true
+    sizing:
+      mode: fixed_usd
+      max_usd: "5"
+      min_shares: "5"
+    exit:
+      z_stop: "0.25"
+      stop_confirm_s: 0
+      flatten_before_event_end_s: 20
+      retry_interval_ms: 0
+      max_exit_attempts: 5
+    reconciliation:
+      venue_sync_grace_ms: 3000
+      poll_interval_ms: 500
+      max_attempts: 6
+    live_validation:
+      maximum_entry_attempts: 1
+      maximum_positions: 1
+      stop_after_terminal: true
+      require_operator_approval: true
+      require_fresh_ptb_attestation: true
+
+runtime:
+  execution_mode: shadow
+  shadow_bootstrap:
+    usdc_balance: "1000000"
+    usdc_allowance: "1000000"
+  reporting:
+    enabled: true
+    runs_dir: "var/reporting/runs"
+  market_data:
+    enabled: true
+    max_book_age_s: 30
+  allocation_ledger:
+    enabled: true
+  signal_feeds:
+    enabled: false
+
+risk:
+  notional:
+    min_usd: "0.01"
+    max_usd: "5"
+    max_policy: deny
+  deployment:
+    token_cap_usd: "25"
+    portfolio_cap_usd: "100"
+  venue_min_size:
+    enabled: false
+  capital:
+    enabled: false
+    max_wallet_age_s: 120
+  concurrency:
+    max_orders_in_flight: 4
+  readiness:
+    require_wallet_sync: false
+    max_wallet_age_s_live: 120
+    require_heartbeat_live: false
+    require_user_ws_live: false

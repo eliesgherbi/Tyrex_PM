@@ -77,8 +77,8 @@ def test_reference_price_historical_snapshot_normalization() -> None:
     assert events[0].event_id != events[1].event_id
 
 
-def test_price_to_beat_final_reference_and_direction() -> None:
-    tracker = PriceToBeatTracker(max_lag_ms=5000.0)
+def test_price_to_beat_final_reference_and_direction(tmp_path) -> None:
+    tracker = PriceToBeatTracker(max_lag_ms=5000.0, chainlink_log_path=tmp_path / "empty.jsonl")
     tracker.register_market(
         market_id="btc_5m_final",
         event_start_ts=1780000000.0,
@@ -148,8 +148,8 @@ def test_reference_price_tick_round_trip() -> None:
     assert restored.payload["value"] == "109812.5"
 
 
-def test_price_to_beat_derived_from_first_tick_after_start() -> None:
-    tracker = PriceToBeatTracker(max_lag_ms=5000.0)
+def test_price_to_beat_derived_from_first_tick_after_start(tmp_path) -> None:
+    tracker = PriceToBeatTracker(max_lag_ms=5000.0, chainlink_log_path=tmp_path / "empty.jsonl")
     tracker.register_market(
         market_id="btc_5m_20260703_1900",
         event_start_ts=1780000000.0,

@@ -968,14 +968,17 @@ async def execute_run(args: argparse.Namespace) -> int:
                     start_signal_feeds,
                     stop_signal_feeds,
                 )
+                from tyrex_pm.runtime.config import Z_GAP_ENTRY_MODE_ENFORCE
                 from tyrex_pm.runtime.z_gap_run import (
                     ZGapStartupTimings,
                     run_z_gap_observe_loop,
                 )
+                from tyrex_pm.runtime.z_gap_enforce import run_z_gap_enforce_loop
                 from tyrex_pm.strategies.z_gap.facts import (
                     ZGapObserveRuntimeState,
                     handle_feed_health_callback,
                 )
+                from tyrex_pm.strategies.z_gap.strategy import ZGapStrategy
 
                 startup_t0 = _time.monotonic()
                 startup = ZGapStartupTimings()
@@ -1013,17 +1016,32 @@ async def execute_run(args: argparse.Namespace) -> int:
 
                 startup.total_startup_ms = round((_time.monotonic() - startup_t0) * 1000.0, 1)
 
-                exit_code = await run_z_gap_observe_loop(
-                    app=app,
-                    run_id=run_id,
-                    coord=coord,
-                    sink=sink,
-                    stop=stop_live,
-                    signal_feed_state=signal_feed_state,
-                    runtime_state=zg_observe_state,
-                    time_authority=coord.time_authority,
-                    startup_timings=startup,
-                )
+                if app.z_gap.entry_mode == Z_GAP_ENTRY_MODE_ENFORCE:
+                    zg_strategy = ZGapStrategy(app.z_gap)
+                    exit_code = await run_z_gap_enforce_loop(
+                        app=app,
+                        run_id=run_id,
+                        coord=coord,
+                        sink=sink,
+                        strategy=zg_strategy,
+                        oms=oms_backend,
+                        stop=stop_live,
+                        apply_local_shadow_fill=apply_local_fill,
+                        time_authority=coord.time_authority,
+                        startup_timings=startup,
+                    )
+                else:
+                    exit_code = await run_z_gap_observe_loop(
+                        app=app,
+                        run_id=run_id,
+                        coord=coord,
+                        sink=sink,
+                        stop=stop_live,
+                        signal_feed_state=signal_feed_state,
+                        runtime_state=zg_observe_state,
+                        time_authority=coord.time_authority,
+                        startup_timings=startup,
+                    )
                 if signal_feed_state is not None:
                     await stop_signal_feeds(signal_feed_state)
                 iterations = 0

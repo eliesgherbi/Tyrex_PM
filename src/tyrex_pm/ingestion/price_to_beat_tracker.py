@@ -43,6 +43,23 @@ class PtbDerivation:
     status: str
 
 
+@dataclass(frozen=True)
+class PtbParseDiagnostics:
+    """Counts of skipped sidecar lines while scanning for PTB derivation."""
+
+    skipped_blank_lines: int = 0
+    skipped_malformed_json: int = 0
+    skipped_invalid_rows: int = 0
+
+    @property
+    def had_parse_issues(self) -> bool:
+        return (
+            self.skipped_blank_lines > 0
+            or self.skipped_malformed_json > 0
+            or self.skipped_invalid_rows > 0
+        )
+
+
 def derive_ptb_from_chainlink_log(
     *,
     event_start_ts: float,
@@ -50,25 +67,61 @@ def derive_ptb_from_chainlink_log(
     max_lag_ms: float = 5000.0,
 ) -> PtbDerivation | None:
     """Find first Chainlink tick with source_ts >= event_start_ts in the sidecar log."""
+    derivation, _ = derive_ptb_from_chainlink_log_ex(
+        event_start_ts=event_start_ts,
+        path=path,
+        max_lag_ms=max_lag_ms,
+    )
+    return derivation
+
+
+def derive_ptb_from_chainlink_log_ex(
+    *,
+    event_start_ts: float,
+    path: Path | None = None,
+    max_lag_ms: float = 5000.0,
+) -> tuple[PtbDerivation | None, PtbParseDiagnostics]:
+    """Find first usable Chainlink tick; return diagnostics for skipped lines."""
     target = path or DEFAULT_CHAINLINK_TICKS_PATH
+    diagnostics = PtbParseDiagnostics()
     if not target.is_file():
-        return None
+        return None, diagnostics
     best: PtbDerivation | None = None
     with target.open("r", encoding="utf-8") as fh:
         for line in fh:
-            text = line.strip()
-            if not text:
+            if not line.strip():
+                diagnostics = PtbParseDiagnostics(
+                    skipped_blank_lines=diagnostics.skipped_blank_lines + 1,
+                    skipped_malformed_json=diagnostics.skipped_malformed_json,
+                    skipped_invalid_rows=diagnostics.skipped_invalid_rows,
+                )
                 continue
+            text = line.strip()
             try:
                 row: dict[str, Any] = json.loads(text)
             except json.JSONDecodeError:
+                diagnostics = PtbParseDiagnostics(
+                    skipped_blank_lines=diagnostics.skipped_blank_lines,
+                    skipped_malformed_json=diagnostics.skipped_malformed_json + 1,
+                    skipped_invalid_rows=diagnostics.skipped_invalid_rows,
+                )
                 continue
             source_raw = row.get("source_ts")
             price = str(row.get("price") or "")
             if not source_raw or not price:
+                diagnostics = PtbParseDiagnostics(
+                    skipped_blank_lines=diagnostics.skipped_blank_lines,
+                    skipped_malformed_json=diagnostics.skipped_malformed_json,
+                    skipped_invalid_rows=diagnostics.skipped_invalid_rows + 1,
+                )
                 continue
             source_ts = _parse_iso_ts(str(source_raw))
             if source_ts is None:
+                diagnostics = PtbParseDiagnostics(
+                    skipped_blank_lines=diagnostics.skipped_blank_lines,
+                    skipped_malformed_json=diagnostics.skipped_malformed_json,
+                    skipped_invalid_rows=diagnostics.skipped_invalid_rows + 1,
+                )
                 continue
             source_s = source_ts.timestamp()
             if source_s < event_start_ts:
@@ -83,7 +136,7 @@ def derive_ptb_from_chainlink_log(
             )
             if best is None or candidate.source_ts < best.source_ts:
                 best = candidate
-    return best
+    return best, diagnostics
 
 
 @dataclass

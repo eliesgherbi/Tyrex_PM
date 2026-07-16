@@ -122,6 +122,18 @@ def test_jump_guard_status_in_output() -> None:
     assert snap.jump_guard_tripped is True
 
 
+def test_seed_observations_rejects_duplicates_and_future() -> None:
+    est = EwmaVolatilityEstimator(SigmaConfig(min_samples_s=2, sample_interval_s=1, jump_guard=False))
+    now = _ts(5)
+    result = est.seed_observations(
+        [(Decimal("100"), _ts(0)), (Decimal("100"), _ts(0)), (Decimal("101"), _ts(10))],
+        now_ts=now,
+    )
+    assert result.rejected_duplicate == 1
+    assert result.rejected_future == 1
+    assert result.accepted == 1
+
+
 def test_ewma_lambda_formula() -> None:
     cfg = SigmaConfig(half_life_s=30)
     lam = cfg.ewma_lambda()

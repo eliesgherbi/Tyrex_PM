@@ -21,6 +21,7 @@ from tyrex_pm.market_data.book_read import read_pair_books
 from tyrex_pm.quant.binary_fair_value import FairValueInput, compute_fair_value
 from tyrex_pm.quant.edge import compute_edge
 from tyrex_pm.quant.fees import FeeModel, parse_fee_model_from_market_info, parse_fee_model_from_raw
+from tyrex_pm.quant.model_sanity import ModelSanityConfig, evaluate_model_numeric_sanity
 from tyrex_pm.quant.volatility import EwmaVolatilityEstimator, SigmaConfig, VolatilitySnapshot
 from tyrex_pm.reporting.facts import make_fact
 from tyrex_pm.reporting.schema_v2 import (
@@ -32,6 +33,7 @@ from tyrex_pm.reporting.schema_v2 import (
 from tyrex_pm.reporting.sinks.jsonl import JsonlSink
 from tyrex_pm.runtime.config import (
     AppConfig,
+    Z_GAP_ENTRY_MODE_ENFORCE,
     Z_GAP_ENTRY_MODE_OBSERVE_ONLY,
     ZGapEntryConfig,
     ZGapStrategyConfig,
@@ -74,6 +76,7 @@ class ZGapStartupTimings:
     clob_bootstrap_ms: float | None = None
     signal_state_ready_ms: float | None = None
     ptb_tracker_registered_ms: float | None = None
+    sigma_warmup_ms: float | None = None
     total_startup_ms: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,6 +87,7 @@ class ZGapStartupTimings:
             "clob_bootstrap_ms": self.clob_bootstrap_ms,
             "signal_state_ready_ms": self.signal_state_ready_ms,
             "ptb_tracker_registered_ms": self.ptb_tracker_registered_ms,
+            "sigma_warmup_ms": self.sigma_warmup_ms,
             "total_startup_ms": self.total_startup_ms,
         }
 
@@ -104,6 +108,7 @@ class ObserveTickContext:
     tick_size: Decimal = DEFAULT_TICK_SIZE
     entry_cfg: ZGapEntryConfig | None = None
     now_ts: float | None = None
+    lifecycle: object | None = None
 
 
 def corrected_now_ts(time_authority: TimeAuthority | None, now_ts: float | None = None) -> float:
@@ -209,6 +214,16 @@ def sigma_config_from_zg(zg: ZGapStrategyConfig) -> SigmaConfig:
     )
 
 
+def model_sanity_config_from_zg(zg: ZGapStrategyConfig) -> ModelSanityConfig:
+    ms = zg.model_sanity
+    return ModelSanityConfig(
+        warn_abs_z=ms.warn_abs_z,
+        block_abs_z=ms.block_abs_z,
+        sigma_ratio_warn_min=ms.sigma_ratio_warn_min,
+        sigma_ratio_warn_max=ms.sigma_ratio_warn_max,
+    )
+
+
 def compute_tau_s(event_end_ts: float | None, now_ts: float) -> float | None:
     if event_end_ts is None:
         return None
@@ -241,10 +256,10 @@ async def resolve_fee_model(
     )
 
 
-def run_observe_tick(ctx: ObserveTickContext) -> ZGapEntryEvaluation | None:
-    """Execute one observe-only evaluation tick (no OMS)."""
+def run_observe_tick(ctx: ObserveTickContext, *, allow_enforce: bool = False) -> ZGapEntryEvaluation | None:
+    """Execute one evaluation tick. Observe-only unless ``allow_enforce``."""
     assert ctx.app.z_gap is not None
-    if ctx.app.z_gap.entry_mode != Z_GAP_ENTRY_MODE_OBSERVE_ONLY:
+    if not allow_enforce and ctx.app.z_gap.entry_mode != Z_GAP_ENTRY_MODE_OBSERVE_ONLY:
         raise RuntimeError("observe tick requires entry_mode=observe_only")
 
     zg = ctx.zg
@@ -277,7 +292,10 @@ def run_observe_tick(ctx: ObserveTickContext) -> ZGapEntryEvaluation | None:
     )
 
     vol: VolatilitySnapshot = ctx.estimator.snapshot()
-    if signal.binance_price is not None and signal.binance_recv_ts is not None:
+    vol_obs = signal_store.volatility_price_observation(now_dt)
+    if vol_obs is not None:
+        vol = ctx.estimator.update(vol_obs[0], vol_obs[1])
+    elif signal.binance_price is not None and signal.binance_recv_ts is not None:
         vol = ctx.estimator.update(signal.binance_price, signal.binance_recv_ts)
     if vol.ready and ctx.state.sigma_ready_first_ts is None:
         ctx.state.sigma_ready_first_ts = now_dt
@@ -295,6 +313,17 @@ def run_observe_tick(ctx: ObserveTickContext) -> ZGapEntryEvaluation | None:
         vol=vol,
     )
     zg_facts.emit_model_state_snapshot(ctx.sink, ctx.run_id, ctx.state, fair, vol)
+
+    sanity_cfg = model_sanity_config_from_zg(zg)
+    block_entries = ctx.app.z_gap.entry_mode == Z_GAP_ENTRY_MODE_ENFORCE
+    sanity = evaluate_model_numeric_sanity(
+        fair,
+        cfg=sanity_cfg,
+        block_entries=block_entries,
+        tau_floor_s=zg.sigma.tau_floor_s,
+    )
+    if sanity.warn or sanity.block_entry:
+        zg_facts.emit_model_numeric_anomaly(ctx.sink, ctx.run_id, ctx.state, fair, sanity)
 
     from tyrex_pm.state.market_store import MarketStateStore
 
@@ -344,6 +373,8 @@ def run_observe_tick(ctx: ObserveTickContext) -> ZGapEntryEvaluation | None:
         time_authority=ctx.time_authority,
         entry_mode=ctx.app.z_gap.entry_mode,
         decision_ts=now_dt,
+        lifecycle=ctx.lifecycle,
+        numeric_anomaly_block=sanity.block_entry,
     )
     zg_facts.emit_entry_decision(ctx.sink, ctx.run_id, ctx.state, evaln)
     return evaln
@@ -374,6 +405,8 @@ async def run_z_gap_observe_loop(
     time_authority: TimeAuthority | None = None,
     startup_timings: ZGapStartupTimings | None = None,
     min_prestart_seconds: float = DEFAULT_MIN_PRESTART_SECONDS,
+    skip_late_start_check: bool = False,
+    estimator: EwmaVolatilityEstimator | None = None,
 ) -> int:
     """Observe-only loop until stop, event end, or max_ticks."""
     assert app.z_gap is not None
@@ -383,7 +416,7 @@ async def run_z_gap_observe_loop(
         return 1
 
     state = runtime_state or ZGapObserveRuntimeState()
-    estimator = EwmaVolatilityEstimator(config=sigma_config_from_zg(zg))
+    est = estimator or EwmaVolatilityEstimator(config=sigma_config_from_zg(zg))
     fee_model = await resolve_fee_model(coord, zg, fd_raw=fd_raw)
 
     ta = time_authority or coord.time_authority
@@ -409,7 +442,7 @@ async def run_z_gap_observe_loop(
     if startup_timings is not None:
         emit_startup_timing_fact(sink, run_id, startup_timings)
 
-    if is_late_window_start(
+    if not skip_late_start_check and is_late_window_start(
         event_start_ts=zg.event_start_ts,
         time_authority=ta,
         min_prestart_seconds=min_prestart_seconds,
@@ -484,7 +517,7 @@ async def run_z_gap_observe_loop(
             coord=coord,
             sink=sink,
             state=state,
-            estimator=estimator,
+            estimator=est,
             fee_model=fee_model,
             time_authority=ta,
             tick_size=tick_size,
@@ -495,7 +528,7 @@ async def run_z_gap_observe_loop(
             log.exception("z_gap observe tick failed")
         else:
             last_signal = state.last_signal
-            last_vol = estimator.snapshot()
+            last_vol = est.snapshot()
             ticks += 1
 
         if max_ticks is not None and ticks >= max_ticks:

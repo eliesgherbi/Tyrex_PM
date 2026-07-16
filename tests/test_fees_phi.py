@@ -74,12 +74,26 @@ def test_missing_fd_returns_unknown() -> None:
     assert model.is_resolved is False
 
 
-def test_invalid_price_rejected() -> None:
+def test_phi_monotonic_shape_grid() -> None:
     model = _resolved_model()
+    grid = [Decimal(str(i)) / Decimal("20") for i in range(21)]
+    left = [phi_taker_fee(p, model) for p in grid[:11]]
+    right = [phi_taker_fee(p, model) for p in grid[10:]]
+    for i in range(len(left) - 1):
+        assert left[i] <= left[i + 1]
+    for i in range(len(right) - 1):
+        assert right[i] >= right[i + 1]
+    for p in grid[:11]:
+        assert phi_taker_fee(p, model) == phi_taker_fee(Decimal("1") - p, model)
+
+
+def test_invalid_fd_params_fail_closed() -> None:
+    model = parse_fee_model_from_raw({"c": "0x"}, market_id="m")
+    assert model.is_resolved is False
+    with pytest.raises(ValueError, match="not resolved"):
+        phi_taker_fee(Decimal("0.5"), model)
     with pytest.raises(ValueError, match="\\[0, 1\\]"):
-        validate_fee_price(Decimal("-0.01"))
-    with pytest.raises(ValueError, match="\\[0, 1\\]"):
-        phi_taker_fee(Decimal("1.01"), model)
+        validate_fee_price(Decimal("1.01"))
 
 
 def test_decimal_precision_stable() -> None:

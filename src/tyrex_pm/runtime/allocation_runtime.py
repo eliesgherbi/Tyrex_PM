@@ -16,6 +16,7 @@ from tyrex_pm.runtime.allocation_ids import (
     OWNER_TP_SL_TEST,
     OWNER_VALIDATION_HARNESS,
     OWNER_PAIRED_BINARY,
+    OWNER_Z_GAP,
     SCHEDULED_EXIT_DEMO_SOURCE,
     SELL_TEST_INTENT_SOURCE,
     TP_SL_TEST_INTENT_SOURCE,
@@ -45,6 +46,9 @@ def resolve_owner_id(
     owner = ext.get("allocation_owner_id")
     if owner is not None and str(owner).strip():
         return str(owner).strip()
+    if type(strategy).__name__ == "ZGapStrategy":
+        owner = ext.get("allocation_owner_id")
+        return str(owner).strip() if owner else OWNER_Z_GAP
     if type(strategy).__name__ == "ValidationHarnessStrategy":
         owner = ext.get("allocation_owner_id")
         return str(owner).strip() if owner else OWNER_VALIDATION_HARNESS
@@ -72,6 +76,12 @@ def resolve_owner_id(
         return str(owner).strip() if owner else OWNER_TP_SL_TEST
     if source == SCHEDULED_EXIT_DEMO_SOURCE:
         return OWNER_GURU_FOLLOW
+    from tyrex_pm.strategies.z_gap.entry_plan import Z_GAP_INTENT_SOURCE
+    from tyrex_pm.strategies.z_gap.exit_plan import Z_GAP_EXIT_INTENT_SOURCE
+
+    if source in {Z_GAP_INTENT_SOURCE, Z_GAP_EXIT_INTENT_SOURCE}:
+        owner = ext.get("allocation_owner_id")
+        return str(owner).strip() if owner else OWNER_Z_GAP
     return OWNER_GURU_FOLLOW
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tyrex_pm.market_data.book_read import QUALITY_MISSING, QUALITY_STALE, PairBookSnapshot
 from tyrex_pm.quant.binary_fair_value import FairValueSnapshot, MODEL_STATUS_READY
@@ -47,9 +47,15 @@ REASON_Z_OUT_OF_BAND = "z_gap_z_out_of_band"
 REASON_TAU_OUT_OF_BAND = "z_gap_tau_out_of_band"
 REASON_EDGE_BELOW_THETA = "z_gap_edge_below_theta"
 REASON_SIGMA_NOT_READY = "z_gap_sigma_not_ready"
+REASON_MODEL_NUMERIC_ANOMALY = "z_gap_model_numeric_anomaly"
 REASON_JUMP_GUARD = "z_gap_jump_guard"
 REASON_BOOK_STALE = "z_gap_book_stale"
 REASON_QUALITY_REJECT = "z_gap_quality_reject"
+REASON_POSITION_OPEN = "z_gap_position_open"
+REASON_REENTRY_BLOCKED = "z_gap_reentry_blocked"
+
+if TYPE_CHECKING:
+    from tyrex_pm.strategies.z_gap.state import ZGapLifecycleState
 REASON_FEE_MODEL_UNKNOWN = "z_gap_fee_model_unknown"
 
 
@@ -100,6 +106,8 @@ def evaluate_z_gap_entry(
     ptb_reference_k: Decimal | None = None,
     quality_reject: bool = False,
     decision_ts: datetime | None = None,
+    lifecycle: ZGapLifecycleState | None = None,
+    numeric_anomaly_block: bool = False,
 ) -> ZGapEntryEvaluation:
     """Evaluate entry gates without submitting orders."""
     ts = decision_ts or signal.snapshot_ts
@@ -197,6 +205,10 @@ def evaluate_z_gap_entry(
         return _finish(decision_status=DECISION_SKIP, reason_code=REASON_SIGMA_NOT_READY)
     _gate_pass("sigma_ready", gates)
 
+    if numeric_anomaly_block:
+        _gate_fail("model_numeric_sanity", gates)
+        return _finish(decision_status=DECISION_SKIP, reason_code=REASON_MODEL_NUMERIC_ANOMALY)
+
     # Book quality
     if books.up.stale or books.down.stale:
         _gate_fail("book_fresh", gates)
@@ -255,9 +267,24 @@ def evaluate_z_gap_entry(
         return _finish(decision_status=DECISION_SKIP, reason_code=REASON_Z_OUT_OF_BAND)
     _gate_pass("z_band", gates)
 
-    # Position gates — N/A until A0.6/A0.7
-    _gate_na("one_position_per_window", gates)
-    _gate_na("no_reentry_after_exit", gates)
+    # Position gates (A0.7 enforce lifecycle)
+    from tyrex_pm.strategies.z_gap.state import ZGapPhase
+
+    if entry_cfg.one_position_per_window:
+        if lifecycle is not None and lifecycle.phase != ZGapPhase.IDLE:
+            _gate_fail("one_position_per_window", gates)
+            return _finish(decision_status=DECISION_SKIP, reason_code=REASON_POSITION_OPEN)
+        _gate_pass("one_position_per_window", gates)
+    else:
+        _gate_na("one_position_per_window", gates)
+
+    if entry_cfg.no_reentry_after_exit:
+        if lifecycle is not None and lifecycle.exited_this_window:
+            _gate_fail("no_reentry_after_exit", gates)
+            return _finish(decision_status=DECISION_SKIP, reason_code=REASON_REENTRY_BLOCKED)
+        _gate_pass("no_reentry_after_exit", gates)
+    else:
+        _gate_na("no_reentry_after_exit", gates)
 
     # Edge threshold
     assert edge.selected_edge is not None

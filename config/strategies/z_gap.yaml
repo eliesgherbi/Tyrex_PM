@@ -28,9 +28,31 @@ z_gap:
 
   entry:
     theta_take: "0.05"
+    theta_fill_floor: "0.03"
     z_band: ["0.8", "2.2"]
     tau_band_s: [60, 210]
     basis_max_bps: "3"
     expected_slippage_ticks: 1
     one_position_per_window: true
     no_reentry_after_exit: true
+
+  sizing:
+    mode: fixed_usd
+    max_usd: "5"
+    min_shares: "5"
+
+  exit:
+    z_stop: "0.25"
+    stop_confirm_s: 1
+    flatten_before_event_end_s: 20
+    retry_interval_ms: 1000
+    max_exit_attempts: 5
+
+  ptb:
+    capture_wait_timeout_ms: 5000
+    max_usable_boundary_lag_ms: 5000
+    poll_interval_ms: 100
+
+  model_sanity:
+    warn_abs_z: 8
+    block_abs_z: 20

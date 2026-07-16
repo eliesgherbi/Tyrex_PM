@@ -1,24 +1,21 @@
-# Z-Gap Phase A — future enforce scenario (GATED — do not run until all preflight gates pass).
+# Z-Gap Phase A — tiny live enforce (GATED — operator approval required).
 #
-# Required artifacts under var/reporting/z_gap/:
+# Preflight:
+#   python scripts/preflight_z_gap_live_scenario.py --scenario config/scenarios/live_z_gap_tiny.yaml
+#
+# Required artifacts under var/reporting/z_gap/ (or Z_GAP_PREFLIGHT_DIR):
 #   fee_curve_spike.json
 #   binance_connectivity.json
 #   ptb_attestation.json          (fresh live recording; golden_day alone does NOT unlock)
 #   clock_sanity.json
 #   calibration_lite_review.json
-#   operator_enforce_approval.json
-#
-# Config load with entry_mode: enforce will fail closed unless all gates pass.
-#
-# Preflight:
-#   python scripts/preflight_ptb_attestation.py --recording-dir <fresh> --reference-k <K>
-#   python scripts/preflight_clock_sanity.py
-#
-# NOT FOR A0.1 LIVE USE — enforce loop arrives in A0.6+.
+#   operator_enforce_approval.json  (operator-authored; never auto-generated)
 
 execution_mode: live
 
 strategy:
+  kind: z_gap
+  enabled: true
   z_gap:
     entry_mode: enforce
     market_id: "btc_5m_<YYYYMMDD_HHMM>"
@@ -27,6 +24,58 @@ strategy:
     event_end_ts: null
     yes_token_id: "<required>"
     no_token_id: "<required>"
+    run_once: true
+
+    sigma:
+      estimator: ewma
+      half_life_s: 30
+      min_samples_s: 20
+      jump_guard: true
+      jump_threshold_sigma: 4.0
+      sample_interval_s: 1
+      tau_floor_s: 1
+
+    entry:
+      theta_take: "0.05"
+      theta_fill_floor: "0.03"
+      z_band: ["0.8", "2.2"]
+      tau_band_s: [60, 210]
+      basis_max_bps: "3"
+      expected_slippage_ticks: 1
+      one_position_per_window: true
+      no_reentry_after_exit: true
+
+    sizing:
+      mode: fixed_usd
+      max_usd: "5"
+      min_shares: "5"
+
+    exit:
+      z_stop: "0.25"
+      stop_confirm_s: 1
+      flatten_before_event_end_s: 20
+      retry_interval_ms: 1000
+      max_exit_attempts: 5
+
+    reconciliation:
+      venue_sync_grace_ms: 3000
+      poll_interval_ms: 500
+      max_attempts: 6
+
+    ptb:
+      capture_wait_timeout_ms: 5000
+      max_usable_boundary_lag_ms: 5000
+      poll_interval_ms: 100
+
+    live_validation:
+      maximum_entry_attempts: 1
+      maximum_positions: 1
+      stop_after_terminal: true
+      require_operator_approval: true
+      require_fresh_ptb_attestation: true
+      target_prestart_seconds: 90
+      hard_min_prestart_seconds: 20
+      calibration_ack_expiry_hours: 168
 
 runtime:
   market_data:
@@ -44,6 +93,12 @@ runtime:
     max_runtime_s: null
     fallback_max_runtime_s: 900
     flatten_before_event_end_s: 20
+  signal_feeds:
+    enabled: true
+  reference_prices:
+    enabled: true
+  external_btc:
+    enabled: true
 
 risk:
   notional:

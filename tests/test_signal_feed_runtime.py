@@ -29,16 +29,22 @@ from tyrex_pm.venue.polymarket_rtds.normalize import (
     normalize_reference_price_tick,
 )
 
+EVENT_START_S = 1780000000.0
+
 CHAINLINK_MSG = {
     "topic": "crypto_prices_chainlink",
     "type": "update",
     "timestamp": 1753314088421,
-    "payload": {"symbol": "btc/usd", "timestamp": 1780000000500, "value": 109812.50},
+    "payload": {
+        "symbol": "btc/usd",
+        "timestamp": int((EVENT_START_S + 0.5) * 1000),
+        "value": 109812.50,
+    },
 }
 
 
 def _recv() -> datetime:
-    return datetime(2026, 7, 9, 12, 0, 0, tzinfo=timezone.utc)
+    return datetime.fromtimestamp(EVENT_START_S + 1.0, tz=timezone.utc)
 
 
 def _z_gap_app_with_feeds():
@@ -64,8 +70,8 @@ def _z_gap_app_with_feeds():
                 "condition_id": "0xabc",
                 "yes_token_id": "111",
                 "no_token_id": "222",
-                "event_start_ts": 1780000000,
-                "event_end_ts": 1780000300,
+                "event_start_ts": EVENT_START_S,
+                "event_end_ts": EVENT_START_S + 300,
             },
         },
         runtime={
@@ -128,8 +134,8 @@ def test_price_to_beat_event_updates_store() -> None:
     recv = _recv()
     event = build_price_to_beat_observed_event(
         market_id="btc_5m_test",
-        event_start_ts=1780000000.0,
-        event_end_ts=1780000300.0,
+        event_start_ts=EVENT_START_S,
+        event_end_ts=EVENT_START_S + 300.0,
         price_to_beat="109812.50",
         price_to_beat_ts=recv,
         price_to_beat_source="polymarket_rtds_chainlink",
@@ -145,11 +151,18 @@ def test_price_to_beat_event_updates_store() -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_signal_feeds_mocked_updates_store(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_signal_feeds_mocked_updates_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     app = _z_gap_app_with_feeds()
     coord = RuntimeCoordinator(wallet=WalletStore(), orders=OrderStore(), health=HealthRuntime())
     stop = asyncio.Event()
     health_events: list[dict] = []
+
+    # Isolate PTB tracker from host sidecar log (var/state/chainlink_ticks.jsonl).
+    empty_log = tmp_path / "chainlink_ticks.jsonl"
+    empty_log.write_text("", encoding="utf-8")
 
     async def _fake_btc(**kwargs):
         on_event = kwargs["on_event_emitted"]
@@ -170,16 +183,20 @@ async def test_start_signal_feeds_mocked_updates_store(monkeypatch: pytest.Monke
                 await on_event(derived)
         await stop.wait()
 
+    def _tracker_factory(**kwargs):
+        return PriceToBeatTracker(chainlink_log_path=empty_log, **kwargs)
+
     monkeypatch.setattr("tyrex_pm.ingestion.external_btc.run_external_btc_ingest", _fake_btc)
     monkeypatch.setattr("tyrex_pm.ingestion.reference_prices.run_reference_prices_ingest", _fake_ref)
+    monkeypatch.setattr("tyrex_pm.runtime.signal_feed_runtime.PriceToBeatTracker", _tracker_factory)
 
     state = await start_signal_feeds(
         coord=coord,
         app=app,
         stop=stop,
         market_id="btc_5m_20260703_1200",
-        event_start_ts=1780000000.0,
-        event_end_ts=1780000300.0,
+        event_start_ts=EVENT_START_S,
+        event_end_ts=EVENT_START_S + 300.0,
         on_health=lambda payload: health_events.append(payload),
     )
     await asyncio.sleep(0.05)
@@ -188,6 +205,9 @@ async def test_start_signal_feeds_mocked_updates_store(monkeypatch: pytest.Monke
     assert snap.binance_price == Decimal("50001")
     assert snap.chainlink_price == Decimal("109812.5")
     assert snap.price_to_beat == Decimal("109812.5")
+    assert snap.ptb_status == "observed"
+    assert snap.chainlink_freshness == "fresh"
+    assert snap.binance_freshness == "fresh"
     assert any(e.get("kind") == "basis_computed" for e in health_events)
     stop.set()
     await stop_signal_feeds(state)

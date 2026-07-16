@@ -30,6 +30,18 @@ class SigmaConfig:
 
 
 @dataclass(frozen=True)
+class SeedResult:
+    """Outcome of seeding historical observations into the EWMA estimator."""
+
+    accepted: int
+    rejected_duplicate: int
+    rejected_future: int
+    rejected_out_of_order: int
+    start_ts: datetime | None
+    end_ts: datetime | None
+
+
+@dataclass(frozen=True)
 class VolatilitySnapshot:
     """Point-in-time EWMA volatility state."""
 
@@ -141,6 +153,20 @@ class EwmaVolatilityEstimator:
             return self._snapshot(reject_reason="warming_up")
 
         r_t = math.log(float(new_price / old_price))
+        if abs(r_t) < 1e-15:
+            self._last_price = new_price
+            self._last_sample_ts = ts
+            if self._var is None:
+                self._var = 0.0
+                self._sigma = 0.0
+                self._sample_count += 1
+                self._effective_samples_s += dt_s
+                self._last_update_ts = ts
+            else:
+                # Stagnant price: freeze variance; do not apply lambda decay on zero returns.
+                self._effective_samples_s += dt_s
+            return self.snapshot()
+
         lam = self.config.ewma_lambda()
         jump_tripped = False
 
@@ -167,6 +193,49 @@ class EwmaVolatilityEstimator:
         self._jump_guard_tripped = False
 
         return self._snapshot(jump_guard_tripped=jump_tripped)
+
+    def seed_observations(
+        self,
+        observations: list[tuple[Decimal, datetime]],
+        *,
+        now_ts: datetime | None = None,
+    ) -> SeedResult:
+        """Apply historical observations in timestamp order using the same ``update`` path."""
+        now = self._normalize_ts(now_ts) if now_ts is not None else None
+        accepted = 0
+        rejected_duplicate = 0
+        rejected_future = 0
+        rejected_out_of_order = 0
+        start_ts: datetime | None = None
+        end_ts: datetime | None = None
+        last_batch_ts: datetime | None = None
+
+        for price, raw_ts in sorted(observations, key=lambda row: row[1]):
+            ts = self._normalize_ts(raw_ts)
+            if now is not None and ts > now:
+                rejected_future += 1
+                continue
+            if last_batch_ts is not None and ts == last_batch_ts:
+                rejected_duplicate += 1
+                continue
+            if self._last_sample_ts is not None and ts < self._last_sample_ts:
+                rejected_out_of_order += 1
+                continue
+            last_batch_ts = ts
+            self.update(price, ts)
+            accepted += 1
+            if start_ts is None:
+                start_ts = ts
+            end_ts = ts
+
+        return SeedResult(
+            accepted=accepted,
+            rejected_duplicate=rejected_duplicate,
+            rejected_future=rejected_future,
+            rejected_out_of_order=rejected_out_of_order,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
 
     def reset(self) -> None:
         self._var = None

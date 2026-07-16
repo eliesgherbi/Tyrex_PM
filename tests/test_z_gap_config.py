@@ -115,7 +115,8 @@ def test_z_gap_invalid_entry_mode_fails() -> None:
         )
 
 
-def test_z_gap_enforce_without_preflight_gates_blocked() -> None:
+def test_z_gap_enforce_without_preflight_gates_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("Z_GAP_PREFLIGHT_DIR", raising=False)
     with pytest.raises(ConfigError, match="preflight gates"):
         parse_app_config(
             risk=_risk(),

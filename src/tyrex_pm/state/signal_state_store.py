@@ -188,6 +188,22 @@ class SignalStateStore:
         self._ptb.observed_ts = observed_ts
         self._ptb.lag_ms = lag_ms
 
+    def lock_price_to_beat(
+        self,
+        price: Decimal,
+        *,
+        status: str,
+        observed_ts: datetime | None = None,
+        lag_ms: float | None = None,
+    ) -> None:
+        """Lock boundary K into the store (experimental PTB capture path)."""
+        self.update_price_to_beat(
+            price,
+            status=status,
+            observed_ts=observed_ts,
+            lag_ms=lag_ms,
+        )
+
     def _select_binance(self, now: datetime) -> tuple[Decimal | None, datetime | None, datetime | None]:
         book_age = _age_ms(now, self._binance.book_recv_ts)
         use_book = (
@@ -206,6 +222,28 @@ class SignalStateStore:
         if self._binance.book_price is not None:
             return self._binance.book_price, self._binance.book_source_ts, self._binance.book_recv_ts
         return None, None, None
+
+    def volatility_price_observation(
+        self,
+        now: datetime | None = None,
+    ) -> tuple[Decimal, datetime] | None:
+        """Price + exchange timestamp for EWMA sigma (prefers aggTrade ticks)."""
+        ts = now or _utc_now()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if self._binance.trade_price is not None:
+            trade_ts = self._binance.trade_source_ts or self._binance.trade_recv_ts
+            trade_age = _age_ms(ts, self._binance.trade_recv_ts)
+            if trade_ts is not None and trade_age is not None and trade_age <= self.binance_max_age_ms:
+                return self._binance.trade_price, trade_ts
+        selected = self._select_binance(ts)
+        if selected[0] is None:
+            return None
+        price, source_ts, recv_ts = selected
+        obs_ts = source_ts or recv_ts
+        if obs_ts is None:
+            return None
+        return price, obs_ts
 
     def _compute_basis(
         self,

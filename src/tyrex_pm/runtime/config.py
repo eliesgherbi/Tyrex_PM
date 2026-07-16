@@ -488,6 +488,16 @@ class PairedBinaryStrategyConfig:
 
 
 @dataclass(frozen=True)
+class ZGapModelSanityConfig:
+    """Numerical sanity diagnostics for fair-value z (not a trading threshold)."""
+
+    warn_abs_z: float = 8.0
+    block_abs_z: float = 20.0
+    sigma_ratio_warn_min: float = 0.01
+    sigma_ratio_warn_max: float = 100.0
+
+
+@dataclass(frozen=True)
 class ZGapSigmaConfig:
     """EWMA sigma settings for Z-Gap fair-value model."""
 
@@ -502,9 +512,10 @@ class ZGapSigmaConfig:
 
 @dataclass(frozen=True)
 class ZGapEntryConfig:
-    """Entry gate thresholds for Z-Gap observe/enforce evaluation (A0.5)."""
+    """Entry gate thresholds for Z-Gap observe/enforce evaluation (A0.5+)."""
 
     theta_take: Decimal
+    theta_fill_floor: Decimal
     z_band_lo: Decimal
     z_band_hi: Decimal
     tau_band_lo_s: float
@@ -514,6 +525,58 @@ class ZGapEntryConfig:
     one_position_per_window: bool
     no_reentry_after_exit: bool
     clock_drift_threshold_ms: float = 500.0
+
+
+@dataclass(frozen=True)
+class ZGapSizingConfig:
+    """Fixed USD sizing for Z-Gap enforce entry (A0.6)."""
+
+    mode: str
+    max_usd: Decimal
+    min_shares: Decimal
+
+
+@dataclass(frozen=True)
+class ZGapReconciliationConfig:
+    """Venue/allocation reconciliation grace for Z-Gap enforce (A0.8)."""
+
+    venue_sync_grace_ms: int = 3000
+    poll_interval_ms: int = 500
+    max_attempts: int = 6
+
+
+@dataclass(frozen=True)
+class ZGapPtbConfig:
+    """Bounded PTB/K capture at event boundary (experimental workflow)."""
+
+    capture_wait_timeout_ms: float = 5000.0
+    max_usable_boundary_lag_ms: float = 5000.0
+    poll_interval_ms: float = 100.0
+
+
+@dataclass(frozen=True)
+class ZGapLiveValidationConfig:
+    """Tiny-live operational constraints (A0.8)."""
+
+    maximum_entry_attempts: int = 1
+    maximum_positions: int = 1
+    stop_after_terminal: bool = True
+    require_operator_approval: bool = True
+    require_fresh_ptb_attestation: bool = True
+    target_prestart_seconds: float = 90.0
+    hard_min_prestart_seconds: float = 20.0
+    calibration_ack_expiry_hours: float = 168.0
+
+
+@dataclass(frozen=True)
+class ZGapExitConfig:
+    """Minimal exit policy for Z-Gap Phase A enforce (A0.7)."""
+
+    z_stop: Decimal
+    stop_confirm_s: float
+    flatten_before_event_end_s: float
+    retry_interval_ms: int
+    max_exit_attempts: int
 
 
 @dataclass(frozen=True)
@@ -532,6 +595,12 @@ class ZGapStrategyConfig:
     run_once: bool = True
     sigma: ZGapSigmaConfig = ZGapSigmaConfig()
     entry: ZGapEntryConfig | None = None
+    sizing: ZGapSizingConfig | None = None
+    exit: ZGapExitConfig | None = None
+    reconciliation: ZGapReconciliationConfig = ZGapReconciliationConfig()
+    live_validation: ZGapLiveValidationConfig = ZGapLiveValidationConfig()
+    ptb: ZGapPtbConfig = ZGapPtbConfig()
+    model_sanity: ZGapModelSanityConfig = ZGapModelSanityConfig()
 
 
 @dataclass(frozen=True)
@@ -1743,6 +1812,7 @@ def _parse_z_gap_entry(raw: dict[str, Any] | None) -> ZGapEntryConfig:
         raise ConfigError("z_gap.entry.tau_band_s must be a two-element list")
     return ZGapEntryConfig(
         theta_take=Decimal(str(eg.get("theta_take", "0.05"))),
+        theta_fill_floor=Decimal(str(eg.get("theta_fill_floor", "0.03"))),
         z_band_lo=Decimal(str(z_band[0])),
         z_band_hi=Decimal(str(z_band[1])),
         tau_band_lo_s=float(tau_band[0]),
@@ -1752,6 +1822,83 @@ def _parse_z_gap_entry(raw: dict[str, Any] | None) -> ZGapEntryConfig:
         one_position_per_window=bool(eg.get("one_position_per_window", True)),
         no_reentry_after_exit=bool(eg.get("no_reentry_after_exit", True)),
         clock_drift_threshold_ms=float(eg.get("clock_drift_threshold_ms", 500)),
+    )
+
+
+def _parse_z_gap_reconciliation(raw: dict[str, Any] | None) -> ZGapReconciliationConfig:
+    rc = raw or {}
+    if not isinstance(rc, dict):
+        rc = {}
+    return ZGapReconciliationConfig(
+        venue_sync_grace_ms=int(rc.get("venue_sync_grace_ms", 3000)),
+        poll_interval_ms=int(rc.get("poll_interval_ms", 500)),
+        max_attempts=int(rc.get("max_attempts", 6)),
+    )
+
+
+def _parse_z_gap_ptb(raw: dict[str, Any] | None) -> ZGapPtbConfig:
+    ptb = raw or {}
+    if not isinstance(ptb, dict):
+        ptb = {}
+    return ZGapPtbConfig(
+        capture_wait_timeout_ms=float(ptb.get("capture_wait_timeout_ms", 5000.0)),
+        max_usable_boundary_lag_ms=float(ptb.get("max_usable_boundary_lag_ms", 5000.0)),
+        poll_interval_ms=float(ptb.get("poll_interval_ms", 100.0)),
+    )
+
+
+def _parse_z_gap_model_sanity(raw: dict[str, Any] | None) -> ZGapModelSanityConfig:
+    ms = raw or {}
+    if not isinstance(ms, dict):
+        ms = {}
+    return ZGapModelSanityConfig(
+        warn_abs_z=float(ms.get("warn_abs_z", 8.0)),
+        block_abs_z=float(ms.get("block_abs_z", 20.0)),
+        sigma_ratio_warn_min=float(ms.get("sigma_ratio_warn_min", 0.01)),
+        sigma_ratio_warn_max=float(ms.get("sigma_ratio_warn_max", 100.0)),
+    )
+
+
+def _parse_z_gap_live_validation(raw: dict[str, Any] | None) -> ZGapLiveValidationConfig:
+    lv = raw or {}
+    if not isinstance(lv, dict):
+        lv = {}
+    return ZGapLiveValidationConfig(
+        maximum_entry_attempts=int(lv.get("maximum_entry_attempts", 1)),
+        maximum_positions=int(lv.get("maximum_positions", 1)),
+        stop_after_terminal=bool(lv.get("stop_after_terminal", True)),
+        require_operator_approval=bool(lv.get("require_operator_approval", True)),
+        require_fresh_ptb_attestation=bool(lv.get("require_fresh_ptb_attestation", True)),
+        target_prestart_seconds=float(lv.get("target_prestart_seconds", 90.0)),
+        hard_min_prestart_seconds=float(lv.get("hard_min_prestart_seconds", 20.0)),
+        calibration_ack_expiry_hours=float(lv.get("calibration_ack_expiry_hours", 168.0)),
+    )
+
+
+def _parse_z_gap_exit(raw: dict[str, Any] | None) -> ZGapExitConfig:
+    ex = raw or {}
+    if not isinstance(ex, dict):
+        ex = {}
+    return ZGapExitConfig(
+        z_stop=Decimal(str(ex.get("z_stop", "0.25"))),
+        stop_confirm_s=float(ex.get("stop_confirm_s", 1)),
+        flatten_before_event_end_s=float(ex.get("flatten_before_event_end_s", 20)),
+        retry_interval_ms=int(ex.get("retry_interval_ms", 1000)),
+        max_exit_attempts=int(ex.get("max_exit_attempts", 5)),
+    )
+
+
+def _parse_z_gap_sizing(raw: dict[str, Any] | None) -> ZGapSizingConfig | None:
+    sg = raw or {}
+    if not isinstance(sg, dict) or not sg:
+        return None
+    mode = str(sg.get("mode", "fixed_usd")).strip().lower()
+    if mode != "fixed_usd":
+        raise ConfigError(f"z_gap.sizing.mode must be fixed_usd (got {mode!r})")
+    return ZGapSizingConfig(
+        mode=mode,
+        max_usd=Decimal(str(sg.get("max_usd", "5"))),
+        min_shares=Decimal(str(sg.get("min_shares", "5"))),
     )
 
 
@@ -1787,6 +1934,12 @@ def _parse_z_gap_strategy(strategy: dict[str, Any]) -> ZGapStrategyConfig:
         run_once=bool(zg.get("run_once", True)),
         sigma=_parse_z_gap_sigma(zg.get("sigma")),
         entry=_parse_z_gap_entry(zg.get("entry")),
+        sizing=_parse_z_gap_sizing(zg.get("sizing")),
+        exit=_parse_z_gap_exit(zg.get("exit")),
+        reconciliation=_parse_z_gap_reconciliation(zg.get("reconciliation")),
+        live_validation=_parse_z_gap_live_validation(zg.get("live_validation")),
+        ptb=_parse_z_gap_ptb(zg.get("ptb")),
+        model_sanity=_parse_z_gap_model_sanity(zg.get("model_sanity")),
     )
 
 
