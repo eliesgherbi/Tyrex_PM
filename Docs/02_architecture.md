@@ -1,45 +1,57 @@
 # 02 — Architecture and ownership
 
-**Phase:** R1 documents the target ownership model. Packages beyond `application/` appear when R2+ adds consumers.
+**Phase:** R2 implemented for `core/` + `engine/`  
+**Engine:** Minimal Tyrex in-process event-driven engine (no NautilusTrader)
 
-## Engine decision
-
-Tyrex_PM implements its **own** minimal in-process event-driven engine. NautilusTrader is not used.
-
-## Target flow
+## Implemented flow (R2 primitives)
 
 ```text
-Adapter → Event → Dispatcher → State owner → Indicator → Signal
-  → Strategy → Intent → Risk → Plan/Command → OMS
-  → Execution events → Portfolio → Strategy feedback → Facts
+(future Adapter)
+    → typed Event (BookUpdated | ReferencePriceUpdated | TimerElapsed)
+    → EventDispatcher.publish
+    → (future state owner / indicator / signal / strategy)
 ```
 
-## State ownership
+R2 provides the contracts and dispatcher only. Adapters and strategies begin in R3+.
+
+## Packages present
+
+| Package | Role |
+|---------|------|
+| `tyrex_pm.application` | CLI (R1) |
+| `tyrex_pm.core` | Ids, clock, events, snapshots, envelopes |
+| `tyrex_pm.engine` | `EventDispatcher` |
+
+## State ownership (target; stores arrive R3+)
 
 | State | Authoritative owner |
 |-------|---------------------|
-| Instruments | Instrument registry |
-| Polymarket books | Market-state store |
-| Binance reference | Reference-data store |
-| Indicators | Indicator instances |
+| Instruments | Instrument registry (R3+) |
+| Polymarket books | Market-state store (R3) |
+| Binance reference | Reference-data store (R3) |
+| Indicators | Indicator instances (R3) |
 | Signals | Immutable messages |
-| Orders | Order store |
-| Fills | Order store or fill ledger (choose in R5) |
-| Positions | Portfolio |
-| Strategy lifecycle | Strategy host |
-| Runtime mode | Application configuration |
-| Kill switch | Operations / risk |
-| Persistence | State repository |
-| Facts | Reporting sink |
+| Orders / fills / positions | Portfolio path (R5) |
+| Facts | Reporting sink (R3+) |
 
-The event dispatcher transports information; it is not a second state store.
+The dispatcher transports events; it is **not** a state store and does **not** deduplicate venue events.
 
 ## Dependency direction
 
-`application → strategies/operations → indicators/signals/market_data/domain → engine interfaces → adapters`
+`application → (future strategies) → core ← engine`  
 
-Forbidden: strategy → concrete venue clients; adapters → strategy decisions; active code → `old/`.
+`engine` may import `core`. `core` must not import `engine`, adapters, or strategies. Nothing imports `old/`.
 
-## Active tree (R1)
+## Polymarket identity mapping
 
-Only `src/tyrex_pm/application` (+ package root) exists. Historical code: `old/`.
+| Concept | Type |
+|---------|------|
+| Market / condition | `MarketId` |
+| Tradable CLOB token | `TokenId` |
+| Framework instrument key | `InstrumentId` (typically token string) |
+| YES / NO | `OutcomeSide` on `Instrument` |
+| Window/slug | Not a core ID — scheduler concern in R3 |
+
+## Numeric policy
+
+Trading prices/quantities use `Decimal`. Floats rejected at construction. Venue tick rounding deferred to adapter/execution (R3–R6).

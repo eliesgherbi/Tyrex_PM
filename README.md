@@ -6,8 +6,9 @@ Strategies receive normalized data, compute signals, emit typed intents, and rel
 
 ## Status
 
-**R1 complete:** historical implementation archived under [`old/`](old/); active package is a minimal skeleton (`tyrex-pm` 0.3.0).  
-Next: **R2** event-driven core contracts (not started).
+**R1 complete:** historical implementation archived under [`old/`](old/) (checkpoint `630bac2`).  
+**R2 complete:** `core/` + `engine/` event contracts and in-process dispatcher (`tyrex-pm` 0.3.0).  
+Next: **R3** read-only market-data and observe strategy (not started).
 
 NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_architecture_references.md`](Docs/06_architecture_references.md).
 

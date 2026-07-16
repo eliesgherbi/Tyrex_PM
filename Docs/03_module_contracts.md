@@ -1,35 +1,41 @@
 # 03 — Module contracts
 
-**Phase:** R1 — only `application` is implemented. Other modules are planned contracts for later phases.
+**Phase:** R2 — `core` and `engine` implemented.
 
-## Implemented (R1)
+## `tyrex_pm.application` (R1)
 
-### `tyrex_pm.application`
+CLI entry (`tyrex-pm version|help`). No venue I/O.
 
-- **Responsibility:** CLI entry and future composition root.
-- **Public:** `cli.main`, `tyrex-pm` console script.
-- **Owns:** nothing persistent.
-- **Deps:** `tyrex_pm` version only.
-- **Forbidden:** venue I/O, strategy decisions, imports from `old/`.
+## `tyrex_pm.core` (R2)
 
-## Planned (not created until consumed)
+| Module | Contract |
+|--------|----------|
+| `ids` | `EventId`, `CorrelationId`, `InstrumentId`, `MarketId`, `TokenId`, `StrategyId`, `RunId` |
+| `clock` | `Clock`, `SystemClock`, `FakeClock`, `require_utc` |
+| `numerics` | Decimal helpers; reject float; Polymarket price ∈ [0,1] |
+| `instruments` | `Instrument`, `OutcomeSide` |
+| `snapshots` | `BookLevel`, `BookSnapshot` (full book), `ReferencePriceSnapshot` |
+| `events` | `Event`, `BookUpdated`, `ReferencePriceUpdated`, `TimerElapsed`, `EventSource` |
+| `indicators` | `IndicatorResult` envelope |
+| `signals` | `Signal` envelope (DirectionalSignal in R3) |
+| `facts` | `FactEnvelope` (JSONL sink in R3) |
 
-| Module | Phase | Responsibility |
-|--------|-------|----------------|
-| `core` | R2 | Ids, clock, base Event, enums, fact envelope |
-| `engine` | R2 | EventDispatcher, strategy host loop |
-| `adapters.*` | R3 / R6 | Normalize I/O; no trading decisions |
-| `market_data` | R3 | Book + reference stores, snapshots |
-| `indicators` | R3 | Reusable transforms |
-| `signals` | R3 | Typed signals |
-| `strategies` | R3–R4 | Protocol + `ReferenceMomentumStrategy` |
-| `risk` | R4 | Intent evaluation |
-| `execution` | R4–R5 | Planner + OMS protocol + shadow |
-| `portfolio` | R5 | Orders, fills, positions |
-| `lifecycle` | R5 | Host phases |
-| `operations` | R3–R4 | Timers, preflight, kill switch |
-| `persistence` | R5 | State repository |
-| `reporting` | R3+ | Facts sink |
-| `domain.polymarket` | R3 | Instrument/window types |
+**Forbidden deps:** `engine`, adapters, strategies, `old`, NautilusTrader.
 
-Do not create empty packages ahead of consumers.
+**Deferred:** Intent hierarchy (R4), execution events (R5), WindowOpened/Closed (only if R3 scheduler needs them).
+
+## `tyrex_pm.engine` (R2)
+
+| Type | Contract |
+|------|----------|
+| `EventDispatcher` | subscribe / unsubscribe / publish |
+| `Subscription` | opaque handle |
+| `DispatchResult` | handler_count, delivered, queued_followups |
+| `DispatchError` | fail-fast handler failure |
+
+**Allowed deps:** `tyrex_pm.core` only.  
+**Forbidden:** adapters, strategies, portfolio, `old`.
+
+## Planned later (not created)
+
+`adapters`, `market_data`, `indicators` (calc), `strategies`, `risk`, `execution`, `portfolio`, `lifecycle`, `operations`, `persistence`, `reporting`, `domain.polymarket` — when consumers exist.

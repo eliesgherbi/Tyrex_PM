@@ -1,39 +1,48 @@
 # 04 — Event and runtime flow
 
-**Phase:** R2 implements the dispatcher; this document defines the accepted design.
+**Phase:** R2 implemented semantics below.
 
 ## Event vs signal vs intent vs command
 
-| Kind | Meaning |
-|------|---------|
-| Event | Immutable fact that happened |
-| Signal | Typed market interpretation (not an order) |
-| Intent | Strategy economic request |
-| Command / plan | Approved execution instruction after risk |
+| Kind | R2 status |
+|------|-----------|
+| Event | Implemented (`BookUpdated`, `ReferencePriceUpdated`, `TimerElapsed`) |
+| Signal | Envelope only (`Signal`) |
+| Intent | **Deferred to R4** |
+| Command / plan | **Deferred to R4–R5** |
 
-## Initial event taxonomy
+## Causality metadata
 
-`BookUpdated`, `ReferencePriceUpdated`, `TimerElapsed`, optional `WindowOpened`/`WindowClosed`, execution family (`OrderAccepted`, `OrderRejected`, `OrderPartiallyFilled`, `OrderFilled`, `OrderCanceled`, `PositionChanged`), `KillSwitchActivated`.
+| Field | Meaning |
+|-------|---------|
+| `event_id` | Unique identity of this event |
+| `correlation_id` | Broader decision/operation chain |
+| `causation_id` | Direct cause; **None** for root external events |
+| `ts_event` | Source occurrence time (UTC aware) |
+| `ts_received` | Local ingestion/creation time (UTC aware) |
+| `source` | `EventSource` enum |
 
-Every event carries `event_id`, timestamps, `correlation_id`, optional `causation_id`, `source`.
+Derived events keep `correlation_id` and set `causation_id` to the parent `event_id`.
 
-## Dispatch
+## BookUpdated payload choice
 
-- In-process `EventDispatcher.subscribe` / `publish`.
-- Deterministic handler order per event type.
-- Synchronous by default; async only at I/O edges.
-- Venue order/fill handlers must be idempotent.
+**Complete normalized `BookSnapshot`**, not deltas.
+
+Trade-off: simpler and safer for the first read-only path; no pretend sequence/gap recovery. Separate delta events may be added later if adapters need them. Executable VWAP is **not** on the event — derived in R3 market-data.
+
+## Dispatcher semantics
+
+| Topic | Decision |
+|-------|----------|
+| Ordering | Priority desc, then subscription order |
+| Routing | **Exact type only** (no base-type fanout) |
+| Failure | Fail-fast `DispatchError`; stop remaining handlers |
+| Reentrant publish | Queue until current publication finishes |
+| Subscribe during publish | Snapshot handlers; mutations apply next event |
+| Duplicate callable | Rejected |
+| No subscribers | Valid; `delivered=0` |
+| Idempotency | **Not** in dispatcher — venue stores later (R5–R6) |
 
 ## Modes
 
-| Mode | Execution dispatch |
-|------|--------------------|
-| observe | No OMS; facts may record hypothetical intents |
-| shadow | Shadow OMS |
-| live-tiny | Live Polymarket OMS (authorization required) |
-
-Mode must not change indicator/signal mathematics.
-
-## Failure behavior (target)
-
-Handler errors are logged/facted; fail-closed risk denies intents. Exact policy implemented in R2–R4 tests.
+observe / shadow / live-tiny remain application concerns (R3+). Mode must not change indicator/signal math.
