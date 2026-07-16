@@ -62,6 +62,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print current/next BTC Up/Down slug (operations helper; no second runtime)",
     )
     discover.add_argument("--which", choices=["current", "next"], default="next")
+
+    preflight = sub.add_parser(
+        "live-preflight",
+        help=(
+            "R6C mutation-impossible account observation preflight "
+            "(no submit/cancel/heartbeat; no enable-mutations flag)"
+        ),
+    )
+    preflight.add_argument(
+        "--output",
+        type=Path,
+        default=Path("var/reporting/r6/live_preflight.json"),
+        help="Sanitized artifact path",
+    )
+    preflight.add_argument(
+        "--dotenv",
+        type=Path,
+        default=Path(".env"),
+        help="Optional .env path (values never printed)",
+    )
+    preflight.add_argument(
+        "--user-stream-s",
+        type=float,
+        default=0.0,
+        help="Bounded user-WS observe seconds (0=skip; use on target host)",
+    )
+    preflight.add_argument(
+        "--skip-auth",
+        action="store_true",
+        help="Public connectivity only (no L2 authenticated reads)",
+    )
     return parser
 
 
@@ -184,6 +215,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(slug)
         return 0
+    if args.command == "live-preflight":
+        from tyrex_pm.runtime.live_preflight import run_live_preflight
+
+        result = run_live_preflight(
+            output_path=args.output,
+            dotenv_path=args.dotenv if args.dotenv.exists() else None,
+            user_stream_observe_s=args.user_stream_s,
+            skip_auth=args.skip_auth,
+        )
+        print(
+            f"live-preflight complete ok={result.ok} "
+            f"cloudflare={result.payload.get('cloudflare_blocked')} "
+            f"path={result.artifact_path}"
+        )
+        # Exit 0 when structurally safe; 1 when account evidence incomplete.
+        return 0 if result.payload.get("mutations_attempted") is False else 3
     if args.command == "observe":
         cfg = _build_observe_config(args)
         if cfg.mode is SourceMode.FIXTURE:

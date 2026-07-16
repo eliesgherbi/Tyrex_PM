@@ -1,48 +1,34 @@
 # 04 — Event and runtime flow
 
-**Phase:** R5
+**Phase:** R6A
 
 ## Chain
 
 ```text
 Market/reference event
-  → DirectionalSignal
-  → ObserveDecision
-  → Enter|Exit|Flatten intent
-  → RiskDecision
-  → ExecutionPlan
-  → SubmitOrderCommand
-  → OrderSubmitted / OrderAccepted / fills / cancels
-  → Portfolio + TradeLifecycle
-  → (optional) exit intent → shadow exit → FLAT
+  → signal → observe decision
+  → retry-gated intent
+  → risk → plan → command
+  → OMS.submit (local OrderId)
+  → OrderSubmitted / Accepted|Rejected|Unknown
+  → fills → portfolio → lifecycle
+  → (live) reconcile → readiness
 ```
 
-All retain `correlation_id`. Recovery facts use a new correlation chain while referencing restored entity IDs.
+## Hosts / runners
 
-## Intent vs plan vs order
+| Component | Role |
+|-----------|------|
+| `ObserveHost` / `TradingHost` | Single evaluate pipeline |
+| `ShadowHost` | OMS + lifecycle + retry hooks |
+| `live_runner.run_live` | Shared live adapter loop |
+| `LiveOMS` | Venue adapter; mutations off in R6 |
 
-| Object | Meaning |
-|--------|---------|
-| ObserveDecision | Would-enter / hold / skip |
-| Intent | Strategy economic request |
-| RiskDecision | Permission |
-| ExecutionPlan | Sized limit instruction |
-| SubmitOrderCommand | Immutable OMS input |
-| Order / Fill | Authoritative execution state |
-
-## Hosts
-
-| Host | When |
-|------|------|
-| `ObserveHost` | R3/R4 dry (no OMS) |
-| `ShadowHost` | R5 when `shadow.enable_oms` |
-| `run_live_shadow` | Public live data + ShadowOMS |
-
-## Restart sequence
+## Restart / live readiness
 
 ```text
-Load config → load/validate snapshot → restore orders/fills/portfolio/lifecycle/dedup/strategy
-→ start reporting → start adapters → wait for fresh books → resume evaluation
+Config → credentials → market → persistence → transport
+→ user stream → reconcile → books/reference fresh → ready
 ```
 
-No new entry before recovery completes and market data is ready.
+Public market-data health cannot override private execution unreadiness.

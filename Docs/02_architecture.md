@@ -1,67 +1,60 @@
 # 02 — Architecture and ownership
 
-**Phase:** R5.1 (unified TradingHost + retry)  
+**Phase:** R6A (LiveOMS behind OMS protocol; mutations disabled)  
 **Engine:** Minimal Tyrex in-process dispatcher (no NautilusTrader)  
-**R5 checkpoint:** `5cc1a306ee168f18df40e2107e78785d5a097364`
+**R5:** `5cc1a30` · **R5.1:** `6b03cc3`
 
 ## Flow
 
 ```text
 Adapters → stores → DecisionSnapshot → momentum/signal
   → ObserveDecision
-  → Enter/Exit/Flatten intent (lifecycle-aware)
-  → RiskEngine (entry vs exit asymmetry + portfolio view)
-  → ExecutionPlanner / ExitPlanner
-  → SubmitOrderCommand / CancelOrderCommand
-  → ShadowOMS → execution events
-  → FillLedger + OrderStore → Portfolio → TradeLifecycle
-  → Facts + atomic snapshot persistence
+  → Intent (retry-gated)
+  → RiskEngine
+  → Planner
+  → Command
+  → OMS (ShadowOMS | LiveOMS)
+  → execution events → OrderStore / FillLedger → Portfolio → Lifecycle
+  → Reconciliation (live) → Readiness
+  → Facts + persistence
 ```
 
-R4 dry path remains when `shadow.enable_oms` is false/absent (`ObserveHost` only).
+## One host
 
-## Packages
+```text
+TradingHost = ObserveHost
+  ├── OBSERVE: no OMS dispatch
+  ├── SHADOW: ShadowOMS (ShadowHost hooks)
+  └── LIVE_TINY: LiveOMS injected later; risk dispatch denied until R7
+```
+
+Mode changes OMS dispatch only. Signal/strategy orchestration is one path.
+
+## Execution packages
 
 | Package | Role |
 |---------|------|
-| `core` | Ids, events, modes, intents, commands, execution events |
-| `engine` | Dispatcher |
-| `adapters` / `market_data` / `indicators` / `signals` | R3 (unchanged math) |
-| `strategies` | Lifecycle-aware `ReferenceMomentumStrategy` |
-| `risk` | Policies including portfolio exposure |
-| `planning` | Entry + exit dry planners |
-| `execution` | `OMS` protocol, `OrderStore`, `FillLedger`, `ShadowOMS` |
-| `portfolio` | Long-only positions from fills |
-| `lifecycle` | Host-owned trade lifecycle |
-| `persistence` | Atomic JSON snapshot |
-| `runtime` | `TradingHost`=`ObserveHost`; `ShadowHost` OMS hooks; shared `live_runner` |
-| `reporting` | JSONL facts |
+| `execution/protocol.py` | Shared `OMS` |
+| `execution/shadow_oms.py` | Deterministic shadow fills |
+| `execution/polymarket/` | Live adapter: transport, auth, normalize, reconcile, readiness, LiveOMS |
+| `portfolio` / `lifecycle` | Application owners (not adapter-owned) |
 
-## State ownership (non-competing)
+## State ownership
 
 | Question | Owner |
 |----------|-------|
-| Which fills happened? | `FillLedger` |
-| What is the order’s state? | `OrderStore` |
-| What do we own? | `Portfolio` |
-| Trade eligibility phase? | `TradeLifecycle` (host) |
-| Intent semantic keys | `IntentDedupRegistry` |
-| Books / reference | Market/reference stores |
-
-Facts observe authoritative state; they never own it.
+| Fills | `FillLedger` |
+| Orders | `OrderStore` |
+| Positions | `Portfolio` |
+| Trade phase | `TradeLifecycle` |
+| Venue I/O | `PolymarketTransport` |
+| Venue↔local compare | `ReconciliationService` |
+| Live entry gate | `ExecutionReadiness` |
 
 ## Modes
 
-| Mode | Intent | Risk | Plan | OMS |
-|------|--------|------|------|-----|
-| OBSERVE | Hypothetical | Dry | Optional dry | No |
-| SHADOW | Yes | Yes | Yes | ShadowOMS when enabled |
-| LIVE_TINY | Denied until R6/R7 | Fail-closed | No | No |
-
-## Dispatcher priorities (execution path)
-
-1. Order store / fill ledger (~100)  
-2. Portfolio (~90)  
-3. Lifecycle (~80)  
-4. Strategy feedback via host evaluate  
-5. Reporting (facts)
+| Mode | OMS | Mutations |
+|------|-----|-----------|
+| OBSERVE | None | n/a |
+| SHADOW | ShadowOMS | Shadow only |
+| LIVE_TINY | LiveOMS (R6 wired, R7 enabled) | **Disabled in R6** |

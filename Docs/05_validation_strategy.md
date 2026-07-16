@@ -1,31 +1,21 @@
 # 05 — Validation strategy
 
-**Phase:** R5 — shadow execution lifecycle for `ReferenceMomentumStrategy`.
+**Phase:** R6A/B
 
-## Name
+## Framework strategy
 
-`ReferenceMomentumStrategy` (`framework_validation`)
+`ReferenceMomentumStrategy` — observe + lifecycle exits + R5.1 retry gates.
 
-## Exit policy (precedence)
+## Shadow model (unchanged honesty)
 
-```text
-KILL_SWITCH
-→ MARKET_CLOSE_BOUNDARY
-→ MAX_HOLD
-→ SIGNAL_REVERSAL
-→ SIGNAL_FLAT
-```
+Visible-depth only; no queue/latency/impact; not profitability evidence.
 
-Max-loss exit deferred until mark-to-market accounting is correct.
+## Live validation in R6
 
-## Shadow fill model (honest limits)
+- Scripted `FakeTransport` transcripts for submit/cancel/unknown/reconcile races.
+- Authenticated **read-only** probe (`scripts/r6b_readonly_probe.py`).
+- No real order submit/cancel until R7 authorization.
 
-- Visible-depth marketable limits only
-- No queue position, latency, or market-impact model
-- Does not mutate authoritative external books
-- Fee model: configurable (`shadow_zero_fee_v1` allowed for framework validation)
-- Shadow P&L is **not** profitability evidence
+## Out of scope until R7
 
-## Out of scope
-
-PTB · Chainlink · Z-Gap edge · live private trading · venue reconciliation (R6)
+Wallet signing for live posts · tiny-live capital · on-chain approvals · Z-Gap.

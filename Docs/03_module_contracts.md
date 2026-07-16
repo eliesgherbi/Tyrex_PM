@@ -1,25 +1,13 @@
 # 03 — Module contracts
 
-**Phase:** R5
+**Phase:** R6A/B
 
-## Strategy
+## Strategy / risk / planner
 
-Protocol: `on_start`, `on_signal`/`apply_transition`, `on_stop`.  
-Must not import adapters, risk, planner, OMS, or portfolio.
+Must not import `tyrex_pm.execution.polymarket.*`.  
+Strategy decides economic need; `RetryController` schedules attempts; dedup is a backstop.
 
-When `DecisionContext.lifecycle` is `None` (R4 dry): signal-transition rules.  
-When lifecycle is provided (R5): eligibility uses lifecycle/position; exit precedence applies.
-
-## Intents
-
-| Intent | Role |
-|--------|------|
-| `EnterIntent` | BUY, `target_notional` |
-| `ExitIntent` | Target-flat reduce |
-| `FlattenIntent` | Urgent flat |
-| `CancelIntent` | Cancel working order |
-
-## OMS (`tyrex_pm.execution.protocol`)
+## OMS protocol
 
 ```python
 class OMS(Protocol):
@@ -28,21 +16,26 @@ class OMS(Protocol):
     def stop(self) -> None: ...
 ```
 
-`ShadowOMS` implements this now; live Polymarket adapter in R6.  
-`submit` does not return fills — results arrive as execution events.
+`ShadowOMS` and `LiveOMS` both implement this.  
+`submit` returns local `OrderId` only — never implies venue acceptance.
 
-## Order / fill / portfolio
+## Live transport
 
-- Order states: `CREATED → SUBMITTED → ACCEPTED → PARTIALLY_FILLED|FILLED|CANCEL_*|REJECTED`
-- Fills are immutable ledger records keyed by `execution_id`
-- Portfolio is long-only; oversell fails closed
+`PolymarketTransport`: submit/cancel/query/subscribe/stop.  
+R6A tests use `FakeTransport`. R6B uses `ReadOnlyClobClient` (submit/cancel raise).
 
-## Risk
+## Submission uncertainty
 
-Entry: notional/position/exposure caps, pending-order block, freshness, spread, liquidity.  
-Exit/flatten: cannot increase exposure; kill switch denies entries but permits risk-reducing actions.  
-Missing portfolio view fails closed (except R4 dry `exposure_available=False`).
+`COMMAND_CREATED → SUBMITTING → VENUE_ACCEPTED | REJECTED | UNKNOWN_SUBMISSION`  
+Unknown: reconcile first; do not resubmit; block entries.
 
-## Forbidden in R5
+## Reconciliation classes
 
-Private Polymarket trading endpoints · real order signing · wallet credential use · `old/` · NautilusTrader · Z-Gap.
+`MATCHED` · `LOCAL_MISSING` · `VENUE_MISSING` · `FILL_MISSING_LOCAL` ·  
+`ORDER_STATUS_MISMATCH` · `POSITION_MISMATCH` · `UNKNOWN_EXTERNAL_ORDER` · `UNRESOLVED`
+
+Unknown external orders are never auto-canceled. Missing evidence never means flat.
+
+## Forbidden
+
+Real mutations in R6 · logging credentials · `old/` imports · NautilusTrader · Z-Gap.

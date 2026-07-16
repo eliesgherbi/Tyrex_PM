@@ -31,11 +31,18 @@ def test_no_old_or_nautilus() -> None:
                 assert not node.module.startswith(("old", "nautilus"))
 
 
-def test_no_private_endpoint_literals_in_execution() -> None:
+def test_no_private_endpoint_literals_in_shadow_oms() -> None:
+    """R5 ShadowOMS must stay free of venue hosts; R6 polymarket/ may reference public CLOB URLs."""
+    text = (PKG / "execution" / "shadow_oms.py").read_text(encoding="utf-8")
+    for frag in ("clob.polymarket.com", "createOrder", "postOrder", "POLYMARKET_API"):
+        assert frag not in text
+    # Mutation helpers must not live outside the polymarket live boundary.
     for path in (PKG / "execution").rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        for frag in ("clob.polymarket.com", "createOrder", "postOrder"):
-            assert frag not in text
+        if "polymarket" in path.parts:
+            continue
+        body = path.read_text(encoding="utf-8")
+        assert "createOrder" not in body
+        assert "postOrder" not in body
 
 
 def test_oms_protocol_exists() -> None:

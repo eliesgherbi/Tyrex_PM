@@ -1,52 +1,28 @@
 # 07 — Implementation plan
 
 **Branch:** `rest_project`  
-**R1:** `630bac2acf67961a30b4be014d1df0434af967f1`  
-**R2:** `ccccc969bb4877ae97e6e56c656b839739034425`  
-**R3:** `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9`  
 **R4:** `9813001465db1fd188a4e00a3c82a24fa2cb4292`  
 **R5:** `5cc1a306ee168f18df40e2107e78785d5a097364`  
-**Status:** R5.1 stabilization; R6 adapter next (no real order mutation)
-
-## Engine decision
-
-Minimal Tyrex event-driven engine. NautilusTrader is not a dependency.
-
-## Safe rollback
-
-Explicit reverse of named `git mv` / targeted `git restore` / `git revert`.  
-Do **not** use `git checkout HEAD -- .` or `git clean -fd`.
+**R5.1:** `6b03cc32e3d65dfdf787ce346a73dcd7b545b6d1`  
+**Status:** R6A/B implemented (uncommitted); **stop before R7 mutations**
 
 ## Roadmap
 
 | Phase | Scope | Status |
 |-------|--------|--------|
-| R1 | Archive + skeleton | **Done** |
-| R2 | Core contracts + dispatcher | **Done** |
-| R3 | Read-only MD + observe strategy | **Done** |
-| R4 | Intents + risk + dry planning | **Done** (`9813001`) |
-| R5 | Shadow OMS + portfolio + exits | **Done** (`5cc1a30`) |
-| R5.1 | Host unify + entry/exit retry | **Done** |
-| R6A/B | Live adapter + read-only reconcile | Next (no mutations) |
-| R7–R8 | Tiny-live → acceptance | Planned |
-| Z1–Z4 | Z-Gap after R8 | Planned |
+| R1–R4 | Reset → dry plans | **Done** |
+| R5 | Shadow OMS + lifecycle | **Done** (`5cc1a30`) |
+| R5.1 | Host unify + retry/escalation | **Done** (`6b03cc3`) |
+| R6A | LiveOMS + transport + reconcile (fixtures) | **Done** (uncommitted) |
+| R6B | Authenticated read-only | **Done** (CLOB L2 blocked here) |
+| R7 | Explicit tiny-live mutations | Next (requires authorization) |
+| R8 / Z1–Z4 | Acceptance → Z-Gap | Planned |
 
-## R5 decisions (summary)
+## Proposed R7 scope (exact)
 
-- Lifecycle host owns `FLAT → ENTRY_PENDING → ACTIVE → EXIT_PENDING → FLAT/TERMINAL`.
-- Position truth from fills (`FillLedger` + `OrderStore` + `Portfolio`).
-- `ShadowOMS` implements `OMS` protocol; results are execution events only.
-- Shadow fill model: visible-depth marketable limits; no queue/latency/impact.
-- Exit precedence: `KILL_SWITCH → MARKET_CLOSE_BOUNDARY → MAX_HOLD → SIGNAL_REVERSAL → SIGNAL_FLAT`.
-- Entry vs exit risk asymmetry: stale reference blocks entry; flatten may proceed with emergency policy.
-- R4 dry path remains available when `shadow.enable_oms` is false/absent.
-- Max-loss exit deferred (no mark-to-market P&L consumer yet).
-
-## Proposed R6 scope (exact)
-
-1. Live Polymarket OMS adapter implementing the same `OMS` protocol.
-2. Private authenticated order submit/cancel (credentials from env; never logged).
-3. Venue order/fill reconciliation into `OrderStore` / `FillLedger`.
-4. Map venue rejects/cancels to existing execution events.
-5. Keep ShadowOMS for offline/fixture validation.
-6. Still no Z-Gap strategy logic.
+1. Enable `mutations_enabled=True` behind explicit operator approval.  
+2. Wallet EIP-712 order signing at the execution boundary.  
+3. Live submit/cancel with UNKNOWN_SUBMISSION reconciliation-first policy.  
+4. REST heartbeat supervisor (missing heartbeat cancels all opens).  
+5. Tiny-live notional caps + kill switch + human approval gate.  
+6. Still no Z-Gap strategy.

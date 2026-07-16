@@ -1,152 +1,123 @@
 # 08 — Validation report
 
-## Checkpoints
+## Checkpoints (committed, not pushed)
 
 | Phase | Commit | Message |
 |-------|--------|---------|
-| R1 | `630bac2acf67961a30b4be014d1df0434af967f1` | reset project with isolated legacy tree and minimal skeleton |
-| R2 | `ccccc969bb4877ae97e6e56c656b839739034425` | add deterministic event-driven core contracts |
-| R3 | `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9` | add read-only market data and momentum strategy slice |
 | R4 | `9813001465db1fd188a4e00a3c82a24fa2cb4292` | add intent risk and dry execution planning |
 | R5 | `5cc1a306ee168f18df40e2107e78785d5a097364` | add shadow oms portfolio lifecycle and recovery |
+| R5.1 | `6b03cc32e3d65dfdf787ce346a73dcd7b545b6d1` | stabilize shadow retry policy and unify trading host |
 
 `.env` SHA256 (unchanged): `27210C97AE37101DE48570130BBB517E572F3EB75160B5FC4C05CF178B91F772`  
 `var/` gitignored · no `old/` imports · no NautilusTrader
 
----
-
-## R4 completion (summary)
-
-Dry intent → risk → plan. Live dry-plan: 781 signals → **1 intent / 1 plan**. See git history of this file for full R4 tables.
+R6 checkpoint is created only after R6C gate completion (see below). **Not pushed.**
 
 ---
 
-## R5 completion report
+## R5.1 stabilization
 
-**R4 checkpoint:** `9813001465db1fd188a4e00a3c82a24fa2cb4292`  
-**Pytest:** **124 passed** (no network in default suite)
+**Pytest at R5.1:** 141 passed (now 166 with R6 tests)
 
-### Modules created / extended
+### Host unification
+
+- `TradingHost = ObserveHost` — single evaluate pipeline.
+- `ShadowHost` overrides `_build_decision_context` / `_process_transition` only.
+- `live_runner.run_live` shared by observe/shadow wrappers.
+
+### Retry / residual
+
+- Entry: cooldown + material book fingerprint + attempt cap (`RetryController`).
+- Exit: one outstanding request; escalate on kill/market-close; `MANUAL_INTERVENTION` for residual.
+- `TERMINAL` only from `FLAT`.
+
+### Live-shadow note
+
+Quiet windows produced FLAT/UNAVAILABLE-only signals (0 intents). Unit tests cover storm prevention. Pre-R5.1 storm (89 enter / 488 exit) is the baseline fixed by R5.1.
+
+---
+
+## R6A — Live adapter (fixtures)
+
+### Official venue semantics
+
+Documented in `Docs/Implementation/r6_venue_semantics.md` (CLOB V2).  
+No `clientOrderId` on wire — correlate via returned `orderID`.  
+Historical `old/` inspected for lessons; **not imported**.
+
+### Modules
 
 ```text
-src/tyrex_pm/core/{commands,execution_events,intents,ids}.py
-src/tyrex_pm/execution/{protocol,order_store,fill_ledger,shadow_oms}.py
-src/tyrex_pm/portfolio/portfolio.py
-src/tyrex_pm/lifecycle/trade_lifecycle.py
-src/tyrex_pm/persistence/snapshot.py
-src/tyrex_pm/planning/exit_planner.py
-src/tyrex_pm/runtime/{shadow_config,shadow_host,live_shadow}.py
-config/observe_shadow_r5.json
-tests/test_r5_*.py
+src/tyrex_pm/execution/polymarket/
+  auth.py, transport.py, fake_transport.py, normalize.py,
+  reconciliation.py, readiness.py, live_oms.py, readonly_client.py
+scripts/r6b_readonly_probe.py
+tests/test_r6_*.py
 ```
 
-### OMS protocol
+### State machines
 
-`OMS.submit/cancel/stop` — `ShadowOMS` now; live adapter reserved for R6.
+- Submit: `COMMAND_CREATED → SUBMITTING → VENUE_ACCEPTED | REJECTED | UNKNOWN_SUBMISSION`
+- Cancel: CancelPending → Canceled; uncertain cancel reconciles; mutations off short-circuits
+- `mutations_enabled=False` by default (R6) — transport submit/cancel never called
 
-### Commands / events
+### Reconciliation / readiness
 
-Commands: `SubmitOrderCommand`, `CancelOrderCommand`.  
-Events: `OrderSubmitted`, `OrderAccepted`, `OrderRejected`, `OrderPartiallyFilled`, `OrderFilled`, `OrderCancelPending`, `OrderCanceled`.
+Classifications implemented; unknown external orders never auto-canceled; missing evidence fails closed.  
+Readiness reasons include credentials, stream, reconcile, unknown submission, mutations disabled.
 
-### Ownership
+### Tests
 
-| Concern | Owner |
-|---------|-------|
-| Fills | `FillLedger` |
-| Order state | `OrderStore` |
-| Positions | `Portfolio` |
-| Trade phase | `TradeLifecycle` |
-
-### Shadow fill model
-
-Visible-depth marketable limits; residual cancel optional; fee model `shadow_zero_fee_v1` by default; no queue/latency/impact; books not mutated.
-
-### Intents added
-
-`ExitIntent`, `CancelIntent`, `FlattenIntent` (plus existing `EnterIntent`).
-
-### Lifecycle
-
-`FLAT ↔ ENTRY_PENDING ↔ ACTIVE ↔ EXIT_PENDING`; `TERMINAL` at window end.  
-Eligibility uses lifecycle/portfolio — not `last_signal_direction` alone.
-
-### Risk extensions
-
-Portfolio view required for shadow OMS path; pending/active blocks entry; kill switch denies entry, permits flatten; exit cannot increase exposure.
-
-### Persistence
-
-Schema v1 atomic JSON snapshot; rejects corrupt/mismatched market/config; restores orders/fills/portfolio/lifecycle/dedup/strategy epoch.
-
-### Public live shadow evidence (no trading)
-
-| Item | Value |
-|------|-------|
-| Market | `btc-updown-5m-1784227200` — Bitcoin Up or Down 2:40–2:45PM ET |
-| Duration | ~50s |
-| Signals | 2123 (UP 356, DOWN 1, FLAT 1310, UNAVAILABLE 456) |
-| Intents | ENTER 89 / EXIT 488 |
-| Risk | 88 approved / 489 denied (mostly `DUPLICATE_INTENT` on exits) |
-| Plans | 3 PLANNED / 85 `INSUFFICIENT_DEPTH` |
-| Commands | **3** |
-| Lifecycle | `FLAT→ENTRY_PENDING→ACTIVE` (×2), `ACTIVE→EXIT_PENDING→FLAT` (×1) |
-| Final | Residual shadow exposure possible if exit unplannable; not venue inventory |
-| Fee model | `shadow_zero_fee_v1` |
-| Artifacts | `var/reporting/r5/live_shadow_facts.jsonl`, `var/state/r5_shadow_snapshot.json` (gitignored) |
-| Private/trading calls | **None** |
-
-Shadow fills/commands are **not** profitability evidence.
-
-### Confirmations
-
-No private endpoints · no real order signing · no wallet credential reads · no `old/` · no NautilusTrader · R4 dry path still works without ShadowOMS · distribution excludes `old/` · `.env` unchanged.
-
-### Known limitations
-
-- No queue-position / latency / impact model
-- Visible fills against visible depth only
-- Max-loss exit deferred
-- Shadow performance is not profitability evidence
-- Live venue reconciliation belongs to R6
-- Repeated DOWN/UP while FLAT retries entry each tick after planning failure (dedup forgotten) — expected retry policy; may be rate-limited later
-
-### Proposed R6 scope
-
-1. Live Polymarket OMS adapter implementing the same `OMS` protocol.  
-2. Authenticated submit/cancel (credentials from env; never logged).  
-3. Venue order/fill reconciliation into `OrderStore` / `FillLedger`.  
-4. Keep `ShadowOMS` for fixture/offline validation.  
-5. Still no Z-Gap strategy logic.
+Scripted FakeTransport scenarios + architecture/auth/reconcile/readiness.  
+**Full suite: 166 passed.** Default suite makes no live mutation calls.
 
 ---
 
-## R5.1 stabilization report
+## R6B — Authenticated read-only
 
-**R5 checkpoint:** `5cc1a306ee168f18df40e2107e78785d5a097364`  
-**Pytest:** **141 passed**
+| Item | Result |
+|------|--------|
+| Credentials | Present (L2 key triple + funder); values never logged |
+| submit/cancel | **Blocked** in read-only client |
+| CLOB L2 GET | **Cloudflare 403 / error 1010** from this network |
+| Data-API positions | HTTPError in this run |
+| Reconciliation | `UNRESOLVED` + `blocks_entry=true` (missing evidence) |
+| Readiness | `blocked_clob_l2_unreachable` |
+| Mutations attempted | **False** |
+| `.env` | Unchanged |
+| Report | `var/reporting/r6/readonly_probe.json` (gitignored) |
 
-### Host audit / unification
+**Blocker:** Authenticated CLOB HTTP from this environment is Cloudflare-denied. Adapter + fail-closed readiness are validated; live private reads need a non-blocked network/path before R7.
 
-- Single pipeline in `ObserveHost.evaluate_once` (`TradingHost` alias).
-- `ShadowHost` overrides only `_build_decision_context` and `_process_transition`.
-- Live path unified in `runtime/live_runner.py`.
+---
 
-### Entry / exit retry
+## R6C — Operational readiness
 
-- `RetryController`: cooldown + book fingerprint + attempt caps.
-- Exit outstanding suppresses storms; kill/market-close escalate.
-- Residual exposure → `EXIT_RETRY_WAIT` / `MANUAL_INTERVENTION`; `TERMINAL` only from `FLAT`.
+Full report: [`Docs/Implementation/r6c_completion_report.md`](Implementation/r6c_completion_report.md)  
+Target-host handoff: [`scripts/r6c_target_host_handoff.md`](../scripts/r6c_target_host_handoff.md)
 
-### Live-shadow (quiet windows)
+| Gate | Result |
+|------|--------|
+| Endpoint taxonomy | Documented (public market-data / authenticated account / public Data API) |
+| Public connectivity (agent) | `/time` 200; `/book` origin-reached (404 synthetic); TLS/DNS OK |
+| Authenticated L2 | Public OK; L2 GETs **401** (app auth reached, CF cleared); Data API `/positions` 200 |
+| Mutation-impossible preflight | `PreflightReadClient` has no submit/cancel; no enable-mutations flag |
+| Heartbeat | Official `POST /heartbeats` can cancel all opens if armed then stopped — **not called** |
+| Signing dry | Synthetic V2 vectors; never sent |
+| R5.1 storm | Fixture: 2123 signals → 2 enter / 2 exit / 0 dup denials / 4 cmds / FLAT |
+| Host unification | One `TradingHost`; architecture tests |
+| User stream | Code path ready; confirm on target host with `--user-stream-s` |
 
-| Run | Market | Signals | Intents | Dup risk | Final |
-|-----|--------|---------|---------|----------|-------|
-| A | `btc-updown-5m-1784228700` | 1163 (FLAT/UNAVAILABLE only) | 0 | 0 | FLAT→TERMINAL |
-| B | `btc-updown-5m-1784229000` | 939 (FLAT/UNAVAILABLE only) | 0 | 0 | FLAT→TERMINAL |
+**R6C complete for code/safety gates.** Operational account observation still requires sanitized target-host artifact if agent L2 remains CF-blocked.
 
-No directional transitions in these windows — retry storms not exercised live; unit/strategy tests cover retry gates. Duplicate risk denials: **0**. No false successful terminal with exposure.
+## R7 readiness verdict
 
-See `Docs/Implementation/r51_stabilization.md`.
+**Do not begin R7** until:
 
-**Stop before R6 mutations; R6A/B may proceed for adapter + read-only only.**
+1. Sanitized target-host `live_preflight` evidence reviewed (authenticated reads + user stream + clean reconcile).  
+2. Explicit tiny-live authorization is given.  
+3. Heartbeat supervisor separately approved (still unresolved).  
+
+**Not authorized:** real submit, cancel, wallet approval, on-chain ops, `mutations_enabled=True`.
+
+**Stop after R6C.**
