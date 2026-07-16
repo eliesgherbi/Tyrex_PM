@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -11,7 +10,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from tyrex_pm.execution.polymarket.auth import L2Credentials, redact_text
+from tyrex_pm.execution.polymarket.auth import L2Credentials, positions_wallet_address, redact_text
+from tyrex_pm.execution.polymarket.l2_hmac import build_l2_headers
 from tyrex_pm.execution.polymarket.normalize import venue_order_from_rest, venue_trade_from_rest
 from tyrex_pm.execution.polymarket.readonly_transport import (
     AUTH_CLOB_BALANCE,
@@ -182,25 +182,14 @@ class PreflightReadClient:
     def _l2_headers(self, method: str, path: str, body: str = "") -> dict[str, str]:
         if self.creds is None:
             raise RuntimeError("credentials_missing")
-        import base64
-        import hashlib
-        import hmac
-
-        ts = str(int(time.time()))
-        message = ts + method.upper() + path + body
-        secret = base64.urlsafe_b64decode(self.creds.secret)
-        sig = base64.urlsafe_b64encode(
-            hmac.new(secret, message.encode("utf-8"), hashlib.sha256).digest()
-        ).decode("utf-8")
-        return {
-            "POLY_ADDRESS": self.creds.address,
-            "POLY_SIGNATURE": sig,
-            "POLY_TIMESTAMP": ts,
-            "POLY_API_KEY": self.creds.api_key,
-            "POLY_PASSPHRASE": self.creds.passphrase,
-            "Content-Type": "application/json",
-            "User-Agent": "tyrex-pm-r6c/1.0",
-        }
+        headers, _report = build_l2_headers(
+            self.creds,
+            method=method,
+            request_path=path,
+            body=body or None,
+        )
+        headers["User-Agent"] = "tyrex-pm-r6d/1.0"
+        return headers
 
     def _auth_get(self, path: str, *, params: dict[str, str] | None, category: str) -> Any:
         host = "clob.polymarket.com"
@@ -310,8 +299,9 @@ class PreflightReadClient:
                 detail="credentials_missing",
             )
             return []
-        # Address used in query — report only presence, not value, in facts elsewhere.
-        url = f"{DATA_API_BASE}{path}?{urlencode({'user': self.creds.address})}"
+        # Funder preferred for Data API positions (historical); never log address.
+        user = positions_wallet_address(self.creds)
+        url = f"{DATA_API_BASE}{path}?{urlencode({'user': user})}"
         req = Request(url, method=method, headers={"User-Agent": "tyrex-pm-r6c/1.0"})
         try:
             with urlopen(req, timeout=self.timeout_s) as resp:

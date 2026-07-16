@@ -16,6 +16,10 @@ dependencies = [
 dev = [
   "pytest>=8.0.0",
 ]
+live = [
+  "py-clob-client-v2>=1.0.0",
+  "eth-account>=0.10.0",
+]
 
 [project.scripts]
 tyrex-pm = "tyrex_pm.application.cli:main"

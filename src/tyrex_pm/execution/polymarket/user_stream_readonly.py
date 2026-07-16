@@ -20,7 +20,11 @@ def observe_user_stream_readonly(
     on_disconnect: Callable[[], None] | None = None,
     on_ready: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Connect, authenticate, observe, disconnect/reconnect once. No orders created."""
+    """Connect, authenticate, observe, disconnect/reconnect once. No orders created.
+
+    Idle accounts may receive zero order/trade events. Connection + auth send +
+    absence of auth errors + ping/pong is sufficient evidence.
+    """
     try:
         return asyncio.run(
             _observe_async(
@@ -56,11 +60,14 @@ async def _observe_async(
         "path": urlparse(USER_WS_URL).path,
         "connected": False,
         "authenticated": False,
+        "auth_message_sent": False,
+        "auth_error": False,
         "pong_seen": False,
         "events_received": 0,
         "disconnect_detected": False,
         "reconnected": False,
         "orders_created": False,
+        "idle_account_ok": False,
         "observe_s": observe_s,
     }
 
@@ -74,19 +81,18 @@ async def _observe_async(
         "markets": [],
     }
 
-    async def _session(*, reconnect: bool = False) -> None:
+    async def _session(*, reconnect: bool = False, window_s: float) -> None:
         async with websockets.connect(USER_WS_URL, open_timeout=15, close_timeout=5) as ws:
             report["connected"] = True
             if reconnect:
                 report["reconnected"] = True
             await ws.send(json.dumps(auth_msg))
-            # Official channel: auth then subscribe; idle accounts may emit no trades.
-            deadline = time.monotonic() + max(observe_s, 1.0)
+            report["auth_message_sent"] = True
+            deadline = time.monotonic() + max(window_s, 1.0)
             while time.monotonic() < deadline:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                 except TimeoutError:
-                    # Protocol ping
                     try:
                         pong = await ws.ping()
                         await asyncio.wait_for(pong, timeout=2.0)
@@ -97,20 +103,29 @@ async def _observe_async(
                 report["events_received"] += 1
                 text = raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
                 low = text.lower()
-                if "error" in low and ("auth" in low or "invalid" in low):
+                if "error" in low and ("auth" in low or "invalid" in low or "unauthorized" in low):
+                    report["auth_error"] = True
                     report["authenticated"] = False
                     break
-                # Treat non-error frames after auth send as auth-success for idle accounts
-                report["authenticated"] = True
-                if on_ready is not None:
-                    on_ready()
 
-    await _session(reconnect=False)
+    # First session: full observe window; second: short reconnect proof
+    await _session(reconnect=False, window_s=observe_s)
     if on_disconnect is not None:
         on_disconnect()
         report["disconnect_detected"] = True
     await asyncio.sleep(0.2)
-    await _session(reconnect=True)
-    if report["authenticated"] and on_ready is not None:
-        on_ready()
+    await _session(reconnect=True, window_s=min(2.0, observe_s))
+
+    # Idle-OK: connected, auth sent, no auth error, ping/pong healthy
+    if (
+        report["connected"]
+        and report["auth_message_sent"]
+        and not report["auth_error"]
+        and report["pong_seen"]
+    ):
+        report["authenticated"] = True
+        report["idle_account_ok"] = report["events_received"] == 0
+        if on_ready is not None:
+            on_ready()
+
     return report

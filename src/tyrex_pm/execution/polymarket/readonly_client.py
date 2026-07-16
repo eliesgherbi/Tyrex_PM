@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -11,7 +10,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from tyrex_pm.execution.polymarket.auth import L2Credentials, redact_text
+from tyrex_pm.execution.polymarket.auth import L2Credentials, positions_wallet_address, redact_text
+from tyrex_pm.execution.polymarket.l2_hmac import build_l2_headers
 from tyrex_pm.execution.polymarket.normalize import venue_order_from_rest, venue_trade_from_rest
 from tyrex_pm.execution.polymarket.transport import (
     CancelOrderResult,
@@ -46,25 +46,13 @@ class ReadOnlyClobClient:
         raise MutationAttemptError("R6B read-only client forbids cancel_order")
 
     def _l2_headers(self, method: str, path: str, body: str = "") -> dict[str, str]:
-        # Minimal HMAC compatible with Polymarket L2 (see official signing docs).
-        import base64
-        import hashlib
-        import hmac
-
-        ts = str(int(time.time()))
-        message = ts + method.upper() + path + body
-        secret = base64.urlsafe_b64decode(self.creds.secret)
-        sig = base64.urlsafe_b64encode(
-            hmac.new(secret, message.encode("utf-8"), hashlib.sha256).digest()
-        ).decode("utf-8")
-        return {
-            "POLY_ADDRESS": self.creds.address,
-            "POLY_SIGNATURE": sig,
-            "POLY_TIMESTAMP": ts,
-            "POLY_API_KEY": self.creds.api_key,
-            "POLY_PASSPHRASE": self.creds.passphrase,
-            "Content-Type": "application/json",
-        }
+        headers, _report = build_l2_headers(
+            self.creds,
+            method=method,
+            request_path=path,
+            body=body or None,
+        )
+        return headers
 
     def _get_json(self, path: str, *, params: dict[str, str] | None = None) -> Any:
         qs = f"?{urlencode(params)}" if params else ""
@@ -112,7 +100,10 @@ class ReadOnlyClobClient:
 
     def get_positions(self) -> list[VenuePositionSnapshot]:
         # Public data-api by address — no L2 mutation surface.
-        url = f"{DATA_API_BASE}/positions?{urlencode({'user': self.creds.address})}"
+        url = (
+            f"{DATA_API_BASE}/positions?"
+            f"{urlencode({'user': positions_wallet_address(self.creds)})}"
+        )
         req = Request(url, method="GET")
         with urlopen(req, timeout=self.timeout_s) as resp:
             rows = json.loads(resp.read().decode("utf-8"))

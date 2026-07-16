@@ -108,16 +108,30 @@ Target-host handoff: [`scripts/r6c_target_host_handoff.md`](../scripts/r6c_targe
 | Host unification | One `TradingHost`; architecture tests |
 | User stream | Code path ready; confirm on target host with `--user-stream-s` |
 
-**R6C complete for code/safety gates.** Operational account observation still requires sanitized target-host artifact if agent L2 remains CF-blocked.
+**R6C complete for code/safety gates.**
+
+## R6D — L2 auth resolution
+
+Full report: [`Docs/Implementation/r6d_auth_resolution.md`](Implementation/r6d_auth_resolution.md)
+
+| Item | Result |
+|------|--------|
+| Root cause | `POLY_ADDRESS` was funder; must be signer EOA |
+| Fix | Derive signer from `POLYMARKET_PK`; wrap `py-clob-client-v2` read-only |
+| Authenticated REST | open orders / trades / balance / positions **ok** |
+| User stream | connected + authenticated (idle OK); disconnect/reconnect |
+| Readiness | `MUTATIONS_DISABLED` only |
+| `.env` | Unchanged |
+| Tests | 198 passed |
 
 ## R7 readiness verdict
 
 **Do not begin R7** until:
 
-1. Sanitized target-host `live_preflight` evidence reviewed (authenticated reads + user stream + clean reconcile).  
-2. Explicit tiny-live authorization is given.  
-3. Heartbeat supervisor separately approved (still unresolved).  
+1. Explicit tiny-live authorization is given.  
+2. Heartbeat supervisor separately approved (still unresolved).  
+3. Local portfolio hydration before live entry (venue positions already observed).  
 
 **Not authorized:** real submit, cancel, wallet approval, on-chain ops, `mutations_enabled=True`.
 
-**Stop after R6C.**
+**Stop after R6D.**
