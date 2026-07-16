@@ -1,71 +1,31 @@
 # Tyrex_PM
 
-A Polymarket-native trading stack: small **event-driven runtime**, **venue adapters**, **explicit state stores**, **fail-closed risk**, and **structured reporting**. NautilusTrader is **not** the runtime spine.
+Polymarket-focused **event-driven** trading framework (clean reset on `rest_project`).
 
-```
-guru / market data ──► signals ──► strategies ──► RiskEngine ──► OMS ──► CLOB
-                                                       ▲                  │
-                                                       └── state stores ◄─┘
-                                                            (wallet, orders, marks)
-                                                                      │
-                                                                      ▼
-                                                              facts.jsonl  (reporting)
-```
+Strategies receive normalized data, compute signals, emit typed intents, and rely on shared modules for risk, execution, portfolio truth, lifecycle, recovery, scheduling, and observability.
+
+## Status
+
+**R1 complete:** historical implementation archived under [`old/`](old/); active package is a minimal skeleton (`tyrex-pm` 0.3.0).  
+Next: **R2** event-driven core contracts (not started).
+
+NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_architecture_references.md`](Docs/06_architecture_references.md).
 
 ## Quick start
 
 ```bash
-pip install -e .[dev]            # development
-pip install -e .[live]           # add live CLOB deps (py-clob-client-v2, websockets, dotenv)
-
-# shadow run (no real submits, synthetic USDC bootstrap)
-python -m tyrex_pm.runtime.app run --strategy config/strategies/guru_follow.yaml \
-    --scenario shadow_guru --run-name first_shadow
-
-# live run (requires .env with TYREX_PRIVATE_KEY [+ TYREX_FUNDER for proxy wallets])
-tyrex-pm run --strategy config/strategies/guru_follow.yaml \
-    --scenario live_guru --run-name first_live
-
-# minimal end-to-end live attestation (post + cancel one tiny order)
-tyrex-pm live-attest --token-id <numeric_clob_token_id> --size 1 --price 0.01 --side BUY
+pip install -e ".[dev]"
+tyrex-pm version
+tyrex-pm help
+pytest
 ```
 
-Each run writes `var/reporting/runs/<run_id_or_name>/{manifest.json,facts.jsonl,run_summary.json}`.
+Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). The R1 skeleton does not require venue credentials.
 
 ## Documentation
 
-Start at **[`Docs/README.md`](Docs/README.md)**. Highlights:
+Start at [`Docs/00_objective.md`](Docs/00_objective.md). Implementation plan: [`Docs/07_implementation_plan.md`](Docs/07_implementation_plan.md).
 
-| Audience | Read |
-|----------|------|
-| New to the repo | [`Docs/Architecture.md`](Docs/Architecture.md) |
-| Operating a node | [`Docs/OPERATIONS.md`](Docs/OPERATIONS.md) |
-| Changing the code | [`Docs/developer_guide.md`](Docs/developer_guide.md) · [`Docs/modules/README.md`](Docs/modules/README.md) |
-| Tuning configuration | [`Docs/CONFIG_MODEL.md`](Docs/CONFIG_MODEL.md) |
-| Reading `facts.jsonl` | [`Docs/reporting_fact_model.md`](Docs/reporting_fact_model.md) |
-| Live truth & reconcile | [`Docs/LIVE_ARCHITECTURE.md`](Docs/LIVE_ARCHITECTURE.md) |
+## Historical reference
 
-Secrets live in **`.env`** (never commit). See [`.env.example`](.env.example).
-
-## Repository layout
-
-```
-src/tyrex_pm/
-  core/           # events, models, ids, time, errors, reason codes
-  ingestion/      # guru poll, market WS, user WS, historical backfill
-  signals/        # reusable signal building blocks
-  strategies/     # guru_follow (composition only)
-  risk/           # RiskEngine + per-policy modules (fail-closed)
-  execution/      # OMS (single-writer), order builder, lifecycle
-  state/          # wallet/order/market/strategy stores + reconcile
-  runtime/        # app entrypoint, config, supervisors, coordinator
-  reporting/      # fact schema, sinks, summarizer
-  venue/polymarket/   # CLOB bridge, WS, REST, normalizers, auth
-config/
-  risk/default.yaml             # global risk policy
-  runtime/default.yaml          # supervisors, reporting, mode
-  strategies/guru_follow.yaml   # strategy knobs
-  scenarios/                    # shadow_guru, live_guru, live_attest
-tests/                          # pytest suites (268 cases, V2-native)
-Docs/                           # documentation root
-```
+Pre-reset code, tests, configs, and docs live under `old/`. That tree is **not** installed or imported by the active package. See `old/HISTORICAL_ENVIRONMENT.md`.
