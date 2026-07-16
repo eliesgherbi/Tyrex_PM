@@ -20,8 +20,6 @@ FORBIDDEN_IMPORT_PREFIXES = (
 FORBIDDEN_NAME_FRAGMENTS = (
     "OrderManager",
     "PortfolioStore",
-    "RiskGate",
-    "ExecutionPlanner",
     "FillEvent",
     "OrderSubmitted",
 )

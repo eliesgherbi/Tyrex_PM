@@ -8,7 +8,8 @@ Strategies receive normalized data, compute signals, emit typed intents, and rel
 
 **R1 complete:** historical implementation archived under [`old/`](old/) (checkpoint `630bac2`).  
 **R2 complete:** `core/` + `engine/` event contracts and dispatcher (checkpoint `ccccc96`).  
-**R3 complete:** read-only observe path — fixtures (R3A) + public live validation (R3B). Stop before R4 (intents/risk).
+**R3 complete:** read-only observe path (checkpoint `8b8f34f`).  
+**R4 complete:** EnterIntent + fail-closed risk + dry execution plans. Stop before R5 (OMS/portfolio).
 
 NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_architecture_references.md`](Docs/06_architecture_references.md).
 
@@ -22,7 +23,7 @@ tyrex-pm discover-btc-window --which next
 pytest
 ```
 
-Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). Public R3 observe does not require private keys.
+Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). Public observe / dry-plan does not require private keys.
 
 ## Documentation
 

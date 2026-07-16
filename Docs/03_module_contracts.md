@@ -1,72 +1,34 @@
 # 03 — Module contracts
 
-**Phase:** R3 — read-only observe path implemented.
+**Phase:** R4
 
-## `tyrex_pm.application`
+## Strategy
 
-CLI: `version`, `help`, `observe` (fixture|live), `discover-btc-window`.  
-CLI selects mode/paths/slug/duration; trading decisions stay in the host/strategy.
+Protocol: `on_start`, `on_signal`/`apply_transition`, `on_stop`.  
+Must not import adapters, risk, planner, OMS, or portfolio.
 
-## `tyrex_pm.core`
+`ReferenceMomentumStrategy.evaluate` — R3 observe decision (unchanged).  
+Transition policy emits at most one `EnterIntent` per eligible direction change.
 
-R2 contracts plus R3 ingress:
+## Intents (`tyrex_pm.core.intents`)
 
-| Module | Contract |
-|--------|----------|
-| `book_events` | `BookSnapshotReceived`, `BookDeltaReceived`, `TickSizeChanged`, `BookLevelDelta`, `BookSide` |
-| `events` | `BookUpdated` (store-emitted complete view), `ReferencePriceUpdated`, `TimerElapsed` |
-| `facts` / `signals` / `indicators` | Envelopes consumed by R3 builders |
+`EnterIntent`: BUY, `target_notional`, instrument/market, evidence, `semantic_key()`.  
+Exit/Cancel/Flatten: documented for R5 only — not implemented.
 
-## `tyrex_pm.domain.polymarket`
+## Risk (`tyrex_pm.risk`)
 
-| Type | Contract |
-|------|----------|
-| `MarketRequest` | slug / url / condition_id / fixture_path |
-| `BinaryMarket` | condition, YES/NO instruments, timing, tick/min size, status |
-| `make_binary_instruments` | Token → Instrument mapping |
+`RiskContext` (immutable) · `RiskEngine.evaluate` · typed `RiskReason` · ordered policies.  
+Duplicate guard owned solely by risk (`IntentDedupRegistry`).
 
-No BTC/Z-Gap strategy logic in this domain module.
+## Planning (`tyrex_pm.planning`)
 
-## `tyrex_pm.adapters`
+`ExecutionPlanner.plan` → `PLANNED` | `UNPLANNABLE`. Never submits.
 
-Protocols: `MarketDiscovery`, `MarketDataAdapter` (minimal).  
-**May:** connect, parse, validate venue fields, normalize, publish, reconnect, health.  
-**Must not:** momentum, signals, entry/exit, orders, portfolio, write facts directly.
+## Runtime config
 
-| Adapter | Notes |
-|---------|-------|
-| Polymarket normalize | Option B book/delta/tick |
-| Polymarket fixture source | Deterministic publish |
-| Gamma discovery | Public HTTP, User-Agent required |
-| Polymarket market WS | `wss://ws-subscriptions-clob.polymarket.com/ws/market` |
-| Binance normalize | `@trade` prints |
-| Binance trade WS | `wss://stream.binance.com:9443/ws/<symbol>@trade` |
+`ObserveConfig.risk: RiskPlanConfig | None` — when absent, R3 observe-only path.  
+When present: mode, notionals, price/spread/liquidity bounds, no-entry window, dedup lifetime, kill switch.
 
-## `tyrex_pm.market_data`
+## Forbidden in R4
 
-| Owner | Owns |
-|-------|------|
-| `InstrumentRegistry` | Resolved `BinaryMarket` |
-| `MarketStateStore` | Books, init/recovery, tick size |
-| `ReferenceDataStore` | Latest reference observation |
-| `freshness` | Decision-time `FreshnessAssessment` |
-| `executable` | Mid, spread, touch size, VWAP |
-| `DecisionSnapshot` | Immutable evaluation context |
-
-## `tyrex_pm.indicators` / `signals` / `strategies`
-
-- Momentum: \(m_t = P_t / P_{t-L} - 1\) (no interpolation; out-of-order ignored).
-- Directional: `UP|DOWN|FLAT|UNAVAILABLE`.
-- Strategy observe decisions: `WOULD_ENTER_UP|WOULD_ENTER_DOWN|HOLD|SKIP` (no intents).
-
-## `tyrex_pm.reporting`
-
-`JsonlFactSink` — append-only UTF-8 JSONL, schema_version=1, Decimal/datetime/enum/ID serialization, flush on append, failures propagate.
-
-## `tyrex_pm.runtime`
-
-`ObserveConfig` (validated thresholds, fingerprint), `ObserveHost` (fixture composition), `run_live_observe` (same host + live adapters).
-
-## Forbidden in R3
-
-Risk authorization, execution planning, OMS, orders, fills, portfolio, Z-Gap, PTB/Chainlink, imports from `old/`, NautilusTrader.
+OMS · orders · fills · portfolio accounting · private Polymarket endpoints · Z-Gap · `old/` · NautilusTrader.

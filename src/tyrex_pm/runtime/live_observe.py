@@ -1,4 +1,4 @@
-"""Live public read-only observe runner (R3B)."""
+"""Live public read-only observe / dry-plan runner (R3B/R4 — no OMS)."""
 
 from __future__ import annotations
 
@@ -24,11 +24,16 @@ async def run_live_observe(config: ObserveConfig) -> ObserveRunResult:
     host._init_flags()
     host._emit(
         "runtime_start",
-        {"mode": config.mode.value, "config_fingerprint": config.fingerprint()},
+        {
+            "mode": config.mode.value,
+            "runtime_mode": host._runtime_mode().value,
+            "config_fingerprint": config.fingerprint(),
+        },
     )
 
     market: BinaryMarket = await resolve_market_for_config(config)
     host.registry.set_market(market)
+    host._start_strategy(market)
     host._emit(
         "market_resolved",
         {
@@ -84,11 +89,15 @@ async def run_live_observe(config: ObserveConfig) -> ObserveRunResult:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        host.strategy.on_stop("NORMAL")
         host._emit(
             "runtime_stop",
             {
                 "decision_count": len(host.decisions),
                 "signal_count": len(host.signals),
+                "intent_count": len(host.intents),
+                "risk_count": len(host.risk_decisions),
+                "plan_count": len(host.plans),
             },
         )
         host.sink.flush()
@@ -100,6 +109,9 @@ async def run_live_observe(config: ObserveConfig) -> ObserveRunResult:
         market=market,
         decisions=list(host.decisions),
         signals=list(host.signals),
+        intents=list(host.intents),
+        risk_decisions=list(host.risk_decisions),
+        plans=list(host.plans),
         facts_path=host.sink.path,
         fact_count=host.sink.count,
     )

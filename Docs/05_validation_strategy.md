@@ -1,51 +1,23 @@
 # 05 — Validation strategy
 
-**Phase:** R3 observe-only path implemented. Intents/risk/OMS begin R4+.
+**Phase:** R4 — observe decisions + entry intents + dry risk/plan.
 
 ## Name
 
-`ReferenceMomentumStrategy` (kind: `framework_validation`)
+`ReferenceMomentumStrategy` (`framework_validation`)
 
-## Purpose
+## R3 path (unchanged)
 
-Prove framework composition. Not profitability. Not Z-Gap-in-disguise.
+Momentum, directional signal, observe decisions (`WOULD_ENTER_*` / `HOLD` / `SKIP`).
 
-## R3 behavior (implemented)
+## R4 additions
 
-1. Resolve one configured binary market (fixture JSON or Gamma slug/URL).
-2. Consume YES/NO books + Binance BTCUSDT public trades.
-3. Build immutable `DecisionSnapshot` with freshness assessments.
-4. Indicators: short-horizon momentum \(m_t = P_t/P_{t-L}-1\), mid, spread.
-5. Emit `DirectionalSignal`: `UP` / `DOWN` / `FLAT` / `UNAVAILABLE`.
-6. Emit observe decision: `WOULD_ENTER_UP` / `WOULD_ENTER_DOWN` / `HOLD` / `SKIP`.
-7. Append facts to JSONL (`FactEnvelope`, schema_version=1).
+1. Transition policy → at most one `EnterIntent` per eligible direction change.
+2. Risk evaluation (fail-closed, explicit config).
+3. Dry execution plan (limit buy at ask) — not an order.
 
-**No** enter/exit intents, risk gate, OMS, orders, fills, or portfolio in R3.
-
-## Signal semantics
-
-| Direction | Meaning |
-|-----------|---------|
-| UP | Momentum ≥ threshold; books + reference fresh; spreads OK |
-| DOWN | Momentum ≤ −threshold; same validity |
-| FLAT | Valid data; \|momentum\| < threshold |
-| UNAVAILABLE | Uninitialized/stale/future/insufficient history/one-sided book/wide spread |
-
-Strength (optional): \(\min(1, (|m|-θ)/θ)\) when directional.
-
-## Observe-decision semantics
-
-| Decision | From signal |
-|----------|-------------|
-| WOULD_ENTER_UP | UP |
-| WOULD_ENTER_DOWN | DOWN |
-| HOLD | FLAT |
-| SKIP | UNAVAILABLE |
+No exit/flatten until R5 has positions. No OMS submit.
 
 ## Out of scope
 
-PTB · Chainlink attestation · EWMA σ · binary fair value · `fd` fee edge · paired-leg saga · survival/thesis frameworks · intents.
-
-## Later callbacks (R4+)
-
-`on_start`, `on_signal`, `on_timer`, `on_execution_event`, `on_stop` — only those with consumers; intents appear in R4.
+PTB · Chainlink · Z-Gap edge · live private trading · portfolio PnL.

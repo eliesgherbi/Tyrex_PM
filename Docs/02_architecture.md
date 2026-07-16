@@ -1,80 +1,52 @@
 # 02 — Architecture and ownership
 
-**Phase:** R3 implemented (read-only observe path)  
-**Engine:** Minimal Tyrex in-process event-driven engine (no NautilusTrader)  
-**R2 checkpoint:** `ccccc969bb4877ae97e6e56c656b839739034425`
+**Phase:** R4 (observe + intents + risk + dry plans)  
+**Engine:** Minimal Tyrex in-process dispatcher (no NautilusTrader)  
+**R3 checkpoint:** `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9`
 
-## Implemented flow (R3)
+## Flow
 
 ```text
-MarketDiscovery (fixture | Gamma)
-    → BinaryMarket → InstrumentRegistry
-Polymarket adapter / fixture
-    → BookSnapshotReceived | BookDeltaReceived | TickSizeChanged
-    → MarketStateStore (authoritative book)
-    → BookUpdated (complete reconstructed view)
-Binance trade adapter / fixture
-    → ReferencePriceUpdated
-    → ReferenceDataStore
-ObserveHost (on reference update)
-    → DecisionSnapshot (immutable)
-    → FreshnessAssessment (derived, not latched)
-    → ShortHorizonMomentum + mid/spread views
-    → DirectionalSignal
-    → ReferenceMomentumStrategy (observe decision)
-    → FactEnvelope → JSONL sink
+Adapters → stores → DecisionSnapshot → momentum/signal
+  → ObserveDecision (R3, unchanged math)
+  → EnterIntent (transition policy)
+  → RiskEngine (fail-closed policies + dedup)
+  → ExecutionPlanner (dry plan only)
+  → Facts JSONL
 ```
 
-## Packages present
+No OMS submit. `LIVE_TINY` denied until R5 portfolio/OMS exist.
+
+## Packages
 
 | Package | Role |
 |---------|------|
-| `tyrex_pm.application` | CLI (`version`, `observe`, `discover-btc-window`) |
-| `tyrex_pm.core` | Ids, clock, events, snapshots, envelopes, book ingress events |
-| `tyrex_pm.engine` | `EventDispatcher` |
-| `tyrex_pm.domain.polymarket` | `BinaryMarket`, `MarketRequest` |
-| `tyrex_pm.adapters.polymarket` | Normalize + fixture + Gamma discovery + market WS |
-| `tyrex_pm.adapters.binance` | Normalize + fixture + public trade WS |
-| `tyrex_pm.market_data` | Registry, book/reference stores, freshness, executable views, snapshot |
-| `tyrex_pm.indicators` | Short-horizon momentum (stateful) |
-| `tyrex_pm.signals` | Directional signal builder |
-| `tyrex_pm.strategies.framework_validation` | Observe-only `ReferenceMomentumStrategy` |
-| `tyrex_pm.reporting` | JSONL fact sink |
-| `tyrex_pm.runtime` | Config + observe composition root + live runner |
-| `tyrex_pm.operations` | BTC Up/Down window slug helpers (not a second runtime) |
-
-**Merged:** BTC window selection lives under `operations` re-exporting discovery helpers rather than a separate package tree. No empty R4–R8 placeholders.
+| `core` | Ids, events, modes, `EnterIntent` |
+| `engine` | Dispatcher |
+| `adapters` / `market_data` / `indicators` / `signals` | R3 (unchanged math) |
+| `strategies` | Protocol + `ReferenceMomentumStrategy` transitions |
+| `risk` | Policies, engine, dedup registry |
+| `planning` | Dry `ExecutionPlan` |
+| `runtime` | Single observe host |
+| `reporting` | JSONL facts |
 
 ## State ownership
 
-| State | Authoritative owner |
-|-------|---------------------|
-| Resolved market / YES-NO tokens | `InstrumentRegistry` |
-| Reconstructed books | `MarketStateStore` (Option B) |
-| Latest Binance reference | `ReferenceDataStore` |
-| Momentum rolling buffer | `ShortHorizonMomentum` |
-| Freshness | Derived at decision time via `assess_freshness` |
-| Facts | `JsonlFactSink` |
+| State | Owner |
+|-------|-------|
+| Books / reference | MarketStateStore / ReferenceDataStore |
+| Momentum buffer | ShortHorizonMomentum |
+| Last signal direction / epoch | Strategy (in-memory; persist R5) |
+| Intent semantic keys | `IntentDedupRegistry` (risk) |
+| Kill switch | Host (fed into immutable RiskContext) |
+| Orders / positions | **Not in R4** |
 
-The dispatcher transports events; it does **not** own market state.
+## Modes
 
-## Book protocol choice (Option B)
+| Mode | Intent | Risk | Plan | OMS |
+|------|--------|------|------|-----|
+| OBSERVE | Hypothetical | Dry | Optional dry | No |
+| SHADOW | Yes | Yes | Yes (dry) | No — R5 |
+| LIVE_TINY | Denied | Fail-closed | No | No |
 
-Official Polymarket CLOB market channel publishes:
-
-- `book` — full snapshot
-- `price_change` — level deltas (`size` `"0"` removes)
-- `tick_size_change` — tick change (store invalidates until new snapshot)
-
-Therefore ingress events are snapshot/delta/tick; the **store** reconstructs. Adapters do not present a silently mutated book as a stateless snapshot.
-
-Legacy `old/.../market_ws.py` is a stub and is not imported.
-
-## Dependency direction
-
-`application → runtime → strategies/signals/indicators/market_data/adapters → core`  
-`engine` may import `core`. Nothing imports `old/`. No NautilusTrader.
-
-## Numeric policy
-
-Trading prices/quantities use `Decimal`. Venue tick rounding deferred past R3.
+Mode does not alter indicators or signal mathematics.
