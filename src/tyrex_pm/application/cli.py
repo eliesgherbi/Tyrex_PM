@@ -43,6 +43,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resolve BTC Up/Down 5m slug (live mode helper)",
     )
 
+    shadow = sub.add_parser(
+        "shadow",
+        help="Run R5 ShadowOMS path (public data only; no real orders)",
+    )
+    shadow.add_argument("--config", type=Path, required=True, help="Observe+shadow JSON config")
+    shadow.add_argument("--event-slug", type=str, help="Polymarket event slug")
+    shadow.add_argument("--duration-s", type=float, help="Live runtime seconds")
+    shadow.add_argument(
+        "--btc-window",
+        choices=["current", "next"],
+        help="Resolve BTC Up/Down 5m slug",
+    )
+    shadow.add_argument("--output", type=Path, help="Facts JSONL output path")
+
     discover = sub.add_parser(
         "discover-btc-window",
         help="Print current/next BTC Up/Down slug (operations helper; no second runtime)",
@@ -124,7 +138,31 @@ def _build_observe_config(args: argparse.Namespace) -> ObserveConfig:
             condition_id=None,
             evaluate_on_reference=cfg.evaluate_on_reference,
             momentum_min_samples=cfg.momentum_min_samples,
+            risk=cfg.risk,
+            shadow=cfg.shadow,
         )
+    return cfg
+
+
+def _build_shadow_config(args: argparse.Namespace) -> ObserveConfig:
+    import json
+
+    raw = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    if args.output:
+        raw["output_path"] = str(args.output)
+    if args.duration_s is not None:
+        raw["runtime_duration_s"] = args.duration_s
+    if args.event_slug:
+        raw["event_slug"] = args.event_slug
+    elif args.btc_window:
+        raw["event_slug"] = (
+            current_btc_updown_slug()
+            if args.btc_window == "current"
+            else next_btc_updown_slug()
+        )
+    cfg = observe_config_from_mapping(raw)
+    if cfg.shadow is None or not cfg.shadow.enable_oms:
+        raise SystemExit("shadow command requires shadow.enable_oms=true in config")
     return cfg
 
 
@@ -166,6 +204,34 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"live observe complete decisions={len(result.decisions)} "
             f"facts={result.fact_count} path={result.facts_path}"
+        )
+        return 0
+
+    if args.command == "shadow":
+        cfg = _build_shadow_config(args)
+        if cfg.mode is SourceMode.FIXTURE:
+            from tyrex_pm.runtime.shadow_host import ShadowHost
+
+            clock = FakeClock(_wall=datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc))
+            host = ShadowHost(cfg, clock=clock)
+            try:
+                result = host.run_fixture()
+            finally:
+                host.close()
+            print(
+                f"fixture shadow complete decisions={len(result.decisions)} "
+                f"intents={len(result.intents)} commands={len(host.commands)} "
+                f"lifecycle={host.lifecycle.state.value} facts={result.fact_count} "
+                f"path={result.facts_path}"
+            )
+            return 0
+        from tyrex_pm.runtime.live_shadow import run_live_shadow
+
+        result = asyncio.run(run_live_shadow(cfg))
+        print(
+            f"live shadow complete decisions={len(result.decisions)} "
+            f"intents={len(result.intents)} facts={result.fact_count} "
+            f"path={result.facts_path}"
         )
         return 0
 

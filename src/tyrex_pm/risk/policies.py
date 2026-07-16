@@ -5,6 +5,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Protocol
 
+from typing import Any
+
 from tyrex_pm.core.intents import EnterIntent, IntentKind
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.domain.polymarket.market import MarketStatus
@@ -18,20 +20,34 @@ from tyrex_pm.risk.reasons import RiskReason
 class RiskPolicy(Protocol):
     policy_id: str
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult: ...
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult: ...
+
+
+def _is_entry(intent: Any) -> bool:
+    return getattr(intent, "kind", None) is IntentKind.ENTER
+
+
+def _is_risk_reducing(intent: Any) -> bool:
+    return getattr(intent, "kind", None) in {IntentKind.EXIT, IntentKind.FLATTEN, IntentKind.CANCEL}
 
 
 class SchemaValidityPolicy:
     policy_id = "schema_validity"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
-        if intent.kind is not IntentKind.ENTER:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        kind = getattr(intent, "kind", None)
+        if kind not in {
+            IntentKind.ENTER,
+            IntentKind.EXIT,
+            IntentKind.FLATTEN,
+            IntentKind.CANCEL,
+        }:
             return PolicyResult(
                 policy_id=self.policy_id,
                 approved=False,
                 reason_code=RiskReason.UNSUPPORTED_INTENT,
             )
-        if intent.target_notional <= 0:
+        if _is_entry(intent) and intent.target_notional <= 0:
             return PolicyResult(
                 policy_id=self.policy_id,
                 approved=False,
@@ -67,7 +83,10 @@ class RuntimeModePolicy:
                 policy_id=self.policy_id,
                 approved=True,
                 reason_code=RiskReason.APPROVED,
-                evidence={"mode": context.mode.value, "note": "dry plan only — no OMS"},
+                evidence={
+                    "mode": context.mode.value,
+                    "note": "shadow mode — OMS may be ShadowOMS or dry-only",
+                },
             )
         return PolicyResult(
             policy_id=self.policy_id,
@@ -80,17 +99,19 @@ class RuntimeModePolicy:
 class KillSwitchPolicy:
     policy_id = "kill_switch"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
-        if context.risk_config.kill_switch_active:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        if context.risk_config.kill_switch_active and _is_entry(intent):
             return PolicyResult(
                 policy_id=self.policy_id,
                 approved=False,
                 reason_code=RiskReason.KILL_SWITCH_ACTIVE,
             )
+        # Kill switch denies entries but permits risk-reducing cancel/flatten/exit.
         return PolicyResult(
             policy_id=self.policy_id,
             approved=True,
             reason_code=RiskReason.APPROVED,
+            evidence={"kill_switch": context.risk_config.kill_switch_active},
         )
 
 
@@ -121,7 +142,14 @@ class DuplicateIntentPolicy:
 class InstrumentAllowlistPolicy:
     policy_id = "instrument_allowlist"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        if getattr(intent, "kind", None) is IntentKind.CANCEL:
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=True,
+                reason_code=RiskReason.APPROVED,
+                evidence={"skipped": "cancel"},
+            )
         market = context.market
         if intent.market_id != market.market_id:
             return PolicyResult(
@@ -149,16 +177,16 @@ class InstrumentAllowlistPolicy:
 class MarketTimingPolicy:
     policy_id = "market_timing"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
         market = context.market
-        if market.status is MarketStatus.CLOSED:
+        if market.status is MarketStatus.CLOSED and _is_entry(intent):
             return PolicyResult(
                 policy_id=self.policy_id,
                 approved=False,
                 reason_code=RiskReason.MARKET_NOT_ACTIVE,
                 evidence={"status": market.status.value},
             )
-        if market.event_end is not None:
+        if _is_entry(intent) and market.event_end is not None:
             boundary = market.event_end - context.risk_config.no_entry_before_close
             if context.now >= boundary:
                 return PolicyResult(
@@ -181,13 +209,15 @@ class MarketTimingPolicy:
 class DataReadinessPolicy:
     policy_id = "data_readiness"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
         snap = context.snapshot
-        for label, fresh in (
-            ("yes", snap.yes_freshness),
-            ("no", snap.no_freshness),
-            ("reference", snap.reference_freshness),
-        ):
+        # Emergency flatten: require instrument book init, allow stale reference.
+        feeds = (("yes", snap.yes_freshness), ("no", snap.no_freshness))
+        if _is_entry(intent):
+            feeds = feeds + (("reference", snap.reference_freshness),)
+        elif getattr(intent, "kind", None) is IntentKind.FLATTEN:
+            feeds = ()  # book recovery checked below
+        for label, fresh in feeds:
             if fresh.reason_code is FreshnessReason.UNINITIALIZED:
                 return PolicyResult(
                     policy_id=self.policy_id,
@@ -252,7 +282,14 @@ class DataReadinessPolicy:
 class PriceSpreadLiquidityPolicy:
     policy_id = "price_spread_liquidity"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        if not _is_entry(intent):
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=True,
+                reason_code=RiskReason.APPROVED,
+                evidence={"skipped": "non_entry"},
+            )
         try:
             quote = context.quote_for_instrument(intent.instrument_id.value)
         except KeyError:
@@ -337,7 +374,14 @@ class PriceSpreadLiquidityPolicy:
 class NotionalCapPolicy:
     policy_id = "notional_cap"
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> PolicyResult:
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        if not _is_entry(intent):
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=True,
+                reason_code=RiskReason.APPROVED,
+                evidence={"skipped": "non_entry"},
+            )
         if intent.target_notional <= 0:
             return PolicyResult(
                 policy_id=self.policy_id,
@@ -361,6 +405,80 @@ class NotionalCapPolicy:
         )
 
 
+class PortfolioExposurePolicy:
+    """Portfolio-aware entry/exit constraints. Missing portfolio fails closed."""
+
+    policy_id = "portfolio_exposure"
+
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        view = context.portfolio
+        if view is None or not view.available:
+            if _is_entry(intent) or _is_risk_reducing(intent):
+                # R4 dry path has no portfolio view — allow only when exposure_available
+                # is explicitly False and portfolio is None (backward compatible).
+                if context.portfolio is None and not context.exposure_available:
+                    return PolicyResult(
+                        policy_id=self.policy_id,
+                        approved=True,
+                        reason_code=RiskReason.APPROVED,
+                        evidence={"note": "r4_dry_no_portfolio"},
+                    )
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.PORTFOLIO_UNAVAILABLE,
+                )
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=True,
+                reason_code=RiskReason.APPROVED,
+            )
+
+        if _is_entry(intent):
+            if view.has_pending_order:
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.PENDING_ORDER_BLOCKS_ENTRY,
+                )
+            if view.lifecycle_state in {"ACTIVE", "ENTRY_PENDING", "EXIT_PENDING"}:
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.ACTIVE_POSITION_BLOCKS_ENTRY,
+                    evidence={"lifecycle": view.lifecycle_state},
+                )
+            projected = view.total_cost_notional + intent.target_notional
+            if projected > view.max_total_exposure:
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.POSITION_LIMIT_EXCEEDED,
+                    evidence={"projected": str(projected)},
+                )
+            if intent.target_notional > view.max_position_notional:
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.POSITION_LIMIT_EXCEEDED,
+                )
+
+        if getattr(intent, "kind", None) in {IntentKind.EXIT, IntentKind.FLATTEN}:
+            if view.net_quantity <= 0:
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.EXIT_EXCEEDS_POSITION,
+                )
+
+        return PolicyResult(
+            policy_id=self.policy_id,
+            approved=True,
+            reason_code=RiskReason.APPROVED,
+            evidence={"lifecycle": view.lifecycle_state, "qty": str(view.net_quantity)},
+        )
+
+
 DEFAULT_POLICY_ORDER: tuple[RiskPolicy, ...] = (
     SchemaValidityPolicy(),
     RuntimeModePolicy(),
@@ -371,4 +489,5 @@ DEFAULT_POLICY_ORDER: tuple[RiskPolicy, ...] = (
     DataReadinessPolicy(),
     PriceSpreadLiquidityPolicy(),
     NotionalCapPolicy(),
+    PortfolioExposurePolicy(),
 )

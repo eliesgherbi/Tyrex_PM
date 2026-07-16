@@ -1,52 +1,67 @@
 # 02 — Architecture and ownership
 
-**Phase:** R4 (observe + intents + risk + dry plans)  
+**Phase:** R5 (shadow OMS + portfolio + lifecycle)  
 **Engine:** Minimal Tyrex in-process dispatcher (no NautilusTrader)  
-**R3 checkpoint:** `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9`
+**R4 checkpoint:** `9813001465db1fd188a4e00a3c82a24fa2cb4292`
 
 ## Flow
 
 ```text
 Adapters → stores → DecisionSnapshot → momentum/signal
-  → ObserveDecision (R3, unchanged math)
-  → EnterIntent (transition policy)
-  → RiskEngine (fail-closed policies + dedup)
-  → ExecutionPlanner (dry plan only)
-  → Facts JSONL
+  → ObserveDecision
+  → Enter/Exit/Flatten intent (lifecycle-aware)
+  → RiskEngine (entry vs exit asymmetry + portfolio view)
+  → ExecutionPlanner / ExitPlanner
+  → SubmitOrderCommand / CancelOrderCommand
+  → ShadowOMS → execution events
+  → FillLedger + OrderStore → Portfolio → TradeLifecycle
+  → Facts + atomic snapshot persistence
 ```
 
-No OMS submit. `LIVE_TINY` denied until R5 portfolio/OMS exist.
+R4 dry path remains when `shadow.enable_oms` is false/absent (`ObserveHost` only).
 
 ## Packages
 
 | Package | Role |
 |---------|------|
-| `core` | Ids, events, modes, `EnterIntent` |
+| `core` | Ids, events, modes, intents, commands, execution events |
 | `engine` | Dispatcher |
 | `adapters` / `market_data` / `indicators` / `signals` | R3 (unchanged math) |
-| `strategies` | Protocol + `ReferenceMomentumStrategy` transitions |
-| `risk` | Policies, engine, dedup registry |
-| `planning` | Dry `ExecutionPlan` |
-| `runtime` | Single observe host |
+| `strategies` | Lifecycle-aware `ReferenceMomentumStrategy` |
+| `risk` | Policies including portfolio exposure |
+| `planning` | Entry + exit dry planners |
+| `execution` | `OMS` protocol, `OrderStore`, `FillLedger`, `ShadowOMS` |
+| `portfolio` | Long-only positions from fills |
+| `lifecycle` | Host-owned trade lifecycle |
+| `persistence` | Atomic JSON snapshot |
+| `runtime` | `ObserveHost` + `ShadowHost` + live runners |
 | `reporting` | JSONL facts |
 
-## State ownership
+## State ownership (non-competing)
 
-| State | Owner |
-|-------|-------|
-| Books / reference | MarketStateStore / ReferenceDataStore |
-| Momentum buffer | ShortHorizonMomentum |
-| Last signal direction / epoch | Strategy (in-memory; persist R5) |
-| Intent semantic keys | `IntentDedupRegistry` (risk) |
-| Kill switch | Host (fed into immutable RiskContext) |
-| Orders / positions | **Not in R4** |
+| Question | Owner |
+|----------|-------|
+| Which fills happened? | `FillLedger` |
+| What is the order’s state? | `OrderStore` |
+| What do we own? | `Portfolio` |
+| Trade eligibility phase? | `TradeLifecycle` (host) |
+| Intent semantic keys | `IntentDedupRegistry` |
+| Books / reference | Market/reference stores |
+
+Facts observe authoritative state; they never own it.
 
 ## Modes
 
 | Mode | Intent | Risk | Plan | OMS |
 |------|--------|------|------|-----|
 | OBSERVE | Hypothetical | Dry | Optional dry | No |
-| SHADOW | Yes | Yes | Yes (dry) | No — R5 |
-| LIVE_TINY | Denied | Fail-closed | No | No |
+| SHADOW | Yes | Yes | Yes | ShadowOMS when enabled |
+| LIVE_TINY | Denied until R6/R7 | Fail-closed | No | No |
 
-Mode does not alter indicators or signal mathematics.
+## Dispatcher priorities (execution path)
+
+1. Order store / fill ledger (~100)  
+2. Portfolio (~90)  
+3. Lifecycle (~80)  
+4. Strategy feedback via host evaluate  
+5. Reporting (facts)

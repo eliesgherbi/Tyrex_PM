@@ -1,7 +1,7 @@
-"""Immutable trading intents (R4: EnterIntent only).
+"""Immutable trading intents.
 
-ExitIntent / CancelIntent / FlattenIntent are deferred to R5 when orders,
-positions, and execution feedback exist.
+R4: EnterIntent.
+R5: ExitIntent, CancelIntent, FlattenIntent (consumers exist).
 """
 
 from __future__ import annotations
@@ -14,17 +14,21 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from tyrex_pm.core.clock import require_utc
-from tyrex_pm.core.ids import CorrelationId, EventId, InstrumentId, MarketId, StrategyId
+from tyrex_pm.core.ids import CorrelationId, EventId, InstrumentId, MarketId, OrderId, StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
 from tyrex_pm.core.numerics import as_decimal, require_non_negative
 
 
 class IntentKind(str, Enum):
     ENTER = "ENTER"
+    EXIT = "EXIT"
+    CANCEL = "CANCEL"
+    FLATTEN = "FLATTEN"
 
 
 class OrderSide(str, Enum):
     BUY = "BUY"
+    SELL = "SELL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +80,7 @@ class EnterIntent:
                 as_decimal(self.max_price, field_name="max_price"),
             )
         if self.side is not OrderSide.BUY:
-            raise ValueError("R4 EnterIntent supports BUY only")
+            raise ValueError("EnterIntent supports BUY only")
         if self.kind is not IntentKind.ENTER:
             raise ValueError("EnterIntent.kind must be ENTER")
         if self.decision_epoch < 0:
@@ -86,7 +90,6 @@ class EnterIntent:
             raise ValueError("reason_code must be non-empty")
 
     def semantic_key(self) -> str:
-        """Stable deduplication key (not the random intent_id)."""
         return "|".join(
             (
                 self.strategy_id.value,
@@ -95,5 +98,105 @@ class EnterIntent:
                 self.kind.value,
                 str(self.decision_epoch),
                 self.outcome.value,
+            )
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExitIntent:
+    """Request to flatten the active position (target-flat for R5 validation)."""
+
+    intent_id: IntentId
+    strategy_id: StrategyId
+    instrument_id: InstrumentId
+    market_id: MarketId
+    created_at: datetime
+    correlation_id: CorrelationId
+    causation_id: EventId | None
+    reason_code: str
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    target_flat: bool = True
+    min_price: Decimal | None = None
+    kind: IntentKind = IntentKind.EXIT
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        if self.kind is not IntentKind.EXIT:
+            raise ValueError("ExitIntent.kind must be EXIT")
+        if not self.target_flat:
+            raise ValueError("R5 ExitIntent supports target_flat=True only")
+        if not self.reason_code.strip():
+            raise ValueError("reason_code must be non-empty")
+        if self.min_price is not None:
+            object.__setattr__(self, "min_price", as_decimal(self.min_price, field_name="min_price"))
+        object.__setattr__(self, "evidence", dict(self.evidence))
+
+    def semantic_key(self) -> str:
+        return "|".join(
+            (
+                self.strategy_id.value,
+                self.market_id.value,
+                self.instrument_id.value,
+                self.kind.value,
+                "FLAT",
+            )
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class CancelIntent:
+    intent_id: IntentId
+    strategy_id: StrategyId
+    order_id: OrderId
+    created_at: datetime
+    correlation_id: CorrelationId
+    causation_id: EventId | None
+    reason_code: str
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    kind: IntentKind = IntentKind.CANCEL
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        if self.kind is not IntentKind.CANCEL:
+            raise ValueError("CancelIntent.kind must be CANCEL")
+        if not self.reason_code.strip():
+            raise ValueError("reason_code must be non-empty")
+        object.__setattr__(self, "evidence", dict(self.evidence))
+
+    def semantic_key(self) -> str:
+        return f"{self.strategy_id.value}|CANCEL|{self.order_id.value}"
+
+
+@dataclass(frozen=True, kw_only=True)
+class FlattenIntent:
+    """Urgent request to reach zero position."""
+
+    intent_id: IntentId
+    strategy_id: StrategyId
+    instrument_id: InstrumentId
+    market_id: MarketId
+    created_at: datetime
+    correlation_id: CorrelationId
+    causation_id: EventId | None
+    reason_code: str
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    urgency: str = "URGENT"
+    kind: IntentKind = IntentKind.FLATTEN
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        if self.kind is not IntentKind.FLATTEN:
+            raise ValueError("FlattenIntent.kind must be FLATTEN")
+        if not self.reason_code.strip():
+            raise ValueError("reason_code must be non-empty")
+        object.__setattr__(self, "evidence", dict(self.evidence))
+
+    def semantic_key(self) -> str:
+        return "|".join(
+            (
+                self.strategy_id.value,
+                self.market_id.value,
+                self.instrument_id.value,
+                self.kind.value,
             )
         )

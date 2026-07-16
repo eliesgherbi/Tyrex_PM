@@ -6,10 +6,8 @@ Strategies receive normalized data, compute signals, emit typed intents, and rel
 
 ## Status
 
-**R1 complete:** historical implementation archived under [`old/`](old/) (checkpoint `630bac2`).  
-**R2 complete:** `core/` + `engine/` event contracts and dispatcher (checkpoint `ccccc96`).  
-**R3 complete:** read-only observe path (checkpoint `8b8f34f`).  
-**R4 complete:** EnterIntent + fail-closed risk + dry execution plans. Stop before R5 (OMS/portfolio).
+**R1–R4 complete** (observe → intent → risk → dry plan).  
+**R5 complete:** ShadowOMS + order/fill/portfolio lifecycle + exits + persistence. Stop before R6 (live venue OMS).
 
 NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_architecture_references.md`](Docs/06_architecture_references.md).
 
@@ -19,15 +17,19 @@ NautilusTrader is **not** a dependency or engine candidate. See [`Docs/06_archit
 pip install -e ".[dev]"
 tyrex-pm version
 tyrex-pm observe --config config/observe_fixture_r3.json
+tyrex-pm shadow --config config/observe_shadow_r5.json --btc-window next
 tyrex-pm discover-btc-window --which next
 pytest
 ```
 
-Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). Public observe / dry-plan does not require private keys.
+`observe` = R3/R4 dry path (no OMS).  
+`shadow` = R5 ShadowOMS on public market data (no real orders).
+
+Secrets: copy [`.env.example`](.env.example) to `.env` (never commit `.env`). Public observe/shadow does not require private keys.
 
 ## Documentation
 
-Start at [`Docs/00_objective.md`](Docs/00_objective.md). Implementation plan: [`Docs/07_implementation_plan.md`](Docs/07_implementation_plan.md).
+Start at [`Docs/00_objective.md`](Docs/00_objective.md). Implementation plan: [`Docs/07_implementation_plan.md`](Docs/07_implementation_plan.md). Validation: [`Docs/08_validation_report.md`](Docs/08_validation_report.md).
 
 ## Historical reference
 

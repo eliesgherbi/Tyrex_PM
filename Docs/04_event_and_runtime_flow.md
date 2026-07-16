@@ -1,35 +1,48 @@
 # 04 — Event and runtime flow
 
-**Phase:** R4
+**Phase:** R5
 
 ## Chain
 
 ```text
-ReferencePriceUpdated
+Market/reference event
   → DirectionalSignal
-  → ObserveDecision          (R3)
-  → EnterIntent              (R4 transition)
-  → RiskDecision             (R4)
-  → ExecutionPlan | UNPLANNABLE   (R4 dry)
+  → ObserveDecision
+  → Enter|Exit|Flatten intent
+  → RiskDecision
+  → ExecutionPlan
+  → SubmitOrderCommand
+  → OrderSubmitted / OrderAccepted / fills / cancels
+  → Portfolio + TradeLifecycle
+  → (optional) exit intent → shadow exit → FLAT
 ```
 
-All retain `correlation_id`. Facts record compact IDs + reason codes.
+All retain `correlation_id`. Recovery facts use a new correlation chain while referencing restored entity IDs.
 
 ## Intent vs plan vs order
 
-| Object | Meaning in R4 |
-|--------|----------------|
-| ObserveDecision | Would-enter / hold / skip (no economic request) |
-| EnterIntent | Strategy request for notional |
+| Object | Meaning |
+|--------|---------|
+| ObserveDecision | Would-enter / hold / skip |
+| Intent | Strategy economic request |
 | RiskDecision | Permission |
-| ExecutionPlan | Dry future OMS input |
-| Order | **Not created** |
+| ExecutionPlan | Sized limit instruction |
+| SubmitOrderCommand | Immutable OMS input |
+| Order / Fill | Authoritative execution state |
 
-## Modes
+## Hosts
 
-`OBSERVE` / `SHADOW` evaluate the chain without submission.  
-`LIVE_TINY` → `LIVE_NOT_SUPPORTED` before any plan.
+| Host | When |
+|------|------|
+| `ObserveHost` | R3/R4 dry (no OMS) |
+| `ShadowHost` | R5 when `shadow.enable_oms` |
+| `run_live_shadow` | Public live data + ShadowOMS |
 
-## One host
+## Restart sequence
 
-`ObserveHost` (+ `run_live_observe`) remains the only composition root.
+```text
+Load config → load/validate snapshot → restore orders/fills/portfolio/lifecycle/dedup/strategy
+→ start reporting → start adapters → wait for fresh books → resume evaluation
+```
+
+No new entry before recovery completes and market data is ready.

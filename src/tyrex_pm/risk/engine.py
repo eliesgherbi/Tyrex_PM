@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tyrex_pm.core.intents import EnterIntent
+from typing import Any
+
 from tyrex_pm.risk.context import RiskContext
 from tyrex_pm.risk.decision import PolicyResult, RiskDecision, new_decision_id
 from tyrex_pm.risk.policies import DEFAULT_POLICY_ORDER, RiskPolicy
@@ -13,7 +14,7 @@ class RiskEngine:
     def __init__(self, policies: tuple[RiskPolicy, ...] | None = None) -> None:
         self._policies = policies or DEFAULT_POLICY_ORDER
 
-    def evaluate(self, intent: EnterIntent, context: RiskContext) -> RiskDecision:
+    def evaluate(self, intent: Any, context: RiskContext) -> RiskDecision:
         results: list[PolicyResult] = []
         try:
             for policy in self._policies:
@@ -43,7 +44,7 @@ class RiskEngine:
 
     def _decision(
         self,
-        intent: EnterIntent,
+        intent: Any,
         context: RiskContext,
         results: list[PolicyResult],
         *,

@@ -1,4 +1,4 @@
-"""R4 architecture: no OMS/orders/fills/portfolio; no old/nautilus."""
+"""R4 architecture: dry path remains free of live trading; no old/nautilus."""
 
 from __future__ import annotations
 
@@ -8,12 +8,6 @@ from pathlib import Path
 import tyrex_pm
 
 PKG = Path(tyrex_pm.__file__).resolve().parent
-
-
-def test_no_oms_order_fill_portfolio_packages() -> None:
-    names = {p.name for p in PKG.rglob("*") if p.is_dir()}
-    for banned in ("oms", "portfolio", "orders", "fills"):
-        assert banned not in names
 
 
 def test_no_old_nautilus_imports() -> None:
@@ -36,8 +30,8 @@ def test_strategy_does_not_import_risk_or_adapters() -> None:
     assert "tyrex_pm.planning" not in strat
 
 
-def test_exit_intents_not_implemented() -> None:
-    text = (PKG / "core" / "intents.py").read_text(encoding="utf-8")
-    assert "class ExitIntent" not in text
-    assert "class FlattenIntent" not in text
-    assert "class CancelIntent" not in text
+def test_observe_host_dry_path_does_not_import_shadow_oms() -> None:
+    text = (PKG / "runtime" / "observe_host.py").read_text(encoding="utf-8")
+    assert "ShadowOMS" not in text
+    assert "tyrex_pm.execution" not in text
+    assert "tyrex_pm.portfolio" not in text

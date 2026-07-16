@@ -7,99 +7,115 @@
 | R1 | `630bac2acf67961a30b4be014d1df0434af967f1` | reset project with isolated legacy tree and minimal skeleton |
 | R2 | `ccccc969bb4877ae97e6e56c656b839739034425` | add deterministic event-driven core contracts |
 | R3 | `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9` | add read-only market data and momentum strategy slice |
+| R4 | `9813001465db1fd188a4e00a3c82a24fa2cb4292` | add intent risk and dry execution planning |
 
 `.env` SHA256 (unchanged): `27210C97AE37101DE48570130BBB517E572F3EB75160B5FC4C05CF178B91F772`  
 `var/` gitignored · no `old/` imports · no NautilusTrader
 
 ---
 
-## R3 (summary)
+## R4 completion (summary)
 
-Option B books; Binance `@trade`; observe decisions; 64 tests at R3 gate. See prior R3 sections in git history of this file if needed.
+Dry intent → risk → plan. Live dry-plan: 781 signals → **1 intent / 1 plan**. See git history of this file for full R4 tables.
 
 ---
 
-## R4 completion report
+## R5 completion report
 
-**R3 checkpoint:** `8b8f34f8a275d0986fa1988e6f617094d5fc6cf9`  
-**Pytest:** **95 passed** (no network in default suite)
+**R4 checkpoint:** `9813001465db1fd188a4e00a3c82a24fa2cb4292`  
+**Pytest:** **124 passed** (no network in default suite)
 
-### Packages / files created
+### Modules created / extended
 
 ```text
-src/tyrex_pm/core/modes.py
-src/tyrex_pm/core/intents.py
-src/tyrex_pm/strategies/{protocol,context}.py
-src/tyrex_pm/strategies/framework_validation/reference_momentum.py  (transitions)
-src/tyrex_pm/risk/{reasons,context,decision,dedup,policies,engine}.py
-src/tyrex_pm/planning/{plan,planner}.py
-src/tyrex_pm/runtime/{config,observe_host,live_observe}.py  (extended)
-config/observe_shadow_r4.json
-tests/test_r4_*.py
+src/tyrex_pm/core/{commands,execution_events,intents,ids}.py
+src/tyrex_pm/execution/{protocol,order_store,fill_ledger,shadow_oms}.py
+src/tyrex_pm/portfolio/portfolio.py
+src/tyrex_pm/lifecycle/trade_lifecycle.py
+src/tyrex_pm/persistence/snapshot.py
+src/tyrex_pm/planning/exit_planner.py
+src/tyrex_pm/runtime/{shadow_config,shadow_host,live_shadow}.py
+config/observe_shadow_r5.json
+tests/test_r5_*.py
 ```
 
-### Strategy contract
+### OMS protocol
 
-`on_start` / `on_signal` (via `apply_transition`) / `on_stop`.  
-`on_timer` and `on_execution_event` deferred.  
-Strategy does not import adapters, risk, planner, or OMS.
+`OMS.submit/cancel/stop` — `ShadowOMS` now; live adapter reserved for R6.
 
-### Intent types
+### Commands / events
 
-**Implemented:** `EnterIntent` (BUY, `target_notional`, outcome, semantic_key).  
-**Deferred to R5:** `ExitIntent`, `CancelIntent`, `FlattenIntent`.
+Commands: `SubmitOrderCommand`, `CancelOrderCommand`.  
+Events: `OrderSubmitted`, `OrderAccepted`, `OrderRejected`, `OrderPartiallyFilled`, `OrderFilled`, `OrderCancelPending`, `OrderCanceled`.
 
-### Transition + dedup
+### Ownership
 
-| Rule | Behavior |
-|------|----------|
-| None/FLAT/UNAVAILABLE → UP/DOWN | One `EnterIntent` |
-| Same direction repeat | Suppress `REPEATED_DIRECTION` |
-| UP ↔ DOWN | Observe decision only; `REVERSAL_NO_PORTFOLIO` |
-| → FLAT/UNAVAILABLE | No entry; exit deferred |
-| Framework dedup | `strategy\|market\|instrument\|ENTER\|epoch\|outcome` in risk registry |
+| Concern | Owner |
+|---------|-------|
+| Fills | `FillLedger` |
+| Order state | `OrderStore` |
+| Positions | `Portfolio` |
+| Trade phase | `TradeLifecycle` |
 
-### Risk policies (order)
+### Shadow fill model
 
-1. schema_validity  
-2. runtime_mode (`LIVE_TINY` → `LIVE_NOT_SUPPORTED`)  
-3. kill_switch  
-4. duplicate_intent  
-5. instrument_allowlist  
-6. market_timing  
-7. data_readiness  
-8. price_spread_liquidity  
-9. notional_cap  
+Visible-depth marketable limits; residual cancel optional; fee model `shadow_zero_fee_v1` by default; no queue/latency/impact; books not mutated.
 
-Fail-closed on policy exceptions. Exposure limits deferred (`exposure_available=False`).
+### Intents added
 
-### Planner
+`ExitIntent`, `CancelIntent`, `FlattenIntent` (plus existing `EnterIntent`).
 
-Limit BUY at tick-rounded (UP) best ask; quantity floor so `Q*P ≤ N`; min-size / depth / max-price checks; `PLANNED` vs `UNPLANNABLE`.
+### Lifecycle
 
-### Causality
+`FLAT ↔ ENTRY_PENDING ↔ ACTIVE ↔ EXIT_PENDING`; `TERMINAL` at window end.  
+Eligibility uses lifecycle/portfolio — not `last_signal_direction` alone.
 
-`ReferencePriceUpdated` → signal → observe decision → `EnterIntent` → `RiskDecision` → `ExecutionPlan` (shared `correlation_id`).
+### Risk extensions
 
-### Public live dry-plan evidence (not shadow trading)
+Portfolio view required for shadow OMS path; pending/active blocks entry; kill switch denies entry, permits flatten; exit cannot increase exposure.
+
+### Persistence
+
+Schema v1 atomic JSON snapshot; rejects corrupt/mismatched market/config; restores orders/fills/portfolio/lifecycle/dedup/strategy epoch.
+
+### Public live shadow evidence (no trading)
 
 | Item | Value |
 |------|-------|
-| Market | `btc-updown-5m-1784217300` — Bitcoin Up or Down 11:55AM–12:00PM ET |
-| Duration | ~40s |
-| Signals | 781 (UP 105, FLAT 643, UNAVAILABLE 33) |
-| Strategy intents | **1** (105 repeated UP suppressed) |
-| Risk | 1 approved / 0 denied |
-| Plans | 1 PLANNED / 0 unplannable |
-| Artifact | `var/reporting/r4/live_dry_plan_facts.jsonl` (gitignored) |
-| Private/trading calls | None |
+| Market | `btc-updown-5m-1784227200` — Bitcoin Up or Down 2:40–2:45PM ET |
+| Duration | ~50s |
+| Signals | 2123 (UP 356, DOWN 1, FLAT 1310, UNAVAILABLE 456) |
+| Intents | ENTER 89 / EXIT 488 |
+| Risk | 88 approved / 489 denied (mostly `DUPLICATE_INTENT` on exits) |
+| Plans | 3 PLANNED / 85 `INSUFFICIENT_DEPTH` |
+| Commands | **3** |
+| Lifecycle | `FLAT→ENTRY_PENDING→ACTIVE` (×2), `ACTIVE→EXIT_PENDING→FLAT` (×1) |
+| Final | Residual shadow exposure possible if exit unplannable; not venue inventory |
+| Fee model | `shadow_zero_fee_v1` |
+| Artifacts | `var/reporting/r5/live_shadow_facts.jsonl`, `var/state/r5_shadow_snapshot.json` (gitignored) |
+| Private/trading calls | **None** |
+
+Shadow fills/commands are **not** profitability evidence.
 
 ### Confirmations
 
-No OMS · no orders · no fills · no portfolio · no private endpoints · no `old/` · no NautilusTrader · distribution excludes `old/`.
+No private endpoints · no real order signing · no wallet credential reads · no `old/` · no NautilusTrader · R4 dry path still works without ShadowOMS · distribution excludes `old/` · `.env` unchanged.
 
-### Proposed R5
+### Known limitations
 
-Shadow OMS + portfolio + exit/cancel/flatten intents + execution events + restart persistence + exposure risk. See `07_implementation_plan.md`.
+- No queue-position / latency / impact model
+- Visible fills against visible depth only
+- Max-loss exit deferred
+- Shadow performance is not profitability evidence
+- Live venue reconciliation belongs to R6
+- Repeated DOWN/UP while FLAT retries entry each tick after planning failure (dedup forgotten) — expected retry policy; may be rate-limited later
 
-**Stop before R5.**
+### Proposed R6 scope
+
+1. Live Polymarket OMS adapter implementing the same `OMS` protocol.  
+2. Authenticated submit/cancel (credentials from env; never logged).  
+3. Venue order/fill reconciliation into `OrderStore` / `FillLedger`.  
+4. Keep `ShadowOMS` for fixture/offline validation.  
+5. Still no Z-Gap strategy logic.
+
+**Stop before R6.**

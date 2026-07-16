@@ -12,6 +12,8 @@ from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.market_data.executable import ExecutableQuote
 from tyrex_pm.risk.dedup import DedupRecord, IntentDedupRegistry
 
+_ = MarketStatus  # re-exported usage in helpers below
+
 
 @dataclass(frozen=True, kw_only=True)
 class RiskConfigView:
@@ -33,6 +35,19 @@ class BookReadiness:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PortfolioRiskView:
+    """Immutable portfolio/lifecycle view for risk. Missing view fails closed."""
+
+    available: bool
+    net_quantity: Decimal
+    total_cost_notional: Decimal
+    lifecycle_state: str
+    has_pending_order: bool
+    max_position_notional: Decimal
+    max_total_exposure: Decimal
+
+
+@dataclass(frozen=True, kw_only=True)
 class RiskContext:
     mode: RuntimeMode
     now: datetime
@@ -44,8 +59,9 @@ class RiskContext:
     no_book: BookReadiness
     risk_config: RiskConfigView
     dedup: IntentDedupRegistry
-    # Exposure limits deferred to R5 — never interpret missing as zero live exposure.
+    # Never interpret missing exposure as zero.
     exposure_available: bool = False
+    portfolio: PortfolioRiskView | None = None
 
     def quote_for_instrument(self, instrument_id: str) -> ExecutableQuote:
         if instrument_id == self.market.yes.instrument_id.value:

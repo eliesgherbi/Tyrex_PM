@@ -1,6 +1,6 @@
 # 01 — Functional requirements
 
-**Phase:** R4 complete for pre-execution workflow. OMS begins R5.
+**Phase:** R5 complete for shadow execution lifecycle. Live OMS begins R6.
 
 | Capability | Phase | Status |
 |------------|-------|--------|
@@ -8,8 +8,10 @@
 | EnterIntent + transition policy | R4 | Done |
 | Risk authorization (dry) | R4 | Done |
 | Dry execution plan | R4 | Done |
-| Shadow OMS + fills + portfolio | R5 | Not started |
-| Exit/Cancel/Flatten intents | R5 | Not started |
+| Shadow OMS + fills + portfolio | R5 | Done |
+| Exit/Cancel/Flatten intents | R5 | Done |
+| Authoritative trade lifecycle | R5 | Done |
+| Shadow persistence / restart | R5 | Done |
 | Live Polymarket OMS | R6 | Not started |
 | Tiny-live auth | R7 | Not started |
 

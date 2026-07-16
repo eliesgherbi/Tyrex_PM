@@ -57,3 +57,27 @@ class IntentDedupRegistry:
         )
         self._by_key[semantic_key] = rec
         return rec
+
+    def forget(self, semantic_key: str) -> None:
+        """Allow retry after planning failure / rejected unfilled entry."""
+        self._by_key.pop(semantic_key, None)
+
+    def snapshot(self) -> list[dict]:
+        return [
+            {
+                "semantic_key": rec.semantic_key,
+                "first_intent_id": rec.first_intent_id,
+                "first_seen_at": rec.first_seen_at.isoformat(),
+            }
+            for rec in self._by_key.values()
+        ]
+
+    def restore(self, rows: list[dict]) -> None:
+        self._by_key.clear()
+        for row in rows:
+            key = str(row["semantic_key"])
+            self._by_key[key] = DedupRecord(
+                semantic_key=key,
+                first_intent_id=str(row["first_intent_id"]),
+                first_seen_at=datetime.fromisoformat(str(row["first_seen_at"])),
+            )

@@ -1,0 +1,39 @@
+{
+  "mode": "live",
+  "output_path": "var/reporting/r5/live_shadow_facts.jsonl",
+  "binance_symbol": "BTCUSDT",
+  "momentum_lookback_ms": 5000,
+  "momentum_threshold": "0.0002",
+  "max_book_spread": "0.50",
+  "freshness": {
+    "book_threshold_ms": 30000,
+    "reference_threshold_ms": 5000,
+    "future_tolerance_ms": 2000,
+    "timestamp_basis": "EVENT_TIME"
+  },
+  "runtime_duration_s": 45,
+  "risk": {
+    "runtime_mode": "SHADOW",
+    "target_notional": "5",
+    "max_notional": "10",
+    "min_price": "0.01",
+    "max_price": "0.99",
+    "max_spread": "0.50",
+    "min_liquidity_notional": "1",
+    "no_entry_before_close_s": 15,
+    "duplicate_lifetime_s": 3600,
+    "kill_switch_active": false
+  },
+  "shadow": {
+    "enable_oms": true,
+    "max_position_notional": "10",
+    "max_total_exposure": "20",
+    "max_hold_s": 120,
+    "flatten_before_close_s": 20,
+    "exit_on_flat": true,
+    "persistence_path": "var/state/r5_shadow_snapshot.json",
+    "cancel_unfilled_residual": false,
+    "fee_rate": "0",
+    "fee_model_id": "shadow_zero_fee_v1"
+  }
+}

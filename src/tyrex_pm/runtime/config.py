@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.indicators.momentum import MomentumConfig
 from tyrex_pm.market_data.freshness import FreshnessConfig, TimestampBasis
+from tyrex_pm.runtime.shadow_config import ShadowConfig, shadow_config_from_mapping
 
 
 class SourceMode(str, Enum):
@@ -91,6 +92,7 @@ class ObserveConfig:
     evaluate_on_reference: bool = True
     momentum_min_samples: int = 2
     risk: RiskPlanConfig | None = None
+    shadow: ShadowConfig | None = None
 
     def __post_init__(self) -> None:
         if self.mode is SourceMode.FIXTURE and self.fixture_path is None:
@@ -134,6 +136,7 @@ class ObserveConfig:
             "event_slug": self.event_slug,
             "condition_id": self.condition_id,
             "risk_fingerprint": None if self.risk is None else self.risk.fingerprint(),
+            "shadow_fingerprint": None if self.shadow is None else self.shadow.fingerprint(),
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -192,6 +195,7 @@ def observe_config_from_mapping(data: Mapping[str, Any]) -> ObserveConfig:
     mode = SourceMode(str(data.get("mode", "fixture")))
     fixture = data.get("fixture_path")
     risk_raw = data.get("risk")
+    shadow_raw = data.get("shadow")
     return ObserveConfig(
         mode=mode,
         output_path=Path(str(data["output_path"])),
@@ -208,6 +212,7 @@ def observe_config_from_mapping(data: Mapping[str, Any]) -> ObserveConfig:
         evaluate_on_reference=bool(data.get("evaluate_on_reference", True)),
         momentum_min_samples=int(data.get("momentum_min_samples", 2)),
         risk=None if risk_raw is None else _risk_from_mapping(risk_raw),
+        shadow=None if shadow_raw is None else shadow_config_from_mapping(shadow_raw),
     )
 
 

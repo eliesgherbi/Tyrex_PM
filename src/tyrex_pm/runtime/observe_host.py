@@ -323,6 +323,7 @@ class ObserveHost:
                         causation_id=p.causation_id,
                     )
                 else:
+                    self.dedup.forget(intent.semantic_key())
                     self._emit(
                         "planning_failed",
                         {

@@ -1,4 +1,4 @@
-"""R3 architecture dependency and package rules."""
+"""R3 architecture dependency and package rules (still enforced in R5+)."""
 
 from __future__ import annotations
 
@@ -10,18 +10,10 @@ import tyrex_pm
 ROOT = Path(tyrex_pm.__file__).resolve().parent
 PKG_ROOT = ROOT
 
-
 FORBIDDEN_IMPORT_PREFIXES = (
     "old",
     "nautilus_trader",
     "nautilus",
-)
-
-FORBIDDEN_NAME_FRAGMENTS = (
-    "OrderManager",
-    "PortfolioStore",
-    "FillEvent",
-    "OrderSubmitted",
 )
 
 
@@ -40,19 +32,6 @@ def test_no_old_or_nautilus_imports() -> None:
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     assert not node.module.startswith(FORBIDDEN_IMPORT_PREFIXES), path
-
-
-def test_no_risk_oms_portfolio_modules() -> None:
-    names = {p.name for p in _python_files()}
-    for banned in ("risk.py", "oms.py", "portfolio.py", "orders.py", "fills.py"):
-        assert banned not in names
-
-
-def test_no_forbidden_symbols_in_r3_surface() -> None:
-    text_blobs = [p.read_text(encoding="utf-8") for p in _python_files()]
-    joined = "\n".join(text_blobs)
-    for frag in FORBIDDEN_NAME_FRAGMENTS:
-        assert frag not in joined
 
 
 def test_distribution_excludes_old() -> None:

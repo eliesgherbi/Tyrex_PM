@@ -1,23 +1,31 @@
 # 05 — Validation strategy
 
-**Phase:** R4 — observe decisions + entry intents + dry risk/plan.
+**Phase:** R5 — shadow execution lifecycle for `ReferenceMomentumStrategy`.
 
 ## Name
 
 `ReferenceMomentumStrategy` (`framework_validation`)
 
-## R3 path (unchanged)
+## Exit policy (precedence)
 
-Momentum, directional signal, observe decisions (`WOULD_ENTER_*` / `HOLD` / `SKIP`).
+```text
+KILL_SWITCH
+→ MARKET_CLOSE_BOUNDARY
+→ MAX_HOLD
+→ SIGNAL_REVERSAL
+→ SIGNAL_FLAT
+```
 
-## R4 additions
+Max-loss exit deferred until mark-to-market accounting is correct.
 
-1. Transition policy → at most one `EnterIntent` per eligible direction change.
-2. Risk evaluation (fail-closed, explicit config).
-3. Dry execution plan (limit buy at ask) — not an order.
+## Shadow fill model (honest limits)
 
-No exit/flatten until R5 has positions. No OMS submit.
+- Visible-depth marketable limits only
+- No queue position, latency, or market-impact model
+- Does not mutate authoritative external books
+- Fee model: configurable (`shadow_zero_fee_v1` allowed for framework validation)
+- Shadow P&L is **not** profitability evidence
 
 ## Out of scope
 
-PTB · Chainlink · Z-Gap edge · live private trading · portfolio PnL.
+PTB · Chainlink · Z-Gap edge · live private trading · venue reconciliation (R6)
