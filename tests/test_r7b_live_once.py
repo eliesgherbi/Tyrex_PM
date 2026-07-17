@@ -154,10 +154,9 @@ def _exit_book(best_bid: str = "0.54", size: str = "100") -> Any:
 
 
 def _base_args(tmp_path: Path, **kwargs: Any) -> R7BLiveOnceArgs:
-    from tyrex_pm.execution.polymarket.lifecycle_exit_plan import (
-        ExitPricePolicy,
-        ExitRetryPolicy,
-    )
+    from tyrex_pm.execution.polymarket.lifecycle_exit_plan import ExitRetryPolicy
+    from tyrex_pm.runtime.r7_lifecycle_policy import default_exit_price_policy
+    from dataclasses import replace
 
     window = _eligible_window()
     ack_path, ack_rows = _write_ack(tmp_path)
@@ -176,7 +175,9 @@ def _base_args(tmp_path: Path, **kwargs: Any) -> R7BLiveOnceArgs:
         "exit_book_provider": lambda _tid: _exit_book(),
         "exit_sleep": lambda _s: None,
         "exit_now_provider": lambda: now,
-        "exit_price_policy": ExitPricePolicy(max_book_age_ms=60_000),
+        "exit_price_policy": replace(
+            default_exit_price_policy(), max_book_age_ms=60_000
+        ),
         "exit_retry_policy": ExitRetryPolicy(max_attempts=3, cooldown_s=0.0),
     }
     # Happy-path live tests need settlement injectors (no network)

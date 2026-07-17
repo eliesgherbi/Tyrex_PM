@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from tyrex_pm.execution.polymarket.approval import ApprovalArtifact, validate_approval
+from tyrex_pm.execution.polymarket.lifecycle_exit_plan import (
+    book_from_clob_levels,
+    plan_lifecycle_fak_sell,
+)
 from tyrex_pm.execution.polymarket.live_budget import LiveBudgetGuard
 from tyrex_pm.execution.polymarket.mutation_lifecycle import MutationLifecycle, MutationPhase
 from tyrex_pm.execution.polymarket.mutation_transport import SpyMutationTransport
 from tyrex_pm.execution.polymarket.transport import SubmitOrderRequest
+from tyrex_pm.runtime.r7_lifecycle_policy import default_exit_price_policy
 
 
 @dataclass
@@ -129,15 +135,39 @@ def run_dry_lifecycle(
         life.note_entry_filled(partial=False)
         notes.append("full_fill")
 
-    # Exit
+    # Exit — side-correct bid-side plan (never reuse entry BUY limit)
+    entry_buy = Decimal(artifact.limit_price)
+    exit_qty = (
+        Decimal(artifact.quantity)
+        if scenario != "partial_fill_cancel"
+        else Decimal(artifact.quantity) / 2
+    )
+    # Synthetic fresh book: best bid one tick below entry (marketable SELL).
+    bid = max(Decimal("0.01"), entry_buy - Decimal("0.01"))
+    book = book_from_clob_levels(
+        token_id=artifact.instrument_token_id,
+        bids=[{"price": str(bid), "size": str(max(exit_qty, Decimal("100")))}],
+        asks=[{"price": str(entry_buy), "size": "100"}],
+        ts_event=datetime.now(timezone.utc),
+    )
+    plan = plan_lifecycle_fak_sell(
+        book=book,
+        quantity=exit_qty,
+        tick_size=Decimal("0.01"),
+        policy=default_exit_price_policy(),
+        entry_buy_limit=entry_buy,
+    )
+    if not plan.ok or plan.limit_price is None:
+        raise RuntimeError(f"DRY_EXIT_PLAN_FAILED:{plan.reason}")
+    if plan.limit_price == entry_buy and bid < entry_buy:
+        raise RuntimeError("DRY_EXIT_REUSED_BUY_LIMIT")
     life.note_exit_submitting()
     exit_req = SubmitOrderRequest(
         token_id=artifact.instrument_token_id,
         side="SELL",
-        price=artifact.limit_price,
-        size=artifact.quantity if scenario != "partial_fill_cancel" else str(
-            Decimal(artifact.quantity) / 2
-        ),
+        price=str(plan.limit_price),
+        size=str(exit_qty),
+        amount=str(exit_qty),
         order_type="FAK",
     )
     spy.submit_order(exit_req)
@@ -145,6 +175,8 @@ def run_dry_lifecycle(
     life.note_reconciling()
     life.note_flat_confirmed()
     notes.append("flat_confirmed")
+    notes.append(f"exit_limit={plan.limit_price}")
+    notes.append("exit_used_buy_limit=false")
 
     return DryLifecycleResult(
         ok=life.phase is MutationPhase.MUTATIONS_DISABLED,

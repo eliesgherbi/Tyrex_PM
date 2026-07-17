@@ -36,6 +36,8 @@ class ExitPlanStatus(str, Enum):
     REFUSE_STALE_BOOK = "REFUSE_STALE_BOOK"
     REFUSE_QTY = "REFUSE_QTY"
     REFUSE_ENTRY_PRICE_REUSE = "REFUSE_ENTRY_PRICE_REUSE"
+    REFUSE_SLIPPAGE = "REFUSE_SLIPPAGE"
+    REFUSE_SPREAD = "REFUSE_SPREAD"
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,10 @@ class ExitPricePolicy:
     emergency_floor: Decimal = Decimal("0.01")
     max_book_age_ms: int = 2000
     require_full_depth: bool = True
+    # Worst accepted bid may not fall more than this below best bid (NORMAL).
+    max_slippage_from_touch: Decimal = Decimal("0.05")
+    # Bid-ask spread ceiling; None disables.
+    max_book_spread: Decimal | None = Decimal("0.20")
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,8 @@ class ExitRetryPolicy:
     max_cooldown_s: float = 4.0
 
 
+# Defaults align with tyrex_pm.runtime.r7_lifecycle_policy (single source of truth
+# for operator docs); keep constructors usable without importing runtime.
 DEFAULT_EXIT_PRICE_POLICY = ExitPricePolicy()
 DEFAULT_EXIT_RETRY_POLICY = ExitRetryPolicy()
 
@@ -239,6 +247,31 @@ def plan_lifecycle_fak_sell(
             reason="NO_EXECUTABLE_BIDS",
         )
 
+    if (
+        pol.max_book_spread is not None
+        and quote.best_ask is not None
+        and quote.spread is not None
+        and quote.spread > pol.max_book_spread
+    ):
+        return LifecycleExitPlan(
+            status=ExitPlanStatus.REFUSE_SPREAD,
+            urgency=urgency,
+            limit_price=None,
+            quantity=qty,
+            best_bid=quote.best_bid,
+            worst_accepted_price=None,
+            expected_vwap=None,
+            executable_bid_depth=Decimal("0"),
+            book_fingerprint=fp,
+            book_age_ms=age_ms,
+            tick_size=tick_size,
+            reason="EXIT_BOOK_SPREAD_EXCEEDED",
+            evidence={
+                "spread": str(quote.spread),
+                "max_spread": str(pol.max_book_spread),
+            },
+        )
+
     vwap = executable_vwap(book.bids, qty, side="SELL")
     depth = vwap.filled_qty
     if pol.require_full_depth and not vwap.sufficient:
@@ -286,6 +319,30 @@ def plan_lifecycle_fak_sell(
             tick_size=tick_size,
             reason="BELOW_EXIT_PRICE_FLOOR",
             evidence={"floor": str(floor), "limit": str(limit)},
+        )
+
+    if (
+        urgency is ExitUrgency.NORMAL
+        and quote.best_bid - worst > pol.max_slippage_from_touch
+    ):
+        return LifecycleExitPlan(
+            status=ExitPlanStatus.REFUSE_SLIPPAGE,
+            urgency=urgency,
+            limit_price=None,
+            quantity=qty,
+            best_bid=quote.best_bid,
+            worst_accepted_price=worst,
+            expected_vwap=vwap.vwap,
+            executable_bid_depth=depth,
+            book_fingerprint=fp,
+            book_age_ms=age_ms,
+            tick_size=tick_size,
+            reason="EXIT_SLIPPAGE_FROM_TOUCH_EXCEEDED",
+            evidence={
+                "best_bid": str(quote.best_bid),
+                "worst": str(worst),
+                "max_slippage": str(pol.max_slippage_from_touch),
+            },
         )
 
     # Hard guard: never submit a SELL that equals a known entry BUY ceiling when

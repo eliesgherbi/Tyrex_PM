@@ -48,16 +48,19 @@ Module: `tyrex_pm.execution.polymarket.settlement`
 - Address roles: `address_roles.py` — refuse signer conditional balance when `signature_type=1`.
 - Live path: clean worktree required; CLI read-only verify: `tyrex-pm r7c-recon`.
 
-## R7E lifecycle exit planning
+## R7E / R7F lifecycle exit planning
 
-Module: `tyrex_pm.execution.polymarket.lifecycle_exit_plan`
+Modules: `lifecycle_exit_plan.py`, `r7_lifecycle_policy.py`
 
 - Strategy emits intent; planner owns venue-side price/qty/depth/order-type.
 - BUY limit ≠ SELL limit. Never reuse entry `sized.limit_price` for SELL.
 - Fresh bid-side book required; stale/empty bids → wait or refuse (no knowingly unmatchable FAK).
+- Exact policy: freshness 2000 ms; floors 0.01; max slip from touch 0.05; max spread 0.20;
+  exit attempts 3; cooldown 0.5 s; settlement wait 45 s; flatten−30 s / entry−45 s / min 90 s.
 - SELL qty ≤ `min(confirmed_acquired, sellable_balance, remaining_after_confirmed_exits)`.
-- Partial FAK + no-match retries: bounded attempts, cooldown, flatten deadline; refresh book each try.
+- Partial FAK + no-match retries: new book fingerprint each try; attempt cap + flatten deadline.
 - Residual registry records incomplete exits; cleanup policy remains `NONE`.
+- FAK is floor-protected, not fill-guaranteed under book move.
 
 ## Forbidden
 

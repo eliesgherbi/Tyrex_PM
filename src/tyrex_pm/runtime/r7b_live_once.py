@@ -35,8 +35,6 @@ from tyrex_pm.execution.polymarket.mutation_transport import (
     SpyMutationTransport,
 )
 from tyrex_pm.execution.polymarket.lifecycle_exit_plan import (
-    DEFAULT_EXIT_PRICE_POLICY,
-    DEFAULT_EXIT_RETRY_POLICY,
     ExitPlanStatus,
     ExitPricePolicy,
     ExitRetryPolicy,
@@ -46,6 +44,16 @@ from tyrex_pm.execution.polymarket.lifecycle_exit_plan import (
     is_fak_no_match_error,
     next_retry_cooldown,
     plan_lifecycle_fak_sell,
+)
+from tyrex_pm.runtime.r7_lifecycle_policy import (
+    FLATTEN_BEFORE_CLOSE_S,
+    ENTRY_SAFETY_BUFFER_S,
+    APPROVAL_SKEW_S,
+    MIN_REMAINING_FOR_ENTRY_S,
+    default_exit_price_policy,
+    default_exit_retry_policy,
+    default_settlement_wait_config,
+    policy_snapshot,
 )
 from tyrex_pm.execution.polymarket.order_sizing import SizedBuyOrder, SizingError, size_buy_under_cap
 from tyrex_pm.execution.polymarket.settlement import (
@@ -300,7 +308,14 @@ def _default_windows(max_windows: int, max_buy: Decimal) -> list[dict[str, Any]]
                 out.append({"slug": slug, "eligible": False, "reason": "MARKET_UNRESOLVED"})
                 continue
             window = resolve_btc_5m_window(slug=slug, event=ev, market=m, now=now)
-            deadlines = compute_lifecycle_deadlines(window, now=now)
+            deadlines = compute_lifecycle_deadlines(
+                window,
+                now=now,
+                flatten_before_close_s=FLATTEN_BEFORE_CLOSE_S,
+                entry_safety_buffer_s=ENTRY_SAFETY_BUFFER_S,
+                approval_skew_s=APPROVAL_SKEW_S,
+                min_remaining_for_entry_s=MIN_REMAINING_FOR_ENTRY_S,
+            )
             tokens_raw = m.get("clobTokenIds") or "[]"
             tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else list(tokens_raw)
             if len(tokens) < 2:
@@ -1148,7 +1163,12 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
         order_id=owned_order_id,
         planned_qty=sized.quantity,
         clock=clock,
-        config=SettlementWaitConfig(max_wait_s=args.settlement_max_wait_s),
+        config=SettlementWaitConfig(
+            max_wait_s=args.settlement_max_wait_s,
+            initial_backoff_s=default_settlement_wait_config().initial_backoff_s,
+            max_backoff_s=default_settlement_wait_config().max_backoff_s,
+            max_sell_attempts=default_settlement_wait_config().max_sell_attempts,
+        ),
     )
     for row in settle.facts:
         fact(row.get("event", "settlement"), **{k: v for k, v in row.items() if k != "event"})
@@ -1276,9 +1296,10 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
     if ack is not None and ack_targets_forbidden(token_id, ack):
         raise LiveOnceError("ACKNOWLEDGED_TOKEN_EXIT_FORBIDDEN")
 
-    # R7E: side-correct exit — never reuse sized.limit_price (BUY ceiling) as SELL.
-    price_pol = args.exit_price_policy or DEFAULT_EXIT_PRICE_POLICY
-    retry_pol = args.exit_retry_policy or DEFAULT_EXIT_RETRY_POLICY
+    # R7E/R7F: side-correct exit — never reuse sized.limit_price (BUY ceiling) as SELL.
+    price_pol = args.exit_price_policy or default_exit_price_policy()
+    retry_pol = args.exit_retry_policy or default_exit_retry_policy()
+    report["lifecycle_policy"] = policy_snapshot()
     sleep_fn = args.exit_sleep or time.sleep
     now_fn = args.exit_now_provider or _utc_now
     book_fn = args.exit_book_provider or (lambda tid: fetch_exit_book(tid, now=now_fn()))

@@ -256,3 +256,14 @@ Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_
 | Fix | Bid-side exit planner + fresh book + bounded FAK retry |
 | Live retest | **Not executed** |
 | Incident doc | [`Docs/Implementation/r7d2_second_live_incident.md`](Implementation/r7d2_second_live_incident.md) |
+
+## R7F — Exit planner acceptance + book rehearsal
+
+| Item | Result |
+|------|--------|
+| Operator live proof | `55fd9a76` BUY@0.51 → SELL@0.50 → `FLAT` / dust |
+| Policy | `r7_lifecycle_policy.py` exact values |
+| Rehearsal | `scripts/r7f_exit_rehearsal.py` — zero mutations |
+| Residuals | 3 distinct `FLAT_WITH_DUST` records; ack gate ok |
+| Agent live | **Not executed** |
+| Doc | [`r7f_exit_planner_acceptance.md`](Implementation/r7f_exit_planner_acceptance.md) · [`r7f_operator_runbook.md`](Implementation/r7f_operator_runbook.md) |

@@ -161,11 +161,14 @@ def test_confirmed_balance_caps_sell_qty() -> None:
 
 def test_normal_floor_refuses() -> None:
     plan = plan_lifecycle_fak_sell(
-        book=_book(bid="0.02"),
+        book=_book(bid="0.02", ask="0.03"),
         quantity=Decimal("5"),
         tick_size=Decimal("0.01"),
         now=NOW,
-        policy=ExitPricePolicy(normal_floor=Decimal("0.10")),
+        policy=ExitPricePolicy(
+            normal_floor=Decimal("0.10"),
+            max_book_spread=Decimal("0.50"),
+        ),
         urgency=ExitUrgency.NORMAL,
     )
     assert plan.status is ExitPlanStatus.REFUSE_FLOOR
@@ -173,12 +176,14 @@ def test_normal_floor_refuses() -> None:
 
 def test_emergency_floor_allows_lower() -> None:
     plan = plan_lifecycle_fak_sell(
-        book=_book(bid="0.02"),
+        book=_book(bid="0.02", ask="0.03"),
         quantity=Decimal("5"),
         tick_size=Decimal("0.01"),
         now=NOW,
         policy=ExitPricePolicy(
-            normal_floor=Decimal("0.10"), emergency_floor=Decimal("0.01")
+            normal_floor=Decimal("0.10"),
+            emergency_floor=Decimal("0.01"),
+            max_book_spread=Decimal("0.50"),
         ),
         urgency=ExitUrgency.EMERGENCY,
     )

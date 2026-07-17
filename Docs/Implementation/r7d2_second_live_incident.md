@@ -35,6 +35,14 @@ The later manual fill at **0.50** proves executable bid-side liquidity existed a
 
 Historical book at the exact millisecond of the failed SELL is not reconstructed from a local snapshot store; the venue FAK rejection plus the subsequent 0.50 fill are sufficient proof.
 
+## Follow-up live proof (operator, R7E binary)
+
+Run `55fd9a76-743b-4fb8-835d-adcdbf0f517a` on commit `3df3e21`:
+
+- BUY `0xde990e41…` @ 0.51 → CONFIRMED `9.470587`
+- Exit plan best_bid **0.50**, SELL `0x336afebe…` @ **0.50** (`entry_buy_limit_not_used=true`)
+- Terminal **`FLAT`** with residual dust `0.000587` (`FLAT_WITH_DUST`)
+
 ## Side-correct fix (R7E)
 
 Module: `src/tyrex_pm/execution/polymarket/lifecycle_exit_plan.py`  
