@@ -50,13 +50,21 @@ class VenueBalanceSnapshot:
 
 @dataclass(frozen=True, kw_only=True)
 class SubmitOrderRequest:
-    """Opaque signed-order envelope — LiveOMS builds; transport posts."""
+    """Opaque signed-order envelope — LiveOMS builds; transport posts.
+
+    For official V2 FAK/FOK market BUY, ``amount`` is the dollar notional to
+    spend and ``size`` is the max share quantity derived under the budget.
+    For SELL market orders, ``amount`` is share quantity (SDK semantics).
+    """
 
     token_id: str
     side: str
     price: str
     size: str
     order_type: str = "GTC"
+    amount: str | None = None
+    tick_size: str | None = None
+    neg_risk: bool = False
     local_order_id: str | None = None
     salt: str | None = None
     payload: Mapping[str, Any] = field(default_factory=dict)

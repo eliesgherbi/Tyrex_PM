@@ -93,6 +93,44 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Public connectivity only (no L2 authenticated reads)",
     )
+
+    r7a = sub.add_parser(
+        "r7a-prepare",
+        help="R7A: dry mutation validation + read-only proposal (no real orders)",
+    )
+    r7a.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("var/reporting/r7"),
+        help="Directory for r7a_report.json and approval artifact",
+    )
+    r7a.add_argument(
+        "--preflight",
+        type=Path,
+        default=Path("var/reporting/r6/live_preflight_r6d.json"),
+        help="Prior live-preflight artifact (read-only evidence)",
+    )
+    r7a.add_argument(
+        "--run-preflight",
+        action="store_true",
+        help="Run live-preflight with user-stream before preparing proposal",
+    )
+
+    live_once = sub.add_parser(
+        "live-once",
+        help="R7B one-shot lifecycle (blocked until explicit approval)",
+    )
+    live_once.add_argument(
+        "--approval",
+        type=Path,
+        required=True,
+        help="Path to R7B approval artifact",
+    )
+    live_once.add_argument(
+        "--i-authorize-r7b",
+        action="store_true",
+        help="Required second authorization flag (must match artifact)",
+    )
     return parser
 
 
@@ -231,6 +269,50 @@ def main(argv: list[str] | None = None) -> int:
         )
         # Exit 0 when structurally safe; 1 when account evidence incomplete.
         return 0 if result.payload.get("mutations_attempted") is False else 3
+    if args.command == "r7a-prepare":
+        from tyrex_pm.runtime.r7a_proposal import prepare_r7a_artifacts
+
+        preflight_path = args.preflight
+        if args.run_preflight:
+            from tyrex_pm.runtime.live_preflight import run_live_preflight
+
+            pf = run_live_preflight(
+                output_path=args.output_dir / "live_preflight.json",
+                dotenv_path=Path(".env") if Path(".env").exists() else None,
+                user_stream_observe_s=5.0,
+                skip_auth=False,
+            )
+            preflight_path = pf.artifact_path
+            print(f"preflight ok={pf.ok} path={preflight_path}")
+        report = prepare_r7a_artifacts(
+            repo_root=Path.cwd(),
+            output_dir=args.output_dir,
+            preflight_path=preflight_path if preflight_path.exists() else None,
+            issue_approval=False,
+        )
+        blockers = (report.get("r7_readiness") or {}).get("blockers") or []
+        print(
+            f"r7a-prepare complete phase={report.get('phase')} "
+            f"ready_for_proposal={(report.get('r7_readiness') or {}).get('ready_for_r7b_proposal')} "
+            f"blockers={blockers} "
+            f"approval={report.get('approval_artifact_id')} "
+            f"mutations_enabled={report.get('mutations_enabled')}"
+        )
+        return 0
+    if args.command == "live-once":
+        # R7B gate — refuse unless explicit second authorization is present.
+        if not args.i_authorize_r7b:
+            print(
+                "R7B BLOCKED: refusing live-once without --i-authorize-r7b "
+                "and matching approval artifact. Mutations remain disabled."
+            )
+            return 2
+        print(
+            "R7B BLOCKED: second authorization flag seen, but R7B execution is "
+            "not enabled in this build pending explicit operator review of the "
+            "R7A proposal. Mutations remain disabled. No order submitted."
+        )
+        return 2
     if args.command == "observe":
         cfg = _build_observe_config(args)
         if cfg.mode is SourceMode.FIXTURE:

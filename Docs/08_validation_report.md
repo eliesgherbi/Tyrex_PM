@@ -124,14 +124,50 @@ Full report: [`Docs/Implementation/r6d_auth_resolution.md`](Implementation/r6d_a
 | `.env` | Unchanged |
 | Tests | 198 passed |
 
-## R7 readiness verdict
+## R7 readiness verdict (post-R6D)
 
-**Do not begin R7** until:
+Financial envelope approved for a **future** R7B: max **$5** cumulative BUY, one lifecycle.  
+That approval does **not** authorize submission.
 
-1. Explicit tiny-live authorization is given.  
-2. Heartbeat supervisor separately approved (still unresolved).  
-3. Local portfolio hydration before live entry (venue positions already observed).  
+## R7A — Mutation path + dry validation
 
-**Not authorized:** real submit, cancel, wallet approval, on-chain ops, `mutations_enabled=True`.
+Full report: [`Docs/Implementation/r7a_completion_report.md`](Implementation/r7a_completion_report.md)
 
-**Stop after R6D.**
+| Item | Result |
+|------|--------|
+| Mutation protocols / spy / gated SDK transport | Implemented |
+| `LiveBudgetGuard` + approval artifact + lifecycle SM | Implemented |
+| Order policy | **FAK** dollar amount ≤ $5 (official V2) |
+| Heartbeat | **Not called**; avoid for FAK one-shot |
+| Dry lifecycle + budget/approval tests | 32 R7A tests; **230** full suite |
+| `r7a-prepare --run-preflight` | Read-only; `mutations_attempted=false` |
+| User stream | Ready |
+| Existing positions | **4 nonzero → blocks R7B artifact** |
+| Approval artifact | **Not issued** |
+| `live-once` | Refuses real execution |
+| `.env` | Unchanged |
+| Real mutations | **None** |
+
+**R7A complete for code/dry gates.** R7B not requested: account not flat.
+
+## R7A.1 — Market-time / positions / fees / readiness
+
+Full report: [`Docs/Implementation/r7a1_correction_report.md`](Implementation/r7a1_correction_report.md)
+
+| Item | Result |
+|------|--------|
+| Root cause of ~1-day window | Used Gamma `startDate` (listing) as `market_start` |
+| Authoritative window | Slug epoch → start; end = start+300s |
+| Deadlines | Derived from `market_end` (not `now+10m`) |
+| Four positions | All `RESOLVED_REDEEMABLE` (`curPrice=0`); not CLOB-flattenable |
+| Selected market | Flat (no match) |
+| Fees | `fd.r=0.07`, `e=1`; amount+fee ≤ $5 (e.g. 4.83+0.17) |
+| Readiness | Unified `r7_readiness` includes `ACCOUNT_EXPOSURE_PRESENT` |
+| Approval artifact | **Not issued** |
+| Mutations / cleanup | **None** |
+| Tests | **252** passed |
+| `.env` | Unchanged |
+
+**Stop after R7A.1.** No flatten, redeem, submit, cancel, or R7B.
+
+**Not authorized:** real submit, cancel, wallet approval, on-chain ops, network arm token, `mutations_enabled=True`.
