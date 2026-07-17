@@ -11,6 +11,8 @@ from tyrex_pm.runtime.r7_position_inventory import InventoryReport
 
 class R7Blocker(str, Enum):
     MUTATIONS_DISABLED = "MUTATIONS_DISABLED"
+    # Superseded for operator CLI (r7b-live-once --execute-live). Retained for
+    # legacy R7A.2 session-envelope proposal readiness only.
     R7B_AUTHORIZATION_ABSENT = "R7B_AUTHORIZATION_ABSENT"
     USER_STREAM_NOT_READY = "USER_STREAM_NOT_READY"
     RECONCILIATION_NOT_CLEAN = "RECONCILIATION_NOT_CLEAN"
@@ -80,6 +82,7 @@ def build_r7_readiness(
     mutations_enabled: bool = False,
     acknowledgment_valid: bool | None = None,
     acknowledgment_blockers: Sequence[str] = (),
+    authorization_model: str = "legacy_session",
 ) -> R7Readiness:
     """Build authoritative R7 readiness.
 
@@ -88,10 +91,22 @@ def build_r7_readiness(
       - ``require_ack_resolved_redeemable``: unresolved redeemable blocks until ack
       - ``acknowledged_resolved_redeemable``: valid ack removes ACCOUNT_EXPOSURE_PRESENT
       - ``dedicated_clean_account``: any exposure blocks (prefer clean wallet)
+
+    ``authorization_model``:
+      - ``legacy_session``: R7A.2 session/nonce/verbatim path (superseded for live)
+      - ``operator_cli_execute_live``: operator CLI; no R7B_AUTHORIZATION_ABSENT
     """
     r = R7Readiness(mutations_enabled=mutations_enabled)
     r.deny(R7Blocker.MUTATIONS_DISABLED)
-    r.deny(R7Blocker.R7B_AUTHORIZATION_ABSENT)
+    if authorization_model == "legacy_session":
+        r.deny(R7Blocker.R7B_AUTHORIZATION_ABSENT)
+        r.notes.append(
+            "legacy_session_auth_superseded_for_operator_cli_use_execute_live"
+        )
+    else:
+        r.notes.append(
+            "operator_cli_auth_model_execute_live_is_sole_mutation_authorization"
+        )
 
     if not user_stream_ready:
         r.deny(R7Blocker.USER_STREAM_NOT_READY)
@@ -156,12 +171,15 @@ def build_r7_readiness(
         else:
             r.deny(R7Blocker.SIZING_BLOCKED, sizing_blocker)
 
-    # Proposal-ready only if the only remaining blockers are the intentional
-    # structural ones that require a second human authorization later.
-    structural_only = {
-        R7Blocker.MUTATIONS_DISABLED,
-        R7Blocker.R7B_AUTHORIZATION_ABSENT,
-    }
+    # Proposal-ready (legacy): only structural blockers remain.
+    # Operator CLI does not use this proposal gate; --execute-live is process-local.
+    if authorization_model == "legacy_session":
+        structural_only = {
+            R7Blocker.MUTATIONS_DISABLED,
+            R7Blocker.R7B_AUTHORIZATION_ABSENT,
+        }
+    else:
+        structural_only = {R7Blocker.MUTATIONS_DISABLED}
     r.ready_for_r7b_proposal = set(r.blockers) <= structural_only
     return r
 

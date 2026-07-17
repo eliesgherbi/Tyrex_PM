@@ -49,6 +49,12 @@ from tyrex_pm.execution.polymarket.transport import SubmitOrderRequest
 from tyrex_pm.operations import next_btc_updown_slug
 from tyrex_pm.runtime.r7_ack_gate import enforce_acknowledgment_gate
 from tyrex_pm.runtime.r7_lifecycle_dust import dust_token_ids, read_lifecycle_dust
+from tyrex_pm.runtime.r7_lifecycle_residuals import (
+    evaluate_residuals_for_entry,
+    migrate_dust_to_registry,
+    read_residual_registry,
+    residual_token_ids,
+)
 from tyrex_pm.runtime.r7_paths import DEFAULT_ACKNOWLEDGMENT_PATH, resolve_acknowledgment_path
 from tyrex_pm.runtime.r7_position_ack import (
     PositionAcknowledgment,
@@ -446,9 +452,31 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
         except Exception as exc:  # noqa: BLE001
             report["blockers"].append(f"POSITION_FETCH_FAILED:{type(exc).__name__}")
 
-    dust_state = read_lifecycle_dust(repo_root=args.repo_root)
-    report["lifecycle_dust"] = dust_state
-    ignore_dust = dust_token_ids(dust_state)
+    registry = read_residual_registry(repo_root=args.repo_root)
+    if registry is None:
+        registry = migrate_dust_to_registry(repo_root=args.repo_root, force_incident=False)
+    residual_eval = evaluate_residuals_for_entry(registry)
+    report["lifecycle_residuals"] = None if registry is None else registry.to_dict()
+    report["lifecycle_residuals_gate"] = residual_eval
+    # Back-compat: first open residual as lifecycle_dust summary
+    open_res = [] if registry is None else registry.open_residuals()
+    report["lifecycle_dust"] = None if not open_res else open_res[0].to_dict()
+    ignore_dust = residual_token_ids(registry)
+    if not ignore_dust:
+        ignore_dust = dust_token_ids(read_lifecycle_dust(repo_root=args.repo_root))
+    if residual_eval.get("blockers"):
+        report["blockers"] = list(report.get("blockers") or []) + list(
+            residual_eval["blockers"]
+        )
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.BLOCKED,
+            ok=False,
+            exit_code=2,
+            fact=fact,
+        )
 
     if args.acknowledgment_path is None:
         ack_path = None  # PATH_REQUIRED when require_acknowledgment
@@ -750,7 +778,8 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             "residual_quantity": "0",
             "bound_market": bound["slug"],
             "acknowledgment_ok": True,
-            "lifecycle_dust_visible": dust_state is not None,
+            "lifecycle_dust_visible": bool(open_res),
+            "lifecycle_residuals_open": len(open_res),
         }
         if transport is not None and hasattr(transport, "submitted"):
             # If a test injects a transport, still must not have been called

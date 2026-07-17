@@ -25,8 +25,8 @@
 
 | Stage | Blockers |
 |-------|----------|
-| Before ack policy | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT`, `ACCOUNT_EXPOSURE_PRESENT` |
-| After valid ack | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT` |
+| Before ack policy | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT` (legacy), `ACCOUNT_EXPOSURE_PRESENT` |
+| After valid ack | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT` (legacy session model; **superseded** by operator `--execute-live`) |
 
 No other non-authorization blockers in the R7A.2 prepare run (user stream ready, recon reachable, fees known at policy layer, selected market flat).
 

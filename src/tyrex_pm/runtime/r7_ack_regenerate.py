@@ -1,8 +1,15 @@
-"""Read-only regeneration of durable R7 acknowledgment state (R7D.1).
+"""Read-only regeneration of durable R7 acknowledgment state (R7D.2).
 
-Zero mutations. Never restores a deleted artifact blindly — rebuilds from
-current authoritative inventory and validates exactly four
-RESOLVED_REDEEMABLE positions.
+Zero mutations. Never restores a deleted artifact by acknowledging every
+resolved position on the account.
+
+Policy source (exact four identities):
+  1. ``config/r7/acknowledgment_policy.json`` (committed source of truth)
+  2. ``var/state/r7/acknowledgment_policy.json`` (durable mirror)
+
+After the acknowledgment artifact is deleted, regenerate reloads that sealed
+policy and matches inventory rows by identity. Extra resolved positions are
+never added. Changed token/condition IDs block regeneration.
 """
 
 from __future__ import annotations
@@ -10,16 +17,23 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from tyrex_pm.runtime.r7_ack_gate import enforce_acknowledgment_gate
-from tyrex_pm.runtime.r7_lifecycle_dust import (
-    default_incident_dust_record,
-    write_lifecycle_dust,
+from tyrex_pm.runtime.r7_ack_policy import (
+    AcknowledgmentPolicy,
+    assert_policy_not_broadened,
+    load_acknowledgment_policy,
+    policy_from_acknowledgment_dict,
+    select_rows_for_policy,
+    write_acknowledgment_policy,
+)
+from tyrex_pm.runtime.r7_lifecycle_residuals import (
+    ensure_incident_in_registry,
+    residual_token_ids,
 )
 from tyrex_pm.runtime.r7_paths import (
     DEFAULT_ACKNOWLEDGMENT_PATH,
@@ -28,9 +42,7 @@ from tyrex_pm.runtime.r7_paths import (
 )
 from tyrex_pm.runtime.r7_position_ack import (
     AckError,
-    PositionCategory,
     build_acknowledgment,
-    fingerprint_from_raw,
     write_acknowledgment,
 )
 
@@ -67,35 +79,33 @@ def fetch_positions_readonly(repo_root: Path) -> list[dict[str, Any]]:
     creds = load_l2_credentials(env)
     user = positions_wallet_address(creds)
     url = f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
-    req = Request(url, headers={"User-Agent": "tyrex-pm-r7d1-ack/1.0"}, method="GET")
+    req = Request(url, headers={"User-Agent": "tyrex-pm-r7d2-ack/1.0"}, method="GET")
     with urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
 
 
-def _select_exactly_four_resolved(
-    raw: list[dict[str, Any]],
+def _resolve_policy(
     *,
-    exclude_token_ids: set[str],
-) -> list[dict[str, Any]]:
-    """Pick RESOLVED_REDEEMABLE nonzero rows, excluding known lifecycle dust tokens."""
-    chosen: list[dict[str, Any]] = []
-    for row in raw:
-        size = Decimal(str(row.get("size") or "0"))
-        if size == 0:
-            continue
-        token = str(row.get("asset") or row.get("token_id") or "")
-        if token in exclude_token_ids:
-            continue
-        fp = fingerprint_from_raw(row)
-        if not fp.redeemable or not fp.resolved:
-            continue
-        if fp.category != PositionCategory.RESOLVED_REDEEMABLE_POSITION.value:
-            continue
-        chosen.append(row)
-    if len(chosen) != 4:
-        raise AckError(f"EXPECTED_FOUR_RESOLVED_REDEEMABLE_GOT_{len(chosen)}")
-    return chosen
+    repo: Path,
+    policy: AcknowledgmentPolicy | None,
+    bootstrap_from_ack_path: Path | None,
+) -> AcknowledgmentPolicy:
+    if policy is not None:
+        return policy
+    try:
+        return load_acknowledgment_policy(repo_root=repo)
+    except AckError:
+        if bootstrap_from_ack_path and bootstrap_from_ack_path.exists():
+            ack = json.loads(bootstrap_from_ack_path.read_text(encoding="utf-8"))
+            sealed = policy_from_acknowledgment_dict(ack)
+            write_acknowledgment_policy(sealed, repo_root=repo)
+            return sealed
+        raise AckError(
+            "ACK_POLICY_MISSING — sealed policy required at "
+            "config/r7/acknowledgment_policy.json (or var/state mirror). "
+            "Regenerate will not invent identities from all account positions."
+        )
 
 
 def regenerate_acknowledgment(
@@ -103,39 +113,61 @@ def regenerate_acknowledgment(
     repo_root: Path | None = None,
     output_path: Path | None = None,
     positions_provider: Any | None = None,
-    write_dust_state: bool = True,
+    write_residual_state: bool = True,
+    write_dust_state: bool = True,  # back-compat alias → residuals
+    policy: AcknowledgmentPolicy | None = None,
+    bootstrap_policy_from_existing_ack: bool = False,
 ) -> dict[str, Any]:
-    """Regenerate durable ack from current inventory. mutations_attempted=False."""
+    """Regenerate durable ack from sealed policy + inventory. mutations_attempted=False."""
+    del write_dust_state  # superseded by residual registry
     repo = repo_root or Path.cwd()
     ensure_r7_state_dir(repo)
     dest = output_path or resolve_acknowledgment_path(None, repo_root=repo)
     commit = _git_commit(repo)
     now = datetime.now(timezone.utc).isoformat()
 
+    bootstrap_path = (
+        (repo / DEFAULT_ACKNOWLEDGMENT_PATH)
+        if bootstrap_policy_from_existing_ack
+        else None
+    )
+    pol = _resolve_policy(
+        repo=repo,
+        policy=policy,
+        bootstrap_from_ack_path=bootstrap_path,
+    )
+
     raw = (
         list(positions_provider())
         if positions_provider is not None
         else fetch_positions_readonly(repo)
     )
-    dust_rec = default_incident_dust_record()
-    exclude = {dust_rec.token_id}
-    selected = _select_exactly_four_resolved(raw, exclude_token_ids=exclude)
+
+    registry = None
+    residual_path = None
+    if write_residual_state:
+        registry = ensure_incident_in_registry(repo_root=repo)
+        residual_path = repo / "var" / "state" / "r7" / "lifecycle_residuals.json"
+    exclude = set(residual_token_ids(registry))
+
+    selected = select_rows_for_policy(raw, pol, exclude_token_ids=exclude)
+    assert_policy_not_broadened(pol, selected)
+
+    # Ensure policy mirror exists under durable state (never under reporting)
+    write_acknowledgment_policy(pol, repo_root=repo, write_config=True, write_state=True)
+
     ack = build_acknowledgment(raw_positions=selected, commit_identity=commit)
     content_hash = write_acknowledgment(dest, ack)
-
-    dust_path = None
-    if write_dust_state:
-        dust_path = write_lifecycle_dust(repo_root=repo, record=dust_rec)
 
     gate = enforce_acknowledgment_gate(
         acknowledgment_path=dest,
         raw_positions=selected,
         repo_root=repo,
-        ignore_selected_market_tokens=[dust_rec.token_id],
+        ignore_selected_market_tokens=list(exclude),
     )
 
     report = {
-        "schema": "r7d1_ack_regenerate_v1",
+        "schema": "r7d2_ack_regenerate_v1",
         "ts": now,
         "mutations_attempted": False,
         "mutations_enabled": False,
@@ -144,6 +176,12 @@ def regenerate_acknowledgment(
         "content_hash": content_hash,
         "schema_version": ack.schema_version,
         "policy_id": ack.policy_id,
+        "policy_source": pol.source,
+        "policy_paths": [
+            "config/r7/acknowledgment_policy.json",
+            "var/state/r7/acknowledgment_policy.json",
+        ],
+        "policy_identity_keys": sorted(pol.content_keys()),
         "commit_identity": commit,
         "evidence_source": "data_api_positions_funder_wallet",
         "expected_count": 4,
@@ -158,12 +196,20 @@ def regenerate_acknowledgment(
         ],
         "gate_ok": gate.ok,
         "gate_blockers": gate.blockers,
-        "lifecycle_dust_path": None if dust_path is None else str(dust_path),
-        "lifecycle_dust": dust_rec.to_dict(),
+        "lifecycle_residuals_path": None if residual_path is None else str(residual_path),
+        "lifecycle_residuals": None if registry is None else registry.to_dict(),
+        # back-compat field for older report consumers
+        "lifecycle_dust": (
+            None
+            if registry is None or not registry.open_residuals()
+            else registry.open_residuals()[0].to_dict()
+        ),
         "prohibitions": dict(ack.prohibitions),
         "note": (
-            "Regeneration is not authorization to sell/redeem/transfer/approve/"
-            "merge/split or perform on-chain actions."
+            "Regeneration uses sealed acknowledgment_policy identities only. "
+            "It does not acknowledge every resolved position. "
+            "Not authorization to sell/redeem/transfer/approve/merge/split "
+            "or perform on-chain actions."
         ),
     }
     if not gate.ok:

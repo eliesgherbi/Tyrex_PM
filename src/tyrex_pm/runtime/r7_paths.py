@@ -2,9 +2,10 @@
 
 ``var/reporting/`` — disposable run reports, facts, recon dumps.
 ``var/state/`` — required local runtime/safety artifacts (must survive report cleanup).
+``config/r7/`` — sealed acknowledgment policy (committed source of truth).
 
 Deleting historical reports under ``var/reporting/`` must never delete
-acknowledgment or lifecycle-dust state under ``var/state/``.
+acknowledgment, policy, or residual-registry state under ``var/state/`` / ``config/r7/``.
 """
 
 from __future__ import annotations
@@ -20,14 +21,22 @@ R7C_REPORT_DIR = REPORTING_ROOT / "r7c"
 STATE_ROOT = Path("var/state")
 R7_STATE_DIR = STATE_ROOT / "r7"
 DEFAULT_ACKNOWLEDGMENT_PATH = R7_STATE_DIR / "position_acknowledgment.json"
-DEFAULT_LIFECYCLE_DUST_PATH = R7_STATE_DIR / "lifecycle_dust.json"
+DEFAULT_LIFECYCLE_DUST_PATH = R7_STATE_DIR / "lifecycle_dust.json"  # legacy scalar
+DEFAULT_LIFECYCLE_RESIDUALS_PATH = R7_STATE_DIR / "lifecycle_residuals.json"
+DEFAULT_ACK_POLICY_STATE_PATH = R7_STATE_DIR / "acknowledgment_policy.json"
+
+# Committed sealed policy (not disposable reports)
+CONFIG_ACK_POLICY_PATH = Path("config/r7/acknowledgment_policy.json")
 
 DISPOSABLE_GLOBS = (
     "var/reporting/**",
 )
 DURABLE_STATE_GLOBS = (
     "var/state/r7/position_acknowledgment.json",
-    "var/state/r7/lifecycle_dust.json",
+    "var/state/r7/lifecycle_residuals.json",
+    "var/state/r7/lifecycle_dust.json",  # legacy; migrated into residuals
+    "var/state/r7/acknowledgment_policy.json",
+    "config/r7/acknowledgment_policy.json",
 )
 
 

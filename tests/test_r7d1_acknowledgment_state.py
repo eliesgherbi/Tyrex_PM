@@ -8,13 +8,21 @@ from pathlib import Path
 from typing import Any
 
 from tyrex_pm.execution.polymarket.mutation_transport import SpyMutationTransport
+from datetime import datetime, timezone
+
 from tyrex_pm.runtime.r7_ack_gate import enforce_acknowledgment_gate
+from tyrex_pm.runtime.r7_ack_policy import (
+    AcknowledgmentPolicy,
+    PolicyIdentity,
+    write_acknowledgment_policy,
+)
 from tyrex_pm.runtime.r7_ack_regenerate import regenerate_acknowledgment
 from tyrex_pm.runtime.r7_lifecycle_dust import (
     INCIDENT_DUST_TOKEN,
     default_incident_dust_record,
     write_lifecycle_dust,
 )
+from tyrex_pm.runtime.r7_lifecycle_residuals import migrate_dust_to_registry
 from tyrex_pm.runtime.r7_paths import (
     DEFAULT_ACKNOWLEDGMENT_PATH,
     R7B_REPORT_DIR,
@@ -38,6 +46,29 @@ def _four() -> list[dict[str, Any]]:
         }
         for i in range(4)
     ]
+
+
+def _seed_policy(tmp_path: Path, rows: list[dict[str, Any]] | None = None) -> None:
+    rows = rows or _four()
+    write_acknowledgment_policy(
+        AcknowledgmentPolicy(
+            schema_version="r7_acknowledgment_policy_v1",
+            policy_id="ACK_RESOLVED_REDEEMABLE_UNTOUCHED_R7A1",
+            expected_count=4,
+            identities=[
+                PolicyIdentity(
+                    condition_id=str(r["conditionId"]),
+                    token_id=str(r["asset"]),
+                    slug=str(r.get("slug") or ""),
+                )
+                for r in rows
+            ],
+            created_at=datetime.now(timezone.utc).isoformat(),
+            source="test_r7d1",
+            sealed=True,
+        ),
+        repo_root=tmp_path,
+    )
 
 
 def test_deleting_reports_does_not_delete_durable_ack(tmp_path: Path) -> None:
@@ -120,11 +151,12 @@ def test_none_path_blocks() -> None:
 
 def test_valid_regenerated_artifact_permits_dry(tmp_path: Path) -> None:
     rows = _four()
+    _seed_policy(tmp_path, rows)
     report = regenerate_acknowledgment(
         repo_root=tmp_path,
         output_path=tmp_path / "var" / "state" / "r7" / "position_acknowledgment.json",
         positions_provider=lambda: rows,
-        write_dust_state=True,
+        write_residual_state=True,
     )
     assert report["ok"] is True
     assert report["mutations_attempted"] is False
@@ -142,6 +174,7 @@ def test_valid_regenerated_artifact_permits_dry(tmp_path: Path) -> None:
     assert result.report["acknowledgment"]["content_hash"]
     assert result.report["lifecycle_dust"] is not None
     assert result.report["lifecycle_dust"]["classification"] == "FLAT_WITH_DUST"
+    assert result.report["lifecycle_residuals"] is not None
 
 
 def test_changed_fingerprint_blocks(tmp_path: Path) -> None:
@@ -199,6 +232,7 @@ def test_dry_and_live_share_ack_gate(tmp_path: Path) -> None:
 def test_dust_visible_and_not_ack_target(tmp_path: Path) -> None:
     path, rows = _write_ack(tmp_path)
     write_lifecycle_dust(repo_root=tmp_path, record=default_incident_dust_record())
+    migrate_dust_to_registry(repo_root=tmp_path, force_incident=False)
     result = run_r7b_live_once(
         _base_args(
             tmp_path,
@@ -217,11 +251,13 @@ def test_dust_visible_and_not_ack_target(tmp_path: Path) -> None:
 
 
 def test_regeneration_zero_mutations(tmp_path: Path) -> None:
+    rows = _four()
+    _seed_policy(tmp_path, rows)
     report = regenerate_acknowledgment(
         repo_root=tmp_path,
         output_path=tmp_path / "ack.json",
-        positions_provider=lambda: _four(),
-        write_dust_state=False,
+        positions_provider=lambda: rows,
+        write_residual_state=False,
     )
     assert report["mutations_attempted"] is False
     assert report["mutations_enabled"] is False

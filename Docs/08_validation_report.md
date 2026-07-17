@@ -179,7 +179,7 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | R7A/R7A.1 checkpoint | `f3aeaee` (not pushed) |
 | R7A.2 checkpoint | `35cc52d` (not pushed) |
 | Four positions acknowledged | Exact fingerprints; untouched; no redeem/sell |
-| Readiness after ack | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT` only |
+| Readiness after ack | `MUTATIONS_DISABLED` + legacy `R7B_AUTHORIZATION_ABSENT` (session model; superseded for live) |
 | Session draft | Two-level envelope; `user_authorization_present=false` |
 | Mutations / orders | **None** |
 | Tests | **270** passed |
@@ -234,3 +234,15 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | Live | **Not executed** |
 
 Full note: [`Docs/Implementation/r7d1_acknowledgment_state.md`](Implementation/r7d1_acknowledgment_state.md)
+
+## R7D.2 — Operator handoff preparation
+
+| Item | Result |
+|------|--------|
+| Ack policy | `config/r7/acknowledgment_policy.json` seals exact four identities |
+| Regenerate | Cannot broaden; fifth resolved position not auto-acked |
+| Residuals | `var/state/r7/lifecycle_residuals.json` (multi-record; cleanup `NONE`) |
+| Auth docs | Session/nonce/verbatim marked superseded; CLI help updated |
+| Live | **Not executed** (operator command prepared only) |
+
+Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_operator_handoff.md)

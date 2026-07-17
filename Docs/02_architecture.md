@@ -79,3 +79,7 @@ ENTRY_SUBMITTING → ENTRY_MATCHED → ENTRY_SETTLING → ENTRY_CONFIRMED → AC
 - SELL qty = `min(venue_confirmed_acquired, funder_conditional_balance)` only.
 - `signature_type=1`: signer signs; funder/proxy owns positions and conditional balances.
 - Live `--execute-live` requires a **clean** worktree (no dirty override).
+- Authorization: operator CLI flag only (no session nonce / verbatim ceremony).
+- Durable safety state: `config/r7/acknowledgment_policy.json` (sealed four identities),
+  `var/state/r7/position_acknowledgment.json`, `var/state/r7/lifecycle_residuals.json`.
+- Reports under `var/reporting/**` are disposable and must not be the policy source.

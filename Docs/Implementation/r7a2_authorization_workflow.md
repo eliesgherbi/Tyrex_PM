@@ -1,5 +1,10 @@
 # R7A.2 — Position acknowledgment and R7B session authorization workflow
 
+> **SUPERSEDED for live operation (R7D.2).**  
+> The session-nonce / verbatim-statement / `--i-authorize-r7b` chat-authorization model is **historical**.  
+> Active operator path: `tyrex-pm r7b-live-once` with optional `--execute-live` (process-local; no verbatim statement).  
+> See `Docs/Implementation/r7d2_operator_handoff.md`.
+
 **R7A/R7A.1 checkpoint:** `f3aeaee` — `add guarded tiny-live preparation and corrected R7 readiness`  
 **R7A.2 checkpoint:** `35cc52d` — `add R7 position acknowledgment and session authorization workflow`  
 **Not pushed.**

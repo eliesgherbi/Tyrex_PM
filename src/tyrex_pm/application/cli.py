@@ -202,7 +202,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute-live",
         action="store_true",
         default=False,
-        help="Authorize and run one live mutation lifecycle (operator-owned)",
+        help=(
+            "Operator-only: enable mutations for this one process / one lifecycle. "
+            "No verbatim statement, session nonce, or chat artifact required. "
+            "Absence of this flag remains read-only. Agent must never pass this flag."
+        ),
     )
     r7b.add_argument(
         "--output-dir",
@@ -266,15 +270,16 @@ def build_parser() -> argparse.ArgumentParser:
     ack_regen = sub.add_parser(
         "r7-ack-regenerate",
         help=(
-            "R7D.1: regenerate durable acknowledgment state from current "
-            "read-only inventory (zero mutations)"
+            "R7D.2: regenerate durable acknowledgment from sealed "
+            "config/r7/acknowledgment_policy.json identities + read-only inventory "
+            "(zero mutations; never acks every resolved position)"
         ),
     )
     ack_regen.add_argument(
         "--output",
         type=Path,
         default=Path("var/state/r7/position_acknowledgment.json"),
-        help="Durable acknowledgment state path",
+        help="Durable acknowledgment state path (not under var/reporting/)",
     )
     ack_regen.add_argument(
         "--report",
