@@ -1,6 +1,7 @@
 # R7A.2 — Position acknowledgment and R7B session authorization workflow
 
 **R7A/R7A.1 checkpoint:** `f3aeaee` — `add guarded tiny-live preparation and corrected R7 readiness`  
+**R7A.2 checkpoint:** `35cc52d` — `add R7 position acknowledgment and session authorization workflow`  
 **Not pushed.**
 
 ## Position acknowledgment policy

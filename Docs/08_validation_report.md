@@ -177,6 +177,7 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | Item | Result |
 |------|--------|
 | R7A/R7A.1 checkpoint | `f3aeaee` (not pushed) |
+| R7A.2 checkpoint | `35cc52d` (not pushed) |
 | Four positions acknowledged | Exact fingerprints; untouched; no redeem/sell |
 | Readiness after ack | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT` only |
 | Session draft | Two-level envelope; `user_authorization_present=false` |

@@ -5,8 +5,8 @@
 | Item | Value |
 |------|-------|
 | R7A/R7A.1 commit | `f3aeaee` — *add guarded tiny-live preparation and corrected R7 readiness* |
+| R7A.2 commit | `35cc52d` — *add R7 position acknowledgment and session authorization workflow* |
 | Pushed | **No** |
-| R7A.2 commit | (recorded after R7A.2 checkpoint commit) |
 | `.env` | Unchanged `27210C97…F772` |
 
 ## Acknowledgment
