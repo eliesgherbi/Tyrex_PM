@@ -142,7 +142,7 @@ class MutationLifecycle:
         self._set(MutationPhase.ENTRY_SETTLING)
 
     def note_entry_confirmed(self, *, partial: bool = False) -> None:
-        """Venue trade MINED/CONFIRMED + inventory evidence — may size exit."""
+        """Venue trade CONFIRMED + conditional balance evidence — may size exit."""
         self.entry_mutations_enabled = False
         if partial:
             self._set(MutationPhase.ENTRY_PARTIAL)

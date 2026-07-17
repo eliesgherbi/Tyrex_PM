@@ -298,7 +298,11 @@ def _presubmit_blockers(
     blockers: list[str] = []
     if branch != "rest_project" or not readiness.branch_ok:
         blockers.append("BRANCH_MISMATCH")
-    if (not clean and not args.allow_dirty_worktree) or not readiness.worktree_ok:
+    # R7C.1: live execution always requires a clean worktree (allow_dirty is dry-only)
+    if args.execute_live:
+        if not clean or not readiness.worktree_ok:
+            blockers.append("DIRTY_WORKTREE")
+    elif (not clean and not args.allow_dirty_worktree) or not readiness.worktree_ok:
         blockers.append("DIRTY_WORKTREE")
     if ack is not None and (not ack_ok or not readiness.ack_ok):
         blockers.append("ACKNOWLEDGMENT_INVALID")

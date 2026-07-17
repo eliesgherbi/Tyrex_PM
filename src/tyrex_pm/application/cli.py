@@ -219,7 +219,10 @@ def build_parser() -> argparse.ArgumentParser:
     r7b.add_argument(
         "--allow-dirty-worktree",
         action="store_true",
-        help="Permit dirty git worktree (documented exception)",
+        help=(
+            "Dry-run only: permit dirty worktree. "
+            "Ignored/forbidden for --execute-live (clean worktree required)."
+        ),
     )
 
     r7c = sub.add_parser(
@@ -475,15 +478,20 @@ def main(argv: list[str] | None = None) -> int:
             output_path=args.output,
             repo_root=Path.cwd(),
         )
+        flatness = report.get("flat_classification") or {}
         print(
-            f"r7c-recon flat={report.get('selected_market_flat')} "
+            f"r7c-recon terminal={report.get('terminal')} "
+            f"balance={flatness.get('balance')} "
             f"open_orders_zero={report.get('selected_market_open_orders_zero')} "
             f"buy_acq={((report.get('buy_fill_summary') or {}).get('acquired_quantity'))} "
             f"sell_qty={((report.get('sell_fill_summary') or {}).get('sold_quantity'))} "
+            f"ack_ok={((report.get('acknowledgment') or {}).get('ok'))} "
             f"path={args.output}"
         )
         print(f"mutations_attempted={report.get('mutations_attempted')}")
-        return 0 if report.get("selected_market_flat") else 3
+        # Non-tradable dust is acceptable terminal; tradable residual / unknown → nonzero
+        term = str(report.get("terminal") or "")
+        return 0 if term in {"FLAT", "FLAT_WITH_DUST"} else 3
     if args.command == "r7b-live-once":
         from decimal import Decimal
 

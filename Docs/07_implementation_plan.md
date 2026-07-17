@@ -11,7 +11,8 @@
 | R1–R6 | Reset → live adapter / read-only | **Done** |
 | R7A / R7A.1 / R7A.2 | Tiny-live prep, windows/fees, ack+session | **Done** |
 | R7B | Operator CLI `--execute-live` one-shot | **Done** (`d506ea6`) — first live hit settlement bug |
-| R7C | Incident analysis + settlement/recon hardening | **In progress** |
+| R7C | Incident analysis + settlement/recon hardening | **Done** (`da31508`) |
+| R7C.1 | Acceptance: CONFIRMED-only, dust, ack fail-closed | **In progress** |
 | R8 / Z1–Z4 | Acceptance → Z-Gap | Planned after R7C review |
 
 ## Proposed R7 scope (exact)

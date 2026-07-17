@@ -59,17 +59,23 @@ Mode changes OMS dispatch only. Signal/strategy orchestration is one path.
 | SHADOW | ShadowOMS | Shadow only |
 | LIVE_TINY | LiveOMS + `r7b-live-once` | Operator `--execute-live` only; R7C settlement before SELL |
 
-### R7C settlement ladder (LIVE_TINY)
+### R7C / R7C.1 settlement ladder (LIVE_TINY)
 
 ```text
 Order insert status != trade settlement
 MATCHED != CONFIRMED
+MINED != CONFIRMED
 Planned quantity != acquired quantity
 Confirmed fill != immediately sellable balance
+Conditional balance authoritative over Data API for execution safety
 
 ENTRY_SUBMITTING → ENTRY_MATCHED → ENTRY_SETTLING → ENTRY_CONFIRMED → ACTIVE
-  → EXIT_SUBMITTING → EXIT_MATCHED → EXIT_SETTLING → FLAT
-  | MANUAL_INTERVENTION | FLAT_EXTERNAL_ACTION
+  → EXIT_SUBMITTING → EXIT_MATCHED → EXIT_SETTLING
+  → FLAT | FLAT_WITH_DUST | FLAT_EXTERNAL_ACTION
+  | MANUAL_INTERVENTION | RESIDUAL_EXPOSURE | UNKNOWN
 ```
 
-SELL qty = `min(venue_confirmed_acquired, conditional_token_balance)` only.
+- Inventory only from trade status **CONFIRMED** (not MATCHED/MINED/RETRYING).
+- SELL qty = `min(venue_confirmed_acquired, funder_conditional_balance)` only.
+- `signature_type=1`: signer signs; funder/proxy owns positions and conditional balances.
+- Live `--execute-live` requires a **clean** worktree (no dirty override).

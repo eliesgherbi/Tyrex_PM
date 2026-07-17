@@ -5,13 +5,15 @@
 **R7B CLI checkpoint (pre-R7C):** `d506ea661a6478f7359fc623e69a0054b5dcdc65`  
 **Mutations during R7C analysis:** none (read-only recon only)
 
-## Invariants (post-incident)
+## Invariants (post-incident / R7C.1)
 
 ```text
 Order insert status != trade settlement
 MATCHED != CONFIRMED
+MINED != CONFIRMED   # MINED is non-terminal; cannot enable SELL
 Planned quantity != acquired quantity
 Confirmed fill != immediately sellable balance
+Data API flat != conditional-balance flat  # conditional balance authoritative
 ```
 
 ## Timeline (UTC)
@@ -36,8 +38,9 @@ Confirmed fill != immediately sellable balance
 | Reported residual (buggy) | 9.47 | Asserted planned qty as residual |
 | Manually observed UI position | ~9.5 | After settlement visible |
 | Manual SELL trade (recon) | **9.47** @ 0.50, **CONFIRMED** | order `0x4de12437…10ac`, trade `732f6210-…` |
-| Final selected-market position | **flat** (Data API) | open orders **zero** |
-| Conditional dust | ~0.000587 shares | BUY 9.470587 − SELL 9.47 |
+| Data API selected market | empty / flat | open orders **zero** |
+| Conditional balance (authoritative) | **0.000587** shares | dust below min tradable 0.01 |
+| Terminal classification (R7C.1) | **FLAT_WITH_DUST** | not exact FLAT; no auto order; no redeem/on-chain |
 
 ## Root-cause ranking (evidence-based)
 
@@ -71,20 +74,20 @@ Confirmed fill != immediately sellable balance
 ## Acknowledgment positions
 
 Four acknowledged resolved positions were **not** targeted by the lifecycle BUY/SELL.  
-Read-only recon’s ack validator may report set-change noise when Data API row shape is incomplete; treat as secondary. Manual confirmation: ack tokens were not the selected-market token.
+R7C.1: incomplete Data API rows **fail closed** (`ACK_INVENTORY_ROW_INCOMPLETE`) — never treated as noise. Matching uses stable `condition_id|token_id` identity; row order irrelevant; duplicates and source disagreement fail closed.
 
-## Corrected lifecycle (R7C)
+## Corrected lifecycle (R7C.1)
 
 ```text
 ENTRY_SUBMITTING
   → ENTRY_MATCHED          # insert status only
-  → ENTRY_SETTLING         # wait trades + conditional balance
-  → ENTRY_CONFIRMED        # MINED/CONFIRMED + sellable balance
+  → ENTRY_SETTLING         # MATCHED/MINED/RETRYING pending
+  → ENTRY_CONFIRMED        # CONFIRMED only + sellable conditional balance
   → ACTIVE
-  → EXIT_SUBMITTING        # qty = min(confirmed, balance)
+  → EXIT_SUBMITTING        # qty = min(confirmed, balance), never planned
   → EXIT_MATCHED → EXIT_SETTLING
-  → FLAT
-  or MANUAL_INTERVENTION / FLAT_EXTERNAL_ACTION
+  → FLAT | FLAT_WITH_DUST | FLAT_EXTERNAL_ACTION
+  or MANUAL_INTERVENTION / RESIDUAL_EXPOSURE / UNKNOWN
 ```
 
 ## Artifacts

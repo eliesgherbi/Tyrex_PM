@@ -204,11 +204,20 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | Item | Result |
 |------|--------|
 | Live retest | **Forbidden this phase** |
-| Read-only recon | `tyrex-pm r7c-recon` → selected market **FLAT**, open orders **0** |
-| BUY fill | 9.470587 @ 0.51 CONFIRMED (~$4.83) |
-| Manual SELL | 9.47 @ 0.50 CONFIRMED (UI order) |
 | Hardening | `settlement.py` wait + sell readiness; lifecycle MATCHED≠CONFIRMED |
 | Regression fixture | `tests/fixtures/r7b_incident_d632b631_facts.jsonl` |
-| Invariants | Order insert ≠ settlement; MATCHED ≠ CONFIRMED; planned ≠ acquired; confirmed ≠ sellable |
 
-**Stop after R7C.** Awaiting review before any further `--execute-live`.
+## R7C.1 — Acceptance semantics
+
+| Item | Result |
+|------|--------|
+| Live execution | **None** |
+| Settlement finality | **CONFIRMED only** (+ conditional balance); MINED cannot sell |
+| Dust | BUY 9.470587 − SELL 9.47 → **0.000587** → `FLAT_WITH_DUST` |
+| Data API vs CLOB | Data API may look flat; conditional balance authoritative |
+| Ack validation | Fail closed on incomplete/duplicate/disagreeing rows |
+| Address roles | Proxy mode refuses signer-as-conditional-owner |
+| Live worktree | Clean required for `--execute-live` |
+| Read-only command | `tyrex-pm r7c-recon` |
+
+**Stop after R7C.1.** No further live test until explicit review.

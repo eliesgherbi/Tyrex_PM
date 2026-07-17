@@ -55,14 +55,14 @@ def test_matched_delayed_mined_confirmed_then_sell(tmp_path: Path) -> None:
         return [_trade(TradeSettlementStatus.CONFIRMED)]
 
     def bal() -> tuple[Decimal, Decimal | None]:
-        if state["n"] >= 3:
+        # Balance may appear at MINED — still must not sell until CONFIRMED
+        if state["n"] >= 2:
             state["bal"] = Decimal("9.47")
             return state["bal"], Decimal("9.47")
         return Decimal("0"), None
 
     spy = SpyMutationTransport()
     w = _eligible_window()
-    # Force planned qty alignment
     result = run_r7b_live_once(
         _base_args(
             tmp_path,
@@ -80,7 +80,7 @@ def test_matched_delayed_mined_confirmed_then_sell(tmp_path: Path) -> None:
     assert len([r for r in spy.submitted if r.side == "SELL"]) == 1
     facts = (result.facts_path or Path()).read_text(encoding="utf-8")
     assert "entry_matched_not_settled" in facts
-    assert '"event": "entry_filled"' not in facts or "entry_confirmed" in facts
+    assert "MINED_NONTERMINAL_AWAITING_CONFIRMED" in facts
     assert "entry_confirmed" in facts
 
 

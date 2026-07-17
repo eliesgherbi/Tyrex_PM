@@ -35,14 +35,35 @@ class SettlementPhase(str, Enum):
     EXIT_MATCHED = "EXIT_MATCHED"
     EXIT_SETTLING = "EXIT_SETTLING"
     FLAT = "FLAT"
+    FLAT_WITH_DUST = "FLAT_WITH_DUST"
     FLAT_EXTERNAL_ACTION = "FLAT_EXTERNAL_ACTION"
+    RESIDUAL_EXPOSURE = "RESIDUAL_EXPOSURE"
+    UNKNOWN = "UNKNOWN"
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
 
 
-_TERMINAL_SUCCESS = frozenset(
-    {TradeSettlementStatus.CONFIRMED, TradeSettlementStatus.MINED}
+class FlatClassification(str, Enum):
+    """Terminal balance classification — conditional balance is authoritative."""
+
+    FLAT = "FLAT"  # exact verified balance zero
+    FLAT_WITH_DUST = "FLAT_WITH_DUST"  # positive but below venue-tradable size
+    RESIDUAL_EXPOSURE = "RESIDUAL_EXPOSURE"  # tradable residual remains
+    ACTIVE = "ACTIVE"  # synonym for tradable residual when lifecycle open
+    UNKNOWN = "UNKNOWN"  # reliable balance unavailable
+
+
+# R7C.1: only CONFIRMED creates inventory. MINED/MATCHED/RETRYING are non-terminal.
+_INVENTORY_SUCCESS = frozenset({TradeSettlementStatus.CONFIRMED})
+_NONTERMINAL_PENDING = frozenset(
+    {
+        TradeSettlementStatus.MATCHED,
+        TradeSettlementStatus.MINED,
+        TradeSettlementStatus.RETRYING,
+        TradeSettlementStatus.UNKNOWN,
+    }
 )
 _TERMINAL_FAIL = frozenset({TradeSettlementStatus.FAILED})
+DEFAULT_MIN_TRADABLE = Decimal("0.01")
 
 
 def normalize_trade_status(raw: str | None) -> TradeSettlementStatus:
@@ -157,7 +178,12 @@ def inventory_from_trades(
     side: str = "BUY",
     require_terminal: bool = True,
 ) -> tuple[Decimal, list[str], bool]:
-    """Sum trade sizes for side. If require_terminal, only MINED/CONFIRMED count as acquired."""
+    """Sum trade sizes for side.
+
+    R7C.1: only ``CONFIRMED`` counts as acquired inventory.
+    ``MINED``, ``MATCHED``, and ``RETRYING`` remain pending (uncertain).
+    ``FAILED`` never creates inventory.
+    """
     statuses: list[str] = []
     total = Decimal("0")
     uncertain = False
@@ -167,15 +193,77 @@ def inventory_from_trades(
         statuses.append(t.status.value)
         if t.status in _TERMINAL_FAIL:
             continue
-        if t.status is TradeSettlementStatus.RETRYING:
+        if t.status in _NONTERMINAL_PENDING:
             uncertain = True
+            if not require_terminal:
+                total += t.size
             continue
-        if require_terminal and t.status not in _TERMINAL_SUCCESS:
-            if t.status is TradeSettlementStatus.MATCHED:
-                uncertain = True
-            continue
-        total += t.size
+        if t.status in _INVENTORY_SUCCESS:
+            total += t.size
     return total, statuses, uncertain
+
+
+def classify_flatness(
+    *,
+    conditional_balance: Decimal | None,
+    balance_known: bool,
+    min_tradable: Decimal = DEFAULT_MIN_TRADABLE,
+    mark_price: Decimal | None = None,
+) -> dict[str, Any]:
+    """Classify residual using authenticated conditional balance (authoritative)."""
+    if not balance_known or conditional_balance is None:
+        return {
+            "classification": FlatClassification.UNKNOWN.value,
+            "balance": None,
+            "min_tradable": str(min_tradable),
+            "tradable": False,
+            "can_auto_sell": False,
+            "economic_value": None,
+            "reason": "CONDITIONAL_BALANCE_UNAVAILABLE",
+            "dust_cleanup_authorized": False,
+        }
+    bal = conditional_balance
+    value = None if mark_price is None else str((bal * mark_price).quantize(Decimal("0.000001")))
+    if bal == 0:
+        return {
+            "classification": FlatClassification.FLAT.value,
+            "balance": "0",
+            "min_tradable": str(min_tradable),
+            "tradable": False,
+            "can_auto_sell": False,
+            "economic_value": value,
+            "reason": "BALANCE_EXACT_ZERO",
+            "dust_cleanup_authorized": False,
+        }
+    if bal < min_tradable:
+        return {
+            "classification": FlatClassification.FLAT_WITH_DUST.value,
+            "balance": str(bal),
+            "min_tradable": str(min_tradable),
+            "tradable": False,
+            "can_auto_sell": False,
+            "economic_value": value,
+            "reason": "POSITIVE_BELOW_MIN_TRADABLE_NO_AUTO_ORDER",
+            "dust_cleanup_authorized": False,
+            "prohibited": [
+                "redeem",
+                "merge",
+                "split",
+                "transfer",
+                "approval",
+                "on_chain_cleanup",
+            ],
+        }
+    return {
+        "classification": FlatClassification.RESIDUAL_EXPOSURE.value,
+        "balance": str(bal),
+        "min_tradable": str(min_tradable),
+        "tradable": True,
+        "can_auto_sell": True,
+        "economic_value": value,
+        "reason": "TRADABLE_RESIDUAL_REMAINS",
+        "dust_cleanup_authorized": False,
+    }
 
 
 def evaluate_sell_readiness(
@@ -200,8 +288,14 @@ def evaluate_sell_readiness(
         blockers.append("NO_CONFIRMED_ACQUIRED_QTY")
     if sellable_balance <= 0:
         blockers.append("CONDITIONAL_BALANCE_ZERO")
+    elif sellable_balance < qty_step:
+        blockers.append("DUST_NOT_TRADABLE")
     if allowance is not None and allowance < min(confirmed_acquired, sellable_balance):
-        blockers.append("CONDITIONAL_ALLOWANCE_INSUFFICIENT")
+        # Dust-scale allowance shortfalls still block; huge venue sentinel values ok
+        if allowance < qty_step:
+            blockers.append("CONDITIONAL_ALLOWANCE_INSUFFICIENT")
+        elif allowance < min(confirmed_acquired, sellable_balance):
+            blockers.append("CONDITIONAL_ALLOWANCE_INSUFFICIENT")
     if not stream_or_rest_healthy:
         blockers.append("RECONCILIATION_UNHEALTHY")
     if not bid_depth_ok:
@@ -211,8 +305,10 @@ def evaluate_sell_readiness(
     sell_qty = quantize_sell_qty(
         min(confirmed_acquired, sellable_balance), step=qty_step
     )
-    if sell_qty <= 0 and not blockers:
+    if sell_qty <= 0 and "DUST_NOT_TRADABLE" not in blockers and not blockers:
         blockers.append("SELL_QTY_ZERO_AFTER_QUANTIZE")
+    if sell_qty <= 0 and "DUST_NOT_TRADABLE" in blockers:
+        pass
     ev = InventoryEvidence(
         confirmed_acquired=confirmed_acquired,
         sellable_balance=sellable_balance,
@@ -317,7 +413,24 @@ def wait_for_entry_settlement(
                     exposure_high=planned_qty if uncertain else Decimal("0"),
                 )
 
-        if acquired > 0 and sellable > 0:
+        has_confirmed = any(
+            t.status is TradeSettlementStatus.CONFIRMED and t.side.upper() == "BUY"
+            for t in trades
+        )
+        has_mined_only = any(
+            t.status is TradeSettlementStatus.MINED and t.side.upper() == "BUY"
+            for t in trades
+        ) and not has_confirmed
+
+        if has_mined_only:
+            facts.append(
+                {
+                    "event": "entry_settling",
+                    "reason": "MINED_NONTERMINAL_AWAITING_CONFIRMED",
+                }
+            )
+
+        if acquired > 0 and has_confirmed and sellable > 0:
             return SettlementWaitResult(
                 phase=SettlementPhase.ENTRY_CONFIRMED,
                 trades=last_trades,
@@ -333,7 +446,6 @@ def wait_for_entry_settlement(
             )
 
         if acquired > 0 and sellable <= 0:
-            # Confirmed trade but balance not visible yet
             facts.append({"event": "entry_settling", "reason": "balance_not_visible"})
 
         elapsed = (clock.now() - start).total_seconds()
@@ -386,6 +498,7 @@ def detect_manual_flat(
 __all__ = [
     "TradeSettlementStatus",
     "SettlementPhase",
+    "FlatClassification",
     "TradeEvidence",
     "InventoryEvidence",
     "SellReadiness",
@@ -395,8 +508,10 @@ __all__ = [
     "RealSettlementClock",
     "normalize_trade_status",
     "inventory_from_trades",
+    "classify_flatness",
     "evaluate_sell_readiness",
     "wait_for_entry_settlement",
     "detect_manual_flat",
     "quantize_sell_qty",
+    "DEFAULT_MIN_TRADABLE",
 ]

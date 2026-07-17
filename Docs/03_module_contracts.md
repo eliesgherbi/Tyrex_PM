@@ -36,17 +36,18 @@ Unknown: reconcile first; do not resubmit; block entries.
 
 Unknown external orders are never auto-canceled. Missing evidence never means flat.
 
-## R7C settlement contract
+## R7C / R7C.1 settlement contract
 
 Module: `tyrex_pm.execution.polymarket.settlement`
 
 - Insert `status=matched` → `ENTRY_MATCHED` only (never `entry_filled`).
-- Acquired qty from trades in `{MINED, CONFIRMED}` only.
-- Sellable qty = `min(confirmed_acquired, conditional_balance)` (never planned shares).
-- Bounded wait after MATCHED; no SELL while balance is zero; no SELL storm.
-- Manual UI flatten → `FLAT_EXTERNAL_ACTION`.
-- CLI read-only verify: `tyrex-pm r7c-recon` (never mutates).
+- Acquired qty from trades with status **CONFIRMED** only (`MINED`/`MATCHED`/`RETRYING` pending).
+- Sellable qty = `min(confirmed_acquired, funder_conditional_balance)` (never planned shares).
+- Flatness: `FLAT` | `FLAT_WITH_DUST` | `RESIDUAL_EXPOSURE` | `UNKNOWN` — dust never authorizes on-chain cleanup.
+- Ack validation fail-closed on incomplete/duplicate/disagreeing inventory rows.
+- Address roles: `address_roles.py` — refuse signer conditional balance when `signature_type=1`.
+- Live path: clean worktree required; CLI read-only verify: `tyrex-pm r7c-recon`.
 
 ## Forbidden
 
-Blind live retest before R7C review · logging credentials · `old/` imports · NautilusTrader.
+`--execute-live` on dirty worktree · blind live retest · logging credentials · `old/` imports · NautilusTrader.

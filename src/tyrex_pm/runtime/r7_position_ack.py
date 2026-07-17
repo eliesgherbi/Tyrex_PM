@@ -153,14 +153,41 @@ def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _row_condition_id(row: Mapping[str, Any]) -> str:
+    return str(row.get("conditionId") or row.get("condition_id") or "")
+
+
+def _row_token_id(row: Mapping[str, Any]) -> str:
+    return str(row.get("asset") or row.get("token_id") or "")
+
+
+def identity_key(condition_id: str, token_id: str) -> str:
+    """Stable authoritative identity — not order-dependent."""
+    return f"{condition_id.lower()}|{token_id}"
+
+
+def row_ack_fields_complete(row: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Fail-closed completeness for acknowledgment matching."""
+    missing: list[str] = []
+    if not _row_condition_id(row):
+        missing.append("condition_id")
+    if not _row_token_id(row):
+        missing.append("token_id")
+    if "size" not in row:
+        missing.append("size")
+    if "redeemable" not in row:
+        missing.append("redeemable")
+    return (len(missing) == 0), missing
+
+
 def fingerprint_from_raw(row: Mapping[str, Any]) -> PositionFingerprint:
     size = Decimal(str(row.get("size") or "0"))
     redeemable = bool(row.get("redeemable"))
     cur = row.get("curPrice")
     resolved = redeemable or (cur is not None and Decimal(str(cur)) == 0)
     return PositionFingerprint(
-        condition_id=str(row.get("conditionId") or row.get("condition_id") or ""),
-        token_id=str(row.get("asset") or row.get("token_id") or ""),
+        condition_id=_row_condition_id(row),
+        token_id=_row_token_id(row),
         outcome=str(row.get("outcome") or ""),
         quantity=str(size),
         resolved=resolved,
@@ -256,8 +283,14 @@ def validate_acknowledgment_against_inventory(
     selected_token_ids: Sequence[str] = (),
     selected_condition_id: str | None = None,
     open_order_count: int = 0,
+    secondary_raw_positions: Sequence[Mapping[str, Any]] | None = None,
+    ignore_selected_market_tokens: Sequence[str] = (),
 ) -> AckValidationResult:
-    """Validate that live inventory still matches the acknowledged set exactly."""
+    """Validate that live inventory still matches the acknowledged set exactly.
+
+    Fail closed on incomplete rows — never silently drop or reinterpret acks.
+    Matching is identity-stable (condition_id + token_id); row order irrelevant.
+    """
     result = AckValidationResult(ok=True)
     if ack.acknowledgment_text_hash != _text_hash(ACKNOWLEDGMENT_TEXT):
         result.ok = False
@@ -266,58 +299,102 @@ def validate_acknowledgment_against_inventory(
         result.ok = False
         result.blockers.append("ACKNOWLEDGED_POSITION_SET_CHANGED")
 
-    live_nonzero = [
-        fingerprint_from_raw(r)
-        for r in raw_positions
-        if Decimal(str(r.get("size") or "0")) != 0
-    ]
-    ack_digests = {p.digest(): p for p in ack.positions}
-    live_digests = {p.digest(): p for p in live_nonzero}
+    # Completeness gate — incomplete inventory cannot validate entry
+    complete_rows: list[Mapping[str, Any]] = []
+    for r in raw_positions:
+        if Decimal(str(r.get("size") or "0")) == 0:
+            continue
+        ok_row, missing = row_ack_fields_complete(r)
+        if not ok_row:
+            result.ok = False
+            result.blockers.append("ACK_INVENTORY_ROW_INCOMPLETE")
+            result.notes.append(f"incomplete_fields={missing}")
+            continue
+        complete_rows.append(r)
 
-    if set(ack_digests) != set(live_digests):
-        # Distinguish change types
-        if len(live_nonzero) != 4:
+    if "ACK_INVENTORY_ROW_INCOMPLETE" in result.blockers:
+        result.blockers = list(dict.fromkeys(result.blockers))
+        return result
+
+    ignore_sel = {str(t) for t in ignore_selected_market_tokens}
+    selected = set(selected_token_ids)
+    ack_by_id = {identity_key(p.condition_id, p.token_id): p for p in ack.positions}
+
+    live_fps: list[PositionFingerprint] = []
+    seen_identity: set[str] = set()
+    for r in complete_rows:
+        fp = fingerprint_from_raw(r)
+        ik = identity_key(fp.condition_id, fp.token_id)
+        # Exclude lifecycle dust only when it is NOT an acknowledged identity
+        if fp.token_id in ignore_sel and ik not in ack_by_id:
+            result.notes.append("selected_market_lifecycle_dust_excluded_from_ack_set")
+            continue
+        if ik in seen_identity:
+            result.ok = False
+            result.blockers.append("ACK_DUPLICATE_IDENTITY")
+            continue
+        seen_identity.add(ik)
+        live_fps.append(fp)
+
+    live_by_id = {identity_key(p.condition_id, p.token_id): p for p in live_fps}
+
+    if set(ack_by_id) != set(live_by_id):
+        result.ok = False
+        missing = set(ack_by_id) - set(live_by_id)
+        extra = set(live_by_id) - set(ack_by_id)
+        if missing:
+            result.blockers.append("ACKNOWLEDGED_POSITION_SET_CHANGED")
+            result.notes.append("never_drop_acknowledged_position")
+        if extra:
+            result.blockers.append("UNACKNOWLEDGED_POSITION_PRESENT")
+
+    for ik, ack_fp in ack_by_id.items():
+        live_fp = live_by_id.get(ik)
+        if live_fp is None:
+            continue
+        if Decimal(live_fp.quantity) != Decimal(ack_fp.quantity):
             result.ok = False
             result.blockers.append("ACKNOWLEDGED_POSITION_SET_CHANGED")
-        missing = set(ack_digests) - set(live_digests)
-        extra = set(live_digests) - set(ack_digests)
-        if missing or extra:
-            result.ok = False
-            if extra:
-                result.blockers.append("UNACKNOWLEDGED_POSITION_PRESENT")
-            if missing:
+        if live_fp.digest() != ack_fp.digest():
+            # outcome/slug/category drift
+            if not live_fp.redeemable or not live_fp.resolved:
+                result.ok = False
+                result.blockers.append("ACKNOWLEDGED_POSITION_BECAME_TRADABLE")
+            elif live_fp.digest() != ack_fp.digest():
+                result.ok = False
                 result.blockers.append("ACKNOWLEDGED_POSITION_SET_CHANGED")
-
-    selected = set(selected_token_ids)
-    for fp in live_nonzero:
-        if fp.token_id in selected or (
-            selected_condition_id and fp.condition_id == selected_condition_id
+        if live_fp.token_id in selected or (
+            selected_condition_id and live_fp.condition_id == selected_condition_id
         ):
             result.ok = False
             result.blockers.append("SELECTED_MARKET_POSITION_NONZERO")
-        if fp.digest() in ack_digests:
-            if fp.category != PositionCategory.RESOLVED_REDEEMABLE_POSITION.value:
-                result.ok = False
-                result.blockers.append("ACKNOWLEDGED_POSITION_BECAME_TRADABLE")
-            if not fp.redeemable or not fp.resolved:
-                result.ok = False
-                result.blockers.append("ACKNOWLEDGED_POSITION_BECAME_TRADABLE")
-            # quantity/identity already in digest
-            result.matched += 1
-        else:
-            # Unacknowledged live row
-            if fp.redeemable and fp.resolved:
-                result.ok = False
-                result.blockers.append("UNACKNOWLEDGED_POSITION_PRESENT")
-            else:
-                result.ok = False
-                result.blockers.append("UNACKNOWLEDGED_POSITION_PRESENT")
+        result.matched += 1
+
+    for ik, live_fp in live_by_id.items():
+        if ik not in ack_by_id:
+            result.ok = False
+            result.blockers.append("UNACKNOWLEDGED_POSITION_PRESENT")
+
+    if secondary_raw_positions is not None:
+        sec = validate_acknowledgment_against_inventory(
+            ack,
+            raw_positions=secondary_raw_positions,
+            selected_token_ids=selected_token_ids,
+            selected_condition_id=selected_condition_id,
+            open_order_count=0,
+            secondary_raw_positions=None,
+            ignore_selected_market_tokens=ignore_selected_market_tokens,
+        )
+        if sec.ok != result.ok or set(sec.blockers) != set(result.blockers):
+            # Disagreement between sources — fail closed for entry
+            result.ok = False
+            result.blockers.append("ACK_SOURCE_DISAGREEMENT")
+            result.notes.append("primary_vs_secondary_inventory_disagree")
 
     if open_order_count > 0:
         result.ok = False
         result.blockers.append("UNKNOWN_EXTERNAL_ORDER")
 
-    # Deduplicate blockers
     result.blockers = list(dict.fromkeys(result.blockers))
     if result.ok and result.matched != 4:
         result.ok = False

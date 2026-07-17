@@ -215,7 +215,23 @@ class SdkReadonlyTransport:
     def get_conditional_balance_allowance(
         self, token_id: str
     ) -> tuple[Decimal, Decimal | None]:
-        """CONDITIONAL token balance/allowance in share units (read-only)."""
+        """CONDITIONAL balance/allowance for the funder/proxy owner (share units).
+
+        When ``signature_type=1``, the official client is constructed with
+        ``funder=proxy``; querying via this transport must never substitute the
+        signer EOA as the conditional-token owner.
+        """
+        from tyrex_pm.execution.polymarket.address_roles import roles_from_credentials
+
+        roles = roles_from_credentials(self.creds)
+        roles.assert_conditional_query_target(queried_as=roles.conditional_owner)
+        if roles.proxy_mode and roles.conditional_owner.lower() == roles.signer_eoa.lower():
+            # Only legal when signer==funder; otherwise refuse
+            if roles.funder_proxy and roles.funder_proxy.lower() != roles.signer_eoa.lower():
+                from tyrex_pm.execution.polymarket.address_roles import AddressRoleError
+
+                raise AddressRoleError("REFUSING_SIGNER_CONDITIONAL_BALANCE_WHEN_PROXY_MODE")
+
         self.spy.check(method="GET", path="/balance-allowance")
         from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
@@ -224,25 +240,18 @@ class SdkReadonlyTransport:
         )
         if not isinstance(raw, dict):
             return Decimal("0"), None
-        bal = Decimal(str(raw.get("balance") or "0"))
-        # Venue often returns 6-decimal base units
-        if bal >= Decimal("1000"):
-            bal = bal / Decimal("1000000")
+        bal = Decimal(str(raw.get("balance") or "0")) / Decimal("1000000")
         allowance = None
         allowances = raw.get("allowances")
         if isinstance(allowances, dict) and allowances:
             first = next(iter(allowances.values()))
-            allowance = Decimal(str(first))
-            if allowance >= Decimal("1000"):
-                allowance = allowance / Decimal("1000000")
+            allowance = Decimal(str(first)) / Decimal("1000000")
         elif raw.get("allowance") is not None:
-            allowance = Decimal(str(raw.get("allowance")))
-            if allowance >= Decimal("1000"):
-                allowance = allowance / Decimal("1000000")
+            allowance = Decimal(str(raw.get("allowance"))) / Decimal("1000000")
         return bal, allowance
 
-    def get_positions(self) -> list[VenuePositionSnapshot]:
-        # Public Data API — funder preferred (historical)
+    def get_positions_raw(self) -> list[dict[str, Any]]:
+        """Full Data API position rows for the funder/proxy (ack validation)."""
         import json
         from urllib.request import Request, urlopen
 
@@ -252,12 +261,14 @@ class SdkReadonlyTransport:
         req = Request(url, method="GET", headers={"User-Agent": "tyrex-pm-r6d/1.0"})
         with urlopen(req, timeout=15) as resp:
             rows = json.loads(resp.read().decode("utf-8"))
-        out: list[VenuePositionSnapshot] = []
         if not isinstance(rows, list):
-            return out
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
+            return []
+        return [r for r in rows if isinstance(r, dict)]
+
+    def get_positions(self) -> list[VenuePositionSnapshot]:
+        # Public Data API — funder preferred (historical)
+        out: list[VenuePositionSnapshot] = []
+        for r in self.get_positions_raw():
             asset = str(r.get("asset") or r.get("token_id") or "")
             if not asset:
                 continue

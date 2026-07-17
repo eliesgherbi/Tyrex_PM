@@ -1,21 +1,25 @@
-"""Read-only R7C incident / FLAT reconciliation (no mutations)."""
+"""Read-only R7C / R7C.1 incident and FLAT reconciliation (no mutations)."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from tyrex_pm.execution.polymarket.auth import (
-    load_l2_credentials,
-    positions_wallet_address,
-    redact_text,
-)
+from tyrex_pm.execution.polymarket.address_roles import roles_from_credentials
+from tyrex_pm.execution.polymarket.auth import load_l2_credentials, redact_text
 from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
-from tyrex_pm.runtime.r7_position_ack import read_acknowledgment, validate_acknowledgment_against_inventory
+from tyrex_pm.execution.polymarket.settlement import (
+    DEFAULT_MIN_TRADABLE,
+    FlatClassification,
+    classify_flatness,
+)
+from tyrex_pm.runtime.r7_position_ack import (
+    read_acknowledgment,
+    validate_acknowledgment_against_inventory,
+)
 
 
 INCIDENT_BUY_ORDER = "0x68efa63a23abb0ab55042204683f48f4303ed2db3e9d955317bc41add43e71db"
@@ -90,37 +94,7 @@ def _order_to_safe(o: Any) -> dict[str, Any]:
         "token_suffix": o.instrument_token_id[-8:] if o.instrument_token_id else None,
         "market_id": o.market_id,
         "maker_fp": _addr_fingerprint(str(maker) if maker else None),
-        "associate_trades": raw.get("associate_trades") or raw.get("associateTrades"),
     }
-
-
-def _query_conditional_balance(client: Any, token_id: str) -> dict[str, Any]:
-    """Best-effort CONDITIONAL balance/allowance for sell readiness evidence."""
-    try:
-        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
-
-        raw = client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
-        )
-        if not isinstance(raw, dict):
-            return {"ok": False, "error": "non_dict_response"}
-        bal = Decimal(str(raw.get("balance") or "0"))
-        # CLOB CONDITIONAL balance is typically 6-decimal base units (even for dust)
-        bal_shares = bal / Decimal("1000000")
-        allowance = None
-        allowances = raw.get("allowances")
-        if isinstance(allowances, dict) and allowances:
-            first = next(iter(allowances.values()))
-            allowance = Decimal(str(first)) / Decimal("1000000")
-        return {
-            "ok": True,
-            "balance_raw": str(bal),
-            "balance_shares_interpreted": str(bal_shares),
-            "allowance_shares_interpreted": None if allowance is None else str(allowance),
-            "note": "share units = raw/1e6; dust may remain after UI round-down sells",
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:200]}
 
 
 def run_incident_recon(
@@ -132,56 +106,46 @@ def run_incident_recon(
     acknowledgment_path: Path | None = None,
     output_path: Path | None = None,
     repo_root: Path | None = None,
+    min_tradable: Decimal = DEFAULT_MIN_TRADABLE,
 ) -> dict[str, Any]:
     """Authenticated read-only reconstruction. Never mutates."""
     repo = repo_root or Path.cwd()
     env = _load_env(repo)
     creds = load_l2_credentials(env)
+    roles = roles_from_credentials(creds)
+    roles.assert_conditional_query_target(queried_as=roles.conditional_owner)
     transport = SdkReadonlyTransport.from_env(env)
-    client = transport._client
 
     report: dict[str, Any] = {
-        "schema": "r7c_incident_recon_v1",
+        "schema": "r7c1_incident_recon_v1",
         "ts": datetime.now(timezone.utc).isoformat(),
         "mutations_attempted": False,
         "market_slug": market_slug,
         "condition_id": condition_id,
         "token_suffix": token_id[-8:],
         "buy_order_id": buy_order_id,
-        "address_roles": {
-            "signer_eoa_fp": _addr_fingerprint(creds.address),
-            "funder_proxy_fp": _addr_fingerprint(creds.funder),
-            "positions_query_fp": _addr_fingerprint(positions_wallet_address(creds)),
-            "signer_eq_funder": (
-                bool(creds.funder)
-                and creds.address.lower() == creds.funder.lower()
-            )
-            if creds.funder
-            else True,
-            "signature_type": creds.signature_type,
-        },
+        "address_roles": roles.to_safe_dict(),
+        "settlement_finality_rule": "CONFIRMED_ONLY_PLUS_CONDITIONAL_BALANCE",
     }
 
-    # BUY order
-    buy_order = None
     try:
         buy_order = transport.get_order(buy_order_id)
         report["buy_order"] = None if buy_order is None else _order_to_safe(buy_order)
     except Exception as exc:  # noqa: BLE001
         report["buy_order_error"] = redact_text(f"{type(exc).__name__}:{exc}", creds)
 
-    # Trades (filter by market / order / token)
     trades_safe: list[dict[str, Any]] = []
     try:
         trades = transport.get_trades(market_id=condition_id)
         if not trades:
             trades = transport.get_trades()
         for t in trades:
-            if t.venue_order_id == buy_order_id or t.instrument_token_id == token_id:
+            if (
+                t.venue_order_id == buy_order_id
+                or t.instrument_token_id == token_id
+                or t.market_id == condition_id
+            ):
                 trades_safe.append(_trade_to_safe(t))
-            elif t.market_id == condition_id:
-                trades_safe.append(_trade_to_safe(t))
-        # Dedup
         seen: set[str] = set()
         deduped: list[dict[str, Any]] = []
         for row in trades_safe:
@@ -196,12 +160,10 @@ def run_incident_recon(
     except Exception as exc:  # noqa: BLE001
         report["trades_error"] = redact_text(f"{type(exc).__name__}:{exc}", creds)
 
-    buy_trades = [t for t in trades_safe if str(t.get("side", "")).upper() == "BUY"]
+    buy_trades = [t for t in trades_safe if t.get("order_id") == buy_order_id]
+    if not buy_trades:
+        buy_trades = [t for t in trades_safe if str(t.get("side", "")).upper() == "BUY"]
     sell_trades = [t for t in trades_safe if str(t.get("side", "")).upper() == "SELL"]
-    # Also match by order id for buy
-    buy_by_order = [t for t in trades_safe if t.get("order_id") == buy_order_id]
-    if buy_by_order:
-        buy_trades = buy_by_order
 
     acquired = sum((Decimal(str(t["size"])) for t in buy_trades), Decimal("0"))
     sold = sum((Decimal(str(t["size"])) for t in sell_trades), Decimal("0"))
@@ -210,12 +172,10 @@ def run_incident_recon(
         "trade_count": len(buy_trades),
         "acquired_quantity": str(acquired),
         "statuses": statuses,
-        "status_progression_observed": statuses,
         "has_matched": any(s == "MATCHED" for s in statuses),
         "has_mined": any(s == "MINED" for s in statuses),
         "has_confirmed": any(s == "CONFIRMED" for s in statuses),
-        "has_failed": any(s == "FAILED" for s in statuses),
-        "has_retrying": any(s == "RETRYING" for s in statuses),
+        "inventory_counts_confirmed_only": True,
         "usdc_spent_estimate": str(
             sum(
                 (Decimal(str(t["size"])) * Decimal(str(t["price"])) for t in buy_trades),
@@ -227,154 +187,134 @@ def run_incident_recon(
         "trade_count": len(sell_trades),
         "sold_quantity": str(sold),
         "trades": sell_trades,
-        "note": (
-            "manual UI sell expected; automatic lifecycle SELL was rejected with balance=0"
-        ),
+        "note": "includes manual UI SELL when present",
     }
 
-    # Positions / open orders
-    positions = transport.get_positions()
+    # Data API positions (full rows for ack)
+    raw_positions = transport.get_positions_raw()
     selected_pos = [
-        p
-        for p in positions
-        if p.instrument_token_id == token_id or p.market_id == condition_id
+        r
+        for r in raw_positions
+        if str(r.get("asset") or "") == token_id
+        or str(r.get("conditionId") or "") == condition_id
     ]
-    report["selected_market_positions"] = [
-        {
-            "token_suffix": p.instrument_token_id[-8:],
-            "size": str(p.size),
-            "avg_price": None if p.avg_price is None else str(p.avg_price),
-            "market_id": p.market_id,
-        }
-        for p in selected_pos
-    ]
-    selected_qty = sum((p.size for p in selected_pos), Decimal("0"))
-    report["selected_market_flat"] = selected_qty == 0
+    data_api_selected_qty = sum(
+        (Decimal(str(r.get("size") or "0")) for r in selected_pos), Decimal("0")
+    )
+    report["data_api_selected_market"] = {
+        "positions": [
+            {
+                "token_suffix": str(r.get("asset") or "")[-8:],
+                "size": str(r.get("size")),
+                "condition_id": r.get("conditionId"),
+            }
+            for r in selected_pos
+        ],
+        "flat_by_data_api": data_api_selected_qty == 0,
+        "quantity": str(data_api_selected_qty),
+    }
 
     try:
         opens = transport.get_open_orders(market_id=condition_id)
     except Exception:  # noqa: BLE001
-        opens = transport.get_open_orders()
-        opens = [o for o in opens if o.market_id == condition_id or o.instrument_token_id == token_id]
+        opens = [
+            o
+            for o in transport.get_open_orders()
+            if o.market_id == condition_id or o.instrument_token_id == token_id
+        ]
     report["selected_market_open_orders"] = [_order_to_safe(o) for o in opens]
     report["selected_market_open_orders_zero"] = len(opens) == 0
 
-    # Conditional balance
-    report["conditional_balance"] = _query_conditional_balance(client, token_id)
+    # Authoritative conditional balance (funder/proxy)
+    bal_known = False
+    bal_shares: Decimal | None = None
     try:
-        coll = transport.get_balance()
-        report["collateral"] = {
-            "balance_present": True,
-            "balance_nonzero": coll.collateral_balance > 0,
-            # do not log full balance figure if large — incident needs magnitude
-            "balance": str(coll.collateral_balance),
-            "allowance_present": coll.allowance is not None,
+        bal_shares, allowance = transport.get_conditional_balance_allowance(token_id)
+        bal_known = True
+        report["conditional_balance"] = {
+            "ok": True,
+            "balance_shares": str(bal_shares),
+            "allowance_shares": None if allowance is None else str(allowance),
+            "query_owner_fp": roles.to_safe_dict()["conditional_owner_fp"],
+            "authoritative_for_execution_safety": True,
         }
     except Exception as exc:  # noqa: BLE001
-        report["collateral"] = {"error": type(exc).__name__}
+        report["conditional_balance"] = {
+            "ok": False,
+            "error": type(exc).__name__,
+            "detail": redact_text(str(exc)[:200], creds),
+        }
 
-    # Ack validation
+    mark = None
+    if buy_trades:
+        mark = Decimal(str(buy_trades[0]["price"]))
+    flatness = classify_flatness(
+        conditional_balance=bal_shares,
+        balance_known=bal_known,
+        min_tradable=min_tradable,
+        mark_price=mark,
+    )
+    report["flat_classification"] = flatness
+    report["selected_market_flat"] = (
+        flatness["classification"] == FlatClassification.FLAT.value
+    )
+    report["observations"] = {
+        "data_api_flat": data_api_selected_qty == 0,
+        "conditional_balance_shares": None if bal_shares is None else str(bal_shares),
+        "authoritative": "conditional_balance",
+        "disagreement": (
+            data_api_selected_qty == 0
+            and bal_known
+            and bal_shares is not None
+            and bal_shares > 0
+        ),
+    }
+
+    # Ack — full Data API rows; exclude selected-market lifecycle token from set
     if acknowledgment_path and acknowledgment_path.exists():
         ack = read_acknowledgment(acknowledgment_path)
-        # Rebuild raw rows from positions via data API style
-        raw_rows = []
-        for p in positions:
-            raw_rows.append(
-                {
-                    "asset": p.instrument_token_id,
-                    "conditionId": p.market_id,
-                    "size": str(p.size),
-                    "curPrice": 0,
-                    "redeemable": True,
-                    "outcome": "Up",
-                    "slug": "",
-                }
-            )
-        v = validate_acknowledgment_against_inventory(ack, raw_positions=raw_rows)
+        v = validate_acknowledgment_against_inventory(
+            ack,
+            raw_positions=raw_positions,
+            selected_token_ids=[token_id],
+            selected_condition_id=condition_id,
+            ignore_selected_market_tokens=[token_id],
+        )
         report["acknowledgment"] = {
             "id": ack.acknowledgment_id,
             "ok": v.ok,
             "matched": v.matched,
             "blockers": v.blockers,
+            "notes": v.notes,
             "expected": ack.expected_position_count,
+            "visible_account_wide": True,
+            "positions": [
+                {
+                    "token_suffix": p.token_id[-8:],
+                    "condition_suffix": p.condition_id[-8:],
+                    "quantity": p.quantity,
+                    "category": p.category,
+                    "untouched": True,
+                }
+                for p in ack.positions
+            ],
         }
 
-    # Cause ranking (evidence-based, not asserted)
-    causes: list[dict[str, Any]] = []
-    causes.append(
+    report["terminal"] = flatness["classification"]
+    report["root_cause_ranking"] = [
         {
             "rank": 1,
             "hypothesis": "MATCHED_TO_SETTLEMENT_BALANCE_VISIBILITY_DELAY",
             "confidence": "high",
-            "evidence": [
-                "SELL ~230ms after BUY insert status=matched rejected with balance:0",
-                "user later observed ~9.5 shares in UI (settlement lag plausible)",
-                "runtime emitted entry_filled without trade/balance confirmation",
-            ],
-        }
-    )
-    causes.append(
+        },
         {
             "rank": 2,
             "hypothesis": "CLOB_CONDITIONAL_BALANCE_CACHE_DELAY",
             "confidence": "medium",
-            "evidence": [
-                "CLOB sell path checks conditional balance/allowance endpoint",
-                "balance:0 at submit time despite later UI position",
-            ],
-        }
-    )
-    signer_eq = report["address_roles"]["signer_eq_funder"]
-    causes.append(
-        {
-            "rank": 3,
-            "hypothesis": "SIGNER_FUNDER_PROXY_MISMATCH",
-            "confidence": "low" if signer_eq else "medium",
-            "evidence": [
-                f"signer_eq_funder={signer_eq}",
-                "positions queried via funder when configured",
-                "compare buy_order.maker_fp vs address_roles",
-            ],
-        }
-    )
-    causes.append(
-        {
-            "rank": 4,
-            "hypothesis": "CONDITIONAL_TOKEN_ALLOWANCE",
-            "confidence": "low",
-            "evidence": [
-                "error text said balance:0 not allowance:0",
-                "allowance insufficiency usually wording differs",
-            ],
-        }
-    )
-    causes.append(
-        {
-            "rank": 5,
-            "hypothesis": "PARTIAL_OR_FAILED_SETTLEMENT",
-            "confidence": "low",
-            "evidence": [
-                "user observed ~full planned size later",
-                "requires trade status FAILED/RETRYING evidence if present",
-            ],
-        }
-    )
-    report["root_cause_ranking"] = causes
-    report["uncertainties"] = [
-        "If historical trade rows aged out or UI sell not linked to same order id, "
-        "manual SELL details may be incomplete.",
-        "Actual acquired qty must come from CONFIRMED/MINED trades + balance, "
-        "not planned 9.47.",
+        },
     ]
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report
-
-
-@dataclass
-class FlatVerifyResult:
-    ok: bool
-    report: dict[str, Any]
-    path: Path | None
