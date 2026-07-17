@@ -140,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     live_once = sub.add_parser(
         "live-once",
-        help="R7B one-shot lifecycle (blocked until explicit session authorization)",
+        help="Legacy R7B path (refuses; use r7b-live-once)",
     )
     live_once.add_argument(
         "--approval",
@@ -157,7 +157,69 @@ def build_parser() -> argparse.ArgumentParser:
     live_once.add_argument(
         "--i-authorize-r7b",
         action="store_true",
-        help="Required second authorization flag (must match session/artifact)",
+        help="Legacy second authorization flag (superseded by r7b-live-once --execute-live)",
+    )
+
+    r7b = sub.add_parser(
+        "r7b-live-once",
+        help=(
+            "Operator-owned R7B one-shot: default dry/read-only; "
+            "mutations only with explicit --execute-live"
+        ),
+    )
+    r7b.add_argument(
+        "--strategy",
+        type=str,
+        default="reference-momentum",
+        help="Must be reference-momentum (ReferenceMomentumStrategy)",
+    )
+    r7b.add_argument(
+        "--market-family",
+        type=str,
+        default="btc_updown_5m",
+        help="Must be btc_updown_5m",
+    )
+    r7b.add_argument(
+        "--max-windows",
+        type=int,
+        default=3,
+        help="Max BTC 5m windows to observe (1-3)",
+    )
+    r7b.add_argument(
+        "--max-buy-collateral",
+        type=str,
+        default="5.00",
+        help="Max BUY amount + entry fee in USDC (≤ 5.00)",
+    )
+    mode = r7b.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Read-only preview/validation (default when --execute-live omitted)",
+    )
+    mode.add_argument(
+        "--execute-live",
+        action="store_true",
+        default=False,
+        help="Authorize and run one live mutation lifecycle (operator-owned)",
+    )
+    r7b.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("var/reporting/r7b"),
+        help="Directory for JSON report + JSONL facts",
+    )
+    r7b.add_argument(
+        "--acknowledgment",
+        type=Path,
+        default=Path("var/reporting/r7/r7a2_position_acknowledgment.json"),
+        help="Optional R7A.2 acknowledgment artifact (validated if present)",
+    )
+    r7b.add_argument(
+        "--allow-dirty-worktree",
+        action="store_true",
+        help="Permit dirty git worktree (documented exception)",
     )
     return parser
 
@@ -358,25 +420,58 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "live-once":
-        # R7B gate — refuse unless explicit second authorization is present.
-        if not args.i_authorize_r7b:
-            print(
-                "R7B BLOCKED: refusing live-once without --i-authorize-r7b "
-                "and matching --session (or --approval). Mutations remain disabled."
-            )
-            return 2
-        if args.session is None and args.approval is None:
-            print(
-                "R7B BLOCKED: provide --session <envelope> (preferred) or --approval. "
-                "Mutations remain disabled."
-            )
-            return 2
         print(
-            "R7B BLOCKED: authorization flag seen, but R7B execution is not enabled "
-            "in this build. Awaiting explicit R7B session authorization review. "
-            "Mutations remain disabled. No order submitted."
+            "R7B BLOCKED: legacy live-once is retired. "
+            "Use: tyrex-pm r7b-live-once --dry-run | --execute-live. "
+            "Mutations remain disabled."
         )
         return 2
+    if args.command == "r7b-live-once":
+        from decimal import Decimal
+
+        from tyrex_pm.runtime.r7b_live_once import R7BLiveOnceArgs, run_r7b_live_once
+
+        execute_live = bool(args.execute_live)
+        # Default dry when neither flag set; --dry-run explicit; --execute-live live
+        dry_run = not execute_live
+        result = run_r7b_live_once(
+            R7BLiveOnceArgs(
+                strategy=args.strategy,
+                market_family=args.market_family,
+                max_windows=int(args.max_windows),
+                max_buy_collateral=Decimal(str(args.max_buy_collateral)),
+                dry_run=dry_run,
+                execute_live=execute_live,
+                output_dir=args.output_dir,
+                acknowledgment_path=args.acknowledgment,
+                repo_root=Path.cwd(),
+                allow_dirty_worktree=bool(args.allow_dirty_worktree),
+            )
+        )
+        report = result.report
+        pre = report.get("pre_submit") or {}
+        print(
+            f"r7b-live-once mode={report.get('mode')} terminal={result.outcome.value} "
+            f"exit={result.exit_code}"
+        )
+        if pre:
+            print(
+                "bound_market="
+                f"{pre.get('market_slug')} token_suffix="
+                f"{str(pre.get('token_id') or '')[-8:]} side={pre.get('side')} "
+                f"qty={pre.get('quantity_max_estimated_shares')} "
+                f"limit={pre.get('limit_price')} "
+                f"max_fee={pre.get('estimated_max_entry_fee')} "
+                f"max_collateral={pre.get('max_collateral')} "
+                f"entry_deadline={pre.get('entry_deadline')} "
+                f"flatten_deadline={pre.get('flatten_deadline')}"
+            )
+        if report.get("blockers"):
+            print(f"blockers={report.get('blockers')}")
+        print(f"report={result.report_path}")
+        print(f"facts={result.facts_path}")
+        print(f"mutations_attempted={len(report.get('mutations_attempted') or [])}")
+        return int(result.exit_code)
     if args.command == "observe":
         cfg = _build_observe_config(args)
         if cfg.mode is SourceMode.FIXTURE:
