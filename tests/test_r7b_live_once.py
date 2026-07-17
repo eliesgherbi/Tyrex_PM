@@ -115,18 +115,46 @@ def _git_ok(_repo: Path) -> tuple[str, str, bool]:
     return "rest_project", "abc123deadbeef", True
 
 
+def _ack_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "conditionId": f"0xack{i}",
+            "asset": f"ack_tok_{i}",
+            "outcome": "Up",
+            "size": "5",
+            "redeemable": True,
+            "curPrice": 0,
+            "slug": f"old-{i}",
+        }
+        for i in range(4)
+    ]
+
+
+def _write_ack(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
+    from tyrex_pm.runtime.r7_position_ack import build_acknowledgment, write_acknowledgment
+
+    rows = _ack_rows()
+    ack = build_acknowledgment(raw_positions=rows, commit_identity="abc123deadbeef")
+    path = tmp_path / "state" / "r7" / "position_acknowledgment.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_acknowledgment(path, ack)
+    return path, rows
+
+
 def _base_args(tmp_path: Path, **kwargs: Any) -> R7BLiveOnceArgs:
     window = _eligible_window()
+    ack_path, ack_rows = _write_ack(tmp_path)
     defaults: dict[str, Any] = {
         "output_dir": tmp_path / "out",
-        "acknowledgment_path": None,
+        "acknowledgment_path": ack_path,
         "repo_root": tmp_path,
         "allow_dirty_worktree": True,
         "git_identity_provider": _git_ok,
         "window_provider": lambda: [window],
-        "positions_provider": lambda: [],
+        "positions_provider": lambda: list(ack_rows),
         "skip_network": True,
         "forced_outcome": "YES",
+        "require_acknowledgment": True,
     }
     # Happy-path live tests need settlement injectors (no network)
     if kwargs.get("execute_live") and "settlement_trade_poller" not in kwargs:
@@ -323,17 +351,16 @@ def test_presubmit_failure_each_check(tmp_path: Path) -> None:
             positions = rows
 
         spy = RaisingTransport()
-        result = run_r7b_live_once(
-            _base_args(
-                tmp_path,
-                execute_live=True,
-                mutation_transport=spy,
-                acknowledgment_path=ack_path,
-                positions_provider=lambda p=positions: p,
-                readiness_overrides={key: value},
-                allow_dirty_worktree=True,
-            )
-        )
+        kwargs: dict = {
+            "execute_live": True,
+            "mutation_transport": spy,
+            "readiness_overrides": {key: value},
+            "allow_dirty_worktree": True,
+        }
+        if key == "ack_ok":
+            kwargs["acknowledgment_path"] = ack_path
+            kwargs["positions_provider"] = lambda p=positions: p
+        result = run_r7b_live_once(_base_args(tmp_path, **kwargs))
         assert result.outcome is TerminalOutcome.BLOCKED, key
         assert result.exit_code == 2, key
         assert code in result.report["blockers"], (key, result.report["blockers"])

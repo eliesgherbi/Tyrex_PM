@@ -47,11 +47,12 @@ from tyrex_pm.execution.polymarket.settlement import (
 )
 from tyrex_pm.execution.polymarket.transport import SubmitOrderRequest
 from tyrex_pm.operations import next_btc_updown_slug
+from tyrex_pm.runtime.r7_ack_gate import enforce_acknowledgment_gate
+from tyrex_pm.runtime.r7_lifecycle_dust import dust_token_ids, read_lifecycle_dust
+from tyrex_pm.runtime.r7_paths import DEFAULT_ACKNOWLEDGMENT_PATH, resolve_acknowledgment_path
 from tyrex_pm.runtime.r7_position_ack import (
     PositionAcknowledgment,
     ack_targets_forbidden,
-    read_acknowledgment,
-    validate_acknowledgment_against_inventory,
 )
 from tyrex_pm.runtime.r7b_session import (
     SessionPhase,
@@ -111,10 +112,9 @@ class R7BLiveOnceArgs:
     dry_run: bool = True
     execute_live: bool = False
     output_dir: Path = Path("var/reporting/r7b")
-    acknowledgment_path: Path | None = Path(
-        "var/reporting/r7/r7a2_position_acknowledgment.json"
-    )
+    acknowledgment_path: Path | None = DEFAULT_ACKNOWLEDGMENT_PATH
     repo_root: Path = Path(".")
+    require_acknowledgment: bool = True
     allow_dirty_worktree: bool = False
     # Test / injection hooks
     mutation_transport: Any | None = None
@@ -304,7 +304,7 @@ def _presubmit_blockers(
             blockers.append("DIRTY_WORKTREE")
     elif (not clean and not args.allow_dirty_worktree) or not readiness.worktree_ok:
         blockers.append("DIRTY_WORKTREE")
-    if ack is not None and (not ack_ok or not readiness.ack_ok):
+    if not ack_ok or not readiness.ack_ok:
         blockers.append("ACKNOWLEDGMENT_INVALID")
     if ack is not None and ack_targets_forbidden(selected_token, ack):
         blockers.append("SELECTED_TOKEN_IS_ACKNOWLEDGED")
@@ -410,55 +410,80 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
         },
     }
 
-    # Acknowledgment (optional; validated when present)
+    # Acknowledgment — mandatory for dry and live (R7D.1); never silently skipped
     ack: PositionAcknowledgment | None = None
-    ack_ok = True
+    ack_ok = False
     raw_positions: list[dict[str, Any]] = []
     if args.positions_provider is not None:
         raw_positions = list(args.positions_provider())
-    if args.acknowledgment_path and Path(args.acknowledgment_path).exists():
-        ack = read_acknowledgment(Path(args.acknowledgment_path))
-        if not raw_positions and not args.skip_network:
-            try:
-                from urllib.parse import urlencode
+    elif not args.skip_network:
+        try:
+            from urllib.parse import urlencode
 
-                from tyrex_pm.execution.polymarket.auth import (
-                    load_l2_credentials,
-                    positions_wallet_address,
+            from tyrex_pm.execution.polymarket.auth import (
+                load_l2_credentials,
+                positions_wallet_address,
+            )
+
+            env: dict[str, str] = {}
+            env_path = args.repo_root / ".env"
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#") or "=" not in s:
+                        continue
+                    k, _, v = s.partition("=")
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+            creds = load_l2_credentials(env)
+            user = positions_wallet_address(creds)
+            raw_positions = [
+                r
+                for r in _get_json(
+                    f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
                 )
+                if isinstance(r, dict)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            report["blockers"].append(f"POSITION_FETCH_FAILED:{type(exc).__name__}")
 
-                env: dict[str, str] = {}
-                env_path = args.repo_root / ".env"
-                if env_path.exists():
-                    for line in env_path.read_text(encoding="utf-8").splitlines():
-                        s = line.strip()
-                        if not s or s.startswith("#") or "=" not in s:
-                            continue
-                        k, _, v = s.partition("=")
-                        env[k.strip()] = v.strip().strip('"').strip("'")
-                creds = load_l2_credentials(env)
-                user = positions_wallet_address(creds)
-                raw_positions = [
-                    r
-                    for r in _get_json(
-                        f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
-                    )
-                    if isinstance(r, dict)
-                ]
-            except Exception as exc:  # noqa: BLE001
-                ack_ok = False
-                report["blockers"].append(f"POSITION_FETCH_FAILED:{type(exc).__name__}")
-        if ack is not None:
-            v = validate_acknowledgment_against_inventory(ack, raw_positions=raw_positions)
-            ack_ok = v.ok
-            report["acknowledgment"] = {
-                "id": ack.acknowledgment_id,
-                "ok": v.ok,
-                "blockers": v.blockers,
-                "matched": v.matched,
-                "untouched": True,
-            }
-            fact("acknowledgment_validated", ok=v.ok, blockers=v.blockers)
+    dust_state = read_lifecycle_dust(repo_root=args.repo_root)
+    report["lifecycle_dust"] = dust_state
+    ignore_dust = dust_token_ids(dust_state)
+
+    if args.acknowledgment_path is None:
+        ack_path = None  # PATH_REQUIRED when require_acknowledgment
+    else:
+        p = Path(args.acknowledgment_path)
+        ack_path = p if p.is_absolute() else (args.repo_root / p)
+
+    gate = enforce_acknowledgment_gate(
+        acknowledgment_path=ack_path,
+        raw_positions=raw_positions,
+        repo_root=args.repo_root,
+        ignore_selected_market_tokens=ignore_dust,
+        require_path=args.require_acknowledgment,
+    )
+    report["acknowledgment"] = gate.to_report_dict()
+    fact(
+        "acknowledgment_gate",
+        ok=gate.ok,
+        blockers=gate.blockers,
+        artifact_path=str(gate.path) if gate.path else None,
+        content_hash=gate.content_hash,
+    )
+    if not gate.ok:
+        report["blockers"] = list(gate.blockers) + list(report.get("blockers") or [])
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.BLOCKED,
+            ok=False,
+            exit_code=2,
+            fact=fact,
+        )
+    ack = gate.acknowledgment
+    ack_ok = True
 
     # Transport: dry never arms network and never calls mutations
     transport: Any | None = None
@@ -581,6 +606,29 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
     report["market_switch_blocked"] = True
 
     outcome_side, token_id = _select_outcome(bound, args.forced_outcome)
+    if ack is not None and ack_targets_forbidden(token_id, ack):
+        report["blockers"].append("SELECTED_TOKEN_IS_ACKNOWLEDGED")
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.BLOCKED,
+            ok=False,
+            exit_code=2,
+            fact=fact,
+        )
+    # Known lifecycle dust must never be an entry target
+    if token_id in ignore_dust:
+        report["blockers"].append("LIFECYCLE_DUST_TOKEN_TARGET_FORBIDDEN")
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.BLOCKED,
+            ok=False,
+            exit_code=2,
+            fact=fact,
+        )
     sized: SizedBuyOrder = bound["sized"]
     if sized.max_collateral > args.max_buy_collateral:
         report["blockers"].append("SIZED_COLLATERAL_EXCEEDS_CAP")
@@ -701,6 +749,8 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             "session_phase": rt.phase.value,
             "residual_quantity": "0",
             "bound_market": bound["slug"],
+            "acknowledgment_ok": True,
+            "lifecycle_dust_visible": dust_state is not None,
         }
         if transport is not None and hasattr(transport, "submitted"):
             # If a test injects a transport, still must not have been called

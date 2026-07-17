@@ -221,3 +221,16 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | Read-only command | `tyrex-pm r7c-recon` |
 
 **Stop after R7C.1.** No further live test until explicit review.
+
+## R7D.1 — Durable acknowledgment gate
+
+| Item | Result |
+|------|--------|
+| Root cause | Ack lived under disposable `var/reporting/r7/`; delete skipped gate |
+| Durable path | `var/state/r7/position_acknowledgment.json` |
+| Dust state | `var/state/r7/lifecycle_dust.json` (`FLAT_WITH_DUST`) |
+| Gate | Mandatory dry+live; missing/invalid → BLOCKED |
+| Regenerate | `tyrex-pm r7-ack-regenerate` (read-only, zero mutations) |
+| Live | **Not executed** |
+
+Full note: [`Docs/Implementation/r7d1_acknowledgment_state.md`](Implementation/r7d1_acknowledgment_state.md)

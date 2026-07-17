@@ -211,10 +211,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for JSON report + JSONL facts",
     )
     r7b.add_argument(
+        "--acknowledgment-path",
         "--acknowledgment",
+        dest="acknowledgment",
         type=Path,
-        default=Path("var/reporting/r7/r7a2_position_acknowledgment.json"),
-        help="Optional R7A.2 acknowledgment artifact (validated if present)",
+        default=Path("var/state/r7/position_acknowledgment.json"),
+        help=(
+            "Durable acknowledgment state path (required). "
+            "Missing/invalid artifact fails closed for dry and live."
+        ),
     )
     r7b.add_argument(
         "--allow-dirty-worktree",
@@ -256,6 +261,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--market-slug",
         type=str,
         default="btc-updown-5m-1784303100",
+    )
+
+    ack_regen = sub.add_parser(
+        "r7-ack-regenerate",
+        help=(
+            "R7D.1: regenerate durable acknowledgment state from current "
+            "read-only inventory (zero mutations)"
+        ),
+    )
+    ack_regen.add_argument(
+        "--output",
+        type=Path,
+        default=Path("var/state/r7/position_acknowledgment.json"),
+        help="Durable acknowledgment state path",
+    )
+    ack_regen.add_argument(
+        "--report",
+        type=Path,
+        default=Path("var/reporting/r7d/ack_regenerate_report.json"),
+        help="Disposable regeneration report path",
     )
     return parser
 
@@ -462,19 +487,38 @@ def main(argv: list[str] | None = None) -> int:
             "Mutations remain disabled."
         )
         return 2
+    if args.command == "r7-ack-regenerate":
+        from tyrex_pm.runtime.r7_ack_regenerate import regenerate_acknowledgment
+
+        report = regenerate_acknowledgment(
+            repo_root=Path.cwd(),
+            output_path=args.output,
+            write_dust_state=True,
+        )
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(
+            __import__("json").dumps(report, indent=2) + "\n", encoding="utf-8"
+        )
+        print(
+            f"r7-ack-regenerate ok={report.get('ok')} "
+            f"id={report.get('artifact_id')} "
+            f"hash={report.get('content_hash')} "
+            f"path={report.get('path')} "
+            f"mutations_attempted={report.get('mutations_attempted')} "
+            f"report={args.report}"
+        )
+        return 0 if report.get("ok") else 2
     if args.command == "r7c-recon":
+        from tyrex_pm.runtime.r7_paths import DEFAULT_ACKNOWLEDGMENT_PATH
         from tyrex_pm.runtime.r7c_incident_recon import run_incident_recon
 
+        ack_path = DEFAULT_ACKNOWLEDGMENT_PATH
         report = run_incident_recon(
             buy_order_id=args.buy_order_id,
             condition_id=args.condition_id,
             token_id=args.token_id,
             market_slug=args.market_slug,
-            acknowledgment_path=(
-                Path("var/reporting/r7/r7a2_position_acknowledgment.json")
-                if Path("var/reporting/r7/r7a2_position_acknowledgment.json").exists()
-                else None
-            ),
+            acknowledgment_path=ack_path if ack_path.exists() else None,
             output_path=args.output,
             repo_root=Path.cwd(),
         )

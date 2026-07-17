@@ -249,8 +249,25 @@ def build_acknowledgment(
 
 
 def write_acknowledgment(path: Path, ack: PositionAcknowledgment) -> str:
+    """Atomic write of acknowledgment artifact."""
+    import os
+    import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(ack.to_dict(), indent=2) + "\n", encoding="utf-8")
+    payload = json.dumps(ack.to_dict(), indent=2) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ack_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return ack.content_hash()
 
 
