@@ -29,6 +29,11 @@ class R7Blocker(str, Enum):
     ONE_SIDED_BOOK = "ONE_SIDED_BOOK"
     SIZING_BLOCKED = "SIZING_BLOCKED"
     BALANCE_UNKNOWN = "BALANCE_UNKNOWN"
+    ACKNOWLEDGED_POSITION_SET_CHANGED = "ACKNOWLEDGED_POSITION_SET_CHANGED"
+    UNACKNOWLEDGED_POSITION_PRESENT = "UNACKNOWLEDGED_POSITION_PRESENT"
+    ACKNOWLEDGED_POSITION_BECAME_TRADABLE = "ACKNOWLEDGED_POSITION_BECAME_TRADABLE"
+    UNKNOWN_EXTERNAL_ORDER = "UNKNOWN_EXTERNAL_ORDER"
+    ACKNOWLEDGMENT_REQUIRED = "ACKNOWLEDGMENT_REQUIRED"
 
 
 @dataclass
@@ -73,12 +78,15 @@ def build_r7_readiness(
     balance_ok: bool,
     account_policy: str = "require_ack_resolved_redeemable",
     mutations_enabled: bool = False,
+    acknowledgment_valid: bool | None = None,
+    acknowledgment_blockers: Sequence[str] = (),
 ) -> R7Readiness:
     """Build authoritative R7 readiness.
 
     ``account_policy``:
       - ``require_globally_flat``: any nonzero account exposure blocks
-      - ``require_ack_resolved_redeemable``: allow inventoried redeemable only
+      - ``require_ack_resolved_redeemable``: unresolved redeemable blocks until ack
+      - ``acknowledged_resolved_redeemable``: valid ack removes ACCOUNT_EXPOSURE_PRESENT
       - ``dedicated_clean_account``: any exposure blocks (prefer clean wallet)
     """
     r = R7Readiness(mutations_enabled=mutations_enabled)
@@ -91,6 +99,7 @@ def build_r7_readiness(
         r.deny(R7Blocker.RECONCILIATION_NOT_CLEAN, "venue account evidence unreachable")
     if open_order_count > 0:
         r.deny(R7Blocker.EXISTING_OPEN_ORDER)
+        r.deny(R7Blocker.UNKNOWN_EXTERNAL_ORDER)
     if not inventory.selected_market_flat:
         r.deny(R7Blocker.SELECTED_MARKET_POSITION_NONZERO)
     if inventory.unknown_present:
@@ -98,12 +107,28 @@ def build_r7_readiness(
     if inventory.active_unrelated_present:
         r.deny(R7Blocker.ACTIVE_UNRELATED_POSITION_PRESENT)
 
+    for b in acknowledgment_blockers:
+        try:
+            r.deny(R7Blocker(b))
+        except ValueError:
+            r.deny(R7Blocker.ACKNOWLEDGED_POSITION_SET_CHANGED, b)
+
     if inventory.account_exposure_present:
         if account_policy in {"require_globally_flat", "dedicated_clean_account"}:
             r.deny(
                 R7Blocker.ACCOUNT_EXPOSURE_PRESENT,
                 f"policy={account_policy}",
             )
+        elif account_policy == "acknowledged_resolved_redeemable":
+            if acknowledgment_valid is True:
+                r.notes.append(
+                    "acknowledged_resolved_positions_visible_account_wide_not_blocking"
+                )
+            elif acknowledgment_valid is False:
+                r.deny(R7Blocker.ACKNOWLEDGMENT_REQUIRED, "acknowledgment invalid")
+            else:
+                r.deny(R7Blocker.ACKNOWLEDGMENT_REQUIRED)
+                r.deny(R7Blocker.ACCOUNT_EXPOSURE_PRESENT)
         elif account_policy == "require_ack_resolved_redeemable":
             if inventory.resolved_redeemable_present and not inventory.active_unrelated_present:
                 r.deny(

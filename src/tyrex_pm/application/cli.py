@@ -116,20 +116,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run live-preflight with user-stream before preparing proposal",
     )
 
+    r7a2 = sub.add_parser(
+        "r7a2-prepare",
+        help="R7A.2: record position acknowledgment + draft session (no R7B)",
+    )
+    r7a2.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("var/reporting/r7"),
+        help="Directory for acknowledgment and draft session artifacts",
+    )
+    r7a2.add_argument(
+        "--preflight",
+        type=Path,
+        default=Path("var/reporting/r7/live_preflight.json"),
+        help="Prior live-preflight artifact (read-only evidence)",
+    )
+    r7a2.add_argument(
+        "--run-preflight",
+        action="store_true",
+        help="Run live-preflight with user-stream before recording ack",
+    )
+
     live_once = sub.add_parser(
         "live-once",
-        help="R7B one-shot lifecycle (blocked until explicit approval)",
+        help="R7B one-shot lifecycle (blocked until explicit session authorization)",
     )
     live_once.add_argument(
         "--approval",
         type=Path,
-        required=True,
-        help="Path to R7B approval artifact",
+        default=None,
+        help="Legacy path to R7B approval artifact",
+    )
+    live_once.add_argument(
+        "--session",
+        type=Path,
+        default=None,
+        help="Path to user-authorized R7B session envelope",
     )
     live_once.add_argument(
         "--i-authorize-r7b",
         action="store_true",
-        help="Required second authorization flag (must match artifact)",
+        help="Required second authorization flag (must match session/artifact)",
     )
     return parser
 
@@ -299,18 +327,54 @@ def main(argv: list[str] | None = None) -> int:
             f"mutations_enabled={report.get('mutations_enabled')}"
         )
         return 0
+    if args.command == "r7a2-prepare":
+        from tyrex_pm.runtime.r7a2_prepare import prepare_r7a2
+
+        preflight_path = args.preflight
+        if args.run_preflight:
+            from tyrex_pm.runtime.live_preflight import run_live_preflight
+
+            pf = run_live_preflight(
+                output_path=args.output_dir / "live_preflight.json",
+                dotenv_path=Path(".env") if Path(".env").exists() else None,
+                user_stream_observe_s=5.0,
+                skip_auth=False,
+            )
+            preflight_path = pf.artifact_path
+            print(f"preflight ok={pf.ok} path={preflight_path}")
+        report = prepare_r7a2(
+            repo_root=Path.cwd(),
+            output_dir=args.output_dir,
+            preflight_path=preflight_path if preflight_path.exists() else None,
+        )
+        after = report.get("readiness_after_ack") or {}
+        print(
+            f"r7a2-prepare complete ack={report.get('acknowledgment', {}).get('id')} "
+            f"ack_ok={(report.get('acknowledgment') or {}).get('validation', {}).get('ok')} "
+            f"blockers_after={after.get('blockers')} "
+            f"session_draft={report.get('session_draft', {}).get('session_id')} "
+            f"user_auth={report.get('session_draft', {}).get('user_authorization_present')} "
+            f"mutations_enabled={report.get('mutations_enabled')}"
+        )
+        return 0
     if args.command == "live-once":
         # R7B gate — refuse unless explicit second authorization is present.
         if not args.i_authorize_r7b:
             print(
                 "R7B BLOCKED: refusing live-once without --i-authorize-r7b "
-                "and matching approval artifact. Mutations remain disabled."
+                "and matching --session (or --approval). Mutations remain disabled."
+            )
+            return 2
+        if args.session is None and args.approval is None:
+            print(
+                "R7B BLOCKED: provide --session <envelope> (preferred) or --approval. "
+                "Mutations remain disabled."
             )
             return 2
         print(
-            "R7B BLOCKED: second authorization flag seen, but R7B execution is "
-            "not enabled in this build pending explicit operator review of the "
-            "R7A proposal. Mutations remain disabled. No order submitted."
+            "R7B BLOCKED: authorization flag seen, but R7B execution is not enabled "
+            "in this build. Awaiting explicit R7B session authorization review. "
+            "Mutations remain disabled. No order submitted."
         )
         return 2
     if args.command == "observe":

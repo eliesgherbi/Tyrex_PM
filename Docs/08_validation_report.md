@@ -170,4 +170,20 @@ Full report: [`Docs/Implementation/r7a1_correction_report.md`](Implementation/r7
 
 **Stop after R7A.1.** No flatten, redeem, submit, cancel, or R7B.
 
+## R7A.2 — Acknowledgment + session envelope
+
+Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementation/r7a2_authorization_workflow.md)
+
+| Item | Result |
+|------|--------|
+| R7A/R7A.1 checkpoint | `f3aeaee` (not pushed) |
+| Four positions acknowledged | Exact fingerprints; untouched; no redeem/sell |
+| Readiness after ack | `MUTATIONS_DISABLED`, `R7B_AUTHORIZATION_ABSENT` only |
+| Session draft | Two-level envelope; `user_authorization_present=false` |
+| Mutations / orders | **None** |
+| Tests | **270** passed |
+| `.env` | Unchanged |
+
+**Stop after R7A.2.** Awaiting explicit R7B **session** authorization (not the position ack).
+
 **Not authorized:** real submit, cancel, wallet approval, on-chain ops, network arm token, `mutations_enabled=True`.

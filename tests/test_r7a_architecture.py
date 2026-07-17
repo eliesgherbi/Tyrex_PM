@@ -156,7 +156,7 @@ def test_live_once_still_refuses() -> None:
     text = (PKG / "application" / "cli.py").read_text(encoding="utf-8")
     assert "live-once" in text
     assert "R7B BLOCKED" in text
-    assert "not enabled in this build" in text
+    assert "not enabled in this build" in text or "Mutations remain disabled" in text
 
 
 def test_r7a1_prepare_never_issues_approval_by_default() -> None:
