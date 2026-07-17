@@ -221,6 +221,39 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit dirty git worktree (documented exception)",
     )
+
+    r7c = sub.add_parser(
+        "r7c-recon",
+        help="R7C read-only incident / FLAT reconciliation (never mutates)",
+    )
+    r7c.add_argument(
+        "--output",
+        type=Path,
+        default=Path("var/reporting/r7c/incident_recon.json"),
+        help="Sanitized recon report path",
+    )
+    r7c.add_argument(
+        "--buy-order-id",
+        type=str,
+        default="0x68efa63a23abb0ab55042204683f48f4303ed2db3e9d955317bc41add43e71db",
+    )
+    r7c.add_argument(
+        "--condition-id",
+        type=str,
+        default="0x32204a5cffff255df6155b69105aded512770c4597ccb4bef721dfa0ab526401",
+    )
+    r7c.add_argument(
+        "--token-id",
+        type=str,
+        default=(
+            "1038082852808592687103030316298741805143710778541582307413776216436336466979"
+        ),
+    )
+    r7c.add_argument(
+        "--market-slug",
+        type=str,
+        default="btc-updown-5m-1784303100",
+    )
     return parser
 
 
@@ -426,6 +459,31 @@ def main(argv: list[str] | None = None) -> int:
             "Mutations remain disabled."
         )
         return 2
+    if args.command == "r7c-recon":
+        from tyrex_pm.runtime.r7c_incident_recon import run_incident_recon
+
+        report = run_incident_recon(
+            buy_order_id=args.buy_order_id,
+            condition_id=args.condition_id,
+            token_id=args.token_id,
+            market_slug=args.market_slug,
+            acknowledgment_path=(
+                Path("var/reporting/r7/r7a2_position_acknowledgment.json")
+                if Path("var/reporting/r7/r7a2_position_acknowledgment.json").exists()
+                else None
+            ),
+            output_path=args.output,
+            repo_root=Path.cwd(),
+        )
+        print(
+            f"r7c-recon flat={report.get('selected_market_flat')} "
+            f"open_orders_zero={report.get('selected_market_open_orders_zero')} "
+            f"buy_acq={((report.get('buy_fill_summary') or {}).get('acquired_quantity'))} "
+            f"sell_qty={((report.get('sell_fill_summary') or {}).get('sold_quantity'))} "
+            f"path={args.output}"
+        )
+        print(f"mutations_attempted={report.get('mutations_attempted')}")
+        return 0 if report.get("selected_market_flat") else 3
     if args.command == "r7b-live-once":
         from decimal import Decimal
 

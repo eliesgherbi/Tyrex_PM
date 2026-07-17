@@ -17,16 +17,23 @@ class MutationPhase(str, Enum):
     ENTRY_ACCEPTED = "ENTRY_ACCEPTED"
     ENTRY_REJECTED = "ENTRY_REJECTED"
     ENTRY_UNKNOWN = "ENTRY_UNKNOWN"
-    ENTRY_FILLED = "ENTRY_FILLED"
+    # R7C settlement ladder — MATCHED is non-terminal / not inventory
+    ENTRY_MATCHED = "ENTRY_MATCHED"
+    ENTRY_SETTLING = "ENTRY_SETTLING"
+    ENTRY_CONFIRMED = "ENTRY_CONFIRMED"
+    ENTRY_FILLED = "ENTRY_FILLED"  # legacy alias after ENTRY_CONFIRMED + inventory
     ENTRY_PARTIAL = "ENTRY_PARTIAL"
     ENTRY_CANCELED = "ENTRY_CANCELED"
     POSITION_ACTIVE = "POSITION_ACTIVE"
     EXIT_SUBMITTING = "EXIT_SUBMITTING"
+    EXIT_MATCHED = "EXIT_MATCHED"
+    EXIT_SETTLING = "EXIT_SETTLING"
     EXIT_FILLED = "EXIT_FILLED"
     EXIT_PARTIAL = "EXIT_PARTIAL"
     EXIT_UNKNOWN = "EXIT_UNKNOWN"
     RECONCILING = "RECONCILING"
     FLAT_CONFIRMED = "FLAT_CONFIRMED"
+    FLAT_EXTERNAL_ACTION = "FLAT_EXTERNAL_ACTION"
     BLOCKED = "BLOCKED"
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
     UNKNOWN_SUBMISSION = "UNKNOWN_SUBMISSION"
@@ -110,6 +117,7 @@ class MutationLifecycle:
     def can_submit_exit(self) -> bool:
         return self.exit_mutations_enabled and self.phase in {
             MutationPhase.POSITION_ACTIVE,
+            MutationPhase.ENTRY_CONFIRMED,
             MutationPhase.ENTRY_FILLED,
             MutationPhase.ENTRY_PARTIAL,
             MutationPhase.EXIT_PARTIAL,
@@ -125,6 +133,24 @@ class MutationLifecycle:
     def note_entry_accepted(self) -> None:
         self._set(MutationPhase.ENTRY_ACCEPTED)
 
+    def note_entry_matched(self) -> None:
+        """Order-insert MATCHED — not settled inventory (R7C)."""
+        self.entry_mutations_enabled = False
+        self._set(MutationPhase.ENTRY_MATCHED)
+
+    def note_entry_settling(self) -> None:
+        self._set(MutationPhase.ENTRY_SETTLING)
+
+    def note_entry_confirmed(self, *, partial: bool = False) -> None:
+        """Venue trade MINED/CONFIRMED + inventory evidence — may size exit."""
+        self.entry_mutations_enabled = False
+        if partial:
+            self._set(MutationPhase.ENTRY_PARTIAL)
+        else:
+            self._set(MutationPhase.ENTRY_CONFIRMED)
+            self._set(MutationPhase.ENTRY_FILLED)
+        self._set(MutationPhase.POSITION_ACTIVE)
+
     def note_entry_rejected(self) -> None:
         self.entry_mutations_enabled = False
         self._set(MutationPhase.ENTRY_REJECTED)
@@ -136,9 +162,8 @@ class MutationLifecycle:
         self._set(MutationPhase.UNKNOWN_SUBMISSION)
 
     def note_entry_filled(self, *, partial: bool = False) -> None:
-        self.entry_mutations_enabled = False
-        self._set(MutationPhase.ENTRY_PARTIAL if partial else MutationPhase.ENTRY_FILLED)
-        self._set(MutationPhase.POSITION_ACTIVE)
+        """Deprecated path: prefer note_entry_confirmed after settlement wait."""
+        self.note_entry_confirmed(partial=partial)
 
     def note_entry_canceled(self) -> None:
         self._set(MutationPhase.ENTRY_CANCELED)
@@ -148,6 +173,12 @@ class MutationLifecycle:
             self._set(MutationPhase.BLOCKED, reason="EXIT_NOT_AUTHORIZED")
             return
         self._set(MutationPhase.EXIT_SUBMITTING)
+
+    def note_exit_matched(self) -> None:
+        self._set(MutationPhase.EXIT_MATCHED)
+
+    def note_exit_settling(self) -> None:
+        self._set(MutationPhase.EXIT_SETTLING)
 
     def note_exit_filled(self, *, partial: bool = False) -> None:
         if partial:
@@ -165,6 +196,11 @@ class MutationLifecycle:
     def note_flat_confirmed(self) -> None:
         self.disable_all_mutations()
         self._set(MutationPhase.FLAT_CONFIRMED)
+        self._set(MutationPhase.MUTATIONS_DISABLED)
+
+    def note_flat_external_action(self) -> None:
+        self.disable_all_mutations()
+        self._set(MutationPhase.FLAT_EXTERNAL_ACTION)
         self._set(MutationPhase.MUTATIONS_DISABLED)
 
     def note_manual_intervention(self) -> None:

@@ -25,7 +25,7 @@ Adapters → stores → DecisionSnapshot → momentum/signal
 TradingHost = ObserveHost
   ├── OBSERVE: no OMS dispatch
   ├── SHADOW: ShadowOMS (ShadowHost hooks)
-  └── LIVE_TINY: LiveOMS injected later; risk dispatch denied until R7
+  └── LIVE_TINY: LiveOMS + R7B one-shot; R7C requires MATCHED≠CONFIRMED settlement before exit
 ```
 
 Mode changes OMS dispatch only. Signal/strategy orchestration is one path.
@@ -57,4 +57,19 @@ Mode changes OMS dispatch only. Signal/strategy orchestration is one path.
 |------|-----|-----------|
 | OBSERVE | None | n/a |
 | SHADOW | ShadowOMS | Shadow only |
-| LIVE_TINY | LiveOMS (R6 wired, R7 enabled) | **Disabled in R6** |
+| LIVE_TINY | LiveOMS + `r7b-live-once` | Operator `--execute-live` only; R7C settlement before SELL |
+
+### R7C settlement ladder (LIVE_TINY)
+
+```text
+Order insert status != trade settlement
+MATCHED != CONFIRMED
+Planned quantity != acquired quantity
+Confirmed fill != immediately sellable balance
+
+ENTRY_SUBMITTING → ENTRY_MATCHED → ENTRY_SETTLING → ENTRY_CONFIRMED → ACTIVE
+  → EXIT_SUBMITTING → EXIT_MATCHED → EXIT_SETTLING → FLAT
+  | MANUAL_INTERVENTION | FLAT_EXTERNAL_ACTION
+```
+
+SELL qty = `min(venue_confirmed_acquired, conditional_token_balance)` only.

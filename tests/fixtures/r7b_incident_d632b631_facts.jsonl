@@ -1,0 +1,10 @@
+{"branch": "rest_project", "clean": false, "commit": "4555dfdb93166d1ca86f835e8974c3e55c6babef", "event": "checkpoint", "ts": "2026-07-17T15:42:45.005115+00:00"}
+{"blockers": [], "event": "acknowledgment_validated", "ok": true, "ts": "2026-07-17T15:42:45.521168+00:00"}
+{"event": "mutation_transport_armed", "execute_live": true, "ts": "2026-07-17T15:42:45.829696+00:00"}
+{"eligible": true, "event": "window_observed", "reason": null, "slug": "btc-updown-5m-1784303100", "ts": "2026-07-17T15:42:47.035792+00:00"}
+{"event": "market_bound", "slug": "btc-updown-5m-1784303100", "ts": "2026-07-17T15:42:47.036291+00:00"}
+{"entry_deadline": "2026-07-17T15:48:45+00:00", "estimated_max_entry_fee": "0.16567", "event": "pre_submit_summary", "flatten_deadline": "2026-07-17T15:49:30+00:00", "limit_price": "0.51", "market_slug": "btc-updown-5m-1784303100", "max_collateral": "4.99567", "outcome_side": "YES", "quantity": "9.47", "side": "BUY", "token_id_suffix": "36466979", "ts": "2026-07-17T15:42:47.036792+00:00"}
+{"event": "entry_submit", "ok": true, "ts": "2026-07-17T15:42:47.782875+00:00", "uncertain": false, "venue_order_id": "0x68efa63a23abb0ab55042204683f48f4303ed2db3e9d955317bc41add43e71db"}
+{"event": "entry_filled", "notional": "4.99567", "quantity": "9.47", "ts": "2026-07-17T15:42:47.787881+00:00"}
+{"after_entry_deadline": false, "event": "exit_submit", "ok": false, "ts": "2026-07-17T15:42:48.015910+00:00", "uncertain": false}
+{"event": "terminal", "exit_code": 3, "outcome": "MANUAL_INTERVENTION", "ts": "2026-07-17T15:42:48.016911+00:00"}

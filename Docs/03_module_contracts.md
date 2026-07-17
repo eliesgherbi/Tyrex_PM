@@ -36,6 +36,17 @@ Unknown: reconcile first; do not resubmit; block entries.
 
 Unknown external orders are never auto-canceled. Missing evidence never means flat.
 
+## R7C settlement contract
+
+Module: `tyrex_pm.execution.polymarket.settlement`
+
+- Insert `status=matched` → `ENTRY_MATCHED` only (never `entry_filled`).
+- Acquired qty from trades in `{MINED, CONFIRMED}` only.
+- Sellable qty = `min(confirmed_acquired, conditional_balance)` (never planned shares).
+- Bounded wait after MATCHED; no SELL while balance is zero; no SELL storm.
+- Manual UI flatten → `FLAT_EXTERNAL_ACTION`.
+- CLI read-only verify: `tyrex-pm r7c-recon` (never mutates).
+
 ## Forbidden
 
-Real mutations in R6 · logging credentials · `old/` imports · NautilusTrader · Z-Gap.
+Blind live retest before R7C review · logging credentials · `old/` imports · NautilusTrader.

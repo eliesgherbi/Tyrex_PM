@@ -1,22 +1,18 @@
 # 07 — Implementation plan
 
 **Branch:** `rest_project`  
-**R4:** `9813001465db1fd188a4e00a3c82a24fa2cb4292`  
-**R5:** `5cc1a306ee168f18df40e2107e78785d5a097364`  
-**R5.1:** `6b03cc32e3d65dfdf787ce346a73dcd7b545b6d1`  
-**Status:** R6A/B implemented (uncommitted); **stop before R7 mutations**
+**R7B CLI checkpoint:** `d506ea661a6478f7359fc623e69a0054b5dcdc65`  
+**Status:** R7C settlement hardening in progress — **no further live test until review**
 
 ## Roadmap
 
 | Phase | Scope | Status |
 |-------|--------|--------|
-| R1–R4 | Reset → dry plans | **Done** |
-| R5 | Shadow OMS + lifecycle | **Done** (`5cc1a30`) |
-| R5.1 | Host unify + retry/escalation | **Done** (`6b03cc3`) |
-| R6A | LiveOMS + transport + reconcile (fixtures) | **Done** (uncommitted) |
-| R6B | Authenticated read-only | **Done** (CLOB L2 blocked here) |
-| R7 | Explicit tiny-live mutations | Next (requires authorization) |
-| R8 / Z1–Z4 | Acceptance → Z-Gap | Planned |
+| R1–R6 | Reset → live adapter / read-only | **Done** |
+| R7A / R7A.1 / R7A.2 | Tiny-live prep, windows/fees, ack+session | **Done** |
+| R7B | Operator CLI `--execute-live` one-shot | **Done** (`d506ea6`) — first live hit settlement bug |
+| R7C | Incident analysis + settlement/recon hardening | **In progress** |
+| R8 / Z1–Z4 | Acceptance → Z-Gap | Planned after R7C review |
 
 ## Proposed R7 scope (exact)
 

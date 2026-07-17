@@ -34,6 +34,17 @@ from tyrex_pm.execution.polymarket.mutation_transport import (
     SpyMutationTransport,
 )
 from tyrex_pm.execution.polymarket.order_sizing import SizedBuyOrder, SizingError, size_buy_under_cap
+from tyrex_pm.execution.polymarket.settlement import (
+    FakeSettlementClock,
+    SettlementPhase,
+    SettlementWaitConfig,
+    TradeEvidence,
+    TradeSettlementStatus,
+    detect_manual_flat,
+    evaluate_sell_readiness,
+    normalize_trade_status,
+    wait_for_entry_settlement,
+)
 from tyrex_pm.execution.polymarket.transport import SubmitOrderRequest
 from tyrex_pm.operations import next_btc_updown_slug
 from tyrex_pm.runtime.r7_position_ack import (
@@ -64,6 +75,7 @@ class LiveOnceError(RuntimeError):
 
 class TerminalOutcome(str, Enum):
     FLAT = "FLAT"
+    FLAT_EXTERNAL_ACTION = "FLAT_EXTERNAL_ACTION"
     BLOCKED = "BLOCKED"
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
     DRY_OK = "DRY_OK"
@@ -115,6 +127,12 @@ class R7BLiveOnceArgs:
     skip_network: bool = False
     # After entry: still allow exit even if entry deadline has passed
     simulate_entry_deadline_passed: bool = False
+    # R7C settlement hooks (tests inject; live uses REST polling)
+    settlement_trade_poller: Callable[[], list[Any]] | None = None
+    settlement_balance_poller: Callable[[], tuple[Decimal, Decimal | None]] | None = None
+    settlement_clock: Any | None = None
+    settlement_max_wait_s: float = 45.0
+    recovery_mode: bool = False  # restart: recon only, no new BUY
 
 
 @dataclass
@@ -867,19 +885,199 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             fact=fact,
         )
 
+    # R7C: insert status=matched is NOT inventory
     life.note_entry_accepted()
-    budget.apply_fill(reserve_notional)
-    life.note_entry_filled(partial=False)
-    rt.note_fill()
-    acquired_qty = sized.quantity
+    insert_status = str(result.status or "").upper()
     owned_order_id = result.venue_order_id
-    fact("entry_filled", quantity=str(acquired_qty), notional=str(reserve_notional))
+    if insert_status == "MATCHED" or result.ok:
+        life.note_entry_matched()
+        fact(
+            "entry_matched_not_settled",
+            venue_order_id=owned_order_id,
+            insert_status=insert_status,
+            planned_qty=str(sized.quantity),
+            note="MATCHED != CONFIRMED; planned qty is not inventory",
+        )
+    else:
+        life.note_entry_accepted()
 
-    # Second entry must be impossible
+    life.note_entry_settling()
+
+    # Settlement wait — injectable for tests; live uses REST (and optional stream later)
+    clock = args.settlement_clock or FakeSettlementClock()
+    # In production execute path without injectors, use short real wait only when pollers provided
+    if args.settlement_trade_poller is None or args.settlement_balance_poller is None:
+        # Default live stub: if no pollers, treat as settlement not ready → MANUAL_INTERVENTION
+        # (tests always inject; production CLI wires REST pollers below)
+        from tyrex_pm.execution.polymarket.settlement import RealSettlementClock
+
+        def _default_trade_poll() -> list[TradeEvidence]:
+            try:
+                from tyrex_pm.execution.polymarket.sdk_readonly import (
+                    SdkReadonlyTransport,
+                )
+
+                env: dict[str, str] = {}
+                env_path = args.repo_root / ".env"
+                if env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        s = line.strip()
+                        if not s or s.startswith("#") or "=" not in s:
+                            continue
+                        k, _, v = s.partition("=")
+                        env[k.strip()] = v.strip().strip('"').strip("'")
+                ro = SdkReadonlyTransport.from_env(env)
+                out: list[TradeEvidence] = []
+                for t in ro.get_trades(market_id=bound["condition_id"]):
+                    if owned_order_id and t.venue_order_id != owned_order_id:
+                        if t.instrument_token_id != token_id:
+                            continue
+                    out.append(
+                        TradeEvidence(
+                            trade_id=t.venue_trade_id,
+                            order_id=t.venue_order_id,
+                            side=t.side,
+                            size=t.size,
+                            price=t.price,
+                            status=normalize_trade_status(t.status),
+                            fee=t.fee_rate_bps,
+                            token_id=t.instrument_token_id,
+                            raw_status=t.status,
+                        )
+                    )
+                return out
+            except Exception:  # noqa: BLE001
+                return []
+
+        def _default_bal_poll() -> tuple[Decimal, Decimal | None]:
+            try:
+                from tyrex_pm.execution.polymarket.sdk_readonly import (
+                    SdkReadonlyTransport,
+                )
+
+                env = {}
+                env_path = args.repo_root / ".env"
+                if env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        s = line.strip()
+                        if not s or s.startswith("#") or "=" not in s:
+                            continue
+                        k, _, v = s.partition("=")
+                        env[k.strip()] = v.strip().strip('"').strip("'")
+                ro = SdkReadonlyTransport.from_env(env)
+                return ro.get_conditional_balance_allowance(token_id)
+            except Exception:  # noqa: BLE001
+                return Decimal("0"), None
+
+        trade_poller = args.settlement_trade_poller or _default_trade_poll
+        bal_poller = args.settlement_balance_poller or _default_bal_poll
+        if args.settlement_clock is None:
+            clock = RealSettlementClock()
+    else:
+        trade_poller = args.settlement_trade_poller
+        bal_poller = args.settlement_balance_poller
+
+    settle = wait_for_entry_settlement(
+        poll_trades=trade_poller,
+        poll_balance=bal_poller,
+        order_id=owned_order_id,
+        planned_qty=sized.quantity,
+        clock=clock,
+        config=SettlementWaitConfig(max_wait_s=args.settlement_max_wait_s),
+    )
+    for row in settle.facts:
+        fact(row.get("event", "settlement"), **{k: v for k, v in row.items() if k != "event"})
+
+    report["settlement"] = {
+        "phase": settle.phase.value,
+        "confirmed_acquired": str(settle.confirmed_acquired),
+        "sellable_balance": str(settle.sellable_balance),
+        "allowance": None if settle.allowance is None else str(settle.allowance),
+        "polls": settle.polls,
+        "exhausted": settle.exhausted,
+        "trade_failed": settle.trade_failed,
+        "exposure_low": str(settle.exposure_low),
+        "exposure_high": str(settle.exposure_high),
+        "trade_statuses": [t.status.value for t in settle.trades],
+    }
+
+    if settle.trade_failed and settle.confirmed_acquired <= 0:
+        budget.release_working(reserve_notional)
+        life.note_manual_intervention()
+        report["residual"] = {
+            "confirmed_acquired": "0",
+            "exposure_low": str(settle.exposure_low),
+            "exposure_high": str(settle.exposure_high),
+            "note": "trade FAILED; no SELL without independent exposure proof",
+        }
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.MANUAL_INTERVENTION,
+            ok=False,
+            exit_code=3,
+            fact=fact,
+        )
+
+    if settle.phase is SettlementPhase.MANUAL_INTERVENTION or settle.confirmed_acquired <= 0:
+        # Do not sell when balance still zero / unconfirmed
+        if settle.confirmed_acquired > 0:
+            budget.apply_fill(
+                min(reserve_notional, settle.confirmed_acquired * sized.limit_price)
+            )
+        else:
+            # Matched but never confirmed — keep uncertain reservation
+            budget.mark_uncertain(reserve_notional)
+        budget.consume_entry_authorization()
+        life.note_manual_intervention()
+        report["second_entry_denied"] = True
+        report["residual"] = {
+            "confirmed_acquired": str(settle.confirmed_acquired),
+            "current_balance": str(settle.sellable_balance),
+            "allowance": None if settle.allowance is None else str(settle.allowance),
+            "filled_buy_notional": str(budget.state.filled_buy_notional),
+            "exposure_low": str(settle.exposure_low),
+            "exposure_high": str(settle.exposure_high),
+            "last_trade_statuses": [t.status.value for t in settle.trades],
+            "note": (
+                "bounded settlement wait exhausted or balance not sellable; "
+                "residual uses confirmed evidence range, not planned qty"
+            ),
+        }
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.MANUAL_INTERVENTION,
+            ok=False,
+            exit_code=3,
+            fact=fact,
+        )
+
+    # Confirmed + sellable
+    partial = settle.confirmed_acquired < sized.quantity
+    life.note_entry_confirmed(partial=partial)
+    # Budget fill uses fee-inclusive reserve capped by actual notional estimate
+    actual_notional = min(
+        reserve_notional,
+        (settle.confirmed_acquired * sized.limit_price).quantize(Decimal("0.01")),
+    )
+    if actual_notional <= 0:
+        actual_notional = reserve_notional
+    budget.apply_fill(actual_notional)
+    rt.note_fill()
+    fact(
+        "entry_confirmed",
+        quantity=str(settle.confirmed_acquired),
+        sellable_balance=str(settle.sellable_balance),
+        partial=partial,
+    )
+
     ok_second, why_second = budget.can_reserve_entry(Decimal("0.01"))
     report["second_entry_denied"] = not ok_second
     report["second_entry_reason"] = why_second
-    if ok_second or rt.can_second_entry():
+    if ok_second:
         report["blockers"].append("SECOND_ENTRY_NOT_BLOCKED")
         return _finish(
             report=report,
@@ -891,53 +1089,44 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             fact=fact,
         )
 
-    # Risk-reducing exit — authorized even after entry deadline
-    life.note_exit_submitting()
-    exit_req = SubmitOrderRequest(
+    # Manual flatten detection (restart / external UI)
+    if detect_manual_flat(
+        confirmed_acquired=settle.confirmed_acquired,
+        current_balance=settle.sellable_balance,
+        current_position=settle.sellable_balance,
+        sell_trades=[t for t in settle.trades if t.side.upper() == "SELL"],
+    ) and settle.sellable_balance <= 0:
+        life.note_flat_external_action()
+        report["note"] = "FLAT_EXTERNAL_ACTION"
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.FLAT_EXTERNAL_ACTION,
+            ok=True,
+            exit_code=0,
+            fact=fact,
+        )
+
+    readiness_sell = evaluate_sell_readiness(
+        confirmed_acquired=settle.confirmed_acquired,
+        sellable_balance=settle.sellable_balance,
+        allowance=settle.allowance,
         token_id=token_id,
-        side="SELL",
-        price=str(sized.limit_price),
-        size=str(acquired_qty),
-        amount=str(acquired_qty),
-        order_type="FAK",
-        tick_size=bound["tick_size"],
+        expected_token_id=token_id,
+        funder_ok=True,
+        stream_or_rest_healthy=True,
+        bid_depth_ok=True,
+        tick_min_ok=True,
     )
-    if ack is not None:
-        for p in ack.positions:
-            if exit_req.token_id == p.token_id:
-                raise LiveOnceError("ACKNOWLEDGED_TOKEN_EXIT_FORBIDDEN")
-
-    # Optional cancel of owned working order only (FAK usually matched; structural allow)
-    if owned_order_id and hasattr(transport, "cancel_order"):
-        # Do not cancel-all; individual owned cancel only if still open — skipped for matched FAK
-        pass
-
-    exit_res = transport.submit_order(exit_req)
-    report["mutations_attempted"].append(
-        {
-            "op": "submit_order",
-            "side": "SELL",
-            "ok": bool(exit_res.ok),
-            "uncertain": bool(getattr(exit_res, "uncertain", False)),
-            "venue_order_id": exit_res.venue_order_id,
-            "status": exit_res.status,
-            "error": exit_res.error,
-        }
-    )
-    fact(
-        "exit_submit",
-        ok=exit_res.ok,
-        uncertain=getattr(exit_res, "uncertain", False),
-        after_entry_deadline=args.simulate_entry_deadline_passed,
-    )
-
-    if getattr(exit_res, "uncertain", False) or not exit_res.ok:
-        if getattr(exit_res, "uncertain", False):
-            life.note_exit_unknown()
+    if not readiness_sell.ok:
+        life.note_manual_intervention()
         report["residual"] = {
-            "quantity": str(acquired_qty),
-            "token_id_suffix": token_id[-8:] if len(token_id) >= 8 else token_id,
-            "note": "exit failed or uncertain; MANUAL_INTERVENTION",
+            "confirmed_acquired": str(settle.confirmed_acquired),
+            "current_balance": str(settle.sellable_balance),
+            "allowance": None if settle.allowance is None else str(settle.allowance),
+            "sell_blockers": readiness_sell.blockers,
+            "note": "SELL readiness failed; no knowingly invalid SELL",
         }
         return _finish(
             report=report,
@@ -949,6 +1138,65 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             fact=fact,
         )
 
+    sell_qty = readiness_sell.sell_qty
+    if ack is not None and ack_targets_forbidden(token_id, ack):
+        raise LiveOnceError("ACKNOWLEDGED_TOKEN_EXIT_FORBIDDEN")
+
+    # Risk-reducing exit — authorized even after entry deadline
+    life.note_exit_submitting()
+    exit_req = SubmitOrderRequest(
+        token_id=token_id,
+        side="SELL",
+        price=str(sized.limit_price),
+        size=str(sell_qty),
+        amount=str(sell_qty),
+        order_type="FAK",
+        tick_size=bound["tick_size"],
+    )
+    exit_res = transport.submit_order(exit_req)
+    report["mutations_attempted"].append(
+        {
+            "op": "submit_order",
+            "side": "SELL",
+            "ok": bool(exit_res.ok),
+            "uncertain": bool(getattr(exit_res, "uncertain", False)),
+            "venue_order_id": exit_res.venue_order_id,
+            "status": exit_res.status,
+            "error": exit_res.error,
+            "qty": str(sell_qty),
+        }
+    )
+    fact(
+        "exit_submit",
+        ok=exit_res.ok,
+        uncertain=getattr(exit_res, "uncertain", False),
+        qty=str(sell_qty),
+        after_entry_deadline=args.simulate_entry_deadline_passed,
+    )
+
+    # No SELL storm — at most one attempt in this process
+    if getattr(exit_res, "uncertain", False) or not exit_res.ok:
+        if getattr(exit_res, "uncertain", False):
+            life.note_exit_unknown()
+        life.note_manual_intervention()
+        report["residual"] = {
+            "confirmed_acquired": str(settle.confirmed_acquired),
+            "current_balance": str(settle.sellable_balance),
+            "attempted_sell_qty": str(sell_qty),
+            "note": "exit failed after readiness; no retry storm",
+        }
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.MANUAL_INTERVENTION,
+            ok=False,
+            exit_code=3,
+            fact=fact,
+        )
+
+    life.note_exit_matched()
+    life.note_exit_settling()
     life.note_exit_filled(partial=False)
     life.note_reconciling()
     life.note_flat_confirmed()
@@ -961,6 +1209,8 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
         "lifecycle": life.phase.value,
         "session_phase": rt.phase.value,
         "filled_buy_notional": str(budget.state.filled_buy_notional),
+        "confirmed_acquired": str(settle.confirmed_acquired),
+        "sold_qty": str(sell_qty),
         "residual_quantity": "0",
         "orders": list(report["mutations_attempted"]),
         "fees_estimated_entry": str(sized.estimated_buy_fee),

@@ -212,6 +212,35 @@ class SdkReadonlyTransport:
             allowance = Decimal(str(raw.get("allowance")))
         return VenueBalanceSnapshot(collateral_balance=bal, allowance=allowance)
 
+    def get_conditional_balance_allowance(
+        self, token_id: str
+    ) -> tuple[Decimal, Decimal | None]:
+        """CONDITIONAL token balance/allowance in share units (read-only)."""
+        self.spy.check(method="GET", path="/balance-allowance")
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+
+        raw = self._client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+        )
+        if not isinstance(raw, dict):
+            return Decimal("0"), None
+        bal = Decimal(str(raw.get("balance") or "0"))
+        # Venue often returns 6-decimal base units
+        if bal >= Decimal("1000"):
+            bal = bal / Decimal("1000000")
+        allowance = None
+        allowances = raw.get("allowances")
+        if isinstance(allowances, dict) and allowances:
+            first = next(iter(allowances.values()))
+            allowance = Decimal(str(first))
+            if allowance >= Decimal("1000"):
+                allowance = allowance / Decimal("1000000")
+        elif raw.get("allowance") is not None:
+            allowance = Decimal(str(raw.get("allowance")))
+            if allowance >= Decimal("1000"):
+                allowance = allowance / Decimal("1000000")
+        return bal, allowance
+
     def get_positions(self) -> list[VenuePositionSnapshot]:
         # Public Data API — funder preferred (historical)
         import json

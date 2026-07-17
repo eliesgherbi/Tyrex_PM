@@ -188,3 +188,27 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 **Stop after R7A.2.** Awaiting explicit R7B **session** authorization (not the position ack).
 
 **Not authorized:** real submit, cancel, wallet approval, on-chain ops, network arm token, `mutations_enabled=True`.
+
+## R7B — Operator CLI (checkpoint)
+
+| Item | Result |
+|------|--------|
+| Checkpoint | `d506ea6` (not pushed) |
+| Auth model | Operator `--execute-live` (no chat/nonce ceremony) |
+| Dry default | Yes; dry never mutates |
+| First live run | `d632b631-…` — BUY matched, auto-SELL balance=0 → `MANUAL_INTERVENTION` |
+| Incident doc | [`Docs/Implementation/r7b_first_live_incident.md`](Implementation/r7b_first_live_incident.md) |
+
+## R7C — Settlement / reconciliation hardening
+
+| Item | Result |
+|------|--------|
+| Live retest | **Forbidden this phase** |
+| Read-only recon | `tyrex-pm r7c-recon` → selected market **FLAT**, open orders **0** |
+| BUY fill | 9.470587 @ 0.51 CONFIRMED (~$4.83) |
+| Manual SELL | 9.47 @ 0.50 CONFIRMED (UI order) |
+| Hardening | `settlement.py` wait + sell readiness; lifecycle MATCHED≠CONFIRMED |
+| Regression fixture | `tests/fixtures/r7b_incident_d632b631_facts.jsonl` |
+| Invariants | Order insert ≠ settlement; MATCHED ≠ CONFIRMED; planned ≠ acquired; confirmed ≠ sellable |
+
+**Stop after R7C.** Awaiting review before any further `--execute-live`.

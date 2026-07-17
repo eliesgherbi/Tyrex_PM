@@ -13,6 +13,11 @@ import pytest
 from tyrex_pm.execution.polymarket.fees_fd import FeeDescriptor
 from tyrex_pm.execution.polymarket.mutation_transport import SpyMutationTransport
 from tyrex_pm.execution.polymarket.order_sizing import size_buy_under_cap
+from tyrex_pm.execution.polymarket.settlement import (
+    FakeSettlementClock,
+    TradeEvidence,
+    TradeSettlementStatus,
+)
 from tyrex_pm.runtime.r7_position_ack import build_acknowledgment
 from tyrex_pm.runtime.r7b_live_once import (
     LiveOnceError,
@@ -20,6 +25,26 @@ from tyrex_pm.runtime.r7b_live_once import (
     TerminalOutcome,
     run_r7b_live_once,
 )
+
+
+def _immediate_settlement(qty: Decimal = Decimal("9.09")) -> dict[str, Any]:
+    """Injected pollers: CONFIRMED trade + sellable balance on first poll."""
+    trades = [
+        TradeEvidence(
+            trade_id="t1",
+            order_id="0xspy0001",
+            side="BUY",
+            size=qty,
+            price=Decimal("0.55"),
+            status=TradeSettlementStatus.CONFIRMED,
+        )
+    ]
+    return {
+        "settlement_trade_poller": lambda: list(trades),
+        "settlement_balance_poller": lambda: (qty, qty),
+        "settlement_clock": FakeSettlementClock(),
+        "settlement_max_wait_s": 5.0,
+    }
 
 
 class RaisingTransport:
@@ -91,17 +116,21 @@ def _git_ok(_repo: Path) -> tuple[str, str, bool]:
 
 
 def _base_args(tmp_path: Path, **kwargs: Any) -> R7BLiveOnceArgs:
+    window = _eligible_window()
     defaults: dict[str, Any] = {
         "output_dir": tmp_path / "out",
         "acknowledgment_path": None,
         "repo_root": tmp_path,
         "allow_dirty_worktree": True,
         "git_identity_provider": _git_ok,
-        "window_provider": lambda: [_eligible_window()],
+        "window_provider": lambda: [window],
         "positions_provider": lambda: [],
         "skip_network": True,
         "forced_outcome": "YES",
     }
+    # Happy-path live tests need settlement injectors (no network)
+    if kwargs.get("execute_live") and "settlement_trade_poller" not in kwargs:
+        defaults.update(_immediate_settlement(qty=window["sized"].quantity))
     defaults.update(kwargs)
     return R7BLiveOnceArgs(**defaults)
 
