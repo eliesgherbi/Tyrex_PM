@@ -261,9 +261,21 @@ Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_
 
 | Item | Result |
 |------|--------|
-| Operator live proof | `55fd9a76` BUY@0.51 → SELL@0.50 → `FLAT` / dust |
+| Operator live proof | `55fd9a76` BUY@0.51 → SELL@0.50 → inventory **`FLAT_WITH_DUST`** |
 | Policy | `r7_lifecycle_policy.py` exact values |
 | Rehearsal | `scripts/r7f_exit_rehearsal.py` — zero mutations |
 | Residuals | 3 distinct `FLAT_WITH_DUST` records; ack gate ok |
 | Agent live | **Not executed** |
 | Doc | [`r7f_exit_planner_acceptance.md`](Implementation/r7f_exit_planner_acceptance.md) · [`r7f_operator_runbook.md`](Implementation/r7f_operator_runbook.md) |
+
+## R8 — R7 closure + framework acceptance
+
+| Item | Result |
+|------|--------|
+| Further R7 live | **Not required** (third live complete) |
+| Terminal semantics | Dust ⇒ `FLAT_WITH_DUST`; exact zero ⇒ `FLAT` |
+| Exit floors | Documented; NORMAL≠EMERGENCY (slippage); ≠ legacy REJECT |
+| Account recon | Ack=4; 3 dust; open orders=0; cleanup `NONE` |
+| Framework matrix | [`r8_framework_acceptance.md`](Implementation/r8_framework_acceptance.md) |
+| Success evidence | [`r7_successful_live_acceptance.md`](Implementation/r7_successful_live_acceptance.md) |
+| Z-Gap | **Not implemented** this phase |

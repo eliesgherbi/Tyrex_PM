@@ -107,7 +107,15 @@ class LiveOnceError(RuntimeError):
 
 
 class TerminalOutcome(str, Enum):
+    """Inventory-terminal outcomes for one lifecycle process.
+
+    ``FLAT`` — conditional balance is exactly zero.
+    ``FLAT_WITH_DUST`` — positive residual below min tradable (not tradable exposure).
+    Do not use ``FLAT`` as shorthand for “no tradable exposure.”
+    """
+
     FLAT = "FLAT"
+    FLAT_WITH_DUST = "FLAT_WITH_DUST"
     FLAT_EXTERNAL_ACTION = "FLAT_EXTERNAL_ACTION"
     BLOCKED = "BLOCKED"
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
@@ -1505,7 +1513,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             pass
 
     if residual_qty < Decimal("0.01") and confirmed_sold > 0:
-        # dust-only after exit counts as flat-with-dust success for lifecycle
+        # Exact zero → FLAT; positive dust → FLAT_WITH_DUST (never call dust FLAT).
         life.note_exit_matched()
         life.note_exit_settling()
         life.note_exit_filled(partial=residual_qty > 0)
@@ -1526,26 +1534,28 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
                 tradable=False,
             )
             life.note_flat_confirmed()
-            outcome = TerminalOutcome.FLAT
-            realized = "FLAT_WITH_DUST"
+            outcome = TerminalOutcome.FLAT_WITH_DUST
+            inventory_terminal = "FLAT_WITH_DUST"
         else:
             life.note_flat_confirmed()
             outcome = TerminalOutcome.FLAT
-            realized = "FLAT_AFTER_EXIT"
+            inventory_terminal = "FLAT"
         rt.note_flat()
         report["mutations_enabled"] = False
         if hasattr(transport, "disable_network"):
             transport.disable_network()
         report["final"] = {
             "lifecycle": life.phase.value,
+            "lifecycle_completed": True,
             "session_phase": rt.phase.value,
+            "inventory_terminal": inventory_terminal,
             "filled_buy_notional": str(budget.state.filled_buy_notional),
             "confirmed_acquired": str(settle.confirmed_acquired),
             "sold_qty": str(confirmed_sold),
             "residual_quantity": str(residual_qty),
             "orders": list(report["mutations_attempted"]),
             "fees_estimated_entry": str(sized.estimated_buy_fee),
-            "realized_result": realized,
+            "realized_result": inventory_terminal,
             "exit_used_buy_limit": False,
         }
         report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
@@ -1571,14 +1581,16 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             transport.disable_network()
         report["final"] = {
             "lifecycle": life.phase.value,
+            "lifecycle_completed": True,
             "session_phase": rt.phase.value,
+            "inventory_terminal": "FLAT",
             "filled_buy_notional": str(budget.state.filled_buy_notional),
             "confirmed_acquired": str(settle.confirmed_acquired),
             "sold_qty": str(confirmed_sold),
             "residual_quantity": "0",
             "orders": list(report["mutations_attempted"]),
             "fees_estimated_entry": str(sized.estimated_buy_fee),
-            "realized_result": "FLAT_AFTER_EXIT",
+            "realized_result": "FLAT",
             "exit_used_buy_limit": False,
         }
         report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()

@@ -1,6 +1,6 @@
 # 00 — Project objective
 
-**Phase:** R1 (active)  
+**Phase:** R8 (framework acceptance; Z-Gap design next — not implemented here)  
 **Engine:** Minimal Tyrex_PM event-driven framework (NautilusTrader is not a dependency)
 
 ## Problem

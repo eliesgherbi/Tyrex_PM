@@ -1,6 +1,6 @@
 # 03 — Module contracts
 
-**Phase:** R6A/B
+**Phase:** R8 (R7 live closed; see `Docs/Implementation/r8_framework_acceptance.md`)
 
 ## Strategy / risk / planner
 
@@ -57,10 +57,15 @@ Modules: `lifecycle_exit_plan.py`, `r7_lifecycle_policy.py`
 - Fresh bid-side book required; stale/empty bids → wait or refuse (no knowingly unmatchable FAK).
 - Exact policy: freshness 2000 ms; floors 0.01; max slip from touch 0.05; max spread 0.20;
   exit attempts 3; cooldown 0.5 s; settlement wait 45 s; flatten−30 s / entry−45 s / min 90 s.
+- SELL limit = `tick_floor(worst_bid_walk)`; NORMAL also requires `(best_bid−worst)≤0.05`.
+  EMERGENCY skips touch-slippage only — not a legacy blind `0.01` unwind
+  (see `Docs/Implementation/r7_exit_floor_policy.md`).
 - SELL qty ≤ `min(confirmed_acquired, sellable_balance, remaining_after_confirmed_exits)`.
 - Partial FAK + no-match retries: new book fingerprint each try; attempt cap + flatten deadline.
 - Residual registry records incomplete exits; cleanup policy remains `NONE`.
+- Inventory terminal: exact zero → `FLAT`; dust `<0.01` → `FLAT_WITH_DUST` (never call dust `FLAT`).
 - FAK is floor-protected, not fill-guaranteed under book move.
+- R7 third live complete (`55fd9a76`); no further R7 live under closed runbook.
 
 ## Forbidden
 

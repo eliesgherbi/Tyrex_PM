@@ -1,7 +1,8 @@
 # R7F — Exit-planner integration acceptance
 
 **Prerequisite:** R7E on `3df3e21`.  
-**Successful live proof (operator-run, not agent):** run `55fd9a76-…` → `FLAT` with SELL limit **0.50** (bid), BUY limit **0.51** unused.
+**Successful live proof (operator-run, not agent):** run `55fd9a76-…` → inventory **`FLAT_WITH_DUST`** (`0.000587`) with SELL limit **0.50** (bid), BUY limit **0.51** unused.  
+**R7 live validation complete** — see [`r7_successful_live_acceptance.md`](r7_successful_live_acceptance.md). No further R7 live run.
 
 ## Policy values (exact)
 

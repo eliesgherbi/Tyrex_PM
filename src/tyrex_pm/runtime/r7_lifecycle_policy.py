@@ -20,14 +20,29 @@ from tyrex_pm.execution.polymarket.settlement import (
 
 
 # --- Exit book / price -------------------------------------------------
+# Pricing formula (normal):
+#   worst = deepest bid level consumed walking size qty (descending)
+#   limit = tick_floor(worst)
+#   require: limit >= NORMAL_EXIT_PRICE_FLOOR
+#   require: (best_bid - worst) <= MAX_EXIT_SLIPPAGE_FROM_TOUCH
+#   require: (best_ask - best_bid) <= MAX_EXIT_BOOK_SPREAD  (if ask present)
+#   never: limit == entry_buy_limit when best_bid < entry_buy_limit
+#
+# Emergency differs from normal ONLY by skipping the touch-slippage cap.
+# Absolute floors are intentionally identical (venue min tick = 0.01).
+# This is NOT the rejected legacy unwind (stale touch / hardcoded 0.01
+# without fresh book, depth walk, fingerprint, or qty ownership).
 BOOK_FRESHNESS_MAX_AGE_MS: int = 2000
 NORMAL_EXIT_PRICE_FLOOR: Decimal = Decimal("0.01")
 EMERGENCY_EXIT_PRICE_FLOOR: Decimal = Decimal("0.01")
-# Worst accepted bid may not be more than this below best bid (normal exit).
+# Worst accepted bid may not be more than this below best bid (NORMAL only).
 MAX_EXIT_SLIPPAGE_FROM_TOUCH: Decimal = Decimal("0.05")
 # Bid-ask spread ceiling at exit time.
 MAX_EXIT_BOOK_SPREAD: Decimal | None = Decimal("0.20")
 REQUIRE_FULL_BID_DEPTH: bool = True
+# Documented worst-case for $5 entry under emergency (absolute floor 0.01):
+# if entry paid ~$5 at price p and emergency exits at 0.01, max share loss is
+# economic and bounded by acquired qty ≤ ~500 shares at p=0.01 — see R8 docs.
 
 # --- Exit retries ------------------------------------------------------
 EXIT_MAX_ATTEMPTS: int = 3

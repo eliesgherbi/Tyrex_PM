@@ -1,6 +1,6 @@
 # 02 — Architecture and ownership
 
-**Phase:** R6A (LiveOMS behind OMS protocol; mutations disabled)  
+**Phase:** R8 (framework acceptance; R7 live closed)  
 **Engine:** Minimal Tyrex in-process dispatcher (no NautilusTrader)  
 **R5:** `5cc1a30` · **R5.1:** `6b03cc3`
 

@@ -1,5 +1,7 @@
 # R7D.2 — Operator handoff preparation
 
+> **Historical handoff note.** R7 live validation later completed with run `55fd9a76` — see [`r7_successful_live_acceptance.md`](r7_successful_live_acceptance.md). Runbook closed in R8.
+
 **Prerequisite:** R7D.1 on `696ba94`.  
 **Scope:** architecture + documentation + read-only readiness. **No live trade by the agent.**
 

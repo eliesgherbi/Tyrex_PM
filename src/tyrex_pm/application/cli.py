@@ -540,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"mutations_attempted={report.get('mutations_attempted')}")
         # Non-tradable dust is acceptable terminal; tradable residual / unknown → nonzero
         term = str(report.get("terminal") or "")
-        return 0 if term in {"FLAT", "FLAT_WITH_DUST"} else 3
+        return 0 if term in {"FLAT", "FLAT_WITH_DUST", "FLAT_EXTERNAL_ACTION"} else 3
     if args.command == "r7b-live-once":
         from decimal import Decimal
 
