@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -33,6 +34,19 @@ from tyrex_pm.execution.polymarket.mutation_transport import (
     SdkMutationTransport,
     SpyMutationTransport,
 )
+from tyrex_pm.execution.polymarket.lifecycle_exit_plan import (
+    DEFAULT_EXIT_PRICE_POLICY,
+    DEFAULT_EXIT_RETRY_POLICY,
+    ExitPlanStatus,
+    ExitPricePolicy,
+    ExitRetryPolicy,
+    ExitUrgency,
+    book_from_clob_levels,
+    compute_sell_qty_cap,
+    is_fak_no_match_error,
+    next_retry_cooldown,
+    plan_lifecycle_fak_sell,
+)
 from tyrex_pm.execution.polymarket.order_sizing import SizedBuyOrder, SizingError, size_buy_under_cap
 from tyrex_pm.execution.polymarket.settlement import (
     FakeSettlementClock,
@@ -50,10 +64,14 @@ from tyrex_pm.operations import next_btc_updown_slug
 from tyrex_pm.runtime.r7_ack_gate import enforce_acknowledgment_gate
 from tyrex_pm.runtime.r7_lifecycle_dust import dust_token_ids, read_lifecycle_dust
 from tyrex_pm.runtime.r7_lifecycle_residuals import (
+    CLEANUP_POLICY_NONE,
+    LifecycleResidualRecord,
     evaluate_residuals_for_entry,
     migrate_dust_to_registry,
     read_residual_registry,
     residual_token_ids,
+    upsert_residual,
+    write_residual_registry,
 )
 from tyrex_pm.runtime.r7_paths import DEFAULT_ACKNOWLEDGMENT_PATH, resolve_acknowledgment_path
 from tyrex_pm.runtime.r7_position_ack import (
@@ -139,6 +157,13 @@ class R7BLiveOnceArgs:
     settlement_clock: Any | None = None
     settlement_max_wait_s: float = 45.0
     recovery_mode: bool = False  # restart: recon only, no new BUY
+    # R7E exit planning hooks
+    exit_book_provider: Callable[[str], Any] | None = None
+    exit_price_policy: ExitPricePolicy | None = None
+    exit_retry_policy: ExitRetryPolicy | None = None
+    exit_sleep: Callable[[float], None] | None = None
+    exit_now_provider: Callable[[], datetime] | None = None
+    kill_switch_provider: Callable[[], bool] | None = None
 
 
 @dataclass
@@ -159,6 +184,63 @@ def _get_json(url: str) -> Any:
     req = Request(url, headers={"User-Agent": "tyrex-pm-r7b-live-once/1.0"}, method="GET")
     with urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_exit_book(token_id: str, *, now: datetime | None = None) -> Any:
+    """Fresh public CLOB book for exit planning (bids authoritative for SELL)."""
+    raw = _get_json(f"https://clob.polymarket.com/book?token_id={token_id}")
+    if not isinstance(raw, dict):
+        return None
+    return book_from_clob_levels(
+        token_id=token_id,
+        bids=raw.get("bids") or [],
+        asks=raw.get("asks") or [],
+        ts_event=now or _utc_now(),
+    )
+
+
+def _persist_lifecycle_residual(
+    *,
+    repo_root: Path,
+    run_id: str,
+    condition_id: str,
+    token_id: str,
+    market_slug: str,
+    acquired: Decimal,
+    exited: Decimal,
+    residual: Decimal,
+    classification: str,
+    buy_order_id: str | None,
+    provenance: str,
+    tradable: bool,
+) -> None:
+    reg = read_residual_registry(repo_root=repo_root) or migrate_dust_to_registry(
+        repo_root=repo_root, force_incident=False
+    )
+    now = _utc_now().isoformat()
+    rec = LifecycleResidualRecord(
+        condition_id=condition_id,
+        token_id=token_id,
+        originating_run_id=run_id,
+        market_slug=market_slug,
+        acquired_quantity=str(acquired),
+        exited_quantity=str(exited),
+        residual_quantity=str(residual),
+        min_tradable="0.01",
+        classification=classification,
+        provenance=provenance,
+        created_at=now,
+        updated_at=now,
+        last_reconciliation_source="r7b_live_once",
+        tradable=tradable,
+        cleanup_policy=CLEANUP_POLICY_NONE,
+        buy_order_id=buy_order_id,
+        closed=residual == 0,
+        closed_at=now if residual == 0 else None,
+        historical_provenance_retained=True,
+    )
+    upsert_residual(reg, rec)
+    write_residual_registry(reg, repo_root=repo_root)
 
 
 def git_identity(repo: Path) -> tuple[str, str, bool]:
@@ -1191,122 +1273,337 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             fact=fact,
         )
 
-    readiness_sell = evaluate_sell_readiness(
-        confirmed_acquired=settle.confirmed_acquired,
-        sellable_balance=settle.sellable_balance,
-        allowance=settle.allowance,
-        token_id=token_id,
-        expected_token_id=token_id,
-        funder_ok=True,
-        stream_or_rest_healthy=True,
-        bid_depth_ok=True,
-        tick_min_ok=True,
-    )
-    if not readiness_sell.ok:
-        life.note_manual_intervention()
-        report["residual"] = {
-            "confirmed_acquired": str(settle.confirmed_acquired),
-            "current_balance": str(settle.sellable_balance),
-            "allowance": None if settle.allowance is None else str(settle.allowance),
-            "sell_blockers": readiness_sell.blockers,
-            "note": "SELL readiness failed; no knowingly invalid SELL",
-        }
-        return _finish(
-            report=report,
-            report_path=report_path,
-            facts_path=facts_path,
-            outcome=TerminalOutcome.MANUAL_INTERVENTION,
-            ok=False,
-            exit_code=3,
-            fact=fact,
-        )
-
-    sell_qty = readiness_sell.sell_qty
     if ack is not None and ack_targets_forbidden(token_id, ack):
         raise LiveOnceError("ACKNOWLEDGED_TOKEN_EXIT_FORBIDDEN")
 
-    # Risk-reducing exit — authorized even after entry deadline
-    life.note_exit_submitting()
-    exit_req = SubmitOrderRequest(
-        token_id=token_id,
-        side="SELL",
-        price=str(sized.limit_price),
-        size=str(sell_qty),
-        amount=str(sell_qty),
-        order_type="FAK",
-        tick_size=bound["tick_size"],
-    )
-    exit_res = transport.submit_order(exit_req)
-    report["mutations_attempted"].append(
-        {
-            "op": "submit_order",
-            "side": "SELL",
-            "ok": bool(exit_res.ok),
-            "uncertain": bool(getattr(exit_res, "uncertain", False)),
-            "venue_order_id": exit_res.venue_order_id,
-            "status": exit_res.status,
-            "error": exit_res.error,
-            "qty": str(sell_qty),
-        }
-    )
-    fact(
-        "exit_submit",
-        ok=exit_res.ok,
-        uncertain=getattr(exit_res, "uncertain", False),
-        qty=str(sell_qty),
-        after_entry_deadline=args.simulate_entry_deadline_passed,
-    )
+    # R7E: side-correct exit — never reuse sized.limit_price (BUY ceiling) as SELL.
+    price_pol = args.exit_price_policy or DEFAULT_EXIT_PRICE_POLICY
+    retry_pol = args.exit_retry_policy or DEFAULT_EXIT_RETRY_POLICY
+    sleep_fn = args.exit_sleep or time.sleep
+    now_fn = args.exit_now_provider or _utc_now
+    book_fn = args.exit_book_provider or (lambda tid: fetch_exit_book(tid, now=now_fn()))
+    kill_fn = args.kill_switch_provider or (lambda: False)
 
-    # No SELL storm — at most one attempt in this process
-    if getattr(exit_res, "uncertain", False) or not exit_res.ok:
+    tick = Decimal(str(bound["tick_size"]))
+    min_size = Decimal(str(bound.get("min_order_size") or "0"))
+    confirmed_sold = Decimal("0")
+    exit_plans: list[dict[str, Any]] = []
+    urgency = ExitUrgency.NORMAL
+    flatten_deadline = bound["deadlines"].flatten_deadline
+    attempt = 0
+    last_exit_error: str | None = None
+    bal_now = settle.sellable_balance
+    allow_now = settle.allowance
+
+    while attempt < retry_pol.max_attempts:
+        if kill_fn():
+            report["blockers"].append("KILL_SWITCH_ACTIVE")
+            last_exit_error = "KILL_SWITCH_ACTIVE"
+            break
+        if now_fn() > flatten_deadline and attempt > 0:
+            report["blockers"].append("FLATTEN_DEADLINE_EXCEEDED")
+            last_exit_error = "FLATTEN_DEADLINE_EXCEEDED"
+            break
+
+        if args.settlement_balance_poller is not None:
+            bal_now, allow_now = args.settlement_balance_poller()
+        remaining = compute_sell_qty_cap(
+            confirmed_acquired=settle.confirmed_acquired,
+            sellable_balance=Decimal(str(bal_now)),
+            remaining_after_confirmed_exits=settle.confirmed_acquired - confirmed_sold,
+        )
+        if remaining <= 0:
+            break
+
+        book = book_fn(token_id)
+        plan = plan_lifecycle_fak_sell(
+            book=book,
+            quantity=remaining,
+            tick_size=tick,
+            now=now_fn(),
+            urgency=urgency,
+            policy=price_pol,
+            entry_buy_limit=sized.limit_price,
+            min_order_size=min_size if min_size > 0 else None,
+        )
+        exit_plans.append(plan.to_dict())
+        fact(
+            "exit_plan",
+            attempt=attempt + 1,
+            status=plan.status.value,
+            limit_price=None if plan.limit_price is None else str(plan.limit_price),
+            best_bid=None if plan.best_bid is None else str(plan.best_bid),
+            book_fingerprint=plan.book_fingerprint,
+            reason=plan.reason,
+            entry_buy_limit=str(sized.limit_price),
+        )
+
+        if plan.status is ExitPlanStatus.WAIT_NO_BIDS:
+            sleep_fn(next_retry_cooldown(attempt, retry_pol))
+            attempt += 1
+            urgency = ExitUrgency.EMERGENCY
+            last_exit_error = plan.reason
+            continue
+        if plan.status is ExitPlanStatus.REFUSE_STALE_BOOK:
+            sleep_fn(next_retry_cooldown(attempt, retry_pol))
+            attempt += 1
+            last_exit_error = plan.reason
+            continue
+        if not plan.ok or plan.limit_price is None:
+            last_exit_error = plan.reason
+            attempt += 1
+            urgency = ExitUrgency.EMERGENCY
+            sleep_fn(next_retry_cooldown(attempt - 1, retry_pol))
+            continue
+
+        # Hard invariant: planned SELL must not equal BUY limit when bid is below it
+        if plan.best_bid is not None and plan.best_bid < sized.limit_price:
+            if plan.limit_price >= sized.limit_price:
+                raise LiveOnceError("EXIT_REUSED_BUY_LIMIT")
+
+        readiness_sell = evaluate_sell_readiness(
+            confirmed_acquired=settle.confirmed_acquired - confirmed_sold,
+            sellable_balance=Decimal(str(bal_now)),
+            allowance=allow_now if allow_now is not None else settle.allowance,
+            token_id=token_id,
+            expected_token_id=token_id,
+            funder_ok=True,
+            stream_or_rest_healthy=True,
+            bid_depth_ok=plan.executable_bid_depth >= plan.quantity,
+            tick_min_ok=True,
+        )
+        if not readiness_sell.ok:
+            last_exit_error = ",".join(readiness_sell.blockers)
+            fact("exit_readiness_blocked", blockers=readiness_sell.blockers)
+            break
+
+        sell_qty = min(readiness_sell.sell_qty, plan.quantity)
+        bal_before_sell = Decimal(str(bal_now))
+        life.note_exit_submitting()
+        exit_req = SubmitOrderRequest(
+            token_id=token_id,
+            side="SELL",
+            price=str(plan.limit_price),
+            size=str(sell_qty),
+            amount=str(sell_qty),
+            order_type="FAK",
+            tick_size=bound["tick_size"],
+        )
+        exit_res = transport.submit_order(exit_req)
+        report["mutations_attempted"].append(
+            {
+                "op": "submit_order",
+                "side": "SELL",
+                "ok": bool(exit_res.ok),
+                "uncertain": bool(getattr(exit_res, "uncertain", False)),
+                "venue_order_id": exit_res.venue_order_id,
+                "status": exit_res.status,
+                "error": exit_res.error,
+                "qty": str(sell_qty),
+                "limit_price": str(plan.limit_price),
+                "best_bid": None if plan.best_bid is None else str(plan.best_bid),
+                "book_fingerprint": plan.book_fingerprint,
+                "entry_buy_limit_not_used": True,
+            }
+        )
+        fact(
+            "exit_submit",
+            ok=exit_res.ok,
+            uncertain=getattr(exit_res, "uncertain", False),
+            qty=str(sell_qty),
+            limit_price=str(plan.limit_price),
+            best_bid=None if plan.best_bid is None else str(plan.best_bid),
+            book_fingerprint=plan.book_fingerprint,
+            after_entry_deadline=args.simulate_entry_deadline_passed,
+            attempt=attempt + 1,
+        )
+
         if getattr(exit_res, "uncertain", False):
             life.note_exit_unknown()
-        life.note_manual_intervention()
-        report["residual"] = {
+            last_exit_error = "EXIT_UNCERTAIN"
+            break
+
+        if not exit_res.ok:
+            last_exit_error = exit_res.error
+            if is_fak_no_match_error(exit_res.error):
+                fact("exit_fak_no_match", attempt=attempt + 1)
+                sleep_fn(next_retry_cooldown(attempt, retry_pol))
+                attempt += 1
+                urgency = ExitUrgency.EMERGENCY
+                continue
+            break
+
+        confirmed_sold += sell_qty
+        if args.settlement_balance_poller is not None:
+            bal_now, allow_now = args.settlement_balance_poller()
+            bal_after = Decimal(str(bal_now))
+            remaining_check = compute_sell_qty_cap(
+                confirmed_acquired=settle.confirmed_acquired,
+                sellable_balance=bal_after,
+                remaining_after_confirmed_exits=settle.confirmed_acquired - confirmed_sold,
+            )
+            # If the venue balance did not decrease after an accepted FAK SELL,
+            # do not re-submit against the same stale balance reading (spy lag /
+            # inventory disagreement). Reconcile with accounting residual.
+            if bal_after >= bal_before_sell:
+                fact(
+                    "exit_balance_unchanged_after_sell",
+                    confirmed_sold=str(confirmed_sold),
+                    balance=str(bal_after),
+                )
+                break
+        else:
+            remaining_check = settle.confirmed_acquired - confirmed_sold
+        attempt += 1
+        if remaining_check > 0:
+            fact(
+                "exit_partial",
+                confirmed_sold=str(confirmed_sold),
+                remaining=str(remaining_check),
+            )
+            sleep_fn(next_retry_cooldown(attempt - 1, retry_pol))
+            continue
+        break
+
+    report["exit_plans"] = exit_plans
+    # Inventory residual from confirmed lifecycle accounting first.
+    residual_qty = max(Decimal("0"), settle.confirmed_acquired - confirmed_sold)
+    if args.settlement_balance_poller is not None:
+        try:
+            bal_final, _ = args.settlement_balance_poller()
+            bal_final_d = Decimal(str(bal_final))
+            if confirmed_sold <= 0:
+                # No confirmed exit fills — venue balance is authoritative
+                # (covers external UI flatten during the exit window).
+                residual_qty = bal_final_d
+            else:
+                # Never inflate residual above accounting after our fills;
+                # venue pollers in tests may lag and still show pre-exit balance.
+                residual_qty = min(residual_qty, bal_final_d)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if residual_qty < Decimal("0.01") and confirmed_sold > 0:
+        # dust-only after exit counts as flat-with-dust success for lifecycle
+        life.note_exit_matched()
+        life.note_exit_settling()
+        life.note_exit_filled(partial=residual_qty > 0)
+        life.note_reconciling()
+        if residual_qty > 0:
+            _persist_lifecycle_residual(
+                repo_root=args.repo_root,
+                run_id=run_id,
+                condition_id=str(bound["condition_id"]),
+                token_id=token_id,
+                market_slug=str(bound["slug"]),
+                acquired=settle.confirmed_acquired,
+                exited=confirmed_sold,
+                residual=residual_qty,
+                classification="FLAT_WITH_DUST",
+                buy_order_id=owned_order_id,
+                provenance="r7e_exit_flat_with_dust",
+                tradable=False,
+            )
+            life.note_flat_confirmed()
+            outcome = TerminalOutcome.FLAT
+            realized = "FLAT_WITH_DUST"
+        else:
+            life.note_flat_confirmed()
+            outcome = TerminalOutcome.FLAT
+            realized = "FLAT_AFTER_EXIT"
+        rt.note_flat()
+        report["mutations_enabled"] = False
+        if hasattr(transport, "disable_network"):
+            transport.disable_network()
+        report["final"] = {
+            "lifecycle": life.phase.value,
+            "session_phase": rt.phase.value,
+            "filled_buy_notional": str(budget.state.filled_buy_notional),
             "confirmed_acquired": str(settle.confirmed_acquired),
-            "current_balance": str(settle.sellable_balance),
-            "attempted_sell_qty": str(sell_qty),
-            "note": "exit failed after readiness; no retry storm",
+            "sold_qty": str(confirmed_sold),
+            "residual_quantity": str(residual_qty),
+            "orders": list(report["mutations_attempted"]),
+            "fees_estimated_entry": str(sized.estimated_buy_fee),
+            "realized_result": realized,
+            "exit_used_buy_limit": False,
         }
+        report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
         return _finish(
             report=report,
             report_path=report_path,
             facts_path=facts_path,
-            outcome=TerminalOutcome.MANUAL_INTERVENTION,
-            ok=False,
-            exit_code=3,
+            outcome=outcome,
+            ok=True,
+            exit_code=0,
             fact=fact,
         )
 
-    life.note_exit_matched()
-    life.note_exit_settling()
-    life.note_exit_filled(partial=False)
-    life.note_reconciling()
-    life.note_flat_confirmed()
-    rt.note_flat()
-    report["mutations_enabled"] = False
-    if hasattr(transport, "disable_network"):
-        transport.disable_network()
+    if residual_qty <= 0:
+        life.note_exit_matched()
+        life.note_exit_settling()
+        life.note_exit_filled(partial=False)
+        life.note_reconciling()
+        life.note_flat_confirmed()
+        rt.note_flat()
+        report["mutations_enabled"] = False
+        if hasattr(transport, "disable_network"):
+            transport.disable_network()
+        report["final"] = {
+            "lifecycle": life.phase.value,
+            "session_phase": rt.phase.value,
+            "filled_buy_notional": str(budget.state.filled_buy_notional),
+            "confirmed_acquired": str(settle.confirmed_acquired),
+            "sold_qty": str(confirmed_sold),
+            "residual_quantity": "0",
+            "orders": list(report["mutations_attempted"]),
+            "fees_estimated_entry": str(sized.estimated_buy_fee),
+            "realized_result": "FLAT_AFTER_EXIT",
+            "exit_used_buy_limit": False,
+        }
+        report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
+        return _finish(
+            report=report,
+            report_path=report_path,
+            facts_path=facts_path,
+            outcome=TerminalOutcome.FLAT,
+            ok=True,
+            exit_code=0,
+            fact=fact,
+        )
 
-    report["final"] = {
-        "lifecycle": life.phase.value,
-        "session_phase": rt.phase.value,
-        "filled_buy_notional": str(budget.state.filled_buy_notional),
+    # Tradable residual remains — fail closed, persist registry, no duplicate storm
+    life.note_manual_intervention()
+    classification = "RESIDUAL_EXPOSURE"
+    _persist_lifecycle_residual(
+        repo_root=args.repo_root,
+        run_id=run_id,
+        condition_id=str(bound["condition_id"]),
+        token_id=token_id,
+        market_slug=str(bound["slug"]),
+        acquired=settle.confirmed_acquired,
+        exited=confirmed_sold,
+        residual=residual_qty,
+        classification=classification,
+        buy_order_id=owned_order_id,
+        provenance="r7e_exit_incomplete",
+        tradable=True,
+    )
+    report["residual"] = {
         "confirmed_acquired": str(settle.confirmed_acquired),
-        "sold_qty": str(sell_qty),
-        "residual_quantity": "0",
-        "orders": list(report["mutations_attempted"]),
-        "fees_estimated_entry": str(sized.estimated_buy_fee),
-        "realized_result": "FLAT_AFTER_EXIT",
+        "current_balance": str(residual_qty),
+        "confirmed_sold": str(confirmed_sold),
+        "last_exit_error": last_exit_error,
+        "note": "exit incomplete after side-correct planning; no retry storm",
+        "manual_intervention": True,
     }
     report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
     return _finish(
         report=report,
         report_path=report_path,
         facts_path=facts_path,
-        outcome=TerminalOutcome.FLAT,
-        ok=True,
-        exit_code=0,
+        outcome=TerminalOutcome.MANUAL_INTERVENTION,
+        ok=False,
+        exit_code=3,
         fact=fact,
     )
 
@@ -1320,6 +1617,7 @@ __all__ = [
     "PresubmitReadiness",
     "run_r7b_live_once",
     "git_identity",
+    "fetch_exit_book",
     "STRATEGY_REFERENCE_MOMENTUM",
     "MARKET_FAMILY_BTC_UPDOWN_5M",
     "SpyMutationTransport",

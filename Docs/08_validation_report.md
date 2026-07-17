@@ -246,3 +246,13 @@ Full note: [`Docs/Implementation/r7d1_acknowledgment_state.md`](Implementation/r
 | Live | **Not executed** (operator command prepared only) |
 
 Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_operator_handoff.md)
+
+## R7E — Side-correct exit planning
+
+| Item | Result |
+|------|--------|
+| Second-live incident | BUY settled; SELL FAK @ BUY limit 0.51 → no match; manual SELL @ 0.50 |
+| Current state | Conditional dust `0.000587` → `FLAT_WITH_DUST`; market closed |
+| Fix | Bid-side exit planner + fresh book + bounded FAK retry |
+| Live retest | **Not executed** |
+| Incident doc | [`Docs/Implementation/r7d2_second_live_incident.md`](Implementation/r7d2_second_live_incident.md) |

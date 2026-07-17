@@ -141,9 +141,27 @@ def _write_ack(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
     return path, rows
 
 
+def _exit_book(best_bid: str = "0.54", size: str = "100") -> Any:
+    from tyrex_pm.execution.polymarket.lifecycle_exit_plan import book_from_clob_levels
+
+    now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    return book_from_clob_levels(
+        token_id="tok_yes_live",
+        bids=[{"price": best_bid, "size": size}],
+        asks=[{"price": "0.55", "size": size}],
+        ts_event=now,
+    )
+
+
 def _base_args(tmp_path: Path, **kwargs: Any) -> R7BLiveOnceArgs:
+    from tyrex_pm.execution.polymarket.lifecycle_exit_plan import (
+        ExitPricePolicy,
+        ExitRetryPolicy,
+    )
+
     window = _eligible_window()
     ack_path, ack_rows = _write_ack(tmp_path)
+    now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
     defaults: dict[str, Any] = {
         "output_dir": tmp_path / "out",
         "acknowledgment_path": ack_path,
@@ -155,6 +173,11 @@ def _base_args(tmp_path: Path, **kwargs: Any) -> R7BLiveOnceArgs:
         "skip_network": True,
         "forced_outcome": "YES",
         "require_acknowledgment": True,
+        "exit_book_provider": lambda _tid: _exit_book(),
+        "exit_sleep": lambda _s: None,
+        "exit_now_provider": lambda: now,
+        "exit_price_policy": ExitPricePolicy(max_book_age_ms=60_000),
+        "exit_retry_policy": ExitRetryPolicy(max_attempts=3, cooldown_s=0.0),
     }
     # Happy-path live tests need settlement injectors (no network)
     if kwargs.get("execute_live") and "settlement_trade_poller" not in kwargs:

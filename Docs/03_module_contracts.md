@@ -48,6 +48,17 @@ Module: `tyrex_pm.execution.polymarket.settlement`
 - Address roles: `address_roles.py` — refuse signer conditional balance when `signature_type=1`.
 - Live path: clean worktree required; CLI read-only verify: `tyrex-pm r7c-recon`.
 
+## R7E lifecycle exit planning
+
+Module: `tyrex_pm.execution.polymarket.lifecycle_exit_plan`
+
+- Strategy emits intent; planner owns venue-side price/qty/depth/order-type.
+- BUY limit ≠ SELL limit. Never reuse entry `sized.limit_price` for SELL.
+- Fresh bid-side book required; stale/empty bids → wait or refuse (no knowingly unmatchable FAK).
+- SELL qty ≤ `min(confirmed_acquired, sellable_balance, remaining_after_confirmed_exits)`.
+- Partial FAK + no-match retries: bounded attempts, cooldown, flatten deadline; refresh book each try.
+- Residual registry records incomplete exits; cleanup policy remains `NONE`.
+
 ## Forbidden
 
 `--execute-live` on dirty worktree · blind live retest · logging credentials · `old/` imports · NautilusTrader.

@@ -186,6 +186,12 @@ def test_partial_fak_and_smaller_than_planned(tmp_path: Path) -> None:
 
 
 def test_conditional_balance_smaller_than_confirmed(tmp_path: Path) -> None:
+    """SELL qty is capped by sellable balance; leftover confirmed qty is residual.
+
+    R7E fail-closed: selling the entire sellable 3.00 while confirmed acquired is
+    9.47 leaves accounting residual → MANUAL_INTERVENTION / RESIDUAL_EXPOSURE,
+    not a false FLAT.
+    """
     spy = SpyMutationTransport()
     result = run_r7b_live_once(
         _base_args(
@@ -199,9 +205,11 @@ def test_conditional_balance_smaller_than_confirmed(tmp_path: Path) -> None:
             settlement_clock=FakeSettlementClock(),
         )
     )
-    assert result.outcome is TerminalOutcome.FLAT
     sell = [r for r in spy.submitted if r.side == "SELL"][0]
     assert Decimal(sell.size) == Decimal("3.00")
+    assert result.outcome is TerminalOutcome.MANUAL_INTERVENTION
+    assert Decimal(result.report["residual"]["confirmed_sold"]) == Decimal("3.00")
+    assert Decimal(result.report["residual"]["confirmed_acquired"]) == Decimal("9.47")
 
 
 def test_funder_mismatch_and_allowance(tmp_path: Path) -> None:

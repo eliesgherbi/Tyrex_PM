@@ -83,3 +83,5 @@ ENTRY_SUBMITTING → ENTRY_MATCHED → ENTRY_SETTLING → ENTRY_CONFIRMED → AC
 - Durable safety state: `config/r7/acknowledgment_policy.json` (sealed four identities),
   `var/state/r7/position_acknowledgment.json`, `var/state/r7/lifecycle_residuals.json`.
 - Reports under `var/reporting/**` are disposable and must not be the policy source.
+- Exit planning (R7E): fresh bid-side book → marketable FAK SELL limit; never reuse BUY
+  `sized.limit_price`. Module: `execution/polymarket/lifecycle_exit_plan.py`.
