@@ -1,13 +1,13 @@
 # Modules overview
 
-**Purpose:** map active packages to responsibilities and dependencies.  
+**Purpose:** map active packages to responsibilities.  
 **Contracts baseline:** [`../../specifications/03_module_contracts.md`](../../specifications/03_module_contracts.md).
 
 ## Source-tree map
 
 ```text
 src/tyrex_pm/
-├── application/     CLI entrypoints
+├── application/     CLI / composition root
 ├── engine/          in-process event dispatcher
 ├── core/            ids, intents, commands, modes, snapshots
 ├── adapters/        polymarket/, binance/
@@ -17,13 +17,13 @@ src/tyrex_pm/
 ├── signals/         signal packaging
 ├── strategies/      protocol + framework_validation/
 ├── risk/            engine, dedup, policies, reasons
-├── planning/        entry/exit planners
+├── planning/        entry/exit planners (generic)
 ├── execution/       OMS protocol, shadow_oms, order_store, fill_ledger, polymarket/
-├── portfolio/       positions
-├── lifecycle/       trade phase machine
+├── portfolio/       derived positions
+├── lifecycle/       host TradeLifecycle (shadow path)
 ├── persistence/     snapshots
 ├── reporting/       facts JSONL
-├── runtime/         hosts, R7 gates, one-shot live, residuals/ack
+├── runtime/         hosts + R7 phase-specific gates/one-shot
 └── operations/      small ops helpers
 ```
 
@@ -34,23 +34,34 @@ src/tyrex_pm/
 | Market data & signals | Feeds, books, freshness, indicators, signals | [market_data_and_signals](market_data_and_signals.md) |
 | Strategy / risk / planning | Intents, authorization, sizing, exit plans | [strategy_risk_planning](strategy_risk_planning.md) |
 | Execution & portfolio | OMS, settlement, fills, residuals | [execution_and_portfolio](execution_and_portfolio.md) |
-| Reporting & operations | Facts, state paths, recon | [reporting_and_operations](reporting_and_operations.md) |
+| Reporting & operations | Facts, local state paths, recon | [reporting_and_operations](reporting_and_operations.md) |
 
-## Dependency matrix (allowed)
+## Runtime flow versus static dependencies
 
-| From \ To | Adapters | State | Strategy | Risk | Plan | OMS | Portfolio |
-|-----------|----------|-------|----------|------|------|-----|-----------|
-| Adapters | — | emit | no | no | no | no | no |
-| Strategy | no | read via context | — | intents out | no | **no** | no |
-| Risk | no | read ctx | consume intents | — | approve | no | read exposure |
-| Planner | no | books | — | approved | — | commands | no |
-| OMS | transport | — | — | — | commands | — | events out |
-| Portfolio | no | — | — | — | — | consume events | — |
+**Runtime flow** (processing order): see [architecture](../concepts/architecture.md#runtime-flow-data--control).
 
-Strategies **must not** import `tyrex_pm.execution.polymarket.*`.
+**Static dependency rules** (imports):
+
+- `core` → not adapters  
+- strategies → contracts/context only (not `execution.polymarket`)  
+- risk/planning → not concrete strategies  
+- adapters → inward to core/domain  
+- `application` / `runtime` hosts may wire concretes  
+
+Do not read the runtime flowchart as an import graph.
+
+## Validated implementation versus generic target
+
+Phase-specific (active, validated, not the forever public API):
+
+- `runtime/r7b_live_once.py`, `r7_lifecycle_policy.py`, ack/residual modules  
+- `config/r7/`, `var/state/r7/`  
+- CLI: `r7b-live-once`, `r7c-recon`, `r7-ack-regenerate`  
+
+Generic targets for future strategies: `Strategy` protocol, `RiskEngine`, `OMS`, stores, planners — without importing R7 packages. Z-Gap must not import `runtime/r7*`.
 
 ## Tests (architecture gates)
 
-- `tests/test_import_firewall.py` — no `old/` imports
-- `tests/test_r8_architecture_gates.py` — strategy boundaries, no default network hosts in unit tests
-- Module suites under `tests/test_r*.py`
+- `tests/test_import_firewall.py` — no `old/` imports  
+- `tests/test_r8_architecture_gates.py` — strategy boundaries  
+- `tests/test_docs_links.py` / `tests/test_docs_consistency.py` — docs vs tree/CLI  

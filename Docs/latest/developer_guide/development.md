@@ -56,4 +56,4 @@ Conventions:
 
 ## Dirty worktrees
 
-For live mutation paths the runtime requires a clean tree. Documentation and dry/read-only work may proceed dirty; do not bypass live cleanliness.
+For venue-mutation paths the runtime requires a clean tree. Documentation, offline, and dry (no venue mutation) work may proceed dirty; do not bypass live cleanliness.

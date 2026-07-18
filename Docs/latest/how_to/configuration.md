@@ -12,9 +12,9 @@
 
 Committed seals:
 
-- `config/r7/acknowledgment_policy.json` — exact four ack identities
+- `config/r7/acknowledgment_policy.json` — sealed acknowledgment identities (R7 phase-specific)
 
-Example JSON configs:
+Example JSON configs (all exist in-repo):
 
 | File | Typical use |
 |------|-------------|
@@ -23,15 +23,25 @@ Example JSON configs:
 | `config/observe_shadow_r5.json` | Shadow OMS |
 | `config/observe_shadow_r4.json` | Older shadow sample |
 
-## `.env.example` (names only)
+## Environment variables (names only)
 
-| Name | Meaning | Modes |
-|------|---------|-------|
-| `TYREX_PRIVATE_KEY` / `POLYMARKET_PK` | Signer key | auth / live |
-| `TYREX_FUNDER` / `POLYMARKET_FUNDER` | Funder/proxy | proxy modes |
-| `TYREX_SIGNATURE_TYPE` / `POLYMARKET_SIGNATURE_TYPE` | 0 EOA, 1 proxy, 2 safe, 3 1271 | auth / live |
-| `POLYMARKET_API_KEY` / `SECRET` / `PASSPHRASE` | L2 triple | auth / live |
-| `POLYMARKET_ADDRESS` | Optional signer override (tests) | special |
+Loader: `tyrex_pm.execution.polymarket.auth`.
+
+| Name | Role | Precedence / notes |
+|------|------|--------------------|
+| `TYREX_PRIVATE_KEY` | Signer private key | Preferred over `POLYMARKET_PK` |
+| `POLYMARKET_PK` | Signer private key | Deprecated alias of the above |
+| `TYREX_FUNDER` | Funder / proxy wallet | Preferred over `POLYMARKET_FUNDER` |
+| `POLYMARKET_FUNDER` | Funder / proxy | Deprecated alias |
+| `TYREX_SIGNATURE_TYPE` | `0` EOA, `1` proxy, `2` safe, `3` 1271 | Preferred over `POLYMARKET_SIGNATURE_TYPE` |
+| `POLYMARKET_SIGNATURE_TYPE` | Same | Deprecated alias |
+| `POLYMARKET_API_KEY` | L2 key | Required for authenticated paths |
+| `POLYMARKET_API_SECRET` | L2 secret | Required |
+| `POLYMARKET_PASSPHRASE` | L2 passphrase | Or `POLYMARKET_API_PASSPHRASE` |
+| `POLYMARKET_API_PASSPHRASE` | Passphrase alias | Alternate name |
+| `POLYMARKET_ADDRESS` | Optional **signer** override | Synthetic/tests only when no PK; **never funder** |
+
+**Important:** `POLY_ADDRESS` is the **HTTP header** set to the signer EOA derived from the private key. It is not a preferred `.env` knob. Pre-R6D confusion (putting funder in `POLY_ADDRESS`) caused authenticated L2 failures — do not repeat.
 
 Public fixture observe/shadow do not require these.
 
@@ -41,12 +51,12 @@ Public fixture observe/shadow do not require these.
 |------|------|---------|--------|
 | `mode` | string | `fixture` / `live` | fixture = offline |
 | `fixture_path` | path | recorded events | — |
-| `output_path` | path | facts JSONL | disposable |
+| `output_path` | path | facts JSONL | report write |
 | `binance_symbol` | string | reference symbol | ref-only |
 | `momentum_*` | num | validation strategy params | not alpha |
 | `freshness.*` | ms / basis | staleness gates | fail-closed |
 | `risk.*` | mixed | notional/spread/kill switch | risk |
-| `shadow.*` | mixed | ShadowOMS limits / persistence | paper only |
+| `shadow.*` | mixed | ShadowOMS limits / persistence path | paper; may local-state write |
 
 ## Runtime flags (CLI)
 
@@ -55,16 +65,18 @@ Public fixture observe/shadow do not require these.
 | `--config` | observe/shadow | JSON path |
 | `--mode` | observe | override fixture/live |
 | `--btc-window` | observe/shadow | `current` / `next` |
+| `--which` | `discover-btc-window` | `current` / `next` |
 | `--duration-s` | observe/shadow | live runtime seconds |
-| `--output` | several | report/facts path |
-| `--dry-run` | `r7b-live-once` | read-only (default when not executing) |
-| `--execute-live` | `r7b-live-once` | mutation-capable (operator only) |
+| `--output` | several | report path |
+| `--dry-run` | `r7b-live-once` | no venue mutation (default when not executing) |
+| `--execute-live` | `r7b-live-once` | venue mutation (operator only) |
+| `--skip-auth` | `live-preflight` | public connectivity only |
 
 ## Paths
 
 ```text
-var/state/       required operational state
-var/reporting/   disposable evidence
+var/state/       local persistent operational state (gitignored)
+var/reporting/   runtime-disposable evidence
 config/          committed configs + sealed ack policy
 ```
 

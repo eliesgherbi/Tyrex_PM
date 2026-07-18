@@ -4,37 +4,51 @@
 Working directory: repository root.  
 **No new real-money live command is provided.**
 
-## Observe (fixture / offline)
+## Effects legend
+
+| Tag | Meaning |
+|-----|---------|
+| Offline | No network |
+| Net-read | Public or authenticated reads |
+| Report | Writes `var/reporting/` |
+| Local-state | Writes `var/state/` |
+| Venue | Submit/cancel/heartbeat |
+
+## Observe (fixture) — Offline + Report
 
 ```bash
 tyrex-pm observe --config config/observe_fixture_r3.json
 ```
 
-## Observe (public live, read-only)
+## Observe (public live) — Net-read + Report
 
 ```bash
 tyrex-pm observe --config config/observe_live_r3.json --btc-window next --duration-s 30
 ```
 
-## Shadow (paper OMS, public data)
+## Shadow (paper OMS) — Net-read + Report (+ optional Local-state snapshot)
 
 ```bash
 tyrex-pm shadow --config config/observe_shadow_r5.json --btc-window next
 ```
 
-## Discover BTC window (ops helper)
+## Discover BTC window — Net-read
 
 ```bash
-tyrex-pm discover-btc-window
+tyrex-pm discover-btc-window --which next
 ```
 
-## Mutation-impossible preflight
+## Mutation-impossible preflight — Net-read + Report
 
 ```bash
 tyrex-pm live-preflight --help
+# Public only:
+tyrex-pm live-preflight --skip-auth --output var/reporting/preflight_public.json
 ```
 
-## Dry one-shot validation (read-only default)
+Authenticated preflight needs credentials in `.env` (values never printed). Optional `--user-stream-s` on a target host.
+
+## Dry one-shot — Net-read + Report (no Venue)
 
 ```bash
 tyrex-pm r7b-live-once \
@@ -46,17 +60,22 @@ tyrex-pm r7b-live-once \
   --output-dir var/reporting/docs_dry
 ```
 
-## Read-only reconciliation
+Default without `--execute-live` is dry. Dry is **not** “offline”: it may perform network reads and write reports.
 
-```bash
-tyrex-pm r7c-recon --help
-tyrex-pm r7-ack-regenerate --help
-python scripts/r8_readonly_recon.py
-python scripts/r7f_exit_rehearsal.py
-```
+## Reconciliation tools
 
-## Mutation-capable boundary (do not treat as a runbook)
+| Command | Effects |
+|---------|---------|
+| `tyrex-pm r7c-recon …` | Net-read + Report |
+| `tyrex-pm r7-ack-regenerate` | Net-read + **Local-state** (ack artifact) |
+| `python scripts/r8_readonly_recon.py` | Net-read + Report |
+| `python scripts/r7f_exit_rehearsal.py` | Net-read + Report |
 
-`r7b-live-once --execute-live` can submit real orders. It requires a clean worktree and durable gates.  
-**R7 live validation is complete** (`55fd9a76`). The closed runbook is [`../../implementation/r7f_operator_runbook.md`](../../implementation/r7f_operator_runbook.md).  
-Any future live test needs a **new explicitly scoped phase** — not this page.
+These perform **no venue order mutation** and **no on-chain mutation**.  
+“No mutations” here means no venue/on-chain mutation — not “zero disk writes.”
+
+## Venue-mutation boundary (not a runbook)
+
+`r7b-live-once --execute-live` can submit real orders (Venue). Requires clean worktree and gates.  
+**R7 live validation is complete** (`55fd9a76`). Closed runbook: [`../../implementation/r7f_operator_runbook.md`](../../implementation/r7f_operator_runbook.md).  
+Any future live test needs a **new explicitly scoped phase**.

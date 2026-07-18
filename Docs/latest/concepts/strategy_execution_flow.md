@@ -2,22 +2,13 @@
 
 **Purpose:** end-to-end life of data, entries, and exits in the accepted framework.
 
-## Pipeline
+## Runtime pipeline
 
 ```text
-Adapters
-→ Events
-→ State
-→ Indicators
-→ Signals
-→ Strategy
-→ Intents
-→ Risk
-→ Execution plan
-→ OMS
-→ Execution events
-→ Orders / Fills / Portfolio
-→ Facts
+Venue payload
+→ Adapter → Normalized event → State → Indicator → Signal
+→ Strategy → Intent → Risk → Plan → OMS → Execution event
+→ Orders / Fills / Portfolio → Facts
 ```
 
 ## What strategies may and may not own
@@ -26,55 +17,53 @@ Adapters
 |---------|----------------|
 | Hypothesis, parameters, private flags | Venue API clients |
 | Interpreting signals into intents | Book reconstruction |
-| Evidence attached to intents | Risk authorization |
-| Strategy-private state consistent with portfolio | Execution pricing / OMS state |
-| | Portfolio truth / persistence |
+| Evidence on intents | Risk authorization |
+| Strategy-private state consistent with portfolio | Execution pricing / OMS state / portfolio truth / persistence |
 
-`ReferenceMomentumStrategy` is a **framework-validation** strategy. It proves integration. It does **not** prove profitability or Z-Gap readiness.
+`ReferenceMomentumStrategy` validates integration only — not profitability or Z-Gap.
+
+## Active callbacks
+
+Protocol: `on_start` / `on_signal` / `on_stop` only.  
+No `on_timer` or `on_execution_event`.  
+See [events_signals_intents](events_signals_intents.md) for the protocol vs validation-strategy return-type debt.
 
 ## Life of a market-data update
 
-1. Adapter receives WS/REST payload.
-2. Normalize → dispatch event.
-3. Book/reference stores update; freshness assessed.
-4. Host builds `DecisionSnapshot`.
-5. Indicators + signals update.
-6. Strategy `on_signal` → optional intents.
-7. Facts may record observe decisions even when no order is sent (OBSERVE).
+1. Adapter receives WS/REST/fixture payload.  
+2. Normalize → dispatch.  
+3. Stores update; freshness assessed.  
+4. Host builds `DecisionSnapshot`.  
+5. Indicators + signals update.  
+6. `on_signal` → optional intents.  
+7. OBSERVE may record facts without OMS submit.
 
-## Life of an entry (SHADOW or LIVE_TINY)
+## Life of an entry (SHADOW)
 
-1. Strategy emits `EnterIntent`.
-2. Dedup / retry controller may gate repeats.
-3. Risk approves or denies.
-4. Entry planner sizes quantity and BUY limit; fee-inclusive collateral ≤ configured max (R7 envelope: $5).
-5. OMS `submit` → local `OrderId`.
-6. Insert ack / match status is **not** inventory.
-7. Settlement wait (live): trade status ladder before treating size as acquired.
+1. Strategy emits `EnterIntent`.  
+2. Dedup / retry may gate.  
+3. Risk approves or denies.  
+4. Planner sizes BUY.  
+5. `ShadowOMS.submit` → local `OrderId` + shadow fills → portfolio / `TradeLifecycle`.
 
-## Life of an exit (live one-shot)
+## Life of an entry/exit (LIVE_TINY one-shot)
 
-1. Only after sellable inventory: `min(confirmed_acquired, conditional_balance)`.
-2. Fresh bid-side book + fingerprint.
-3. `plan_lifecycle_fak_sell` → marketable FAK SELL limit (never entry BUY limit).
-4. Bounded no-match retries with new fingerprints.
-5. Residual dust recorded; cleanup policy `NONE`.
+Phase-specific orchestration (`r7b-live-once`), not the generic host loop:
+
+1. Gates: clean worktree, ack, residuals, $5 fee-inclusive BUY cap, one lifecycle.  
+2. BUY submit → wait settlement `MATCHED` → `MINED` → `CONFIRMED`.  
+3. Sellable qty = `min(confirmed_acquired, funder_conditional_balance)`.  
+4. Exit planner: fresh bid-side book → FAK SELL (never reuse BUY limit).  
+5. Inventory state from balance; lifecycle outcome from process terminal.
 
 ## Settlement progression
 
 ```text
 Order insert status  ≠  trade settlement status
-
-MATCHED  →  MINED  →  CONFIRMED
+MATCHED → MINED → CONFIRMED
 ```
 
-| Status | Inventory? | May SELL? |
-|--------|------------|-----------|
-| MATCHED | No | No |
-| MINED | No | No |
-| CONFIRMED (+ sellable balance) | Yes | Yes (qty owned) |
-
-Planned / max-estimated shares are never inventory.
+Only **CONFIRMED** (+ sellable balance) creates sellable inventory. Planned shares are never inventory.
 
 ## Formal detail
 

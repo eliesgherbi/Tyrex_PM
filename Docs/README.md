@@ -45,7 +45,7 @@ If documents disagree, trust code/tests, correct `latest/`, and preserve histori
 
 ## Implemented vs not
 
-**Implemented:** adapters (Polymarket + Binance reference), indicators/signals, `ReferenceMomentumStrategy` (validation only), risk, planning, ShadowOMS, live Polymarket OMS + settlement, portfolio/lifecycle, durable ack/residual gates, facts/reporting, OBSERVE / SHADOW / LIVE_TINY one-shot.
+**Implemented:** adapters (Polymarket + Binance reference), indicators/signals, `ReferenceMomentumStrategy` (validation only), risk, planning, ShadowOMS, live Polymarket OMS + settlement, portfolio/lifecycle, R7 ack/residual gates (local persistent state), facts/reporting, OBSERVE / SHADOW / LIVE_TINY one-shot.
 
 **Not implemented:** Z-Gap, paired-leg/guru migration, full backtest platform, automatic redemption, generic continuous live trading product.
 

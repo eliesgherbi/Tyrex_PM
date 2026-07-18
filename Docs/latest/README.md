@@ -13,7 +13,7 @@ Chronological evidence: [`../implementation/`](../implementation/).
 | Document | Purpose |
 |----------|---------|
 | [installation.md](getting_started/installation.md) | Python env, editable install, tests, CLI check |
-| [quickstart.md](getting_started/quickstart.md) | Smallest safe offline / read-only path |
+| [quickstart.md](getting_started/quickstart.md) | Smallest safe offline / network-read path |
 
 ### Concepts
 
@@ -47,7 +47,7 @@ Chronological evidence: [`../implementation/`](../implementation/).
 | Document | Purpose |
 |----------|---------|
 | [configuration.md](how_to/configuration.md) | Config sources, flags, paths, secrets |
-| [run_modes.md](how_to/run_modes.md) | Observe, shadow, dry, read-only recon recipes |
+| [run_modes.md](how_to/run_modes.md) | Observe, shadow, dry, recon recipes (with effect tags) |
 | [reconciliation_and_recovery.md](how_to/reconciliation_and_recovery.md) | Startup checks, residuals, incident checklist |
 
 ### Developer guide

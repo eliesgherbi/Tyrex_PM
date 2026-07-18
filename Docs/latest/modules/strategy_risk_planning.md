@@ -8,13 +8,14 @@
 - `tyrex_pm.core.intents`
 - `tyrex_pm.risk`
 - `tyrex_pm.planning`
-- `tyrex_pm.execution.polymarket.lifecycle_exit_plan` (exit pricing)
-- `tyrex_pm.runtime.r7_lifecycle_policy` (numeric policy constants)
+- R7 exit pricing: `execution.polymarket.lifecycle_exit_plan` + `runtime.r7_lifecycle_policy` (**phase-specific**)
 
-## Strategy interface
+## Strategy interface (active)
 
-`Strategy` protocol: `on_start` / `on_signal` / `on_stop`.  
-`on_signal` returns `(ObserveDecision, list[EnterIntent])` (exits via related intent types in validation strategy).
+Protocol callbacks only: `on_start`, `on_signal`, `on_stop`.  
+Protocol `on_signal` → `tuple[ObserveDecision, list[EnterIntent]]`.
+
+`ReferenceMomentumStrategy` additionally emits `ExitIntent` / `FlattenIntent` via a wider concrete return type (`IntentLike`). That is validation-strategy behavior, not a protocol guarantee. No `on_timer` / `on_execution_event`.
 
 **ReferenceMomentumStrategy:** structural validation only — not a recommended trading strategy.
 
@@ -30,25 +31,33 @@
 | Planner | Owns |
 |---------|------|
 | Entry sizing | BUY limit, qty, fee-inclusive collateral bound |
-| Exit planner | Bid-side FAK limit, depth, freshness, floors |
+| Exit planner (R7 path) | Bid-side FAK limit, depth, freshness, floors |
 
-### Fee bound vs actual fee
+Entry and exit planning are separate. Never reuse entry BUY limit as SELL limit.
 
-- Entry uses an **estimated max fee** to keep fee-inclusive collateral ≤ cap.
-- Venue trade records may show `fee_rate_bps=0` or omit fee amount.
-- Bounds are **not** realized P&L fees.
+## Fee and P&L vocabulary
+
+| Term | Meaning |
+|------|---------|
+| BUY notional | Price × acquired size paid on entry (ex-fee unless stated) |
+| SELL proceeds | Price × sold size received on exit |
+| Gross price P&L | SELL proceeds − BUY notional |
+| Maximum fee bound | Risk reservation used to keep fee-inclusive collateral ≤ cap |
+| Estimated fee | Pre-submit estimate used for sizing / reporting |
+| Confirmed actual fee | Venue-reported fee amount when present |
+| Realized net P&L | Proceeds − notional − **confirmed** fees (only when fees known) |
+| Unknown net P&L | When fee amount is missing/uncertain |
+
+A fee bound is a **risk reservation**, not a confirmed expense.  
+`fee_rate_bps=0` or a missing fee field does **not** prove the estimated maximum fee was charged.  
+Do not label fee-bound-adjusted estimates as confirmed realized P&L.
 
 ## Invariants
 
-- Strategy must not import live Polymarket execution package
-- Never reuse entry BUY limit as SELL limit
-- SELL qty ≤ `min(confirmed_acquired, sellable_balance, remaining_after_confirmed_exits)`
+- Strategy must not import `tyrex_pm.execution.polymarket.*`
+- SELL qty ≤ `min(confirmed_acquired, sellable_balance, remaining_after_confirmed_exits)` on the live one-shot path
 
-## Tests
+## Tests / limits
 
-- `tests/test_r7e_exit_plan.py`, `test_r7f_exit_integration.py`, `test_r8_flat_with_dust_terminal.py`, risk/strategy unit tests
-
-## Limits
-
+- Exit/risk suites under `tests/test_r7*.py`, `test_r8_*.py`
 - Z-Gap contracts not present
-- Emergency vs normal differ mainly by touch-slippage cap (see exit-floor policy)
