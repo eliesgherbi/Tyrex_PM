@@ -19,7 +19,7 @@ Useful logic to port selectively (not import live):
 - `old/src/tyrex_pm/strategies/z_gap/`
 - `old/src/tyrex_pm/ingestion/price_to_beat_tracker.py`
 - `old/src/tyrex_pm/runtime/time_authority.py`
-- Phase 0 notes: `old/Docs/Implementation/z_gap_architecture_reset/`
+- Phase 0 notes: `old/Docs/implementation/z_gap_architecture_reset/`
 
 ## Rule
 

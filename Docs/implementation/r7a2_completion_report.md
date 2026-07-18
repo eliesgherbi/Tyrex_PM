@@ -59,7 +59,7 @@ No other non-authorization blockers in the R7A.2 prepare run (user stream ready,
 
 ## Future authorization
 
-See `Docs/Implementation/r7a2_authorization_workflow.md` and generated  
+See `Docs/implementation/r7a2_authorization_workflow.md` and generated  
 `var/reporting/r7/r7b_future_authorization_statement.txt`.
 
 Do **not** treat the position acknowledgment as R7B authorization.

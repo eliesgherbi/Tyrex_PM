@@ -1,6 +1,6 @@
 # R7D.1 — Durable acknowledgment state
 
-**Superseded in part by R7D.2** (`Docs/Implementation/r7d2_operator_handoff.md`):
+**Superseded in part by R7D.2** (`Docs/implementation/r7d2_operator_handoff.md`):
 sealed acknowledgment policy + multi-record residual registry.
 
 ## Root cause

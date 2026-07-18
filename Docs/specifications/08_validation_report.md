@@ -41,7 +41,7 @@ Quiet windows produced FLAT/UNAVAILABLE-only signals (0 intents). Unit tests cov
 
 ### Official venue semantics
 
-Documented in `Docs/Implementation/r6_venue_semantics.md` (CLOB V2).  
+Documented in `Docs/implementation/r6_venue_semantics.md` (CLOB V2).  
 No `clientOrderId` on wire — correlate via returned `orderID`.  
 Historical `old/` inspected for lessons; **not imported**.
 
@@ -93,8 +93,8 @@ Scripted FakeTransport scenarios + architecture/auth/reconcile/readiness.
 
 ## R6C — Operational readiness
 
-Full report: [`Docs/Implementation/r6c_completion_report.md`](Implementation/r6c_completion_report.md)  
-Target-host handoff: [`scripts/r6c_target_host_handoff.md`](../scripts/r6c_target_host_handoff.md)
+Full report: [`Docs/implementation/r6c_completion_report.md`](../implementation/r6c_completion_report.md)  
+Target-host handoff: [`scripts/r6c_target_host_handoff.md`](../../scripts/r6c_target_host_handoff.md)
 
 | Gate | Result |
 |------|--------|
@@ -112,7 +112,7 @@ Target-host handoff: [`scripts/r6c_target_host_handoff.md`](../scripts/r6c_targe
 
 ## R6D — L2 auth resolution
 
-Full report: [`Docs/Implementation/r6d_auth_resolution.md`](Implementation/r6d_auth_resolution.md)
+Full report: [`Docs/implementation/r6d_auth_resolution.md`](../implementation/r6d_auth_resolution.md)
 
 | Item | Result |
 |------|--------|
@@ -131,7 +131,7 @@ That approval does **not** authorize submission.
 
 ## R7A — Mutation path + dry validation
 
-Full report: [`Docs/Implementation/r7a_completion_report.md`](Implementation/r7a_completion_report.md)
+Full report: [`Docs/implementation/r7a_completion_report.md`](../implementation/r7a_completion_report.md)
 
 | Item | Result |
 |------|--------|
@@ -152,7 +152,7 @@ Full report: [`Docs/Implementation/r7a_completion_report.md`](Implementation/r7a
 
 ## R7A.1 — Market-time / positions / fees / readiness
 
-Full report: [`Docs/Implementation/r7a1_correction_report.md`](Implementation/r7a1_correction_report.md)
+Full report: [`Docs/implementation/r7a1_correction_report.md`](../implementation/r7a1_correction_report.md)
 
 | Item | Result |
 |------|--------|
@@ -172,7 +172,7 @@ Full report: [`Docs/Implementation/r7a1_correction_report.md`](Implementation/r7
 
 ## R7A.2 — Acknowledgment + session envelope
 
-Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementation/r7a2_authorization_workflow.md)
+Full report: [`Docs/implementation/r7a2_authorization_workflow.md`](../implementation/r7a2_authorization_workflow.md)
 
 | Item | Result |
 |------|--------|
@@ -197,7 +197,7 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | Auth model | Operator `--execute-live` (no chat/nonce ceremony) |
 | Dry default | Yes; dry never mutates |
 | First live run | `d632b631-…` — BUY matched, auto-SELL balance=0 → `MANUAL_INTERVENTION` |
-| Incident doc | [`Docs/Implementation/r7b_first_live_incident.md`](Implementation/r7b_first_live_incident.md) |
+| Incident doc | [`Docs/implementation/r7b_first_live_incident.md`](../implementation/r7b_first_live_incident.md) |
 
 ## R7C — Settlement / reconciliation hardening
 
@@ -233,7 +233,7 @@ Full report: [`Docs/Implementation/r7a2_authorization_workflow.md`](Implementati
 | Regenerate | `tyrex-pm r7-ack-regenerate` (read-only, zero mutations) |
 | Live | **Not executed** |
 
-Full note: [`Docs/Implementation/r7d1_acknowledgment_state.md`](Implementation/r7d1_acknowledgment_state.md)
+Full note: [`Docs/implementation/r7d1_acknowledgment_state.md`](../implementation/r7d1_acknowledgment_state.md)
 
 ## R7D.2 — Operator handoff preparation
 
@@ -245,7 +245,7 @@ Full note: [`Docs/Implementation/r7d1_acknowledgment_state.md`](Implementation/r
 | Auth docs | Session/nonce/verbatim marked superseded; CLI help updated |
 | Live | **Not executed** (operator command prepared only) |
 
-Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_operator_handoff.md)
+Full note: [`Docs/implementation/r7d2_operator_handoff.md`](../implementation/r7d2_operator_handoff.md)
 
 ## R7E — Side-correct exit planning
 
@@ -255,7 +255,7 @@ Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_
 | Current state | Conditional dust `0.000587` → `FLAT_WITH_DUST`; market closed |
 | Fix | Bid-side exit planner + fresh book + bounded FAK retry |
 | Live retest | **Not executed** |
-| Incident doc | [`Docs/Implementation/r7d2_second_live_incident.md`](Implementation/r7d2_second_live_incident.md) |
+| Incident doc | [`Docs/implementation/r7d2_second_live_incident.md`](../implementation/r7d2_second_live_incident.md) |
 
 ## R7F — Exit planner acceptance + book rehearsal
 
@@ -266,7 +266,7 @@ Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_
 | Rehearsal | `scripts/r7f_exit_rehearsal.py` — zero mutations |
 | Residuals | 3 distinct `FLAT_WITH_DUST` records; ack gate ok |
 | Agent live | **Not executed** |
-| Doc | [`r7f_exit_planner_acceptance.md`](Implementation/r7f_exit_planner_acceptance.md) · [`r7f_operator_runbook.md`](Implementation/r7f_operator_runbook.md) |
+| Doc | [`r7f_exit_planner_acceptance.md`](../implementation/r7f_exit_planner_acceptance.md) · [`r7f_operator_runbook.md`](../implementation/r7f_operator_runbook.md) |
 
 ## R8 — R7 closure + framework acceptance
 
@@ -276,6 +276,6 @@ Full note: [`Docs/Implementation/r7d2_operator_handoff.md`](Implementation/r7d2_
 | Terminal semantics | Dust ⇒ `FLAT_WITH_DUST`; exact zero ⇒ `FLAT` |
 | Exit floors | Documented; NORMAL≠EMERGENCY (slippage); ≠ legacy REJECT |
 | Account recon | Ack=4; 3 dust; open orders=0; cleanup `NONE` |
-| Framework matrix | [`r8_framework_acceptance.md`](Implementation/r8_framework_acceptance.md) |
-| Success evidence | [`r7_successful_live_acceptance.md`](Implementation/r7_successful_live_acceptance.md) |
+| Framework matrix | [`r8_framework_acceptance.md`](../implementation/r8_framework_acceptance.md) |
+| Success evidence | [`r7_successful_live_acceptance.md`](../implementation/r7_successful_live_acceptance.md) |
 | Z-Gap | **Not implemented** this phase |

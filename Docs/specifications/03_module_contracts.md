@@ -1,6 +1,6 @@
 # 03 — Module contracts
 
-**Phase:** R8 (R7 live closed; see `Docs/Implementation/r8_framework_acceptance.md`)
+**Phase:** R8 (R7 live closed; see `Docs/implementation/r8_framework_acceptance.md`)
 
 ## Strategy / risk / planner
 
@@ -59,7 +59,7 @@ Modules: `lifecycle_exit_plan.py`, `r7_lifecycle_policy.py`
   exit attempts 3; cooldown 0.5 s; settlement wait 45 s; flatten−30 s / entry−45 s / min 90 s.
 - SELL limit = `tick_floor(worst_bid_walk)`; NORMAL also requires `(best_bid−worst)≤0.05`.
   EMERGENCY skips touch-slippage only — not a legacy blind `0.01` unwind
-  (see `Docs/Implementation/r7_exit_floor_policy.md`).
+  (see `Docs/implementation/r7_exit_floor_policy.md`).
 - SELL qty ≤ `min(confirmed_acquired, sellable_balance, remaining_after_confirmed_exits)`.
 - Partial FAK + no-match retries: new book fingerprint each try; attempt cap + flatten deadline.
 - Residual registry records incomplete exits; cleanup policy remains `NONE`.

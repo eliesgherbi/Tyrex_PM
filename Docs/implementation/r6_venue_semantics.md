@@ -32,7 +32,7 @@ Historical `old/` inspected for lessons only — **not imported**.
 
 ## Endpoint taxonomy (R6C)
 
-See `Docs/Implementation/r6c_completion_report.md` and `endpoint_taxonomy.py`.
+See `Docs/implementation/r6c_completion_report.md` and `endpoint_taxonomy.py`.
 
 ## Historical lessons (port selectively)
 
