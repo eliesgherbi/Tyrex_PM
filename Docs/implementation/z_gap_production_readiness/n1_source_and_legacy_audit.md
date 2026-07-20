@@ -1,10 +1,12 @@
 # N1 — Source and legacy audit
 
-**Status:** planned (documentation only — no runtime code)  
+**Status:** `PASS_WITH_BLOCKERS` (executed)  
+**Acceptance:** [n1_acceptance_report.md](n1_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n1_source_and_legacy_audit.md`  
 **Baseline:** F1–F5 accepted · branch `rest_project`  
 **Depends on:** P0 design baseline + F1–F5 acceptance  
-**Unblocks:** N2 (real adapters), N3 (PTB/basis alignment)
+**Unblocks:** N2 (real adapters); N3 PTB/basis alignment proceeds with provisional boundary + OPEN numeric thresholds  
+**Classification refs:** boundary rule **PROVISIONAL**; resolution source **PROVEN**; crypto PTB HTTP **OPEN**; clock uncertainty **OPEN**
 
 ---
 
@@ -66,18 +68,26 @@ Plan a timestamped, offline-analyzable capture campaign comparing:
 3. Direct Binance Spot WebSocket (existing `@trade` adapter path)
 4. PTB displayed by Polymarket (from A)
 
-**Per-message / per-window metrics:**
+**Per-message / per-window metrics (corrected timestamp schema):**
 
 | Metric | Definition |
 |--------|------------|
+| `capture_sequence` | Monotonic capture ordinal for the audit run |
+| `source` / `symbol` / `window_id` | Provenance + market window identity |
 | `source_ts` | Provider event timestamp |
-| `receive_ts` | Local receive wall time |
-| Sequencing | Message order / gaps |
-| Missing messages | Detected drops after reconnect |
-| Reconnects | Count + gap duration |
-| Boundary arrival delay | `receive_ts - event_start` for first usable post-boundary tick |
-| Displayed PTB delay | When UI shows PTB vs `event_start` |
-| Mismatches | Cross-source price disagreement at paired times |
+| `receive_wall_utc` | Local receive wall time (UTC) |
+| `receive_monotonic_ns` | Local monotonic receive clock (ns since capture start) |
+| `clock_uncertainty_ms` | Estimated sync uncertainty when known; else null + OPEN |
+| Sequencing / provider sequence | Message order / gaps / provider ids when available |
+| Late / out-of-order marker | Explicit flag; events retained append-only |
+| Raw fingerprint | Safe provenance reference (hash), not secrets |
+| Boundary arrival delay | `receive_wall_utc - event_start` for first usable boundary tick |
+| Displayed PTB delay | When attested PTB becomes available vs `event_start` |
+| Candidate vs attested | Per-window exact diff + bps by `candidate_ptb_rule` |
+| Mismatches | Cross-source disagreement at causally paired times |
+
+Do **not** rely on a single undifferentiated `receive_ts` field. Wall and monotonic
+receive times are both required; uncertainty is recorded even when OPEN.
 
 Goal: select sources from measured behavior, not assumption.
 
@@ -250,11 +260,10 @@ Minimum audit outputs:
 
 | Artifact | Contents |
 |----------|----------|
-| `ptb_source_proof.md` (or section in acceptance report) | Rules text citations; UI provenance classification |
-| `latency_comparison.jsonl` | Per-tick / per-window metrics (§3B) |
-| `discovery_validation.md` | Slug/Gamma/token/rule checklist results |
-| `legacy_keep_adapt_reject.md` | Table for §3D |
-| `n1_acceptance.md` | Frozen recommendations + open items deferred |
+| [n1_acceptance_report.md](n1_acceptance_report.md) | Principal N1 result (all sections) |
+| [n1_latency_sample.jsonl](n1_latency_sample.jsonl) | Sanitized small sample (committed) |
+| `var/reporting/n1/*` | Raw capture / full comparisons (gitignored) |
+| `tools/n1_audit/*` | Read-only public-data audit scripts |
 
 ---
 
