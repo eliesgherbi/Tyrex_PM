@@ -11,11 +11,11 @@ src/tyrex_pm/
 ├── engine/          in-process event dispatcher
 ├── core/            ids, intents, commands, modes, snapshots
 ├── adapters/        polymarket/, binance/
-├── domain/          polymarket market/instrument types
+├── domain/          polymarket market/instrument types (+ resolution/PTB contracts)
 ├── market_data/     books, freshness, decision snapshots, executable quotes
-├── indicators/      reusable transforms
+├── indicators/      reusable transforms (momentum, EWMA vol, binary FV, basis)
 ├── signals/         signal packaging
-├── strategies/      protocol + framework_validation/
+├── strategies/      protocol + decisions + framework_validation/ + z_gap/ (pure F2)
 ├── risk/            engine, dedup, policies, reasons
 ├── planning/        entry/exit planners (generic)
 ├── execution/       OMS protocol, shadow_oms, order_store, fill_ledger, polymarket/

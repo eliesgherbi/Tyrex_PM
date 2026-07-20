@@ -1,0 +1,107 @@
+[
+  {
+    "name": "s_gt_k",
+    "S": "110",
+    "K": "100",
+    "sigma": 0.01,
+    "tau_s": 100,
+    "tau_floor_s": 1,
+    "expected_z": 0.9531017980432493,
+    "expected_p_up": 0.8297307523927193,
+    "expected_p_down": 0.1702692476072807,
+    "model_status": "ready",
+    "provenance": "Inputs from old/tests/fixtures/z_gap/fair_value_golden.json; z and Phi(z) recomputed with math.erf (F2)"
+  },
+  {
+    "name": "s_lt_k",
+    "S": "95",
+    "K": "100",
+    "sigma": 0.01,
+    "tau_s": 100,
+    "tau_floor_s": 1,
+    "expected_z": -0.5129329438755057,
+    "expected_p_up": 0.30399911394891166,
+    "expected_p_down": 0.6960008860510883,
+    "model_status": "ready",
+    "provenance": "Inputs from old/tests/fixtures/z_gap/fair_value_golden.json; z and Phi(z) recomputed with math.erf (F2)"
+  },
+  {
+    "name": "s_eq_k",
+    "S": "100",
+    "K": "100",
+    "sigma": 0.01,
+    "tau_s": 100,
+    "tau_floor_s": 1,
+    "expected_z": 0.0,
+    "expected_p_up": 0.5,
+    "expected_p_down": 0.5,
+    "model_status": "ready",
+    "provenance": "Inputs from old/tests/fixtures/z_gap/fair_value_golden.json; z and Phi(z) recomputed with math.erf (F2)"
+  },
+  {
+    "name": "shorter_tau_higher_abs_z",
+    "S": "110",
+    "K": "100",
+    "sigma": 0.01,
+    "tau_s": 25,
+    "tau_floor_s": 1,
+    "expected_z": 1.9062035960864987,
+    "expected_p_up": 0.971688102066696,
+    "expected_p_down": 0.028311897933304023,
+    "model_status": "ready",
+    "provenance": "Inputs from old/tests/fixtures/z_gap/fair_value_golden.json; z and Phi(z) recomputed with math.erf (F2)"
+  },
+  {
+    "name": "higher_sigma_lower_abs_z",
+    "S": "110",
+    "K": "100",
+    "sigma": 0.02,
+    "tau_s": 100,
+    "tau_floor_s": 1,
+    "expected_z": 0.4765508990216247,
+    "expected_p_up": 0.6831590226808273,
+    "expected_p_down": 0.31684097731917274,
+    "model_status": "ready",
+    "provenance": "Inputs from old/tests/fixtures/z_gap/fair_value_golden.json; z and Phi(z) recomputed with math.erf (F2)"
+  },
+  {
+    "name": "missing_k",
+    "S": "110",
+    "K": null,
+    "sigma": 0.01,
+    "tau_s": 100,
+    "model_status": "not_ready",
+    "reject_reason": "missing_ptb_k",
+    "provenance": "Copied from old/tests/fixtures/z_gap/fair_value_golden.json"
+  },
+  {
+    "name": "missing_sigma",
+    "S": "110",
+    "K": "100",
+    "sigma": null,
+    "tau_s": 100,
+    "model_status": "not_ready",
+    "reject_reason": "missing_sigma",
+    "provenance": "Copied from old/tests/fixtures/z_gap/fair_value_golden.json"
+  },
+  {
+    "name": "invalid_s",
+    "S": "0",
+    "K": "100",
+    "sigma": 0.01,
+    "tau_s": 100,
+    "model_status": "not_ready",
+    "reject_reason": "invalid_s",
+    "provenance": "Copied from old/tests/fixtures/z_gap/fair_value_golden.json"
+  },
+  {
+    "name": "invalid_tau",
+    "S": "110",
+    "K": "100",
+    "sigma": 0.01,
+    "tau_s": 0,
+    "model_status": "not_ready",
+    "reject_reason": "invalid_tau",
+    "provenance": "Copied from old/tests/fixtures/z_gap/fair_value_golden.json"
+  }
+]

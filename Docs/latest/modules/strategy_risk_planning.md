@@ -5,6 +5,7 @@
 ## Packages
 
 - `tyrex_pm.strategies` (+ `framework_validation.reference_momentum`)
+- `tyrex_pm.strategies.z_gap` — pure model/valuation/policy modules (F2; no host orchestration)
 - `tyrex_pm.core.intents`
 - `tyrex_pm.risk`
 - `tyrex_pm.planning`
