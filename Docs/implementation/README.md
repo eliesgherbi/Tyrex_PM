@@ -16,4 +16,12 @@ Key anchors:
 | [r7b_first_live_incident.md](r7b_first_live_incident.md) | Live 1 — settlement race |
 | [r7d2_second_live_incident.md](r7d2_second_live_incident.md) | Live 2 — wrong SELL price |
 
-All files in this directory are preserved as historical evidence.
+### Z-Gap P0 design baseline (pre-implementation)
+
+| Document | Role |
+|----------|------|
+| [z0_z_gap_design_audit.md](z0_z_gap_design_audit.md) | Legacy Phase A evidence audit (what was implemented) |
+| [z0_z_gap_full_strategy_spectrum.md](z0_z_gap_full_strategy_spectrum.md) | Accepted full economic strategy (corrections A–F) |
+| [z_gap_full_strategy_implementation_plan.md](z_gap_full_strategy_implementation_plan.md) | Architecture + F1–F5 implementation preparation |
+
+All files in this directory are preserved as historical evidence (plus the P0 design baseline above).
