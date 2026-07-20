@@ -1,7 +1,7 @@
 # N3 — PTB and reference alignment
 
 **Status:** planned (no implementation in this planning commit)  
-**Milestone folder:** `Docs/implementation/n3_ptb_and_reference_alignment/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n3_ptb_and_reference_alignment.md`  
 **Depends on:** N1 evidence + N2 settlement/trading reference feeds  
 **Unblocks:** N4 real-input OBSERVE, N5 real-input SHADOW
 

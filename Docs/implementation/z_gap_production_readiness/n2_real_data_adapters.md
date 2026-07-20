@@ -1,7 +1,7 @@
 # N2 — Real read-only data adapters
 
 **Status:** planned (no implementation in this planning commit)  
-**Milestone folder:** `Docs/implementation/n2_real_data_adapters/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n2_real_data_adapters.md`  
 **Depends on:** N1 frozen source recommendations  
 **Unblocks:** N3 (PTB/basis), N4 (real OBSERVE)
 
@@ -271,7 +271,7 @@ Use recorded fixtures; do not require live network in CI.
 - Extended discovery readiness
 - Recorded fixtures + unit tests
 - Operator smoke notes for read-only connectivity
-- N2 acceptance note under this folder
+- N2 acceptance note under this initiative
 
 ---
 

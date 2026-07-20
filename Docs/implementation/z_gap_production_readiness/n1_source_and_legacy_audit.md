@@ -1,7 +1,7 @@
 # N1 — Source and legacy audit
 
 **Status:** planned (documentation only — no runtime code)  
-**Milestone folder:** `Docs/implementation/n1_source_and_legacy_audit/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n1_source_and_legacy_audit.md`  
 **Baseline:** F1–F5 accepted · branch `rest_project`  
 **Depends on:** P0 design baseline + F1–F5 acceptance  
 **Unblocks:** N2 (real adapters), N3 (PTB/basis alignment)
@@ -154,7 +154,7 @@ From P0 / F1–F5 (must not reopen):
 
 | Concern | Owner during N1 | Must not own |
 |---------|-----------------|--------------|
-| Audit plan & evidence artifacts | Operator / docs under this folder | Strategy code |
+| Audit plan & evidence artifacts | Operator / docs under this initiative | Strategy code |
 | Browser / network capture scripts (if any) | One-off scripts under `scripts/` or `var/reporting/n1/` (optional; still no product adapters) | `strategies/z_gap` |
 | Legacy concept extraction | Docs only | Runtime dependency on `old/` |
 | Freeze recommendations | This README + decision table in implementation README | Silent code defaults |
@@ -183,8 +183,8 @@ Existing (reuse as targets): `PtbSnapshot`, `PtbLockStore`, `BinaryResolutionRul
 **During N1 (docs / optional offline analysis only):**
 
 ```text
-Docs/implementation/n1_source_and_legacy_audit/README.md   # this plan
-Docs/implementation/n1_source_and_legacy_audit/             # evidence notes as they accumulate
+Docs/implementation/z_gap_production_readiness/n1_source_and_legacy_audit.md  # this plan
+Docs/implementation/z_gap_production_readiness/             # initiative docs + future evidence notes
 var/reporting/n1/                                          # optional capture outputs (gitignored)
 ```
 
@@ -294,7 +294,7 @@ N1 is accepted when **all** are true:
 - Capture schemas + sample metrics
 - Frozen adapter/source recommendations for N2
 - Frozen PTB quality / confirmation recommendations for N3
-- Updated master decision table rows (in `Docs/implementation/README.md`)
+- Updated master decision table rows (in `Docs/implementation/z_gap_production_readiness/README.md`)
 
 ---
 
@@ -334,9 +334,9 @@ Stop N1 and escalate if:
 N1 commit theme:
   "Audit Z-Gap PTB sources, latency, discovery, and legacy reuse"
 
-Include: Docs/implementation/n1_* evidence + acceptance; optional reporting samples
+Include: N1 evidence + acceptance under z_gap_production_readiness/; optional reporting samples
 Exclude: src/, product tests, runtime configs, credentials, live commands
 ```
 
-Planning-only commit that creates this folder may be bundled with the N1–N7
-roadmap commit (`Plan Z-Gap production readiness milestones`).
+Planning-only commits for this initiative may ship documentation under
+`z_gap_production_readiness/` without starting N1 implementation.

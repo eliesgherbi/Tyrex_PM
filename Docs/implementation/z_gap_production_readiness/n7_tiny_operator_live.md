@@ -1,7 +1,7 @@
 # N7 — Tiny operator-controlled live
 
 **Status:** planned (no implementation or live enablement in this planning commit)  
-**Milestone folder:** `Docs/implementation/n7_tiny_operator_live/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n7_tiny_operator_live.md`  
 **Depends on:** N1–N6 accepted evidence + explicit operator authorization  
 **Unblocks:** Later limited continuous live (separate acceptance) / Scope B (separate)
 
@@ -135,7 +135,7 @@ src/tyrex_pm/application/cli.py
 src/tyrex_pm/risk/policies.py
 config/                        # sealed tiny-live config (not r7/)
 Docs/latest/how_to/run_modes.md
-Docs/implementation/n7_tiny_operator_live/  # runbook + evidence
+Docs/implementation/z_gap_production_readiness/  # runbook + evidence
 tests/                         # gates, opt-in, caps (no live money in CI)
 ```
 
@@ -266,7 +266,7 @@ estimate vs actual, fees estimate vs actual, basis, timing.
 
 ## 17. Expected deliverables
 
-- Operator runbook (this folder)  
+- Operator runbook (this initiative / document)  
 - Sealed tiny-live config  
 - Preflight + one-shot CLI  
 - First-run evidence pack  

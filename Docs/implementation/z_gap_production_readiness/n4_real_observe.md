@@ -1,7 +1,7 @@
 # N4 — Real-input OBSERVE
 
 **Status:** planned (no implementation in this planning commit)  
-**Milestone folder:** `Docs/implementation/n4_real_observe/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n4_real_observe.md`  
 **Depends on:** N2 adapters + N3 PTB/basis  
 **Unblocks:** N5 real-input SHADOW (engineering gate)
 

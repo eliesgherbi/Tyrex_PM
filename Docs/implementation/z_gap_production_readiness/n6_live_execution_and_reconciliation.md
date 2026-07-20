@@ -1,7 +1,7 @@
 # N6 — Live execution and reconciliation
 
 **Status:** planned (design only — do not implement or enable live in this milestone’s planning commit)  
-**Milestone folder:** `Docs/implementation/n6_live_execution_and_reconciliation/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n6_live_execution_and_reconciliation.md`  
 **Depends on:** N5 real-input SHADOW acceptance + existing R7 LiveOMS/recon evidence (concepts only)  
 **Unblocks:** N7 tiny operator-controlled live
 
@@ -334,4 +334,4 @@ Exclude: Z-Gap operator enablement (N7), Scope B redeem unless explicitly scoped
          any forced push / live money run
 ```
 
-Planning-only updates to this folder may ship with the N1–N7 roadmap commit.
+Planning-only updates for this milestone may ship under `z_gap_production_readiness/`.

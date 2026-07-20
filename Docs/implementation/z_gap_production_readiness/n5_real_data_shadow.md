@@ -1,7 +1,7 @@
 # N5 — Real-data SHADOW
 
 **Status:** planned (no implementation in this planning commit)  
-**Milestone folder:** `Docs/implementation/n5_real_data_shadow/`  
+**Document:** `Docs/implementation/z_gap_production_readiness/n5_real_data_shadow.md`  
 **Depends on:** N4 real-input OBSERVE engineering acceptance  
 **Unblocks:** N6 live execution planning completion / N7 evidence gate
 
