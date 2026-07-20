@@ -19,11 +19,12 @@ def test_one_host_signal_intent_facts_startup_shared() -> None:
     shadow = (PKG / "runtime" / "shadow_host.py").read_text(encoding="utf-8")
     assert "def evaluate_once" in observe
     assert "def evaluate_once" not in shadow
-    assert "build_directional_signal" in observe
+    binding = (PKG / "runtime" / "strategy_binding.py").read_text(encoding="utf-8")
+    # Signal construction lives in the strategy binding (F4), not duplicated in hosts.
+    assert "build_directional_signal" in binding
+    assert "build_directional_signal" not in observe
     assert "build_directional_signal" not in shadow
     assert "def run_fixture" in observe
-    # Shadow may specialize startup/persistence in run_fixture; signal eval stays one impl
-    assert "build_directional_signal" not in shadow
     assert "_handle_shadow_transition" in shadow or "self.oms" in shadow
     # Paper/shadow rename deferred — compatibility note only
     assert "TradingHost = ObserveHost" in observe

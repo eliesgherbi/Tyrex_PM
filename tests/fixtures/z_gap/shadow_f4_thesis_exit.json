@@ -1,27 +1,27 @@
 {
   "market": {
-    "market_id": "zgap-f3-cond-1",
-    "condition_id": "zgap-f3-cond-1",
-    "question": "Will BTC be above K at window end? (F3 fixture)",
-    "yes_token_id": "zgap-tok-up",
-    "no_token_id": "zgap-tok-down",
+    "market_id": "zgap-f4-thesis-1",
+    "condition_id": "zgap-f4-thesis-1",
+    "question": "Will BTC be above K at window end? (F4 thesis exit)",
+    "yes_token_id": "zgap-f4t-tok-up",
+    "no_token_id": "zgap-f4t-tok-down",
     "event_start": "2026-07-20T12:00:00+00:00",
-    "event_end": "2026-07-20T12:05:00+00:00",
+    "event_end": "2026-07-20T12:10:00+00:00",
     "tick_size": "0.01",
     "min_order_size": "5",
     "status": "ACTIVE",
-    "event_slug": "btc-updown-5m-zgap-f3"
+    "event_slug": "btc-updown-5m-zgap-f4-thesis"
   },
   "polymarket_events": [
     {
       "ts_received": "2026-07-20T12:01:00+00:00",
       "payload": {
         "event_type": "book",
-        "asset_id": "zgap-tok-up",
+        "asset_id": "zgap-f4t-tok-up",
         "timestamp": "2026-07-20T12:01:00+00:00",
         "bids": [
           {
-            "price": "0.34",
+            "price": "0.30",
             "size": "200"
           }
         ],
@@ -31,14 +31,14 @@
             "size": "200"
           }
         ],
-        "hash": "zgap-up-1"
+        "hash": "f4t-up-1"
       }
     },
     {
       "ts_received": "2026-07-20T12:01:00+00:00",
       "payload": {
         "event_type": "book",
-        "asset_id": "zgap-tok-down",
+        "asset_id": "zgap-f4t-tok-down",
         "timestamp": "2026-07-20T12:01:00+00:00",
         "bids": [
           {
@@ -52,7 +52,7 @@
             "size": "200"
           }
         ],
-        "hash": "zgap-down-1"
+        "hash": "f4t-down-1"
       }
     }
   ],
@@ -69,7 +69,7 @@
       "ts_received": "2026-07-20T12:01:02+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100020",
+        "p": "100040",
         "T": 1784548862000
       }
     },
@@ -77,7 +77,7 @@
       "ts_received": "2026-07-20T12:01:03+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100040",
+        "p": "100080",
         "T": 1784548863000
       }
     },
@@ -85,7 +85,7 @@
       "ts_received": "2026-07-20T12:01:04+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100060",
+        "p": "100120",
         "T": 1784548864000
       }
     },
@@ -93,7 +93,7 @@
       "ts_received": "2026-07-20T12:01:05+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100080",
+        "p": "100160",
         "T": 1784548865000
       }
     },
@@ -101,7 +101,7 @@
       "ts_received": "2026-07-20T12:01:06+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100100",
+        "p": "100200",
         "T": 1784548866000
       }
     },
@@ -109,7 +109,7 @@
       "ts_received": "2026-07-20T12:01:07+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100150",
+        "p": "100180",
         "T": 1784548867000
       }
     },
@@ -117,7 +117,7 @@
       "ts_received": "2026-07-20T12:01:08+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100200",
+        "p": "100100",
         "T": 1784548868000
       }
     },
@@ -125,7 +125,7 @@
       "ts_received": "2026-07-20T12:01:09+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100250",
+        "p": "100020",
         "T": 1784548869000
       }
     },
@@ -133,8 +133,48 @@
       "ts_received": "2026-07-20T12:01:10+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100300",
+        "p": "99900",
         "T": 1784548870000
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:11+00:00",
+      "payload": {
+        "s": "BTCUSDT",
+        "p": "99700",
+        "T": 1784548871000
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:12+00:00",
+      "payload": {
+        "s": "BTCUSDT",
+        "p": "99400",
+        "T": 1784548872000
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:13+00:00",
+      "payload": {
+        "s": "BTCUSDT",
+        "p": "99000",
+        "T": 1784548873000
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:14+00:00",
+      "payload": {
+        "s": "BTCUSDT",
+        "p": "98500",
+        "T": 1784548874000
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:15+00:00",
+      "payload": {
+        "s": "BTCUSDT",
+        "p": "98000",
+        "T": 1784548875000
       }
     }
   ]

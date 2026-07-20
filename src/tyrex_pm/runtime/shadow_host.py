@@ -71,8 +71,8 @@ class ShadowHost(ObserveHost):
             config, clock=clock, run_id=run_id, correlation_id=correlation_id
         )
         self.order_store = OrderStore()
-        self.fill_ledger = FillLedger()
-        self.portfolio = Portfolio(fill_ledger=self.fill_ledger)
+        self.fills_ledger = FillLedger()
+        self.portfolio = Portfolio(fill_ledger=self.fills_ledger)
         self.lifecycle = TradeLifecycle(
             order_store=self.order_store, portfolio=self.portfolio
         )
@@ -118,7 +118,7 @@ class ShadowHost(ObserveHost):
         super()._attach()
         if self.oms is not None:
             self.order_store.attach(self.dispatcher)
-            self.fill_ledger.attach(self.dispatcher)
+            self.fills_ledger.attach(self.dispatcher)
             self.portfolio.attach(self.dispatcher)
             self.lifecycle.attach(self.dispatcher)
             self.dispatcher.subscribe(
@@ -140,7 +140,7 @@ class ShadowHost(ObserveHost):
         )
         if new is LifecycleState.FLAT and prev is not LifecycleState.FLAT:
             # New entry eligibility after reject/cancel/flat — not signal-direction alone.
-            self.strategy.bump_decision_epoch()
+            self.binding.bump_decision_epoch()
             self.retry.on_flat()
         elif new is LifecycleState.EXIT_RETRY_WAIT:
             # Single bridge point for every path into EXIT_RETRY_WAIT — host-driven
@@ -240,7 +240,7 @@ class ShadowHost(ObserveHost):
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _build_decision_context(
-        self, snapshot: DecisionSnapshot, signal: DirectionalSignal
+        self, snapshot: DecisionSnapshot, signal: DirectionalSignal | None = None
     ) -> DecisionContext | None:
         if self.oms is None:
             return super()._build_decision_context(snapshot, signal)
@@ -251,15 +251,21 @@ class ShadowHost(ObserveHost):
             if life.instrument_id is None
             else self.portfolio.net_quantity(life.instrument_id)
         )
+        pos_cost = Decimal("0")
+        if life.instrument_id is not None:
+            pos = self.portfolio.get(life.instrument_id)
+            if pos is not None:
+                pos_cost = pos.total_cost
         now = self.clock.now_utc()
 
-        entry_instrument = None
-        if signal.direction is Direction.UP:
-            entry_instrument = snapshot.market.yes.instrument_id
-        elif signal.direction is Direction.DOWN:
-            entry_instrument = snapshot.market.no.instrument_id
-        if life.state is LifecycleState.FLAT and entry_instrument is not None:
-            self.retry.on_directional_transition(signal.direction.value)
+        entry_instrument = life.instrument_id
+        if signal is not None:
+            if signal.direction is Direction.UP:
+                entry_instrument = snapshot.market.yes.instrument_id
+            elif signal.direction is Direction.DOWN:
+                entry_instrument = snapshot.market.no.instrument_id
+            if life.state is LifecycleState.FLAT and entry_instrument is not None:
+                self.retry.on_directional_transition(signal.direction.value)
         entry_fp = self._book_fingerprint(snapshot, entry_instrument)
         entry_allowed, entry_reason = self.retry.entry_allowed(now=now, book_fingerprint=entry_fp)
 
@@ -272,23 +278,38 @@ class ShadowHost(ObserveHost):
         # must bypass the strategy's single-outstanding-exit suppression.
         exit_escalate = exit_allowed and exit_outstanding
 
+        target = self.config.risk.target_notional
+        if self.config.z_gap is not None:
+            target = self.config.z_gap.target_notional
+
+        unknown = bool(getattr(self, "_unknown_inventory", False))
         return DecisionContext(
             run_id=self.run_id,
             mode=self.config.risk.runtime_mode,
             snapshot=snapshot,
-            target_notional=self.config.risk.target_notional,
+            target_notional=target,
             max_price=self.config.risk.max_price,
             lifecycle=life,
-            position_quantity=pos_qty,
+            position_quantity=Decimal("0") if unknown else pos_qty,
+            position_cost_total=Decimal("0") if unknown else pos_cost,
+            unknown_inventory=unknown,
             now=now,
             max_hold=self.config.shadow.max_hold,
             flatten_before_close=self.config.shadow.flatten_before_close,
             exit_on_flat=self.config.shadow.exit_on_flat,
             kill_switch_active=self._kill_switch,
-            entry_allowed=entry_allowed,
-            entry_block_reason=None if entry_allowed else entry_reason,
-            exit_allowed=exit_allowed,
-            exit_block_reason=None if exit_allowed else exit_reason,
+            entry_allowed=entry_allowed and not unknown,
+            entry_block_reason=(
+                "UNKNOWN_INVENTORY"
+                if unknown
+                else (None if entry_allowed else entry_reason)
+            ),
+            exit_allowed=exit_allowed and not unknown,
+            exit_block_reason=(
+                "UNKNOWN_INVENTORY"
+                if unknown
+                else (None if exit_allowed else exit_reason)
+            ),
             exit_escalate=exit_escalate,
             exit_urgency=self.retry.exit.urgency,
         )
@@ -301,6 +322,21 @@ class ShadowHost(ObserveHost):
             return
         self._handle_shadow_transition(signal, snapshot, transition)
 
+    def _process_intents(self, intents, snapshot: DecisionSnapshot) -> None:
+        """SHADOW: route economic intents through risk → plan → ShadowOMS."""
+        if self.oms is None:
+            super()._process_intents(intents, snapshot)
+            return
+        # Synthetic TransitionResult-compatible path without momentum signal.
+        from types import SimpleNamespace
+
+        transition = SimpleNamespace(
+            suppressed=False,
+            suppress_reason=None,
+            intents=list(intents),
+        )
+        self._handle_shadow_transition(None, snapshot, transition)
+
     # --- Retry bookkeeping ---
 
     def _attach_attempt_id(self, intent, snapshot, signal, now):
@@ -312,9 +348,17 @@ class ShadowHost(ObserveHost):
             allowed, _ = self.retry.entry_allowed(now=now, book_fingerprint=fp)
             if not allowed:
                 return intent
+            if signal is not None:
+                direction = signal.direction.value
+            else:
+                outcome = getattr(intent, "outcome", None)
+                direction = outcome.value if outcome is not None else "UNKNOWN"
+            # Directional transition bookkeeping (signal may be absent for Z-Gap).
+            if self.lifecycle.state is LifecycleState.FLAT:
+                self.retry.on_directional_transition(direction)
             rec = self.retry.note_entry_attempt(
                 now=now,
-                direction=signal.direction.value,
+                direction=direction,
                 book_fingerprint=fp,
                 reason=intent.reason_code,
             )
@@ -365,9 +409,11 @@ class ShadowHost(ObserveHost):
                     {
                         "reason": transition.suppress_reason,
                         "lifecycle": self.lifecycle.state.value,
-                        "signal_direction": signal.direction.value,
+                        "signal_direction": None
+                        if signal is None
+                        else signal.direction.value,
                     },
-                    causation_id=signal.causation_id,
+                    causation_id=None if signal is None else signal.causation_id,
                 )
             return
 
@@ -382,6 +428,10 @@ class ShadowHost(ObserveHost):
                     "kind": intent.kind.value,
                     "reason_code": intent.reason_code,
                     "semantic_key": intent.semantic_key(),
+                    "observe_only": False,
+                    "oms_submit": True,
+                    "economics_label": "estimated",
+                    "fee_label": "shadow_model",
                 },
                 causation_id=intent.causation_id,
                 strategy_id=getattr(intent, "strategy_id", None),
@@ -612,18 +662,18 @@ class ShadowHost(ObserveHost):
             "config_fingerprint": self.config.fingerprint(),
             "updated_at": StateSnapshotStore.now_iso(),
             "orders": self.order_store.snapshot(),
-            "fills": self.fill_ledger.snapshot(),
+            "fills": self.fills_ledger.snapshot(),
             "portfolio": self.portfolio.snapshot(),
             "lifecycle": self.lifecycle.snapshot(),
             "dedup_keys": self.dedup.snapshot(),
             "retry": self.retry.snapshot(),
             "kill_switch": self._kill_switch,
-            "strategy_epoch": self.strategy.decision_epoch,
-            "strategy_last_direction": None
-            if self.strategy.last_direction is None
-            else self.strategy.last_direction.value,
+            "strategy_state": self.binding.persistence_slice(),
             "shadow_fee_model": self.config.shadow.fee_model_id,
         }
+        slice_ = payload["strategy_state"]
+        payload["strategy_epoch"] = slice_.get("strategy_epoch", 0)
+        payload["strategy_last_direction"] = slice_.get("strategy_last_direction")
         self._persist.save(payload)
         self._emit("persistence_saved", {"path": str(self._persist.path)})
 
@@ -644,17 +694,19 @@ class ShadowHost(ObserveHost):
             )
             raise
         self.order_store.restore(payload.get("orders") or [])
-        self.fill_ledger.restore(payload.get("fills") or [])
+        self.fills_ledger.restore(payload.get("fills") or [])
         self.portfolio.restore(payload.get("portfolio") or {})
         self.lifecycle.restore(payload.get("lifecycle") or {"state": "FLAT"})
         self.dedup.restore(payload.get("dedup_keys") or [])
         self.retry.restore(payload.get("retry") or {})
         self._kill_switch = bool(payload.get("kill_switch", False))
-        last_dir = payload.get("strategy_last_direction")
-        self.strategy.restore_state(
-            decision_epoch=int(payload.get("strategy_epoch") or 0),
-            last_direction=None if last_dir is None else Direction(last_dir),
-        )
+        strategy_state = dict(payload.get("strategy_state") or {})
+        if not strategy_state:
+            strategy_state = {
+                "strategy_epoch": payload.get("strategy_epoch") or 0,
+                "strategy_last_direction": payload.get("strategy_last_direction"),
+            }
+        self.binding.restore_persistence_slice(strategy_state)
         self._recovered = True
         self._emit(
             "persistence_loaded",
@@ -663,12 +715,17 @@ class ShadowHost(ObserveHost):
         self._emit("recovery_complete", {"lifecycle": self.lifecycle.state.value})
         return True
 
+    def mark_unknown_inventory(self, *, active: bool = True) -> None:
+        """Test/ops hook: force UNKNOWN inventory gate (no blind sell)."""
+        self._unknown_inventory = bool(active)
+
     def run_fixture(self) -> ObserveRunResult:
         if self.oms is None:
             return super().run_fixture()
         if self.config.mode is not SourceMode.FIXTURE:
             raise ValueError("run_fixture requires fixture mode")
         assert self.config.fixture_path is not None
+        self._unknown_inventory = False
         self._attach()
         self._init_flags()
         self._emit(
@@ -685,6 +742,7 @@ class ShadowHost(ObserveHost):
                     "visible_depth_only",
                 ],
                 "config_fingerprint": self.config.fingerprint(),
+                "strategy_kind": self.config.strategy_kind,
             },
         )
         try:
@@ -703,21 +761,10 @@ class ShadowHost(ObserveHost):
             try:
                 self.try_recover()
             except PersistenceError:
-                # Fresh run if no/invalid snapshot
                 pass
-            pm = PolymarketFixtureSource(self.config.fixture_path)
-            bn = BinanceFixtureSource(self.config.fixture_path)
-            pm.publish_all(
-                self.dispatcher,
-                correlation_id=self.correlation_id,
-                market_id=market.market_id,
-            )
-            bn.publish_all(
-                self.dispatcher,
-                correlation_id=self.correlation_id,
-                symbol=self.config.binance_symbol,
-            )
-            self.strategy.on_stop("NORMAL")
+            self._publish_fixture_timeline(market)
+            self._run_timer_evaluations()
+            self.binding.on_stop("NORMAL")
             self._maybe_persist()
             self._emit(
                 "runtime_stop",
@@ -727,6 +774,7 @@ class ShadowHost(ObserveHost):
                     "command_count": len(self.commands),
                     "lifecycle": self.lifecycle.state.value,
                     "flat": self.portfolio.is_flat(),
+                    "estimated_shadow_pnl_label": "estimated_shadow_pnl",
                 },
             )
         except Exception as exc:

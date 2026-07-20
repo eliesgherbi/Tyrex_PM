@@ -1,7 +1,12 @@
-"""Pluggable OBSERVE strategy bindings — no isinstance(ZGapStrategy) in host.
+"""Pluggable strategy bindings — uniform host-facing evaluation interface.
 
-Each binding owns signal/snapshot construction for its strategy kind and
-returns a uniform evaluation result for the host loop.
+Host
+→ binding.evaluate(trigger, immutable framework context)
+→ StrategyDecision + list[IntentLike]
+
+The composition layer knows which assembler/strategy to invoke. Generic hosts
+must not branch on strategy_kind or isinstance(strategy, …) inside evaluation,
+intent dispatch, risk, planning, or lifecycle logic.
 """
 
 from __future__ import annotations
@@ -13,7 +18,8 @@ from typing import Any, Protocol
 from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
 from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, TimeAuthority
 from tyrex_pm.domain.polymarket.fees import FeeCurveParams, PROVISIONAL_SAMPLE_FEE
-from tyrex_pm.domain.polymarket.ptb import PtbLockStore, PtbSnapshot
+from tyrex_pm.domain.polymarket.market import BinaryMarket
+from tyrex_pm.domain.polymarket.ptb import PtbLockStore, PtbSnapshot, make_fixture_ptb
 from tyrex_pm.indicators.ewma_volatility import EwmaVolatilityEstimator, SigmaConfig
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.signals.directional import DirectionalSignal, build_directional_signal
@@ -27,7 +33,7 @@ from tyrex_pm.strategies.z_gap.assemble import assemble_zgap_decision_snapshot
 from tyrex_pm.strategies.z_gap.calibration import build_calibration_row
 from tyrex_pm.strategies.z_gap.config import ZGapConfig
 from tyrex_pm.strategies.z_gap.strategy import ZGapStrategy
-from tyrex_pm.strategies.z_gap.valuations import ZGapLeg, value_entry_leg
+from tyrex_pm.strategies.z_gap.valuations import PositionView, ZGapLeg, value_entry_leg
 
 
 @dataclass
@@ -49,6 +55,10 @@ class StrategyBinding(Protocol):
 
     def on_stop(self, reason: str) -> None: ...
 
+    def on_market_bound(self, market: BinaryMarket, *, clock_now) -> None:
+        """Optional market/window binding (PTB fixture, etc.). Default no-op."""
+        ...
+
     def evaluate(
         self,
         *,
@@ -64,9 +74,23 @@ class StrategyBinding(Protocol):
         max_book_spread: Decimal,
     ) -> StrategyEvalResult: ...
 
+    def bump_decision_epoch(self) -> None: ...
+
+    def persistence_slice(self) -> dict[str, Any]: ...
+
+    def restore_persistence_slice(self, data: dict[str, Any]) -> None: ...
+
     @property
     def last_direction(self):  # optional, for suppress facts
         return None
+
+    @property
+    def timer_eval_count(self) -> int:
+        return 0
+
+    @property
+    def evaluate_interval_s(self) -> float:
+        return 1.0
 
 
 @dataclass
@@ -83,11 +107,42 @@ class ReferenceMomentumBinding:
     def last_direction(self):
         return self.strategy.last_direction
 
+    @property
+    def timer_eval_count(self) -> int:
+        return 0
+
+    @property
+    def evaluate_interval_s(self) -> float:
+        return 1.0
+
     def on_start(self, context: StrategyContext) -> None:
         self.strategy.on_start(context)
 
     def on_stop(self, reason: str) -> None:
         self.strategy.on_stop(reason)
+
+    def on_market_bound(self, market: BinaryMarket, *, clock_now) -> None:
+        return None
+
+    def bump_decision_epoch(self) -> None:
+        self.strategy.bump_decision_epoch()
+
+    def persistence_slice(self) -> dict[str, Any]:
+        return {
+            "strategy_epoch": self.strategy.decision_epoch,
+            "strategy_last_direction": None
+            if self.strategy.last_direction is None
+            else self.strategy.last_direction.value,
+        }
+
+    def restore_persistence_slice(self, data: dict[str, Any]) -> None:
+        from tyrex_pm.signals.directional import Direction
+
+        last_dir = data.get("strategy_last_direction")
+        self.strategy.restore_state(
+            decision_epoch=int(data.get("strategy_epoch") or 0),
+            last_direction=None if last_dir is None else Direction(last_dir),
+        )
 
     def evaluate(
         self,
@@ -103,6 +158,7 @@ class ReferenceMomentumBinding:
         momentum_threshold: Decimal,
         max_book_spread: Decimal,
     ) -> StrategyEvalResult:
+        del correlation_id  # carried on market_snapshot / signal
         signal = build_directional_signal(
             snapshot=market_snapshot,
             momentum=momentum_value,
@@ -144,8 +200,8 @@ class ReferenceMomentumBinding:
 
 
 @dataclass
-class ZGapObserveBinding:
-    """Z-Gap OBSERVE binding: EWMA + assemble + thin strategy."""
+class ZGapBinding:
+    """Z-Gap binding: EWMA + assemble + thin strategy (OBSERVE and SHADOW)."""
 
     strategy: ZGapStrategy
     ewma: EwmaVolatilityEstimator
@@ -157,6 +213,8 @@ class ZGapObserveBinding:
     target_notional: Decimal
     window_id: str
     config: ZGapConfig
+    _timer_eval_count: int = 2
+    _evaluate_interval_s: float = 1.0
     _last_epoch_id: str | None = None
 
     @property
@@ -167,6 +225,14 @@ class ZGapObserveBinding:
     def last_direction(self):
         return None
 
+    @property
+    def timer_eval_count(self) -> int:
+        return self._timer_eval_count
+
+    @property
+    def evaluate_interval_s(self) -> float:
+        return self._evaluate_interval_s
+
     def on_start(self, context: StrategyContext) -> None:
         self.strategy.on_start(context)
         if self.fixture_ptb is not None and self.fixture_ptb.k is not None:
@@ -174,6 +240,66 @@ class ZGapObserveBinding:
 
     def on_stop(self, reason: str) -> None:
         self.strategy.on_stop(reason)
+
+    def on_market_bound(self, market: BinaryMarket, *, clock_now) -> None:
+        if self.fixture_ptb is not None:
+            return
+        if market.event_start is None or market.event_end is None:
+            return
+        # Host may have already set fixture_ptb via configure_fixture_ptb.
+
+    def configure_fixture_ptb(self, ptb: PtbSnapshot) -> None:
+        self.fixture_ptb = ptb
+        self.window_id = ptb.window_id
+
+    def bump_decision_epoch(self) -> None:
+        self.strategy.bump_decision_epoch()
+
+    def persistence_slice(self) -> dict[str, Any]:
+        return self.strategy.persistence_slice()
+
+    def restore_persistence_slice(self, data: dict[str, Any]) -> None:
+        self.strategy.restore_state(
+            decision_epoch=int(data.get("strategy_epoch") or 0),
+            entry_lineage_consumed=bool(data.get("entry_lineage_consumed", False)),
+            window_closed_to_reentry=bool(data.get("window_closed_to_reentry", False)),
+            window_id=data.get("window_id"),
+            thesis_state=data.get("thesis_state"),
+        )
+
+    def _position_from_context(
+        self, context: DecisionContext, *, epoch_placeholder_needed: bool
+    ) -> PositionView | None:
+        del epoch_placeholder_needed
+        qty = context.position_quantity
+        if qty is None or qty <= 0:
+            return None
+        life = context.lifecycle
+        if life is None or life.instrument_id is None:
+            return None
+        market = context.snapshot.market
+        if life.instrument_id == market.yes.instrument_id:
+            held = ZGapLeg.UP
+        elif life.instrument_id == market.no.instrument_id:
+            held = ZGapLeg.DOWN
+        else:
+            return None
+        # Epoch is rebound inside assemble to the sealed decision epoch.
+        from tyrex_pm.strategies.z_gap.snapshots import DecisionEpoch
+
+        placeholder = DecisionEpoch.new(
+            market_id=market.market_id,
+            window_id=self.window_id,
+            evaluated_at=context.snapshot.observed_at,
+            correlation_id=context.snapshot.correlation_id,
+            causation_id=context.snapshot.causation_id,
+        )
+        return PositionView(
+            epoch=placeholder,
+            held_leg=held,
+            confirmed_quantity=qty,
+            entry_cost_total=context.position_cost_total,
+        )
 
     def evaluate(
         self,
@@ -189,7 +315,7 @@ class ZGapObserveBinding:
         momentum_threshold: Decimal,
         max_book_spread: Decimal,
     ) -> StrategyEvalResult:
-        # Update EWMA from reference (host-owned estimator; strategy does not)
+        del momentum_value, momentum_ready, momentum_reason, momentum_threshold, max_book_spread
         if market_snapshot.reference is not None:
             self.ewma.update(
                 market_snapshot.reference.price,
@@ -201,6 +327,17 @@ class ZGapObserveBinding:
         ptb = None
         if self.fixture_ptb is not None:
             ptb = self.ptb_store.observe(self.fixture_ptb)
+
+        if decision_context is None:
+            raise ValueError("Z-Gap binding requires DecisionContext from host")
+
+        position = self._position_from_context(
+            decision_context, epoch_placeholder_needed=True
+        )
+        capabilities = {
+            "resolution_capability": False,
+            "unknown_inventory": bool(decision_context.unknown_inventory),
+        }
 
         decision_input = assemble_zgap_decision_snapshot(
             market_snapshot=market_snapshot,
@@ -221,16 +358,11 @@ class ZGapObserveBinding:
                 else market_snapshot.reference.price
             ),
             settlement_ref_fresh=market_snapshot.reference_freshness.is_fresh,
+            position=position,
+            capabilities=capabilities,
         )
 
-        # Same-epoch guard (duplicate trigger)
-        if self._last_epoch_id == decision_input.epoch.epoch_id:
-            # Should be unique per assemble; still protect lineage
-            pass
         self._last_epoch_id = decision_input.epoch.epoch_id
-
-        if decision_context is None:
-            raise ValueError("Z-Gap OBSERVE binding requires DecisionContext from host")
         decision, intents = self.strategy.on_decision(decision_input, decision_context)
 
         up_val = value_entry_leg(
@@ -254,6 +386,15 @@ class ZGapObserveBinding:
             down_val=down_val,
             actionable=bool(intents),
         )
+
+        pos_payload = None
+        if decision_input.position is not None:
+            pos_payload = {
+                "held_leg": decision_input.position.held_leg.value,
+                "confirmed_quantity": str(decision_input.position.confirmed_quantity),
+                "entry_cost_total": str(decision_input.position.entry_cost_total),
+                "truth_source": "portfolio_lifecycle",
+            }
 
         extra_facts = [
             (
@@ -280,6 +421,7 @@ class ZGapObserveBinding:
                     "time_ready": decision_input.time.ready,
                     "time_uncertainty_ms": decision_input.time.uncertainty_ms,
                     "economics_label": "estimated",
+                    "position": pos_payload,
                 },
             ),
             (
@@ -316,6 +458,18 @@ class ZGapObserveBinding:
             ),
             ("zgap_calibration_row", calib),
         ]
+        if pos_payload is not None:
+            extra_facts.append(
+                (
+                    "zgap_active_position_context",
+                    {
+                        "epoch_id": decision_input.epoch.epoch_id,
+                        **pos_payload,
+                        "action": decision.action.value,
+                        "reason_code": decision.reason_code,
+                    },
+                )
+            )
 
         signal_payload = {
             "signal_type": "z_gap_decision",
@@ -326,6 +480,7 @@ class ZGapObserveBinding:
             "z": decision_input.model.z,
             "p_up": decision_input.model.p_up,
             "p_down": decision_input.model.p_down,
+            "has_position": pos_payload is not None,
         }
 
         return StrategyEvalResult(
@@ -337,6 +492,10 @@ class ZGapObserveBinding:
         )
 
 
+# Backward-compatible alias
+ZGapObserveBinding = ZGapBinding
+
+
 def zgap_config_from_runtime(zg) -> ZGapConfig:
     """Map ObserveConfig.z_gap runtime knobs → pure ZGapConfig."""
     from tyrex_pm.strategies.z_gap.config import (
@@ -344,6 +503,8 @@ def zgap_config_from_runtime(zg) -> ZGapConfig:
         ZGapFrictionConfig,
         ZGapPtbTimeQualityConfig,
         ZGapRealizationConfig,
+        ZGapThesisConfig,
+        ZGapTimeResolutionConfig,
         ZGapVolatilityConfig,
     )
 
@@ -353,6 +514,7 @@ def zgap_config_from_runtime(zg) -> ZGapConfig:
             min_samples_s=zg.min_samples_s,
             sample_interval_s=zg.sample_interval_s,
             tau_floor_s=zg.tau_floor_s,
+            jump_threshold_sigma=float(getattr(zg, "jump_threshold_sigma", 4.0)),
         ),
         entry=ZGapEntryConfig(
             theta_take=zg.theta_take,
@@ -365,8 +527,19 @@ def zgap_config_from_runtime(zg) -> ZGapConfig:
             reject_both_legs_edge=zg.reject_both_legs_edge,
         ),
         realization=ZGapRealizationConfig(
+            theta_rich=getattr(zg, "theta_rich", Decimal("0.02")),
             expected_slippage_sell=zg.expected_slippage_sell,
             slippage_included_in_executable_bid=True,
+        ),
+        thesis=ZGapThesisConfig(
+            p_stop=getattr(zg, "p_stop", Decimal("0.4013")),
+            stop_confirm_s=float(getattr(zg, "stop_confirm_s", 1.0)),
+        ),
+        time_resolution=ZGapTimeResolutionConfig(
+            flatten_before_event_end_s=float(
+                getattr(zg, "flatten_before_event_end_s", 20.0)
+            ),
+            resolution_capability_default=False,
         ),
         ptb_time_quality=ZGapPtbTimeQualityConfig(basis_max_bps=zg.basis_max_bps),
         friction=ZGapFrictionConfig(
@@ -392,6 +565,8 @@ def build_strategy_binding(
     if kind in {"reference_momentum", "momentum"}:
         return ReferenceMomentumBinding()
     if kind in {"z_gap", "zgap"}:
+        timer_count = 2
+        interval_s = 1.0
         if zgap_config is None and zgap_runtime is not None:
             zgap_config = zgap_config_from_runtime(zgap_runtime)
             target_notional = zgap_runtime.target_notional
@@ -399,6 +574,8 @@ def build_strategy_binding(
             fee_curve = FeeCurveParams(
                 fee_rate=zgap_runtime.fee_rate, exponent=zgap_runtime.fee_exponent
             )
+            timer_count = zgap_runtime.timer_eval_count
+            interval_s = zgap_runtime.evaluate_interval_s
         cfg = zgap_config or ZGapConfig()
         ewma = EwmaVolatilityEstimator(
             SigmaConfig(
@@ -421,7 +598,7 @@ def build_strategy_binding(
                 auth = ClockTimeAuthority(clock=clock)
         else:
             raise ValueError("z_gap binding requires time_authority or clock")
-        return ZGapObserveBinding(
+        return ZGapBinding(
             strategy=ZGapStrategy(config=cfg),
             ewma=ewma,
             time_authority=auth,
@@ -432,5 +609,33 @@ def build_strategy_binding(
             target_notional=target_notional,
             window_id=window_id,
             config=cfg,
+            _timer_eval_count=timer_count,
+            _evaluate_interval_s=interval_s,
         )
     raise ValueError(f"unsupported strategy_kind: {strategy_kind!r}")
+
+
+def bind_fixture_ptb_for_market(
+    binding: StrategyBinding,
+    *,
+    market: BinaryMarket,
+    window_id: str,
+    k: Decimal,
+    receive_ts,
+) -> None:
+    """Composition helper: attach fixture PTB without host strategy-type branching."""
+    configure = getattr(binding, "configure_fixture_ptb", None)
+    if configure is None:
+        return
+    if market.event_start is None or market.event_end is None:
+        return
+    ptb = make_fixture_ptb(
+        market_id=market.market_id,
+        window_id=window_id,
+        event_start=market.event_start,
+        event_end=market.event_end,
+        k=k,
+        receive_ts=receive_ts,
+        provenance_ref="fixture_f4",
+    )
+    configure(ptb)

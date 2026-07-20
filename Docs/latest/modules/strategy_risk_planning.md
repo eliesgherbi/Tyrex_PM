@@ -5,8 +5,10 @@
 ## Packages
 
 - `tyrex_pm.strategies` (+ `framework_validation.reference_momentum`)
-- `tyrex_pm.strategies.z_gap` — pure model/valuation/policy (F2) + thin `ZGapStrategy` (F3)
-- Fixture OBSERVE: `config/observe_z_gap_fixture_f3.json` (`strategy_kind=z_gap`; no OMS; not a public live path)
+- `tyrex_pm.strategies.z_gap` — pure model/valuation/policy (F2) + thin `ZGapStrategy` (F3/F4)
+- Fixture OBSERVE: `config/observe_z_gap_fixture_f3.json` (`strategy_kind=z_gap`; no OMS)
+- Fixture SHADOW: `config/observe_shadow_z_gap_f4.json` (same decision path + ShadowOMS; not a public live path)
+- Host evaluation uses `StrategyBinding.evaluate` (no host `isinstance` / formula branching)
 - `tyrex_pm.core.intents`
 - `tyrex_pm.risk`
 - `tyrex_pm.planning`

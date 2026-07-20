@@ -44,3 +44,7 @@ class DecisionContext:
     exit_block_reason: str | None = None
     exit_escalate: bool = False
     exit_urgency: str = "NORMAL"
+    # Confirmed internal cost basis (SHADOW Portfolio); zero when flat/unavailable.
+    position_cost_total: Decimal = Decimal("0")
+    # Host-normalized inventory integrity flag (never guessed by strategy).
+    unknown_inventory: bool = False

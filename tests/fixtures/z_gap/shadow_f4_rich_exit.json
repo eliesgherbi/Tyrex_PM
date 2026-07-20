@@ -1,23 +1,23 @@
 {
   "market": {
-    "market_id": "zgap-f3-cond-1",
-    "condition_id": "zgap-f3-cond-1",
-    "question": "Will BTC be above K at window end? (F3 fixture)",
-    "yes_token_id": "zgap-tok-up",
-    "no_token_id": "zgap-tok-down",
+    "market_id": "zgap-f4-rich-1",
+    "condition_id": "zgap-f4-rich-1",
+    "question": "Will BTC be above K at window end? (F4 rich exit)",
+    "yes_token_id": "zgap-f4-tok-up",
+    "no_token_id": "zgap-f4-tok-down",
     "event_start": "2026-07-20T12:00:00+00:00",
-    "event_end": "2026-07-20T12:05:00+00:00",
+    "event_end": "2026-07-20T12:10:00+00:00",
     "tick_size": "0.01",
     "min_order_size": "5",
     "status": "ACTIVE",
-    "event_slug": "btc-updown-5m-zgap-f3"
+    "event_slug": "btc-updown-5m-zgap-f4-rich"
   },
   "polymarket_events": [
     {
       "ts_received": "2026-07-20T12:01:00+00:00",
       "payload": {
         "event_type": "book",
-        "asset_id": "zgap-tok-up",
+        "asset_id": "zgap-f4-tok-up",
         "timestamp": "2026-07-20T12:01:00+00:00",
         "bids": [
           {
@@ -31,14 +31,14 @@
             "size": "200"
           }
         ],
-        "hash": "zgap-up-1"
+        "hash": "f4-up-1"
       }
     },
     {
       "ts_received": "2026-07-20T12:01:00+00:00",
       "payload": {
         "event_type": "book",
-        "asset_id": "zgap-tok-down",
+        "asset_id": "zgap-f4-tok-down",
         "timestamp": "2026-07-20T12:01:00+00:00",
         "bids": [
           {
@@ -52,7 +52,49 @@
             "size": "200"
           }
         ],
-        "hash": "zgap-down-1"
+        "hash": "f4-down-1"
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:08+00:00",
+      "payload": {
+        "event_type": "book",
+        "asset_id": "zgap-f4-tok-up",
+        "timestamp": "2026-07-20T12:01:08+00:00",
+        "bids": [
+          {
+            "price": "0.85",
+            "size": "500"
+          }
+        ],
+        "asks": [
+          {
+            "price": "0.90",
+            "size": "200"
+          }
+        ],
+        "hash": "f4-up-rich"
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:08+00:00",
+      "payload": {
+        "event_type": "book",
+        "asset_id": "zgap-f4-tok-down",
+        "timestamp": "2026-07-20T12:01:08+00:00",
+        "bids": [
+          {
+            "price": "0.08",
+            "size": "200"
+          }
+        ],
+        "asks": [
+          {
+            "price": "0.12",
+            "size": "200"
+          }
+        ],
+        "hash": "f4-down-rich"
       }
     }
   ],
@@ -114,18 +156,10 @@
       }
     },
     {
-      "ts_received": "2026-07-20T12:01:08+00:00",
-      "payload": {
-        "s": "BTCUSDT",
-        "p": "100200",
-        "T": 1784548868000
-      }
-    },
-    {
       "ts_received": "2026-07-20T12:01:09+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100250",
+        "p": "100160",
         "T": 1784548869000
       }
     },
@@ -133,8 +167,16 @@
       "ts_received": "2026-07-20T12:01:10+00:00",
       "payload": {
         "s": "BTCUSDT",
-        "p": "100300",
+        "p": "100170",
         "T": 1784548870000
+      }
+    },
+    {
+      "ts_received": "2026-07-20T12:01:11+00:00",
+      "payload": {
+        "s": "BTCUSDT",
+        "p": "100180",
+        "T": 1784548871000
       }
     }
   ]

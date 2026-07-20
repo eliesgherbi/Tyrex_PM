@@ -158,6 +158,16 @@ def assemble_zgap_decision_snapshot(
         "valuation_label": "counterfactual",
     }
 
+    # Position truth is qty/cost; rebind to this sealed epoch (never reuse entry prices).
+    sealed_position = None
+    if position is not None:
+        sealed_position = PositionView(
+            epoch=epoch,
+            held_leg=position.held_leg,
+            confirmed_quantity=position.confirmed_quantity,
+            entry_cost_total=position.entry_cost_total,
+        )
+
     return ZGapDecisionSnapshot(
         epoch=epoch,
         model=model,
@@ -172,7 +182,7 @@ def assemble_zgap_decision_snapshot(
         observed_at=now,
         correlation_id=correlation_id,
         causation_id=causation_id,
-        position=position,
+        position=sealed_position,
         capabilities=dict(capabilities or {}),
         evidence=evidence,
     )

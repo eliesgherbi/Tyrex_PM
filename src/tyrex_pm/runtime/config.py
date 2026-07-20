@@ -91,6 +91,7 @@ class ZGapObserveRuntimeConfig:
     min_samples_s: float = 3.0
     sample_interval_s: float = 1.0
     tau_floor_s: float = 1.0
+    jump_threshold_sigma: float = 4.0
     theta_take: Decimal = Decimal("0.01")
     z_min: Decimal = Decimal("0.0")
     z_max: Decimal = Decimal("20.0")
@@ -100,6 +101,11 @@ class ZGapObserveRuntimeConfig:
     expected_slippage_buy: Decimal = Decimal("0")
     expected_slippage_sell: Decimal = Decimal("0")
     reject_both_legs_edge: bool = False
+    # Exit-family knobs (provisional; bind actual F2 policy behavior)
+    theta_rich: Decimal = Decimal("0.02")
+    p_stop: Decimal = Decimal("0.4013")
+    stop_confirm_s: float = 1.0
+    flatten_before_event_end_s: float = 20.0
 
     def __post_init__(self) -> None:
         if not self.window_id.strip():
@@ -283,6 +289,7 @@ def _zgap_from_mapping(data: Mapping[str, Any]) -> ZGapObserveRuntimeConfig:
         min_samples_s=float(data.get("min_samples_s", 3.0)),
         sample_interval_s=float(data.get("sample_interval_s", 1.0)),
         tau_floor_s=float(data.get("tau_floor_s", 1.0)),
+        jump_threshold_sigma=float(data.get("jump_threshold_sigma", 4.0)),
         theta_take=Decimal(str(data.get("theta_take", "0.01"))),
         z_min=Decimal(str(data.get("z_min", "0"))),
         z_max=Decimal(str(data.get("z_max", "20"))),
@@ -292,6 +299,10 @@ def _zgap_from_mapping(data: Mapping[str, Any]) -> ZGapObserveRuntimeConfig:
         expected_slippage_buy=Decimal(str(data.get("expected_slippage_buy", "0"))),
         expected_slippage_sell=Decimal(str(data.get("expected_slippage_sell", "0"))),
         reject_both_legs_edge=bool(data.get("reject_both_legs_edge", False)),
+        theta_rich=Decimal(str(data.get("theta_rich", "0.02"))),
+        p_stop=Decimal(str(data.get("p_stop", "0.4013"))),
+        stop_confirm_s=float(data.get("stop_confirm_s", 1.0)),
+        flatten_before_event_end_s=float(data.get("flatten_before_event_end_s", 20.0)),
     )
 
 

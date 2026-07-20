@@ -40,6 +40,14 @@ tyrex-pm observe --config config/observe_live_r3.json --btc-window next --durati
 tyrex-pm shadow --config config/observe_shadow_r5.json --btc-window next
 ```
 
+### Z-Gap fixture SHADOW (F4; offline only)
+
+```bash
+tyrex-pm shadow --config config/observe_shadow_z_gap_f4.json
+```
+
+Simulated entry→exit via ShadowOMS using the same Z-Gap decision path as F3 OBSERVE. **No public live Z-Gap, real PTB provider, or venue mutation.**
+
 ## Discover BTC window — Net-read
 
 ```bash
