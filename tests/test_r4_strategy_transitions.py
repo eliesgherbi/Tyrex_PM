@@ -96,7 +96,8 @@ def test_up_transition_one_intent_repeated_suppressed() -> None:
     ctx = _ctx(snap)
     r1 = strat.apply_transition(_sig(Direction.UP), ctx)
     assert len(r1.intents) == 1
-    assert r1.decision.kind is ObserveDecisionKind.WOULD_ENTER_UP
+    assert r1.decision.action.value == "ENTER"
+    assert r1.decision.evidence["validation_kind"] == ObserveDecisionKind.WOULD_ENTER_UP.value
     r2 = strat.apply_transition(_sig(Direction.UP), ctx)
     assert r2.intents == []
     assert r2.suppress_reason == "REPEATED_DIRECTION"
@@ -125,14 +126,16 @@ def test_reversal_no_intent() -> None:
     r = strat.apply_transition(_sig(Direction.DOWN), ctx)
     assert r.intents == []
     assert r.suppress_reason == "REVERSAL_NO_PORTFOLIO"
-    assert r.decision.kind is ObserveDecisionKind.WOULD_ENTER_DOWN
+    assert r.decision.action.value == "ENTER"
+    assert r.decision.evidence["validation_kind"] == ObserveDecisionKind.WOULD_ENTER_DOWN.value
 
 
 def test_evaluate_unchanged_from_r3() -> None:
     strat = ReferenceMomentumStrategy()
     sig = _sig(Direction.UP)
     d = strat.evaluate(sig)
-    assert d.kind is ObserveDecisionKind.WOULD_ENTER_UP
+    assert d.action.value == "ENTER"
+    assert d.evidence["validation_kind"] == ObserveDecisionKind.WOULD_ENTER_UP.value
     assert d.reason_code == "TEST"
 
 

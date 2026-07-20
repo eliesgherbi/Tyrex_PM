@@ -13,11 +13,11 @@
 ## Strategy interface (active)
 
 Protocol callbacks only: `on_start`, `on_signal`, `on_stop`.  
-Protocol `on_signal` → `tuple[ObserveDecision, list[EnterIntent]]`.
+Protocol `on_signal` → `tuple[StrategyDecision, list[IntentLike]]` (`IntentLike` = enter | exit | flatten).
 
-`ReferenceMomentumStrategy` additionally emits `ExitIntent` / `FlattenIntent` via a wider concrete return type (`IntentLike`). That is validation-strategy behavior, not a protocol guarantee. No `on_timer` / `on_execution_event`.
+F1 actions: `WAIT` · `SKIP` · `ENTER` · `HOLD` · `EXIT` · `FLATTEN` · `BLOCKED`. No `on_timer` / `on_execution_event`.
 
-**ReferenceMomentumStrategy:** structural validation only — not a recommended trading strategy.
+**ReferenceMomentumStrategy:** structural validation only — not a recommended trading strategy. Validation labels live in `evidence["validation_kind"]`.
 
 ## Risk
 

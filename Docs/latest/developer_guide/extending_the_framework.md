@@ -20,8 +20,8 @@ A strategy **must not** reimplement venue APIs, book reconstruction, risk author
 Implement `on_start`, `on_signal`, `on_stop` only.  
 Do **not** assume `on_timer` or `on_execution_event` exist.
 
-Protocol types `on_signal` as returning `list[EnterIntent]`.  
-`ExitIntent` / `FlattenIntent` exist as core types and are used by `ReferenceMomentumStrategy` / shadow host — if you emit them, document the host path that consumes them. Prefer aligning with the protocol for new strategies until the protocol is widened deliberately.
+Protocol types `on_signal` as returning `tuple[StrategyDecision, list[IntentLike]]` where `IntentLike` is `EnterIntent | ExitIntent | FlattenIntent`.
+Use F1 actions (`WAIT`/`SKIP`/`ENTER`/`HOLD`/`EXIT`/`FLATTEN`/`BLOCKED`) and put exit-family distinctions in `reason_code`. Do not invent `HOLD_TO_RESOLUTION` as a generic action.
 
 ## Add an indicator
 

@@ -17,7 +17,6 @@ from tyrex_pm.adapters.polymarket.fixture_source import PolymarketFixtureSource
 from tyrex_pm.core.clock import Clock, FakeClock, SystemClock
 from tyrex_pm.core.events import ReferencePriceUpdated
 from tyrex_pm.core.ids import CorrelationId, RunId, new_correlation_id, new_run_id
-from tyrex_pm.core.intents import EnterIntent
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.domain.polymarket.market import BinaryMarket, MarketRequest
 from tyrex_pm.engine.dispatcher import EventDispatcher
@@ -40,8 +39,8 @@ from tyrex_pm.risk.reasons import RiskReason
 from tyrex_pm.runtime.config import ObserveConfig, SourceMode
 from tyrex_pm.signals.directional import DirectionalSignal, build_directional_signal
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
+from tyrex_pm.strategies.decisions import IntentLike, StrategyDecision
 from tyrex_pm.strategies.framework_validation.reference_momentum import (
-    ObserveDecision,
     ReferenceMomentumStrategy,
 )
 
@@ -51,9 +50,9 @@ class ObserveRunResult:
     run_id: RunId
     correlation_id: CorrelationId
     market: BinaryMarket
-    decisions: list[ObserveDecision] = field(default_factory=list)
+    decisions: list[StrategyDecision] = field(default_factory=list)
     signals: list[DirectionalSignal] = field(default_factory=list)
-    intents: list[EnterIntent] = field(default_factory=list)
+    intents: list[IntentLike] = field(default_factory=list)
     risk_decisions: list[RiskDecision] = field(default_factory=list)
     plans: list[PlanningResult] = field(default_factory=list)
     facts_path: Path | None = None
@@ -93,9 +92,9 @@ class ObserveHost:
             )
         )
         self.sink = JsonlFactSink(config.output_path)
-        self.decisions: list[ObserveDecision] = []
+        self.decisions: list[StrategyDecision] = []
         self.signals: list[DirectionalSignal] = []
-        self.intents: list[EnterIntent] = []
+        self.intents: list[IntentLike] = []
         self.risk_decisions: list[RiskDecision] = []
         self.plans: list[PlanningResult] = []
         self._attached = False
@@ -372,7 +371,7 @@ class ObserveHost:
                         causation_id=decision.causation_id,
                     )
 
-    def evaluate_once(self, *, causation_id=None) -> ObserveDecision:
+    def evaluate_once(self, *, causation_id=None) -> StrategyDecision:
         snapshot = self.build_snapshot(causation_id=causation_id)
         self._emit(
             "freshness_assessment",
@@ -485,14 +484,17 @@ class ObserveHost:
         """Dry (R4) intent/risk/plan processing hook; overridden for shadow OMS."""
         self._handle_transition(signal, snapshot, transition)
 
-    def _emit_observe_decision(self, decision: ObserveDecision) -> None:
+    def _emit_observe_decision(self, decision: StrategyDecision) -> None:
+        # Emit both neutral action and validation_kind (when present) for continuity.
         self._emit(
             "observe_decision",
             {
-                "kind": decision.kind.value,
+                "action": decision.action.value,
+                "kind": decision.evidence.get("validation_kind", decision.action.value),
                 "reason_code": decision.reason_code,
-                "signal_direction": decision.signal_direction.value,
-                "evidence": decision.evidence,
+                "signal_direction": decision.evidence.get("signal_direction"),
+                "decision_id": decision.decision_id,
+                "evidence": dict(decision.evidence),
             },
             causation_id=decision.causation_id,
             strategy_id=decision.strategy_id,

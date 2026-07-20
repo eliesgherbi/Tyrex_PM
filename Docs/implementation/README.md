@@ -24,4 +24,10 @@ Key anchors:
 | [z0_z_gap_full_strategy_spectrum.md](z0_z_gap_full_strategy_spectrum.md) | Accepted full economic strategy (corrections A–F) |
 | [z_gap_full_strategy_implementation_plan.md](z_gap_full_strategy_implementation_plan.md) | Architecture + F1–F5 implementation preparation |
 
-All files in this directory are preserved as historical evidence (plus the P0 design baseline above).
+### Z-Gap implementation milestones
+
+| Document | Role |
+|----------|------|
+| [f1_generic_strategy_contracts.md](f1_generic_strategy_contracts.md) | F1 — neutral `StrategyDecision` / `IntentLike` / protocol |
+
+All files in this directory are preserved as historical evidence (plus the P0 design baseline and milestone reports above).

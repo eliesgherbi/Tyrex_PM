@@ -56,7 +56,11 @@ def test_complete_chain_up(tmp_path: Path) -> None:
         host.close()
 
     assert result.market.yes.token_id.value == "tok-yes-1"
-    assert any(d.kind is ObserveDecisionKind.WOULD_ENTER_UP for d in result.decisions)
+    assert any(
+        d.action.value == "ENTER"
+        and d.evidence.get("validation_kind") == ObserveDecisionKind.WOULD_ENTER_UP.value
+        for d in result.decisions
+    )
     assert any(s.direction is Direction.UP for s in result.signals)
     lines = result.facts_path.read_text(encoding="utf-8").strip().splitlines()
     assert lines
@@ -81,7 +85,9 @@ def test_deterministic_semantic_output(tmp_path: Path) -> None:
         )
         try:
             host.run_fixture()
-            kinds = [d.kind.value for d in host.decisions]
+            kinds = [
+                d.evidence.get("validation_kind", d.action.value) for d in host.decisions
+            ]
             dirs = [s.direction.value for s in host.signals]
             return kinds + dirs
         finally:
@@ -99,7 +105,11 @@ def test_down_fixture(tmp_path: Path) -> None:
         result = host.run_fixture()
     finally:
         host.close()
-    assert any(d.kind is ObserveDecisionKind.WOULD_ENTER_DOWN for d in result.decisions)
+    assert any(
+        d.action.value == "ENTER"
+        and d.evidence.get("validation_kind") == ObserveDecisionKind.WOULD_ENTER_DOWN.value
+        for d in result.decisions
+    )
 
 
 def test_fact_jsonl_roundtrip(tmp_path: Path) -> None:

@@ -1,13 +1,12 @@
-"""Minimal strategy protocol with R4 consumers only."""
+"""Minimal strategy protocol — neutral decisions and IntentLike outputs."""
 
 from __future__ import annotations
 
 from typing import Protocol
 
-from tyrex_pm.core.intents import EnterIntent
 from tyrex_pm.signals.directional import DirectionalSignal
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
-from tyrex_pm.strategies.framework_validation.reference_momentum import ObserveDecision
+from tyrex_pm.strategies.decisions import IntentLike, StrategyDecision
 
 
 class StopReason(str):
@@ -21,6 +20,6 @@ class Strategy(Protocol):
         self,
         signal: DirectionalSignal,
         context: DecisionContext,
-    ) -> tuple[ObserveDecision, list[EnterIntent]]: ...
+    ) -> tuple[StrategyDecision, list[IntentLike]]: ...
 
     def on_stop(self, reason: str) -> None: ...

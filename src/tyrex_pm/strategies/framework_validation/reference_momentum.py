@@ -1,6 +1,11 @@
 """ReferenceMomentumStrategy — R3 observe + R4/R5 transitions.
 
-``evaluate`` is unchanged from R3.
+Framework-validation only (not an alpha strategy).
+
+Uses neutral ``StrategyDecision`` / ``IntentLike`` (F1). Validation-specific
+labels such as WOULD_ENTER_UP/DOWN are retained in ``evidence["validation_kind"]``
+for fact/report continuity — they are not generic protocol actions.
+
 When ``DecisionContext.lifecycle`` is None (R4 dry), signal-transition rules apply.
 When lifecycle is provided (R5), eligibility uses authoritative lifecycle/position.
 """
@@ -12,46 +17,66 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
+from tyrex_pm.core.ids import StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
-from tyrex_pm.core.intents import (
-    EnterIntent,
-    ExitIntent,
-    FlattenIntent,
-    new_intent_id,
-)
+from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent, new_intent_id
 from tyrex_pm.lifecycle.trade_lifecycle import LifecycleState
 from tyrex_pm.signals.directional import Direction, DirectionalSignal
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
-
-IntentLike = EnterIntent | ExitIntent | FlattenIntent
+from tyrex_pm.strategies.decisions import IntentLike, StrategyAction, StrategyDecision
 
 
 class ObserveDecisionKind(str, Enum):
+    """Validation-strategy labels stored in evidence (not F1 generic actions)."""
+
     WOULD_ENTER_UP = "WOULD_ENTER_UP"
     WOULD_ENTER_DOWN = "WOULD_ENTER_DOWN"
     HOLD = "HOLD"
     SKIP = "SKIP"
 
 
-@dataclass(frozen=True, kw_only=True)
-class ObserveDecision:
-    kind: ObserveDecisionKind
-    reason_code: str
-    observed_at: datetime
-    correlation_id: CorrelationId
-    causation_id: EventId | None
-    signal_direction: Direction
-    evidence: dict[str, Any]
-    strategy_id: StrategyId = StrategyId("reference_momentum")
-
-
 @dataclass
 class TransitionResult:
-    decision: ObserveDecision
+    decision: StrategyDecision
     intents: list[IntentLike] = field(default_factory=list)
     suppressed: bool = False
     suppress_reason: str | None = None
+
+
+def _validation_kind_to_action(kind: ObserveDecisionKind) -> StrategyAction:
+    if kind is ObserveDecisionKind.SKIP:
+        return StrategyAction.SKIP
+    if kind is ObserveDecisionKind.HOLD:
+        return StrategyAction.HOLD
+    if kind in (ObserveDecisionKind.WOULD_ENTER_UP, ObserveDecisionKind.WOULD_ENTER_DOWN):
+        return StrategyAction.ENTER
+    raise ValueError(f"unmapped ObserveDecisionKind: {kind!r}")
+
+
+def _make_decision(
+    *,
+    kind: ObserveDecisionKind,
+    reason_code: str,
+    observed_at: datetime,
+    correlation_id,
+    causation_id,
+    signal_direction: Direction,
+    evidence: dict[str, Any],
+    strategy_id: StrategyId,
+) -> StrategyDecision:
+    return StrategyDecision(
+        action=_validation_kind_to_action(kind),
+        reason_code=reason_code,
+        decided_at=observed_at,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+        strategy_id=strategy_id,
+        evidence={
+            **evidence,
+            "validation_kind": kind.value,
+            "signal_direction": signal_direction.value,
+        },
+    )
 
 
 class ReferenceMomentumStrategy:
@@ -98,9 +123,9 @@ class ReferenceMomentumStrategy:
     def last_direction(self) -> Direction | None:
         return self._last_direction
 
-    def evaluate(self, signal: DirectionalSignal) -> ObserveDecision:
+    def evaluate(self, signal: DirectionalSignal) -> StrategyDecision:
         if signal.direction is Direction.UNAVAILABLE:
-            return ObserveDecision(
+            return _make_decision(
                 kind=ObserveDecisionKind.SKIP,
                 reason_code=signal.reason_code,
                 observed_at=signal.observed_at,
@@ -111,7 +136,7 @@ class ReferenceMomentumStrategy:
                 strategy_id=self.STRATEGY_ID,
             )
         if signal.direction is Direction.UP:
-            return ObserveDecision(
+            return _make_decision(
                 kind=ObserveDecisionKind.WOULD_ENTER_UP,
                 reason_code=signal.reason_code,
                 observed_at=signal.observed_at,
@@ -126,7 +151,7 @@ class ReferenceMomentumStrategy:
                 strategy_id=self.STRATEGY_ID,
             )
         if signal.direction is Direction.DOWN:
-            return ObserveDecision(
+            return _make_decision(
                 kind=ObserveDecisionKind.WOULD_ENTER_DOWN,
                 reason_code=signal.reason_code,
                 observed_at=signal.observed_at,
@@ -140,7 +165,7 @@ class ReferenceMomentumStrategy:
                 },
                 strategy_id=self.STRATEGY_ID,
             )
-        return ObserveDecision(
+        return _make_decision(
             kind=ObserveDecisionKind.HOLD,
             reason_code=signal.reason_code,
             observed_at=signal.observed_at,
@@ -158,7 +183,7 @@ class ReferenceMomentumStrategy:
         self,
         signal: DirectionalSignal,
         context: DecisionContext,
-    ) -> tuple[ObserveDecision, list[IntentLike]]:
+    ) -> tuple[StrategyDecision, list[IntentLike]]:
         result = self.apply_transition(signal, context)
         return result.decision, list(result.intents)
 
@@ -176,7 +201,7 @@ class ReferenceMomentumStrategy:
         self,
         signal: DirectionalSignal,
         context: DecisionContext,
-        decision: ObserveDecision,
+        decision: StrategyDecision,
     ) -> TransitionResult:
         life = context.lifecycle
         assert life is not None
@@ -317,7 +342,7 @@ class ReferenceMomentumStrategy:
         self,
         signal: DirectionalSignal,
         context: DecisionContext,
-        decision: ObserveDecision,
+        decision: StrategyDecision,
     ) -> TransitionResult:
         """R4 dry-plan transition (no portfolio)."""
         prev = self._last_direction
@@ -378,7 +403,7 @@ class ReferenceMomentumStrategy:
         self,
         signal: DirectionalSignal,
         context: DecisionContext,
-        decision: ObserveDecision,
+        decision: StrategyDecision,
     ) -> EnterIntent:
         market = context.snapshot.market
         if signal.direction is Direction.UP:
@@ -397,7 +422,8 @@ class ReferenceMomentumStrategy:
             causation_id=signal.causation_id,
             reason_code=decision.reason_code,
             evidence={
-                "observe_kind": decision.kind.value,
+                "validation_kind": decision.evidence.get("validation_kind"),
+                "strategy_action": decision.action.value,
                 "signal_direction": signal.direction.value,
                 "decision_epoch": self._decision_epoch,
             },

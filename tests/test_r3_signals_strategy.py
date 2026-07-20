@@ -166,7 +166,9 @@ def test_strategy_decisions() -> None:
         threshold=Decimal("0.001"),
         max_spread=Decimal("0.1"),
     )
-    assert strat.evaluate(up).kind is ObserveDecisionKind.WOULD_ENTER_UP
+    up_d = strat.evaluate(up)
+    assert up_d.action.value == "ENTER"
+    assert up_d.evidence["validation_kind"] == ObserveDecisionKind.WOULD_ENTER_UP.value
 
     flat = build_directional_signal(
         snapshot=snap,
@@ -176,7 +178,9 @@ def test_strategy_decisions() -> None:
         threshold=Decimal("0.001"),
         max_spread=Decimal("0.1"),
     )
-    assert strat.evaluate(flat).kind is ObserveDecisionKind.HOLD
+    flat_d = strat.evaluate(flat)
+    assert flat_d.action.value == "HOLD"
+    assert flat_d.evidence["validation_kind"] == ObserveDecisionKind.HOLD.value
 
     skip = build_directional_signal(
         snapshot=_snapshot(ref_fresh=_stale()),
@@ -186,4 +190,6 @@ def test_strategy_decisions() -> None:
         threshold=Decimal("0.001"),
         max_spread=Decimal("0.1"),
     )
-    assert strat.evaluate(skip).kind is ObserveDecisionKind.SKIP
+    skip_d = strat.evaluate(skip)
+    assert skip_d.action.value == "SKIP"
+    assert skip_d.evidence["validation_kind"] == ObserveDecisionKind.SKIP.value

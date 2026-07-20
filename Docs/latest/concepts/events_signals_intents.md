@@ -14,8 +14,8 @@ Event ≠ Indicator ≠ Signal ≠ Decision ≠ Intent
 | **Event** | Normalized observation | Adapters | Stores / dispatcher | Fact | Book/reference updates (adapter-normalized) |
 | **Indicator** | Reusable transform | Indicators | Signals / strategy | Interpretation | Momentum features |
 | **Signal** | Packaged interpretation | Signal builders | Strategy | Interpretation | `DirectionalSignal` |
-| **Decision** | Observe outcome | Strategy | Host | Interpretation | `ObserveDecision` (defined under `framework_validation`) |
-| **Intent** | Economic request | Strategy | Risk / host | Request | `EnterIntent`, `ExitIntent`, `CancelIntent`, `FlattenIntent` |
+| **Decision** | Strategy outcome | Strategy | Host | Interpretation | `StrategyDecision` + `StrategyAction` (`strategies/decisions.py`) |
+| **Intent** | Economic request | Strategy | Risk / host | Request | `EnterIntent`, `ExitIntent`, `FlattenIntent` (`IntentLike`); `CancelIntent` exists but is not in the strategy return union |
 | **RiskDecision** | Authorize / deny | `RiskEngine` | Planner / host | Authorization | approve/deny + `RiskReason` |
 | **ExecutionPlan** | Price/qty/order-type | Planners | Commands | Action design | Sized BUY plan; `LifecycleExitPlan` (R7 exit path) |
 | **Command** | OMS instruction | Planner / runtime | OMS | Action request | `SubmitOrderCommand`, `CancelOrderCommand` |
@@ -28,12 +28,15 @@ Event ≠ Indicator ≠ Signal ≠ Decision ≠ Intent
 | Callback | Exists? | Signature (active) |
 |----------|---------|---------------------|
 | `on_start` | yes | `(context: StrategyContext) -> None` |
-| `on_signal` | yes | `(signal, context) -> tuple[ObserveDecision, list[EnterIntent]]` |
+| `on_signal` | yes | `(signal, context) -> tuple[StrategyDecision, list[IntentLike]]` |
 | `on_stop` | yes | `(reason: str) -> None` |
 | `on_timer` | **no** | not implemented |
 | `on_execution_event` | **no** | not implemented |
 
-**Debt:** `ReferenceMomentumStrategy.on_signal` returns `list[IntentLike]` including `ExitIntent` / `FlattenIntent`, which is wider than the protocol’s `list[EnterIntent]`. Treat Exit/Flatten intents as implemented types used by the validation strategy / shadow host, not as protocol-guaranteed returns for every strategy.
+**F1 actions:** `WAIT` · `SKIP` · `ENTER` · `HOLD` · `EXIT` · `FLATTEN` · `BLOCKED`.
+Exit-family distinctions use `reason_code`, not separate actions. Resolution-hold is **not** an F1 action (F5 intent).
+
+`ReferenceMomentumStrategy` maps validation labels (`WOULD_ENTER_UP` / `WOULD_ENTER_DOWN`) into `evidence["validation_kind"]` while `action` is the neutral `ENTER` / `HOLD` / `SKIP`.
 
 ## Concrete examples
 

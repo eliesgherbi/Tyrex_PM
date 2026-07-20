@@ -99,8 +99,7 @@ Documented from active import checks (not an aspirational clean-architecture cla
 
 ### Remaining dependency debt
 
-- `strategies.protocol` imports `ObserveDecision` from `framework_validation.reference_momentum` (validation type leaked into the protocol module).
-- Protocol `on_signal` is typed to return `list[EnterIntent]`, while `ReferenceMomentumStrategy.on_signal` returns `list[IntentLike]` (`EnterIntent` \| `ExitIntent` \| `FlattenIntent`).
+- ~~`strategies.protocol` imports `ObserveDecision` from validation~~ **resolved in F1** — protocol uses `StrategyDecision` / `IntentLike` from `strategies/decisions.py`.
 - R7 one-shot orchestration lives under `runtime/r7*` and is not yet a generic public strategy API.
 
 ## Authoritative-state layers

@@ -73,7 +73,11 @@ def test_e2e_up_intent_approved_planned(tmp_path: Path) -> None:
         host.close()
 
     assert any(s.direction is Direction.UP for s in result.signals)
-    assert any(d.kind is ObserveDecisionKind.WOULD_ENTER_UP for d in result.decisions)
+    assert any(
+        d.action.value == "ENTER"
+        and d.evidence.get("validation_kind") == ObserveDecisionKind.WOULD_ENTER_UP.value
+        for d in result.decisions
+    )
     assert len(result.intents) == 1
     assert result.intents[0].target_notional == Decimal("5")
     assert any(r.approved for r in result.risk_decisions)
@@ -144,4 +148,8 @@ def test_r3_signal_path_without_risk_unchanged(tmp_path: Path) -> None:
         host.close()
     assert result.intents == []
     assert result.risk_decisions == []
-    assert any(d.kind is ObserveDecisionKind.WOULD_ENTER_UP for d in result.decisions)
+    assert any(
+        d.action.value == "ENTER"
+        and d.evidence.get("validation_kind") == ObserveDecisionKind.WOULD_ENTER_UP.value
+        for d in result.decisions
+    )
