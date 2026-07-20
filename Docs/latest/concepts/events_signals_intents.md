@@ -34,7 +34,7 @@ Event ≠ Indicator ≠ Signal ≠ Decision ≠ Intent
 | `on_execution_event` | **no** | not implemented |
 
 **F1 actions:** `WAIT` · `SKIP` · `ENTER` · `HOLD` · `EXIT` · `FLATTEN` · `BLOCKED`.
-Exit-family distinctions use `reason_code`, not separate actions. Resolution-hold is **not** an F1 action (F5 intent).
+Exit-family distinctions use `reason_code`, not separate actions. Resolution-hold is **not** an F1 action; F5 uses explicit `HoldToResolutionIntent` while `StrategyAction` stays `HOLD`.
 
 `ReferenceMomentumStrategy` maps validation labels (`WOULD_ENTER_UP` / `WOULD_ENTER_DOWN`) into `evidence["validation_kind"]` while `action` is the neutral `ENTER` / `HOLD` / `SKIP`.
 

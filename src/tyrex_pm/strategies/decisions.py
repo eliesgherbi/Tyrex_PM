@@ -13,11 +13,16 @@ from uuid import uuid4
 
 from tyrex_pm.core.clock import require_utc
 from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent
+from tyrex_pm.core.intents import (
+    EnterIntent,
+    ExitIntent,
+    FlattenIntent,
+    HoldToResolutionIntent,
+)
 
-IntentLike = EnterIntent | ExitIntent | FlattenIntent
+IntentLike = EnterIntent | ExitIntent | FlattenIntent | HoldToResolutionIntent
 
-# F1 generic economic effects — do not add STOP or HOLD_TO_RESOLUTION here.
+# F1 generic economic effects — do not add STOP or HOLD_TO_RESOLUTION as actions.
 _F1_ACTIONS = frozenset(
     {"WAIT", "SKIP", "ENTER", "HOLD", "EXIT", "FLATTEN", "BLOCKED"}
 )

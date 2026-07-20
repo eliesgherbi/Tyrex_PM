@@ -12,6 +12,7 @@ overrides the two hooks that differ when ``shadow.enable_oms`` is set:
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -30,8 +31,19 @@ from tyrex_pm.core.commands import (
 )
 from tyrex_pm.core.events import BookUpdated, ReferencePriceUpdated
 from tyrex_pm.core.ids import CorrelationId, RunId, new_correlation_id, new_order_id, new_run_id
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent
+from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent, HoldToResolutionIntent
+from tyrex_pm.core.instruments import OutcomeSide
 from tyrex_pm.core.modes import RuntimeMode
+from tyrex_pm.core.settlement_events import new_simulated_settlement
+from tyrex_pm.domain.polymarket.resolution import BinaryResolutionRule
+from tyrex_pm.domain.polymarket.resolution_evidence import (
+    ResolutionEvidenceError,
+    simulated_payout_per_share,
+    validate_resolution_evidence,
+)
+from tyrex_pm.domain.polymarket.resolution_evidence_load import (
+    load_resolution_evidence_events,
+)
 from tyrex_pm.execution.fill_ledger import FillLedger
 from tyrex_pm.execution.order_store import OrderStore
 from tyrex_pm.execution.shadow_oms import ShadowFeeConfig, ShadowFillConfig, ShadowOMS
@@ -81,6 +93,8 @@ class ShadowHost(ObserveHost):
         self._persist: StateSnapshotStore | None = None
         self._recovered = False
         self.commands: list[Any] = []
+        self._resolution_evidence_queue: list[tuple[datetime, Any]] = []
+        self._resolution_evidence_applied: set[str] = set()
 
         retry_cfg = RetryConfig()
         if config.shadow is not None:
@@ -184,6 +198,7 @@ class ShadowHost(ObserveHost):
         market = snapshot.market
         yes_state = self.book_store.get(market.yes.instrument_id)
         no_state = self.book_store.get(market.no.instrument_id)
+        cap = self._compose_resolution_capability()
         return RiskContext(
             mode=risk_cfg.runtime_mode,
             now=self.clock.now_utc(),
@@ -214,9 +229,15 @@ class ShadowHost(ObserveHost):
             dedup=self.dedup,
             exposure_available=True,
             portfolio=self._portfolio_view(),
+            resolution_capability_available=cap.available,
         )
 
     # --- R5.1 hooks (ObserveHost.evaluate_once calls these) ---
+
+    def _dispatch_eval_result(self, result, snapshot: DecisionSnapshot) -> None:
+        super()._dispatch_eval_result(result, snapshot)
+        if self.oms is not None:
+            self._maybe_apply_resolution_evidence()
 
     def _book_fingerprint(self, snapshot: DecisionSnapshot, instrument_id) -> str | None:
         """Hash of best bid/ask + touch sizes — used as a retry "material move" gate."""
@@ -283,6 +304,7 @@ class ShadowHost(ObserveHost):
             target = self.config.z_gap.target_notional
 
         unknown = bool(getattr(self, "_unknown_inventory", False))
+        cap = self._compose_resolution_capability()
         return DecisionContext(
             run_id=self.run_id,
             mode=self.config.risk.runtime_mode,
@@ -312,6 +334,8 @@ class ShadowHost(ObserveHost):
             ),
             exit_escalate=exit_escalate,
             exit_urgency=self.retry.exit.urgency,
+            resolution_capability=cap,
+            ponr_reached=self._ponr_reached(snapshot),
         )
 
     def _process_transition(
@@ -421,18 +445,23 @@ class ShadowHost(ObserveHost):
         for raw_intent in transition.intents:
             intent = self._attach_attempt_id(raw_intent, snapshot, signal, now)
             self.intents.append(intent)
+            is_hold_res = isinstance(intent, HoldToResolutionIntent)
+            intent_fact = {
+                "intent_id": intent.intent_id.value,
+                "kind": intent.kind.value,
+                "reason_code": intent.reason_code,
+                "semantic_key": intent.semantic_key(),
+                "observe_only": False,
+                "oms_submit": not is_hold_res,
+                "economics_label": "estimated",
+                "fee_label": "shadow_model",
+            }
+            if is_hold_res:
+                intent_fact["window_id"] = intent.window_id
+                intent_fact["operation"] = "hold_to_resolution"
             self._emit(
                 "intent_created",
-                {
-                    "intent_id": intent.intent_id.value,
-                    "kind": intent.kind.value,
-                    "reason_code": intent.reason_code,
-                    "semantic_key": intent.semantic_key(),
-                    "observe_only": False,
-                    "oms_submit": True,
-                    "economics_label": "estimated",
-                    "fee_label": "shadow_model",
-                },
+                intent_fact,
                 causation_id=intent.causation_id,
                 strategy_id=getattr(intent, "strategy_id", None),
             )
@@ -454,6 +483,7 @@ class ShadowHost(ObserveHost):
                     dedup=base.dedup,
                     exposure_available=True,
                     portfolio=self._portfolio_view(inst.value),
+                    resolution_capability_available=base.resolution_capability_available,
                 )
 
             decision = self.risk_engine.evaluate(intent, risk_ctx)
@@ -490,6 +520,9 @@ class ShadowHost(ObserveHost):
     def _execute_approved(self, intent, risk_decision, snapshot) -> None:
         assert self.oms is not None
         now = self.clock.now_utc()
+        if isinstance(intent, HoldToResolutionIntent):
+            self._execute_hold_to_resolution(intent, risk_decision, snapshot, now=now)
+            return
         if isinstance(intent, EnterIntent):
             book = (
                 snapshot.yes_book
@@ -567,6 +600,24 @@ class ShadowHost(ObserveHost):
             return
 
         if isinstance(intent, (ExitIntent, FlattenIntent)):
+            if self.lifecycle.state in {
+                LifecycleState.RESOLUTION_CONFIRMED,
+            } or (
+                self.lifecycle.state is LifecycleState.RESOLUTION_PENDING
+                and self._ponr_reached(snapshot)
+            ):
+                self._emit(
+                    "resolution_exit_blocked",
+                    {
+                        "intent_id": intent.intent_id.value,
+                        "lifecycle": self.lifecycle.state.value,
+                        "reason": "no_fabricated_sell_after_resolution_commitment",
+                        "operator_attention": True,
+                    },
+                    causation_id=intent.causation_id,
+                    strategy_id=intent.strategy_id,
+                )
+                return
             qty = self.portfolio.net_quantity(intent.instrument_id)
             book = (
                 snapshot.yes_book
@@ -647,6 +698,224 @@ class ShadowHost(ObserveHost):
             self.retry.note_exit_submitted()
             self.oms.submit(cmd, order_id=eid)
             self._maybe_persist()
+
+    def _execute_hold_to_resolution(
+        self, intent: HoldToResolutionIntent, risk_decision, snapshot, *, now: datetime
+    ) -> None:
+        """Accept resolution commitment — no OMS / no fabricated sell."""
+        del snapshot
+        cap = self._compose_resolution_capability()
+        if not cap.available:
+            self._emit(
+                "resolution_capability_rejected",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "reason": "capability_unavailable",
+                    "risk_decision_id": risk_decision.decision_id.value,
+                },
+                causation_id=intent.causation_id,
+                strategy_id=intent.strategy_id,
+            )
+            return
+        self.lifecycle.note_resolution_committed(window_id=intent.window_id, when=now)
+        self._emit(
+            "resolution_committed",
+            {
+                "intent_id": intent.intent_id.value,
+                "window_id": intent.window_id,
+                "instrument_id": intent.instrument_id.value,
+                "lifecycle": self.lifecycle.state.value,
+                "ponr_before_event_end_s": cap.ponr_before_event_end_s,
+                "economics_label": "estimated",
+                "note": "framework-owned commitment; settlement pending evidence",
+            },
+            causation_id=intent.causation_id,
+            strategy_id=intent.strategy_id,
+        )
+        self._maybe_persist()
+        # Settlement is applied from _dispatch_eval_result after intents.
+
+    def _load_resolution_evidence_queue(self, fixture_path: Path) -> None:
+        candidates: list[Path] = [fixture_path]
+        zg = self.config.z_gap
+        if zg is not None and zg.resolution_evidence_path:
+            alt = Path(zg.resolution_evidence_path)
+            if not alt.is_absolute():
+                alt = fixture_path.parent / alt.name if (fixture_path.parent / alt.name).exists() else alt
+            candidates.insert(0, alt)
+        for path in candidates:
+            try:
+                rows = load_resolution_evidence_events(path)
+            except (OSError, KeyError, ValueError, json.JSONDecodeError, TypeError):
+                continue
+            if rows:
+                self._resolution_evidence_queue = rows
+                return
+        self._resolution_evidence_queue = []
+
+    def _maybe_apply_resolution_evidence(self) -> None:
+        """Apply the earliest ready evidence while RESOLUTION_PENDING (idempotent)."""
+        if self.oms is None:
+            return
+        life = self.lifecycle.view()
+        if life.state not in {
+            LifecycleState.RESOLUTION_PENDING,
+            LifecycleState.RESOLUTION_CONFIRMED,
+        }:
+            return
+        if life.settlement_applied_id is not None:
+            return
+        if life.instrument_id is None or life.resolution_window_id is None:
+            return
+        market = self.registry.market
+        if market is None:
+            return
+        now = self.clock.now_utc()
+        pending = [
+            (ts, ev)
+            for ts, ev in self._resolution_evidence_queue
+            if ts <= now and (not ev.evidence_id or ev.evidence_id not in self._resolution_evidence_applied)
+        ]
+        if not pending:
+            self._emit(
+                "resolution_evidence_pending",
+                {
+                    "lifecycle": life.state.value,
+                    "window_id": life.resolution_window_id,
+                    "note": "missing_or_future_evidence; remain pending/blocked",
+                },
+            )
+            return
+
+        zg = self.config.z_gap
+        expected_k = None if zg is None else zg.ptb_k
+        rule = BinaryResolutionRule(
+            market_id=market.market_id,
+            window_id=life.resolution_window_id,
+            event_start=market.event_start,
+            event_end=market.event_end,
+        )
+        for ts, evidence in pending:
+            eid = evidence.evidence_id or f"anon:{ts.isoformat()}"
+            try:
+                validated = validate_resolution_evidence(
+                    evidence,
+                    market_id=market.market_id,
+                    window_id=life.resolution_window_id,
+                    expected_k=expected_k,
+                    rule=rule,
+                )
+            except ResolutionEvidenceError as exc:
+                self._emit(
+                    "resolution_evidence_rejected",
+                    {
+                        "evidence_id": eid,
+                        "error": str(exc),
+                        "note": "no portfolio/lifecycle mutation",
+                    },
+                )
+                self._resolution_evidence_applied.add(eid)
+                continue
+
+            assert validated.resolved_side is not None
+            held_side = (
+                OutcomeSide.YES
+                if life.instrument_id == market.yes.instrument_id
+                else OutcomeSide.NO
+            )
+            evidence_id = validated.evidence_id or eid
+            # Resume incomplete settlement after portfolio already flattened.
+            if life.state is LifecycleState.RESOLUTION_CONFIRMED and (
+                life.resolution_evidence_id == evidence_id
+                or life.settlement_applied_id == evidence_id
+            ):
+                self.lifecycle.note_resolution_settled(
+                    settlement_id=evidence_id, when=now
+                )
+                self._resolution_evidence_applied.add(evidence_id)
+                self._maybe_persist()
+                return
+
+            qty = self.portfolio.net_quantity(life.instrument_id)
+            pos = self.portfolio.get(life.instrument_id)
+            if qty <= 0 or pos is None:
+                self._emit(
+                    "resolution_settlement_blocked",
+                    {
+                        "evidence_id": evidence_id,
+                        "reason": "no_confirmed_quantity",
+                        "lifecycle": life.state.value,
+                    },
+                )
+                if life.state is LifecycleState.RESOLUTION_CONFIRMED:
+                    self.lifecycle.note_resolution_settled(
+                        settlement_id=evidence_id, when=now
+                    )
+                    self._resolution_evidence_applied.add(evidence_id)
+                    self._maybe_persist()
+                return
+            payout = simulated_payout_per_share(
+                held_side=held_side, resolved_side=validated.resolved_side
+            )
+            self._emit(
+                "resolution_evidence_accepted",
+                {
+                    "evidence_id": evidence_id,
+                    "resolved_side": validated.resolved_side.value,
+                    "settlement_price": None
+                    if validated.settlement_price is None
+                    else str(validated.settlement_price),
+                    "boundary_k": str(validated.boundary_k),
+                    "source": validated.source,
+                    "provenance": validated.provenance,
+                    "label": "simulated_resolution_evidence",
+                },
+            )
+            event = new_simulated_settlement(
+                correlation_id=self.correlation_id,
+                causation_id=None,
+                when=now,
+                market_id=market.market_id,
+                window_id=life.resolution_window_id,
+                instrument_id=life.instrument_id,
+                held_side=held_side,
+                resolved_side=validated.resolved_side,
+                quantity=qty,
+                payout_per_share=payout,
+                entry_cost_total=pos.total_cost,
+                evidence_id=evidence_id,
+                evidence={
+                    "source": validated.source,
+                    "provenance": validated.provenance,
+                    "economics_label": "simulated_shadow",
+                },
+            )
+            # Mark evidence before payout so recovery can resume if publish is interrupted.
+            self.lifecycle.note_resolution_evidence_accepted(
+                evidence_id=evidence_id, when=now
+            )
+            self.dispatcher.publish(event)
+            self.lifecycle.note_resolution_settled(
+                settlement_id=evidence_id, when=now
+            )
+            self._resolution_evidence_applied.add(evidence_id)
+            self._emit(
+                "simulated_resolution_settled",
+                {
+                    "evidence_id": evidence_id,
+                    "held_side": held_side.value,
+                    "resolved_side": validated.resolved_side.value,
+                    "quantity": str(qty),
+                    "payout_per_share": str(payout),
+                    "payout_total": str(event.payout_total),
+                    "simulated_realized_pnl": str(event.simulated_realized_pnl),
+                    "economics_label": "simulated_shadow",
+                    "pnl_label": "simulated_shadow_pnl",
+                    "lifecycle": self.lifecycle.state.value,
+                },
+            )
+            self._maybe_persist()
+            return
 
     def _maybe_persist(self) -> None:
         if self._persist is None or self.config.shadow is None or self.config.risk is None:
@@ -762,8 +1031,10 @@ class ShadowHost(ObserveHost):
                 self.try_recover()
             except PersistenceError:
                 pass
+            self._load_resolution_evidence_queue(self.config.fixture_path)
             self._publish_fixture_timeline(market)
             self._run_timer_evaluations()
+            self._maybe_apply_resolution_evidence()
             self.binding.on_stop("NORMAL")
             self._maybe_persist()
             self._emit(

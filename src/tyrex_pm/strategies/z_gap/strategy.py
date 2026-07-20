@@ -10,7 +10,13 @@ from typing import Any
 
 from tyrex_pm.core.ids import StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent, new_intent_id
+from tyrex_pm.core.intents import (
+    EnterIntent,
+    ExitIntent,
+    FlattenIntent,
+    HoldToResolutionIntent,
+    new_intent_id,
+)
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.lifecycle.trade_lifecycle import LifecycleState
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
@@ -19,6 +25,8 @@ from tyrex_pm.strategies.z_gap.config import ZGapConfig
 from tyrex_pm.strategies.z_gap.decision_input import ZGapDecisionSnapshot
 from tyrex_pm.strategies.z_gap.policies import (
     NormalizedRiskFlags,
+    ResolutionPreference,
+    TimeResolutionResult,
     combine_precedence,
     evaluate_readiness,
     evaluate_realization,
@@ -40,6 +48,7 @@ _EXIT_BUSY = frozenset(
         LifecycleState.EXIT_PENDING,
         LifecycleState.EXIT_RETRY_WAIT,
         LifecycleState.MANUAL_INTERVENTION,
+        LifecycleState.RESOLUTION_CONFIRMED,
     }
 )
 
@@ -143,13 +152,18 @@ class ZGapStrategy:
         self._decision_epoch_counter += 1
         self._last_epoch_id = decision_input.epoch.epoch_id
 
+        # After resolution commitment, kill must not fabricate a sell.
+        committed = bool(
+            context.lifecycle is not None and context.lifecycle.resolution_committed
+        )
+        kill_as_emergency = context.kill_switch_active and not committed
         flags = NormalizedRiskFlags(
             unknown_inventory=bool(
                 decision_input.capabilities.get("unknown_inventory", False)
             )
             or bool(context.unknown_inventory),
             emergency=bool(decision_input.capabilities.get("emergency", False)),
-            kill_switch=context.kill_switch_active,
+            kill_switch=kill_as_emergency,
         )
 
         basis = None
@@ -316,6 +330,10 @@ class ZGapStrategy:
         flags: NormalizedRiskFlags,
     ) -> tuple[StrategyDecision, list[IntentLike]]:
         assert decision_input.position is not None
+        committed = bool(
+            context.lifecycle is not None and context.lifecycle.resolution_committed
+        )
+        kill_as_emergency = context.kill_switch_active and not committed
         held = decision_input.position.held_leg
         book = (
             decision_input.up_book if held is ZGapLeg.UP else decision_input.down_book
@@ -338,15 +356,35 @@ class ZGapStrategy:
         )
         self._thesis_state = thesis.state
         realization = evaluate_realization(pos_val, config=self.config)
+        capable = bool(context.resolution_capability.available) or bool(
+            decision_input.capabilities.get("resolution_capability", False)
+        )
         time_res = evaluate_time_resolution(
             tau_s=decision_input.model.tau_s,
-            resolution_capability=bool(
-                decision_input.capabilities.get("resolution_capability", False)
-            ),
+            resolution_capability=capable,
             v_sell=pos_val.v_sell,
             v_resolve_adj=pos_val.v_resolve_adj,
             config=self.config,
         )
+        # While committed past PONR, do not allow sell preference to win.
+        if (
+            committed
+            and context.ponr_reached
+            and time_res.preference is ResolutionPreference.SELL
+            and time_res.reason_code is not ZGapReason.MARKET_RICH_EXIT
+        ):
+            # Keep hold preference sticky after PONR (except market-rich handled above).
+            if capable:
+                time_res = TimeResolutionResult(
+                    preference=ResolutionPreference.HOLD_RESOLUTION,
+                    reason_code=ZGapReason.RESOLUTION_PREFERENCE,
+                    evidence={
+                        **dict(time_res.evidence),
+                        "ponr_sticky": True,
+                        "ponr_reached": True,
+                    },
+                )
+
         policy = combine_precedence(
             flags=flags,
             model_valid=decision_input.model.ready,
@@ -356,6 +394,14 @@ class ZGapStrategy:
             entry_selection=None,
             flat=False,
         )
+        # Kill after commitment: report blocked/pending, never fabricate flatten sell.
+        if context.kill_switch_active and committed and not kill_as_emergency:
+            policy_action = StrategyAction.BLOCKED
+            policy_reason = ZGapReason.EMERGENCY_FLAG
+        else:
+            policy_action = policy.action
+            policy_reason = policy.reason_code
+
         evidence: dict[str, Any] = {
             "trigger": decision_input.trigger,
             "epoch_id": decision_input.epoch.epoch_id,
@@ -367,6 +413,9 @@ class ZGapStrategy:
                 if pos_val.market_richness is None
                 else str(pos_val.market_richness),
                 "v_sell": None if pos_val.v_sell is None else str(pos_val.v_sell),
+                "v_resolve_adj": None
+                if pos_val.v_resolve_adj is None
+                else str(pos_val.v_resolve_adj),
                 "p_held": None if pos_val.p_held is None else str(pos_val.p_held),
                 "remaining_hold_edge": None
                 if pos_val.remaining_hold_edge is None
@@ -382,39 +431,91 @@ class ZGapStrategy:
             "thesis_confirming": thesis.confirming,
             "realization": realization.reason_code.value,
             "time_resolution": time_res.reason_code.value,
+            "resolution_capability": capable,
+            "resolution_committed": committed,
+            "ponr_reached": context.ponr_reached,
             "exit_outstanding": bool(
                 context.lifecycle is not None and context.lifecycle.state in _EXIT_BUSY
             ),
+            "sell_vs_resolve": {
+                "v_sell": None if pos_val.v_sell is None else str(pos_val.v_sell),
+                "v_resolve_adj": None
+                if pos_val.v_resolve_adj is None
+                else str(pos_val.v_resolve_adj),
+                "preference": time_res.preference.value,
+                "label": "counterfactual_comparison",
+            },
         }
 
         intents: list[IntentLike] = []
         emit_exits = self._may_emit_exit_intents(decision_input, context)
-        if emit_exits and policy.action in {StrategyAction.EXIT, StrategyAction.FLATTEN}:
-            escalate = (
-                policy.action is StrategyAction.FLATTEN
-                or context.exit_escalate
-                or context.kill_switch_active
+        life = context.lifecycle
+        resolution_pending = (
+            life is not None and life.state is LifecycleState.RESOLUTION_PENDING
+        )
+        resolution_confirmed = (
+            life is not None and life.state is LifecycleState.RESOLUTION_CONFIRMED
+        )
+
+        if (
+            policy_action is StrategyAction.HOLD
+            and policy_reason is ZGapReason.RESOLUTION_PREFERENCE
+            and capable
+            and emit_exits
+            and not committed
+        ):
+            intent = self._make_hold_to_resolution_intent(
+                decision_input=decision_input, context=context, held=held
             )
-            life = context.lifecycle
-            exit_busy = life is not None and life.state in _EXIT_BUSY
-            if exit_busy and not escalate and not context.exit_escalate:
-                evidence["exit_suppressed"] = "EXIT_ALREADY_OUTSTANDING"
-            elif not context.exit_allowed and not escalate:
-                evidence["exit_suppressed"] = context.exit_block_reason or "EXIT_BLOCKED"
+            intents.append(intent)
+            evidence["intent_id"] = intent.intent_id.value
+            evidence["intent_kind"] = "HOLD_TO_RESOLUTION"
+        elif (
+            resolution_confirmed
+            and policy_action in {StrategyAction.EXIT, StrategyAction.FLATTEN, StrategyAction.HOLD}
+        ):
+            # Evidence accepted; settlement in progress — never fabricate a sell.
+            evidence["exit_suppressed"] = "RESOLUTION_CONFIRMED"
+            policy_action = StrategyAction.HOLD
+            policy_reason = ZGapReason.RESOLUTION_PREFERENCE
+        elif emit_exits and policy_action in {StrategyAction.EXIT, StrategyAction.FLATTEN}:
+            escalate = (
+                policy_action is StrategyAction.FLATTEN
+                or context.exit_escalate
+                or (context.kill_switch_active and not committed)
+            )
+            # After PONR commitment: no sell lineage.
+            if resolution_pending and context.ponr_reached and not escalate:
+                evidence["exit_suppressed"] = "RESOLUTION_PONR"
+                policy_action = StrategyAction.HOLD
+                policy_reason = ZGapReason.RESOLUTION_PREFERENCE
             else:
-                intent = self._make_exit_intent(
-                    decision_input=decision_input,
-                    context=context,
-                    held=held,
-                    action=policy.action,
-                    reason=policy.reason_code,
-                )
-                intents.append(intent)
-                evidence["intent_id"] = intent.intent_id.value
+                exit_busy = life is not None and life.state in _EXIT_BUSY
+                # RESOLUTION_PENDING counts as busy but pre-PONR sell is allowed.
+                if (
+                    exit_busy
+                    and life is not None
+                    and life.state is not LifecycleState.RESOLUTION_PENDING
+                    and not escalate
+                    and not context.exit_escalate
+                ):
+                    evidence["exit_suppressed"] = "EXIT_ALREADY_OUTSTANDING"
+                elif not context.exit_allowed and not escalate:
+                    evidence["exit_suppressed"] = context.exit_block_reason or "EXIT_BLOCKED"
+                else:
+                    intent = self._make_exit_intent(
+                        decision_input=decision_input,
+                        context=context,
+                        held=held,
+                        action=policy_action,
+                        reason=policy_reason,
+                    )
+                    intents.append(intent)
+                    evidence["intent_id"] = intent.intent_id.value
 
         decision = self._decision(
-            action=policy.action,
-            reason=policy.reason_code,
+            action=policy_action,
+            reason=policy_reason,
             decision_input=decision_input,
             evidence=evidence,
         )
@@ -426,6 +527,34 @@ class ZGapStrategy:
         if bool(decision_input.capabilities.get("emit_exit_intents", False)):
             return True
         return context.mode is RuntimeMode.SHADOW
+
+    def _make_hold_to_resolution_intent(
+        self,
+        *,
+        decision_input: ZGapDecisionSnapshot,
+        context: DecisionContext,
+        held: ZGapLeg,
+    ) -> HoldToResolutionIntent:
+        market = context.snapshot.market
+        instrument = market.yes if held is ZGapLeg.UP else market.no
+        return HoldToResolutionIntent(
+            intent_id=new_intent_id(),
+            strategy_id=self.STRATEGY_ID,
+            instrument_id=instrument.instrument_id,
+            market_id=market.market_id,
+            created_at=decision_input.observed_at,
+            correlation_id=decision_input.correlation_id,
+            causation_id=decision_input.causation_id,
+            reason_code=ZGapReason.RESOLUTION_PREFERENCE.value,
+            window_id=decision_input.window_id,
+            evidence={
+                "held_leg": held.value,
+                "epoch_id": decision_input.epoch.epoch_id,
+                "quantity_source": "confirmed_internal_portfolio",
+                "economics_label": "estimated",
+                "operation": "hold_to_resolution",
+            },
+        )
 
     def _make_exit_intent(
         self,

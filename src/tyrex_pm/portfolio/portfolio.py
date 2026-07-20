@@ -9,6 +9,7 @@ from decimal import Decimal
 from tyrex_pm.core.execution_events import OrderFilled, OrderPartiallyFilled
 from tyrex_pm.core.ids import InstrumentId, MarketId
 from tyrex_pm.core.intents import OrderSide
+from tyrex_pm.core.settlement_events import SimulatedResolutionSettled
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.execution.fill_ledger import FillLedger
 
@@ -57,6 +58,9 @@ class Portfolio:
     def attach(self, dispatcher: EventDispatcher) -> None:
         dispatcher.subscribe(OrderPartiallyFilled, self.on_fill, priority=self.PRIORITY)
         dispatcher.subscribe(OrderFilled, self.on_fill, priority=self.PRIORITY)
+        dispatcher.subscribe(
+            SimulatedResolutionSettled, self.on_simulated_settlement, priority=self.PRIORITY
+        )
 
     def set_market_id(self, market_id: MarketId) -> None:
         self._market_id = market_id
@@ -89,6 +93,34 @@ class Portfolio:
             fee=event.fee_amount,
             when=event.ts_event,
         )
+        self._applied.add(key)
+
+    def on_simulated_settlement(self, event: SimulatedResolutionSettled) -> None:
+        """Apply simulated binary payout — idempotent by evidence/settlement id."""
+        key = f"sim_settle:{event.evidence_id}"
+        if key in self._applied:
+            return
+        if event.economics_label != "simulated_shadow":
+            raise PortfolioError("refusing non-simulated settlement economics_label")
+        if self._market_id is None:
+            raise PortfolioError("market_id not set")
+        if event.market_id != self._market_id:
+            raise PortfolioError("settlement market_id mismatch")
+        pos = self.get(event.instrument_id)
+        if pos is None or pos.quantity <= 0:
+            # Already flat — treat as idempotent no-op if previously applied elsewhere
+            self._applied.add(key)
+            return
+        if event.quantity != pos.quantity:
+            raise PortfolioError(
+                f"settlement qty {event.quantity} != position {pos.quantity}"
+            )
+        # Realize simulated PnL and flatten without inventing a venue fill.
+        pos.realized_pnl += event.simulated_realized_pnl
+        pos.quantity = Decimal("0")
+        pos.total_cost = Decimal("0")
+        pos.average_entry_price = None
+        pos.updated_at = event.ts_event
         self._applied.add(key)
 
     def _apply(

@@ -24,6 +24,7 @@ class IntentKind(str, Enum):
     EXIT = "EXIT"
     CANCEL = "CANCEL"
     FLATTEN = "FLATTEN"
+    HOLD_TO_RESOLUTION = "HOLD_TO_RESOLUTION"
 
 
 class OrderSide(str, Enum):
@@ -202,6 +203,50 @@ class FlattenIntent:
                 self.market_id.value,
                 self.instrument_id.value,
                 self.kind.value,
+            )
+        )
+        attempt_id = self.evidence.get("attempt_id")
+        return base if not attempt_id else f"{base}|{attempt_id}"
+
+
+@dataclass(frozen=True, kw_only=True)
+class HoldToResolutionIntent:
+    """Request to hold confirmed inventory through binary market resolution.
+
+    Not a venue order. Framework validates capability and owns lifecycle.
+    Generic StrategyAction remains HOLD; this intent carries the operation.
+    """
+
+    intent_id: IntentId
+    strategy_id: StrategyId
+    instrument_id: InstrumentId
+    market_id: MarketId
+    created_at: datetime
+    correlation_id: CorrelationId
+    causation_id: EventId | None
+    reason_code: str
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    window_id: str = ""
+    kind: IntentKind = IntentKind.HOLD_TO_RESOLUTION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        if self.kind is not IntentKind.HOLD_TO_RESOLUTION:
+            raise ValueError("HoldToResolutionIntent.kind must be HOLD_TO_RESOLUTION")
+        if not self.reason_code.strip():
+            raise ValueError("reason_code must be non-empty")
+        if not self.window_id.strip():
+            raise ValueError("window_id must be non-empty")
+        object.__setattr__(self, "evidence", dict(self.evidence))
+
+    def semantic_key(self) -> str:
+        base = "|".join(
+            (
+                self.strategy_id.value,
+                self.market_id.value,
+                self.instrument_id.value,
+                self.kind.value,
+                self.window_id,
             )
         )
         attempt_id = self.evidence.get("attempt_id")

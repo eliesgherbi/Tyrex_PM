@@ -8,7 +8,7 @@ from pathlib import Path
 
 import tyrex_pm
 from tyrex_pm.core.ids import CorrelationId, StrategyId
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent
+from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent, HoldToResolutionIntent
 from tyrex_pm.strategies.decisions import IntentLike, StrategyAction, StrategyDecision
 
 ROOT = Path(tyrex_pm.__file__).resolve().parents[2]
@@ -99,8 +99,10 @@ def test_protocol_does_not_import_framework_validation() -> None:
     assert "EnterIntent" not in text or "IntentLike" in text
 
 
-def test_intent_like_accepts_enter_exit_flatten_only() -> None:
-    assert IntentLike == EnterIntent | ExitIntent | FlattenIntent
+def test_intent_like_accepts_enter_exit_flatten_and_hold_to_resolution() -> None:
+    # F5 adds HoldToResolutionIntent; F1 StrategyAction vocabulary stays unchanged.
+    assert IntentLike == EnterIntent | ExitIntent | FlattenIntent | HoldToResolutionIntent
+    assert "HOLD_TO_RESOLUTION" not in {a.value for a in StrategyAction}
 
 
 def test_strategy_decision_minimal_fields() -> None:

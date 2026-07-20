@@ -106,6 +106,11 @@ class ZGapObserveRuntimeConfig:
     p_stop: Decimal = Decimal("0.4013")
     stop_confirm_s: float = 1.0
     flatten_before_event_end_s: float = 20.0
+    # F5: composition-supplied resolution capability (default off)
+    resolution_capability: bool = False
+    ponr_before_event_end_s: float = 5.0
+    # Optional fixture path fragment for resolution evidence events
+    resolution_evidence_path: str | None = None
 
     def __post_init__(self) -> None:
         if not self.window_id.strip():
@@ -303,6 +308,13 @@ def _zgap_from_mapping(data: Mapping[str, Any]) -> ZGapObserveRuntimeConfig:
         p_stop=Decimal(str(data.get("p_stop", "0.4013"))),
         stop_confirm_s=float(data.get("stop_confirm_s", 1.0)),
         flatten_before_event_end_s=float(data.get("flatten_before_event_end_s", 20.0)),
+        resolution_capability=bool(data.get("resolution_capability", False)),
+        ponr_before_event_end_s=float(data.get("ponr_before_event_end_s", 5.0)),
+        resolution_evidence_path=(
+            None
+            if data.get("resolution_evidence_path") is None
+            else str(data.get("resolution_evidence_path"))
+        ),
     )
 
 

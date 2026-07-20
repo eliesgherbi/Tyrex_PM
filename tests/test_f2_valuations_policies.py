@@ -403,6 +403,7 @@ def test_realization_and_sell_beats_resolution() -> None:
     )
     assert hold.preference is ResolutionPreference.HOLD_RESOLUTION
 
+    # With capability on, near-deadline still re-compares (non-sticky); resolve can win.
     deadline = evaluate_time_resolution(
         tau_s=10.0,
         resolution_capability=True,
@@ -410,8 +411,19 @@ def test_realization_and_sell_beats_resolution() -> None:
         v_resolve_adj=Decimal("5.0"),
         config=cfg,
     )
-    assert deadline.preference is ResolutionPreference.SELL
-    assert deadline.reason_code is ZGapReason.TIME_SELL
+    assert deadline.preference is ResolutionPreference.HOLD_RESOLUTION
+    assert deadline.reason_code is ZGapReason.RESOLUTION_PREFERENCE
+
+    # TIME_SELL only when resolution capability is unavailable.
+    time_sell = evaluate_time_resolution(
+        tau_s=10.0,
+        resolution_capability=False,
+        v_sell=Decimal("4.0"),
+        v_resolve_adj=Decimal("5.0"),
+        config=cfg,
+    )
+    assert time_sell.preference is ResolutionPreference.SELL
+    assert time_sell.reason_code is ZGapReason.TIME_SELL
 
 
 def test_precedence_unknown_emergency_thesis_rich() -> None:

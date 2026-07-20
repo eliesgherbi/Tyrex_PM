@@ -335,7 +335,9 @@ class ZGapBinding:
             decision_context, epoch_placeholder_needed=True
         )
         capabilities = {
-            "resolution_capability": False,
+            "resolution_capability": bool(
+                decision_context.resolution_capability.available
+            ),
             "unknown_inventory": bool(decision_context.unknown_inventory),
         }
 
@@ -540,6 +542,9 @@ def zgap_config_from_runtime(zg) -> ZGapConfig:
                 getattr(zg, "flatten_before_event_end_s", 20.0)
             ),
             resolution_capability_default=False,
+            ponr_before_event_end_s=float(
+                getattr(zg, "ponr_before_event_end_s", 5.0)
+            ),
         ),
         ptb_time_quality=ZGapPtbTimeQualityConfig(basis_max_bps=zg.basis_max_bps),
         friction=ZGapFrictionConfig(

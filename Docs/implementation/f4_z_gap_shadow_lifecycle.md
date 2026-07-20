@@ -100,16 +100,15 @@ python -m pytest tests -q --tb=no
 
 Result: **450 passed** (baseline 434).
 
-## Explicit exclusions
+## Explicit exclusions (F4 scope)
 
-No real PTB/Chainlink/RTDS · no network TimeAuthority · no live OMS · no venue mutation · no HoldToResolutionIntent · no resolution-pending lifecycle · no threshold calibration · no `runtime/r7*` / `config/r7/` / `.env` edits.
+No real PTB/Chainlink/RTDS · no network TimeAuthority · no live OMS · no venue mutation · no threshold calibration · no `runtime/r7*` / `config/r7/` / `.env` edits.
 
 ## Unresolved real PTB/reference provider
 
 Still open. F4 uses fixture K only.
 
-## F5 prerequisites
+## F5 follow-on
 
-- Resolution capability flag + HoldToResolution path (still not a generic STOP action)
-- Resolution-pending lifecycle / settlement simulation
-- Still no live venue
+See `Docs/implementation/f5_z_gap_resolution_shadow.md` for resolution capability,
+`HoldToResolutionIntent`, PONR, and simulated settlement (still no live venue).

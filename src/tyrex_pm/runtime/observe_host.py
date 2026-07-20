@@ -471,6 +471,31 @@ class ObserveHost:
         self._dispatch_eval_result(result, snapshot)
         return result.decision
 
+    def _compose_resolution_capability(self):
+        from tyrex_pm.domain.polymarket.resolution_capability import (
+            DISABLED_RESOLUTION,
+            ResolutionCapability,
+            ResolutionCapabilityStatus,
+        )
+
+        zg = self.config.z_gap
+        if zg is None or not bool(getattr(zg, "resolution_capability", False)):
+            return DISABLED_RESOLUTION
+        return ResolutionCapability(
+            status=ResolutionCapabilityStatus.AVAILABLE,
+            ponr_before_event_end_s=float(
+                getattr(zg, "ponr_before_event_end_s", 5.0)
+            ),
+        )
+
+    def _ponr_reached(self, snapshot: DecisionSnapshot) -> bool:
+        cap = self._compose_resolution_capability()
+        if not cap.available:
+            return False
+        now = self.clock.now_utc()
+        tau = (snapshot.market.event_end - now).total_seconds()
+        return tau <= cap.ponr_before_event_end_s
+
     def _build_decision_context(
         self, snapshot: DecisionSnapshot, signal: DirectionalSignal | None = None
     ) -> DecisionContext | None:
@@ -490,6 +515,8 @@ class ObserveHost:
                 else Decimal("5")
             )
         )
+        cap = self._compose_resolution_capability()
+        ponr = self._ponr_reached(snapshot)
         if self.config.risk is None:
             # Momentum evaluate-only: None → binding uses strategy.evaluate
             # Z-Gap always needs a context — supply OBSERVE shell.
@@ -502,6 +529,8 @@ class ObserveHost:
                     max_price=None,
                     kill_switch_active=self._kill_switch,
                     now=self.clock.now_utc(),
+                    resolution_capability=cap,
+                    ponr_reached=ponr,
                 )
             return None
         return DecisionContext(
@@ -512,6 +541,8 @@ class ObserveHost:
             max_price=self.config.risk.max_price,
             kill_switch_active=self._kill_switch,
             now=self.clock.now_utc(),
+            resolution_capability=cap,
+            ponr_reached=ponr,
         )
 
     def _dispatch_eval_result(
@@ -537,22 +568,27 @@ class ObserveHost:
         """Record economic intents as facts only — no OMS, fills, or portfolio."""
         for intent in intents:
             self.intents.append(intent)
+            payload = {
+                "intent_id": intent.intent_id.value,
+                "kind": intent.kind.value,
+                "instrument_id": intent.instrument_id.value,
+                "market_id": intent.market_id.value,
+                "semantic_key": intent.semantic_key(),
+                "reason_code": intent.reason_code,
+                "observe_only": True,
+                "oms_submit": False,
+                "economics_label": "estimated",
+                "valuation_label": "counterfactual",
+            }
+            if hasattr(intent, "target_notional"):
+                payload["target_notional"] = str(intent.target_notional)
+            if hasattr(intent, "outcome"):
+                payload["outcome"] = intent.outcome.value
+            if hasattr(intent, "window_id"):
+                payload["window_id"] = intent.window_id
             self._emit(
                 "intent_created",
-                {
-                    "intent_id": intent.intent_id.value,
-                    "kind": intent.kind.value,
-                    "instrument_id": intent.instrument_id.value,
-                    "market_id": intent.market_id.value,
-                    "target_notional": str(intent.target_notional),
-                    "outcome": intent.outcome.value,
-                    "semantic_key": intent.semantic_key(),
-                    "reason_code": intent.reason_code,
-                    "observe_only": True,
-                    "oms_submit": False,
-                    "economics_label": "estimated",
-                    "valuation_label": "counterfactual",
-                },
+                payload,
                 causation_id=intent.causation_id,
                 strategy_id=intent.strategy_id,
             )
@@ -560,7 +596,7 @@ class ObserveHost:
                 "intent_observe_no_oms",
                 {
                     "intent_id": intent.intent_id.value,
-                    "note": "OBSERVE records would-enter intent; no order/fill/portfolio",
+                    "note": "OBSERVE records would-intent only; no order/fill/portfolio",
                 },
                 causation_id=intent.causation_id,
                 strategy_id=intent.strategy_id,

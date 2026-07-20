@@ -9,6 +9,10 @@ from decimal import Decimal
 from tyrex_pm.core.ids import RunId, StrategyId
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.domain.polymarket.market import BinaryMarket
+from tyrex_pm.domain.polymarket.resolution_capability import (
+    DISABLED_RESOLUTION,
+    ResolutionCapability,
+)
 from tyrex_pm.lifecycle.trade_lifecycle import LifecycleSnapshot
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 
@@ -48,3 +52,7 @@ class DecisionContext:
     position_cost_total: Decimal = Decimal("0")
     # Host-normalized inventory integrity flag (never guessed by strategy).
     unknown_inventory: bool = False
+    # Composition-supplied resolution capability (never inferred by strategy).
+    resolution_capability: ResolutionCapability = DISABLED_RESOLUTION
+    # True when wall τ is at/inside the configured point-of-no-return window.
+    ponr_reached: bool = False

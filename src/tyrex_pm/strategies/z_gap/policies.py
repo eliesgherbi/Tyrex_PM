@@ -2,7 +2,7 @@
 
 Consumes immutable snapshots/valuations + normalized flags.
 Emits strategy-level economic desire and stable reason codes.
-Does not emit HoldToResolutionIntent or mutate lifecycle (F5).
+Emits preference only; HoldToResolutionIntent is created by the thin strategy (F5).
 """
 
 from __future__ import annotations
@@ -444,17 +444,22 @@ def evaluate_time_resolution(
     config: ZGapConfig,
 ) -> TimeResolutionResult:
     """Semantic preference among SELL / CONTINUE / HOLD_RESOLUTION."""
-    if tau_s is not None and tau_s <= config.time_resolution.flatten_before_event_end_s:
-        return TimeResolutionResult(
-            preference=ResolutionPreference.SELL,
-            reason_code=ZGapReason.TIME_SELL,
-            evidence={"tau_s": tau_s},
-        )
-
-    # Capability is an explicit input (default unavailable until F5).
+    # Capability is an explicit input (composition-supplied; default unavailable).
     capable = bool(resolution_capability)
     if not capable:
         capable = bool(config.time_resolution.resolution_capability_default)
+
+    # Pre-resolution operational flatten: only when resolution hold is unavailable.
+    if (
+        tau_s is not None
+        and tau_s <= config.time_resolution.flatten_before_event_end_s
+        and not capable
+    ):
+        return TimeResolutionResult(
+            preference=ResolutionPreference.SELL,
+            reason_code=ZGapReason.TIME_SELL,
+            evidence={"tau_s": tau_s, "capable": False},
+        )
 
     if capable and v_sell is not None and v_resolve_adj is not None:
         margin = config.time_resolution.sell_vs_resolve_margin
@@ -549,13 +554,13 @@ def combine_precedence(
                 evidence={"layer": 6, **dict(time_res.evidence)},
             )
         if time_res.preference is ResolutionPreference.HOLD_RESOLUTION:
-            # F2: semantic only — maps to HOLD (no resolution intent)
+            # Generic action remains HOLD; strategy may emit HoldToResolutionIntent.
             return PolicyDecision(
                 action=StrategyAction.HOLD,
                 reason_code=ZGapReason.RESOLUTION_PREFERENCE,
                 resolution_preference=time_res.preference,
                 thesis_state=None if thesis is None else thesis.state,
-                evidence={"layer": 6, "note": "no_HoldToResolutionIntent_in_F2"},
+                evidence={"layer": 6, "emit_hold_to_resolution_intent": True},
             )
 
     if flat and entry_selection is not None:

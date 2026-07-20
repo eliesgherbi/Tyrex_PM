@@ -62,6 +62,8 @@ class RiskContext:
     # Never interpret missing exposure as zero.
     exposure_available: bool = False
     portfolio: PortfolioRiskView | None = None
+    # Composition-supplied: may the framework accept HoldToResolutionIntent?
+    resolution_capability_available: bool = False
 
     def quote_for_instrument(self, instrument_id: str) -> ExecutableQuote:
         if instrument_id == self.market.yes.instrument_id.value:

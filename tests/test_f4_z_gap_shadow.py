@@ -353,7 +353,12 @@ def test_f1_actions_unchanged() -> None:
         "FLATTEN",
         "BLOCKED",
     }
-    assert not hasattr(tyrex_pm.strategies.decisions, "HoldToResolutionIntent")
+    # F5: HoldToResolutionIntent is an IntentLike, not a StrategyAction.
+    assert "HOLD_TO_RESOLUTION" not in {a.value for a in StrategyAction}
+    from tyrex_pm.core.intents import HoldToResolutionIntent as _HTRI
+    from tyrex_pm.strategies.decisions import IntentLike
+
+    assert _HTRI in IntentLike.__args__
 
 
 def test_reference_momentum_shadow_still_works(tmp_path: Path) -> None:

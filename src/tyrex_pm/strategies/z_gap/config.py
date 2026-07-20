@@ -60,7 +60,10 @@ class ZGapTimeResolutionConfig:
     flatten_before_event_end_s: float = 20.0  # provisional operational default
     # Sell preferred when V_sell exceeds V_resolve,adj by this margin.
     sell_vs_resolve_margin: Decimal = Decimal("0.0")
-    resolution_capability_default: bool = False  # unavailable until F5
+    # Strategy-local default only when capability not supplied; composition wins.
+    resolution_capability_default: bool = False
+    # Point of no return: τ ≤ this while resolution-pending blocks sell exits.
+    ponr_before_event_end_s: float = 5.0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -111,6 +114,8 @@ def validate_zgap_config(cfg: ZGapConfig) -> None:
     tr = cfg.time_resolution
     if tr.flatten_before_event_end_s < 0:
         raise ValueError("flatten_before_event_end_s must be >= 0")
+    if tr.ponr_before_event_end_s < 0:
+        raise ValueError("ponr_before_event_end_s must be >= 0")
     q = cfg.ptb_time_quality
     if q.basis_max_bps < 0:
         raise ValueError("basis_max_bps must be >= 0")

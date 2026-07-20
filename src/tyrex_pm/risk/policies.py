@@ -10,6 +10,7 @@ from typing import Any
 from tyrex_pm.core.intents import EnterIntent, IntentKind
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.domain.polymarket.market import MarketStatus
+from tyrex_pm.domain.polymarket.resolution_capability import ResolutionCapabilityStatus
 from tyrex_pm.market_data.executable import executable_vwap
 from tyrex_pm.market_data.freshness import FreshnessReason
 from tyrex_pm.risk.context import RiskContext
@@ -41,6 +42,7 @@ class SchemaValidityPolicy:
             IntentKind.EXIT,
             IntentKind.FLATTEN,
             IntentKind.CANCEL,
+            IntentKind.HOLD_TO_RESOLUTION,
         }:
             return PolicyResult(
                 policy_id=self.policy_id,
@@ -100,18 +102,47 @@ class KillSwitchPolicy:
     policy_id = "kill_switch"
 
     def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
-        if context.risk_config.kill_switch_active and _is_entry(intent):
+        kind = getattr(intent, "kind", None)
+        if context.risk_config.kill_switch_active and (
+            _is_entry(intent) or kind is IntentKind.HOLD_TO_RESOLUTION
+        ):
             return PolicyResult(
                 policy_id=self.policy_id,
                 approved=False,
                 reason_code=RiskReason.KILL_SWITCH_ACTIVE,
             )
-        # Kill switch denies entries but permits risk-reducing cancel/flatten/exit.
+        # Kill switch denies entries/hold-to-resolution; permits exit/flatten/cancel.
         return PolicyResult(
             policy_id=self.policy_id,
             approved=True,
             reason_code=RiskReason.APPROVED,
             evidence={"kill_switch": context.risk_config.kill_switch_active},
+        )
+
+
+class ResolutionCapabilityPolicy:
+    """Fail closed: never accept HoldToResolution without explicit capability."""
+
+    policy_id = "resolution_capability"
+
+    def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
+        if getattr(intent, "kind", None) is not IntentKind.HOLD_TO_RESOLUTION:
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=True,
+                reason_code=RiskReason.APPROVED,
+                evidence={"skipped": "non_resolution_intent"},
+            )
+        if not context.resolution_capability_available:
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=False,
+                reason_code=RiskReason.RESOLUTION_CAPABILITY_UNAVAILABLE,
+            )
+        return PolicyResult(
+            policy_id=self.policy_id,
+            approved=True,
+            reason_code=RiskReason.APPROVED,
         )
 
 
@@ -217,6 +248,13 @@ class DataReadinessPolicy:
             feeds = feeds + (("reference", snap.reference_freshness),)
         elif getattr(intent, "kind", None) is IntentKind.FLATTEN:
             feeds = ()  # book recovery checked below
+        elif getattr(intent, "kind", None) is IntentKind.HOLD_TO_RESOLUTION:
+            return PolicyResult(
+                policy_id=self.policy_id,
+                approved=True,
+                reason_code=RiskReason.APPROVED,
+                evidence={"skipped": "hold_to_resolution"},
+            )
         for label, fresh in feeds:
             if fresh.reason_code is FreshnessReason.UNINITIALIZED:
                 return PolicyResult(
@@ -412,11 +450,20 @@ class PortfolioExposurePolicy:
 
     def evaluate(self, intent: Any, context: RiskContext) -> PolicyResult:
         view = context.portfolio
+        needs_portfolio = (
+            _is_entry(intent)
+            or _is_risk_reducing(intent)
+            or getattr(intent, "kind", None) is IntentKind.HOLD_TO_RESOLUTION
+        )
         if view is None or not view.available:
-            if _is_entry(intent) or _is_risk_reducing(intent):
+            if needs_portfolio:
                 # R4 dry path has no portfolio view — allow only when exposure_available
                 # is explicitly False and portfolio is None (backward compatible).
-                if context.portfolio is None and not context.exposure_available:
+                if (
+                    context.portfolio is None
+                    and not context.exposure_available
+                    and getattr(intent, "kind", None) is not IntentKind.HOLD_TO_RESOLUTION
+                ):
                     return PolicyResult(
                         policy_id=self.policy_id,
                         approved=True,
@@ -471,6 +518,26 @@ class PortfolioExposurePolicy:
                     reason_code=RiskReason.EXIT_EXCEEDS_POSITION,
                 )
 
+        if getattr(intent, "kind", None) is IntentKind.HOLD_TO_RESOLUTION:
+            if view.net_quantity <= 0:
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=False,
+                    reason_code=RiskReason.EXIT_EXCEEDS_POSITION,
+                    evidence={"note": "hold_requires_confirmed_quantity"},
+                )
+            if view.lifecycle_state in {
+                "RESOLUTION_PENDING",
+                "RESOLUTION_CONFIRMED",
+            }:
+                # Idempotent re-request while already committed — allow.
+                return PolicyResult(
+                    policy_id=self.policy_id,
+                    approved=True,
+                    reason_code=RiskReason.APPROVED,
+                    evidence={"lifecycle": view.lifecycle_state, "idempotent": True},
+                )
+
         return PolicyResult(
             policy_id=self.policy_id,
             approved=True,
@@ -483,6 +550,7 @@ DEFAULT_POLICY_ORDER: tuple[RiskPolicy, ...] = (
     SchemaValidityPolicy(),
     RuntimeModePolicy(),
     KillSwitchPolicy(),
+    ResolutionCapabilityPolicy(),
     DuplicateIntentPolicy(),
     InstrumentAllowlistPolicy(),
     MarketTimingPolicy(),
