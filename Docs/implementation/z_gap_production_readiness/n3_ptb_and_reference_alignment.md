@@ -12,9 +12,9 @@
 Evolve the existing provider-independent PTB and reference-basis contracts into
 production-ready services that:
 
-- Capture and classify \(K\) (candidate → confirmed/attested → locked → mismatched);
-- Preserve lock immutability;
-- Compute synchronized Chainlink/Binance basis and Chainlink-aligned Binance
+- Capture and classify \(K\) on **three orthogonal axes** (quality, lock, readiness);
+- Preserve lock immutability (locked \(K\) never mutates; mismatch evidence allowed);
+- Compute **causal** Chainlink/Binance basis and Chainlink-aligned Binance
   estimates without treating Binance as settlement truth;
 - Emit facts sufficient for later calibration.
 
@@ -33,22 +33,38 @@ false edges.
 
 ## 3. Scope
 
-### PTB lifecycle (if supported by N1 evidence)
+### PTB: three orthogonal axes (not one linear machine)
 
-| State | Meaning | Trading implication |
-|-------|---------|---------------------|
-| Candidate / provisional | Best current capture; not attested | OBSERVE OK with labels; entry gated by mode policy |
-| Independently confirmed / attested | Agrees with display and/or second source within tolerance | May upgrade quality toward `CONFIRMED_CANONICAL` |
-| Locked | Frozen for the window (especially once used for entry) | Immutable |
-| Mismatched / blocked | Sources disagree beyond tolerance | Fail closed for the window |
+Do **not** model PTB as `candidate → confirmed → locked → mismatched`.
 
-**Lock immutability:** never silently mutate a locked \(K\). If a later
-authoritative value conflicts, keep the locked snapshot, mark mismatch evidence,
-and fail closed for that window.
+| Axis | Values | Notes |
+|------|--------|-------|
+| **A. Capture quality** | candidate/provisional · attested/confirmed · mismatched | Attestation from N1-chosen sources |
+| **B. Lock state** | unlocked · locked | Locked value is immutable |
+| **C. Entry readiness** | allowed · blocked | Derived from quality + lock + mode policy |
 
-**Entry requirement (recommended provisional):** real SHADOW/live entry requires
-confirmed/attested K (not merely provisional). OBSERVE may evaluate with
-provisional K if explicitly labeled.
+Rules:
+
+- A locked \(K\) **never mutates**.
+- A locked \(K\) can later receive mismatch evidence → quality may become
+  mismatched / readiness **blocked** while preserving the locked numeric value.
+- Real SHADOW and live entry require **attested and locked** \(K\) (readiness allowed).
+- OBSERVE may evaluate a provisional (unlocked or locked) \(K\) only with explicit
+  provisional and counterfactual labels.
+- **Lock must occur before** any real SHADOW/live entry evaluation is accepted —
+  not “at entry” after economics were already evaluated.
+- Exact capture and attestation rule is determined by the N1 audit (provisional
+  until proven; runtime attestation remains active).
+
+### Exposure-aware consequences of PTB/basis degradation
+
+| Exposure | Behavior |
+|----------|----------|
+| FLAT | Block new exposure (entry readiness blocked) |
+| ACTIVE confirmed | Continue risk management; seek safe exit — do **not** invent flatness |
+| UNKNOWN | Reconcile; never guess quantity |
+
+Entry readiness and exit capability are separate.
 
 ### Synchronized basis and aligned estimate
 
@@ -70,24 +86,33 @@ Window-relative equivalent (evaluate; do not assume equivalence without evidence
 \hat{C}_t = K \cdot (B_t / B_0)
 \]
 
-where \(B_0\) is Binance at the PTB lock / boundary pairing.
+where \(B_0\) is Binance at the PTB lock / boundary pairing under the **causal** policy.
 
 **Reject:** comparing raw Binance price directly to Chainlink \(K\) as if they
 were the same series.
 
-### Pairing and gates
+### Causal pairing and gates (live/production)
+
+**Policy ID:** `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK`
 
 | Concern | Plan |
 |---------|------|
-| Timestamp pairing | Pair \(C_t\) and \(B_t\) by nearest `source_ts` within max skew |
-| Interpolation | Prefer nearest-tick; interpolation only if N1 shows necessity |
-| Max pairing skew | Config; provisional default from N1 (open decision) |
+| Timestamp pairing | For each Chainlink tick \(C\) with `source_ts = t_C`, choose latest Binance tick with `source_ts ≤ t_C` |
+| Look-ahead | **Forbidden** in live/replay of live policy |
+| Max age/skew | \(t_C - t_B ≤\) max skew (from N1; open until measured) |
+| Timestamps recorded | source_ts, corrected receive-wall, monotonic receive, clock uncertainty |
+| Interpolation / symmetric nearest | **Offline analysis only**, explicitly labelled — creates look-ahead bias if a later Binance tick is used |
 | Basis freshness | Age of \(b_{\mathrm{latest}}\) vs max age |
 | Basis drift limits | Max \|Δb\| over window / short horizon |
-| Divergence gates | \|b\| or bps form vs `basis_max` policy (Z-Gap config owns threshold) |
+| Divergence gates | \|b\| or bps form vs `basis_max` (Z-Gap config) |
 | Precedence | Chainlink-direct for settlement path; Binance-proxy \(\hat{C}\) for model \(S\) when configured |
-| After reconnect | Invalidate basis until both series fresh and re-paired |
-| Deterministic replay | Pure functions of recorded ticks + explicit pairing policy id |
+| After reconnect | Invalidate basis until both series fresh and re-paired causally |
+| Deterministic replay | Same ordered ingress → same aligned snapshot; preserve arrival order |
+| Lateness budget | Bounded event-time buffer; budget measured N1, frozen here |
+
+**Why not symmetric nearest:** choosing a Binance tick after \(t_C\) uses future
+information relative to the Chainlink event and biases basis/\(\hat{C}\) in live
+decisions.
 
 ---
 
@@ -149,11 +174,13 @@ From N1 (must be frozen or explicitly provisional with owner):
 | Item | Change |
 |------|--------|
 | `PtbSourceClass` | Ensure `SETTLEMENT_BOUNDARY` used for real capture; add attestation class if needed |
-| `PtbQuality` | Document upgrade path provisional → confirmed |
+| Capture quality axis | provisional / attested / mismatched (orthogonal to lock) |
+| Lock state | unlocked / locked; immutable value when locked |
+| Entry readiness | allowed / blocked (mode-aware) |
 | Capture rule id | Versioned string in `provenance_ref` / attestation map |
-| `AlignedReferenceSnapshot` | \(B_t\), \(C_t\), \(b_t\), \(\hat{C}_t\), skew_ms, freshness, validity |
+| `AlignedReferenceSnapshot` | \(B_t\), \(C_t\), \(b_t\), \(\hat{C}_t\), skew_ms, freshness, validity, **pairing_policy_id** |
 | Log-basis helper | Pure indicator alongside or evolving `compute_basis_bps` |
-| Pairing policy | Explicit enum: `NEAREST_WITHIN_SKEW` (initial) |
+| Pairing policy | Live: `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK`; offline-only: labelled nearest/interp |
 
 ---
 
@@ -176,20 +203,21 @@ Adapters: consume only; no new venue mutation.
 ## 10. End-to-end data or control flow
 
 ```text
-RTDS Chainlink ticks + Binance ticks
-  → pairing (source_ts within max_skew)
+RTDS Chainlink ticks + Binance ticks (ordered ingress)
+  → causal pair: latest B with source_ts ≤ C.source_ts within max skew
   → b_t = ln(C_t / B_t)
   → C_hat_t = B_t * exp(b_latest)
 
-Boundary / capture rule (N1-frozen)
-  → candidate PtbSnapshot (PROVISIONAL)
-  → optional attestation vs display / second source
-  → quality upgrade or MISMATCHED
-  → lock on policy trigger (e.g. first usable confirmed, or at entry)
+Boundary / capture rule (N1 provisional or proven)
+  → candidate quality (provisional)
+  → optional attestation → attested/confirmed or mismatched
+  → lock when attestation policy satisfied (before entry eval)
+  → readiness allowed only if attested+locked (SHADOW/live)
 
 assemble_zgap_decision_snapshot
   → model uses K + S(=B or C_hat per config) + basis validity
-  → readiness fail-closed if K mismatched / basis stale / skew exceeded
+  → entry blocked if readiness blocked / basis stale / skew exceeded
+  → ACTIVE exposure still eligible for exit policies
 ```
 
 ---
@@ -198,11 +226,12 @@ assemble_zgap_decision_snapshot
 
 | Failure | Behavior |
 |---------|----------|
-| No post-boundary Chainlink tick within max lag | `LATE` / missing; block entry |
-| Locked K vs new attestation disagree | Keep locked K; `MISMATCHED`; block window |
-| Skew > max | Basis INVALID/STALE; block entry; cautious exits later |
+| No post-boundary Chainlink tick within max lag | Late/missing quality; entry blocked |
+| Locked K vs new attestation disagree | Keep locked K; mismatch evidence; entry blocked; ACTIVE may still exit |
+| Skew > max (causal pair unavailable) | Basis invalid/stale; entry blocked |
 | One feed reconnecting | Basis not ready until re-paired |
-| \(B_0\) missing for window-relative form | Disable that estimator; fall back to log-basis form or block |
+| \(B_0\) missing for window-relative form | Disable that estimator; fall back to log-basis form or block entry |
+| Late boundary tick in buffer | Retain for audit/attestation; apply lateness policy |
 
 ---
 
@@ -263,14 +292,16 @@ tiny live once engineering gates pass.
 
 ## 16. Deterministic acceptance criteria
 
-1. Real ticks can produce `PtbSnapshot` with provenance and quality classes.
-2. Locked K is immutable under conflicting input.
-3. Log-basis \(b_t\) and \(\hat{C}_t\) implemented as pure, tested functions.
-4. Max skew / freshness / drift gates fail closed.
-5. Z-Gap binding no longer uses Binance-as-Chainlink stand-in when real dual refs are configured.
-6. Window-relative estimator evaluated and either adopted with evidence or documented as rejected/ deferred.
-7. Facts cover candidate/confirm/lock/mismatch/basis.
-8. Pytest green; no OMS.
+1. Real ticks can produce PTB with quality / lock / readiness axes and provenance.
+2. Locked K is immutable under conflicting input; mismatch evidence does not rewrite K.
+3. Log-basis \(b_t\) and \(\hat{C}_t\) implemented as pure, tested functions under
+   `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK`.
+4. Live path never uses future Binance ticks relative to Chainlink `source_ts`.
+5. Max skew / freshness / drift / lateness gates block **entry** when violated.
+6. Z-Gap binding no longer uses Binance-as-Chainlink stand-in when real dual refs are configured.
+7. Window-relative estimator evaluated and either adopted with evidence or documented as rejected/deferred.
+8. Facts cover candidate/attest/lock/mismatch/basis/pairing_policy_id.
+9. Pytest green; no OMS.
 
 ---
 
@@ -296,11 +327,13 @@ tiny live once engineering gates pass.
 
 | Decision | Provisional default |
 |----------|---------------------|
-| Boundary sampling | Legacy candidate: first Chainlink tick with `source_ts >= event_start` within max lag — **confirm in N1** |
-| Confirmation | Display agreement and/or dual-source bps tolerance |
-| Entry K class (real SHADOW) | Require confirmed/attested |
-| Max skew | Open — measure in N1; do not invent |
-| \(C\) vs \(\hat{C}\) as model \(S\) | Prefer \(\hat{C}\) when trading on Binance books latency; always gate on basis |
+| Boundary sampling | Legacy candidate: first Chainlink tick with `source_ts >= event_start` within max lag — **confirm/measure in N1**; label provisional if unproven |
+| Confirmation | Display agreement and/or dual-source bps; runtime attestation stays on |
+| Lock trigger | After attested capture, **before** entry evaluation |
+| Entry readiness (real SHADOW/live) | Attested **and** locked |
+| Live pairing | `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK` |
+| Max skew / lateness | **OPEN** — measure in N1 |
+| \(C\) vs \(\hat{C}\) as model \(S\) | Prefer \(\hat{C}\) when trading on Binance latency; always gate on basis |
 
 ---
 

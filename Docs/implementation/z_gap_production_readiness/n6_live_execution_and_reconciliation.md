@@ -54,13 +54,14 @@ fills, reconciliation, and restart semantics — before any tiny live money.
 | Balance reconciliation | Funder conditional balance authoritative for sellability |
 | Portfolio / inventory reconciliation | Internal vs venue; UNKNOWN on conflict |
 | Restart with pending orders | Reconcile before new risk |
-| Retry / idempotency | Bounded retry; no duplicate entry lineage |
+| Retry / idempotency | **Verify** venue client-order support; else framework lineage (see below) |
 | Kill switch | Shared risk; operator command |
-| Stale-near-expiry | Fail-closed flatten or block |
+| Stale-near-expiry | Scope A timing ladder: flatten/block — no silent hold |
 | Actual realized P&L | Confirmed fills/fees only |
 | Audit facts | Full order lifecycle |
 | Operator commands | Preflight, recon, kill, abort |
 | Fail-closed startup | Dirty worktree / failed recon / missing readiness → no submit |
+| Authenticated read-only acceptance | **Required** before N7 (mutations still disabled) |
 
 ### Resolution vs execution (must not conflate)
 
@@ -78,10 +79,18 @@ Simulated payout ≠ Redeemed proceeds
 | Property | Value |
 |----------|-------|
 | Resolution hold | **Disabled** |
-| Monetization | Mandatory pre-resolution exit |
+| Monetization | Mandatory pre-resolution exit via **timing ladder** (see initiative README / N7) |
 | Redeem | **Not required** |
 | Lifecycle | Entry → exit → flat before event end |
-| Extra work vs N5 | LiveOMS + user fills + recon + ack/timeouts |
+| Extra work vs N5 | LiveOMS + user fills + recon + ack/timeouts + auth read-only gate |
+
+Scope A deadlines (relative to authoritative `event_end`; numeric freeze before N7):
+
+last allowed entry · discretionary exit cutoff · mandatory flatten start ·
+ack timeout · cancel/recon budget · final residual/operator deadline ·
+event-end safety buffer.
+
+Late entry is **skipped**. Scope A never silently becomes hold-to-resolution.
 
 #### Scope B — full live strategy
 
@@ -161,9 +170,11 @@ When N6 is later implemented: still no Z-Gap money until N7.
 | Execution events | Ack, partial fill, cancel, reject, ambiguous |
 | Recon report | Open orders, balances, positions, disagreement class |
 | Live readiness | Feed + auth + clock + inventory flatness + kill clear |
-| Idempotency keys | client_order_id namespace per strategy/window |
+| Idempotency | **OPEN audit:** verify Polymarket client_order_id support; else framework lineage |
+| Framework lineage | `intent_id` → `plan_id` → request fingerprint → submission attempt ID → venue order ID when known |
 | Resolution evidence (Scope B) | Real finality port — distinct from execution fills |
 | Redeem port (Scope B) | New; absent today |
+| Hard collateral cap | Fee-inclusive max; **SKIP** if min valid order exceeds cap (never auto-raise) |
 
 ---
 
@@ -192,15 +203,26 @@ historical phase code.
 ### Scope A
 
 ```text
-Preflight recon (flat / known)
-→ feeds READY + PTB confirmed + clock READY
-→ sealed evaluate → EnterIntent
-→ Risk → Plan → LiveOMS.submit
+Authenticated read-only preflight (mutations OFF) — must pass before any mutate path
+→ Preflight recon (flat / known)
+→ feeds READY + PTB attested+locked + clock READY
+→ sealed evaluate → EnterIntent (only if before last-entry deadline)
+→ Risk → Plan (hard cap; SKIP if min valid > cap)
+→ LiveOMS.submit (lineage IDs)
 → ack / user-stream fills → Portfolio (confirmed qty)
-→ active evaluate → ExitIntent
-→ LiveOMS exit → confirmed flat
+→ active evaluate → ExitIntent within timing ladder
+→ LiveOMS exit → confirmed flat before residual deadline
 → post-trade recon → report
 ```
+
+### Idempotency and ambiguity
+
+1. Verify whether Polymarket supports caller-controlled idempotent client order IDs.  
+2. If unavailable/insufficient, use framework lineage above.  
+3. Ack timeout → **AMBIGUOUS** state.  
+4. Ambiguity triggers user-stream/REST reconciliation.  
+5. Never send a fresh entry merely because the original response was lost.  
+6. Retry semantics bounded and evidence-aware.
 
 ### Scope B additions
 
@@ -216,15 +238,26 @@ Preflight recon (flat / known)
 
 ## 11. Failure and degraded-mode behavior
 
+| Exposure state | Failure behavior |
+|----------------|------------------|
+| FLAT | Block new exposure |
+| ACTIVE with confirmed inventory | Continue risk management; seek safe exit |
+| Inventory UNKNOWN | Reconcile; never guess quantity |
+| Entry order ambiguous | Stop new actions; recon before retry |
+| Exit partially filled | Manage only confirmed residual quantity |
+| Resolution committed | Remain pending; do not fabricate a sell (Scope B) |
+
 | Failure | Behavior |
 |---------|----------|
-| Ack timeout | Ambiguous-order stop; recon; no second entry |
-| Partial entry | Manage confirmed qty only; no fantasy inventory |
-| Reject | Record; consume or retry per policy; fail closed on ambiguity |
-| Balance disagreement | UNKNOWN; block |
+| Ack timeout | AMBIGUOUS; recon; no second entry |
+| Partial entry | Manage confirmed qty only |
+| Reject | Record; consume or retry per evidence-aware policy |
+| Balance disagreement | UNKNOWN; block new risk |
 | User stream gap | REST recon before new actions |
-| Kill | Flatten confirmed qty only (Scope A); Scope B after PONR follows F5 hold rules |
-| Stale near expiry | Flatten/block — no silent hold (Scope A) |
+| Kill | Flatten confirmed qty only (Scope A) via bounded exit ladder |
+| Stale near expiry | Mandatory flatten path; no silent hold |
+| PTB/basis degrade while ACTIVE | Do not prevent exit management |
+| Min valid order > hard cap | SKIP; never auto-raise cap |
 
 ---
 
@@ -273,7 +306,28 @@ Preflight recon (flat / known)
 | Restart pending | Recovery tests |
 | Architecture | No z_gap → r7* / execution.polymarket |
 | Recon | Synthetic venue disagreement → UNKNOWN |
+| Cap vs min order | SKIP when min valid > cap |
+| Idempotency | Lost-ack does not create duplicate entry lineage |
 | Scope B | Tests only after redeem port exists; otherwise document blocked |
+
+### Authenticated read-only acceptance (mutation-disabled) — required before N7
+
+Real-account, **no order submission**:
+
+1. Authenticate successfully.  
+2. Validate signer/funder roles.  
+3. Connect to authenticated user/order data.  
+4. Read balances.  
+5. Read token inventory.  
+6. Read allowances if applicable.  
+7. Read open orders.  
+8. Reconcile venue state with internal state.  
+9. Restart and reconcile again.  
+10. Prove mutations/order submission remain disabled.  
+11. Ensure credentials and secrets are never logged.
+
+N7 must **not** be the first time real authentication, user-channel connectivity,
+or account reconciliation is exercised.
 
 Dry-run net-read may reuse preflight patterns; no CI live money.
 
@@ -286,10 +340,12 @@ Dry-run net-read may reuse preflight patterns; no CI live money.
 3. Submitted price never used as fill truth in Portfolio.
 4. Recon detects open-order and balance disagreements.
 5. Restart with pending order fails closed or resumes correctly (tested).
-6. Kill switch prevents new exposure and flattens confirmed qty (Scope A).
-7. Scope B checklist explicitly incomplete until redeem/finality done.
-8. Z-Gap still uses sealed decision path; no venue fields on intents.
-9. Pytest green; no Z-Gap live money.
+6. Kill switch prevents new exposure and drives bounded exit of confirmed qty (Scope A).
+7. Authenticated read-only acceptance completed successfully.
+8. Venue idempotency capability audited and documented (supported or framework lineage).
+9. Scope B checklist explicitly incomplete until redeem/finality done.
+10. Z-Gap still uses sealed decision path; no venue fields on intents.
+11. Pytest green; no Z-Gap live money.
 
 ---
 
@@ -317,7 +373,10 @@ Dry-run net-read may reuse preflight patterns; no CI live money.
 |----------|----------------|
 | First live scope | **Scope A** |
 | Order type | Marketable limit / FAK-style per R7-validated semantics |
-| Ack timeout | Fail closed (numeric open) |
+| Ack timeout | Fail closed → AMBIGUOUS (numeric OPEN) |
+| Idempotency | **OPEN** — verify venue; else framework lineage |
+| Auth read-only gate | Required before N7 |
+| Hard cap | SKIP if min valid > cap |
 | Redeem ownership | Framework execution/settlement — not strategy (Scope B) |
 | Promotion of R7 code | Copy/adapt concepts into generic modules |
 

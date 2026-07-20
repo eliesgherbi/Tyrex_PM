@@ -43,17 +43,22 @@ Without N2, N4 cannot leave fixtures.
 
 | Adapter / capability | Role |
 |----------------------|------|
-| Gamma discovery | Resolve BTC 5m market by slug; token/outcome map; start/end; rule metadata |
+| Gamma discovery | Resolve BTC 5m market by slug; **Up/Down** token map by label; start/end; rule metadata |
 | RTDS Chainlink | `wss://ws-live-data.polymarket.com` · topic `crypto_prices_chainlink` · `btc/usd` |
 | Direct Binance Spot WS | Primary trading reference \(S\) (extend existing `@trade` adapter) |
 | Optional RTDS Binance | Comparison / fallback (`crypto_prices` / `btcusdt`) — not primary \(S\) unless N1 says otherwise |
-| CLOB market WS | Books by discovered YES/NO token IDs |
-| Time sync | SNTP (or equivalent) + optional Binance `/time` cross-check behind `TimeAuthority` |
+| CLOB market WS | Books by discovered **Up/Down** token IDs (label-mapped) |
+| Clock sync provider | Adapter/ops emits `ClockSyncSnapshot` (SNTP, Binance `/time`, OS monitor) — **not** inside core |
+| TimeAuthority (core) | Interprets sync evidence → corrected UTC, monotonic, uncertainty, readiness |
 | Lifecycle | Connect, subscribe, heartbeat, reconnect/backoff, resubscribe, dedupe, shutdown |
-| Facts | Raw normalized ingress facts for audit/replay |
+| Ingress evidence | Append-only raw facts retaining late/out-of-order events |
+| Prep support | APIs usable by N4 prepared-next discovery/subscribe without activating session |
 
 **REST:** used for discovery, clock cross-check, optional book snapshot recovery —
 **outside** the hot decision path.
+
+**Outcome mapping:** `"Up"` → `UP`, `"Down"` → `DOWN` by normalized label only.
+Never by array position. Reject missing/duplicate/unknown/ambiguous maps.
 
 ---
 
@@ -103,14 +108,15 @@ From N1 (required before coding N2):
 | Concern | Owner package | Must not |
 |---------|---------------|----------|
 | Ports | `adapters/protocols.py`, domain event types | Strategy imports |
-| Gamma discovery | `adapters/polymarket/discovery.py` | Strategy |
+| Gamma discovery | `adapters/polymarket/discovery.py` | Strategy; positional Up/Down mapping |
 | CLOB market WS | `adapters/polymarket/ws_adapter.py` | Execution/OMS |
 | RTDS client | `adapters/polymarket/rtds_*.py` (new) | Strategy / valuation |
 | Binance WS | `adapters/binance/ws_adapter.py` | OMS |
 | Normalize | `adapters/*/normalize.py` | Thresholds / Z-Gap policy |
-| TimeAuthority live impl | `core/time_authority.py` + small sync helper | Strategy |
+| Clock sync **provider** | `adapters/` or ops module (SNTP, Binance `/time`, OS monitor) | Mutate system clock; live inside `strategies/` |
+| `TimeAuthority` (core) | `core/time_authority.py` — interpret `ClockSyncSnapshot` only | Perform network I/O |
 | Connection supervisor | `runtime/` or `adapters/` composition helper | Z-Gap formulas |
-| Raw facts | Host / reporting sink | Recalculate FV |
+| Raw facts | Host / reporting sink | Recalculate FV; drop late ticks silently |
 
 ---
 
@@ -118,16 +124,18 @@ From N1 (required before coding N2):
 
 | Contract | Evolution |
 |----------|-----------|
-| `MarketDiscovery` | Keep; harden slug + fallback + rule packaging |
+| `MarketDiscovery` | Keep; harden slug + fallback; **label-based Up/Down** packaging |
 | `MarketDataAdapter` | Keep async `run`/`stop`; may fan multiple sockets |
 | Settlement reference event | New normalized event (distinct from Binance `ReferencePriceUpdated`) |
-| Reference store | May need dual series: trading vs settlement-associated |
-| `TimeAuthority` | Add network-synced implementation; keep `FakeTimeAuthority` |
+| Reference store | Dual series: trading vs settlement-associated |
+| `ClockSyncSnapshot` | Normalized sync evidence from adapter/ops provider |
+| `TimeAuthority` | Interprets snapshots → view; keep `FakeTimeAuthority` |
 | Readiness / freshness | Explicit feed-ready flags per source |
-| Sequence / dedupe keys | `(source, symbol, source_ts, value)` or provider sequence if present |
+| Sequence / dedupe keys | Prefer provider sequence IDs when available; else `(source, symbol, source_ts, value)` without erasing distinct meaningful events |
+| Ingress buffer | Bounded event-time buffer for PTB lateness (budget frozen in N3 from N1) |
 
-**Subscription identity:** CLOB books subscribe by **token IDs** validated against
-the discovered market/window — never by guessing from a prior window.
+**Subscription identity:** CLOB books subscribe by **token IDs** from validated
+Up/Down mapping for the market/window — never by guessing from a prior window.
 
 ---
 
@@ -141,56 +149,86 @@ src/tyrex_pm/adapters/polymarket/normalize.py
 src/tyrex_pm/adapters/polymarket/rtds_*.py          # new
 src/tyrex_pm/adapters/binance/ws_adapter.py
 src/tyrex_pm/adapters/binance/normalize.py
-src/tyrex_pm/core/time_authority.py
-src/tyrex_pm/market_data/*                         # dual-ref / freshness if needed
+src/tyrex_pm/adapters/*/clock_sync*.py             # network sync provider (new)
+src/tyrex_pm/core/time_authority.py                # interpret only; no SNTP/HTTP
+src/tyrex_pm/market_data/*                         # dual-ref / freshness / ingress buffer
 src/tyrex_pm/runtime/live_runner.py                # lifecycle reuse (generic)
 tests/                                             # adapter unit + recorded fixtures
 ```
 
 Strategy / RiskEngine / planner / OMS / Portfolio: **unchanged** in N2.
 
+**Production clock model:** deployment host clock disciplined by OS tooling where
+possible; application **monitors and cross-checks** uncertainty via
+`ClockSyncSnapshot`; application does **not** silently change the system clock.
+
 ---
 
 ## 10. End-to-end data or control flow
 
 ```text
-Gamma resolve(window)
-  → BinaryMarket {market_id, tokens, start, end, rule}
+Gamma resolve(window) with Up/Down label map
+  → BinaryMarket {market_id, condition_id, tokens[UP|DOWN], start, end, rule}
 
-TimeAuthority.sync() → READY | DEGRADED | UNSYNCHRONIZED
+ClockSyncProvider → ClockSyncSnapshot
+TimeAuthority.view() → READY | DEGRADED | UNSYNCHRONIZED (+ uncertainty)
 
-Parallel feeds:
-  RTDS Chainlink → SettlementRefUpdated(source_ts, receive_ts, value)
+Parallel shared feeds (survive rollover):
+  RTDS Chainlink → SettlementRefUpdated(source_ts, receive_wall, receive_mono, value)
   Binance Spot   → ReferencePriceUpdated(...)
   [optional] RTDS Binance → comparison series
-  CLOB market WS → BookUpdated(token_id, ...)
 
-→ Stores (authoritative)
-→ Readiness aggregate
-→ (N3+) PTB capture / basis
-→ (N4+) sealed ZGapDecisionSnapshot
+Market-specific:
+  CLOB market WS → BookUpdated(token_id for active and/or prepared-next)
+
+→ Append-only ingress facts (retain late/OOO)
+→ Current-price view may reject older updates after recording them
+→ Stores / readiness
+→ (N3+) PTB capture / causal basis
+→ (N4+) sealed ZGapDecisionSnapshot on **active** session only
 
 Shutdown:
   stop Event → cancel tasks → close sockets → flush facts → exit
 ```
 
-One-run vs continuous: same adapters; continuous orchestration only changes
-**when** discovery/resubscribe runs (N4).
+One-run vs continuous: same adapters; continuous orchestration (N4) owns
+prepared-next discover/subscribe and atomic promote.
 
 ---
 
 ## 11. Failure and degraded-mode behavior
+
+Exposure-state matrix (initiative-wide; adapters contribute readiness signals):
+
+| Exposure state | Failure behavior |
+|----------------|------------------|
+| FLAT | Block new exposure |
+| ACTIVE with confirmed inventory | Continue risk management; seek safe exit |
+| Inventory UNKNOWN | Reconcile; never guess quantity |
+| Entry order ambiguous | N/A in N2 (no OMS); surface feed ambiguity only |
+| Exit partially filled | N/A in N2 |
+| Resolution committed | N/A in N2 |
 
 | Failure | Behavior |
 |---------|----------|
 | Connect failure | Backoff reconnect; mark feed not ready |
 | Heartbeat timeout | Treat as disconnect; reconnect + resubscribe |
 | Gap after reconnect | Invalidate affected book/ref freshness; optional REST snapshot rebuild for books |
-| Duplicate message | Dedupe; do not double-update stores |
-| Out-of-order `source_ts` | Policy: ignore older; fact `out_of_order` |
-| Wrong token subscription | Fail closed; do not publish books under mismatched market_id |
-| Time sync fail | `TimeAuthority` DEGRADED/UNSYNCHRONIZED; consumers block trading decisions later |
-| RTDS down, Binance up | Trading ref may be fresh; settlement ref stale → basis/PTB not ready |
+| Late / out-of-order tick | **Record** in append-only ingress; current-price view may reject older update; do not erase audit evidence |
+| Duplicate message | Dedupe without erasing meaningful distinct provider events |
+| Wrong token / Up-Down map | Reject market; do not publish books under mismatched identity |
+| Time sync fail | `TimeAuthority` DEGRADED/UNSYNCHRONIZED; **FLAT** → block entry desires later; **ACTIVE** → exit capability remains a host/risk concern |
+| RTDS down, Binance up | Trading ref may be fresh; settlement ref stale → entry not ready |
+
+### Late / out-of-order ingress policy
+
+1. Raw ingress facts are append-only and retain late/OOO events.  
+2. Current-price view may reject an older update **after** recording it.  
+3. PTB capture uses a bounded event-time buffer and explicit lateness policy
+   (budget measured in N1, frozen in N3).  
+4. Prefer provider sequence IDs when available.  
+5. Any boundary tick arriving late remains available for audit and mismatch evidence.  
+6. Deterministic replay preserves original arrival order.
 
 ---
 
@@ -256,12 +294,13 @@ Use recorded fixtures; do not require live network in CI.
 1. RTDS Chainlink adapter receives and normalizes `btc/usd` ticks with source + receive timestamps.
 2. Direct Binance Spot adapter remains the default trading reference path.
 3. Optional RTDS Binance path exists behind config and is clearly labeled comparison/fallback.
-4. CLOB market WS subscribes only to token IDs from a validated `BinaryMarket`.
+4. CLOB market WS subscribes only to token IDs from a validated **Up/Down** `BinaryMarket`.
 5. Heartbeat + reconnect + resubscribe behaviors covered by tests.
-6. Network `TimeAuthority` can reach READY with measured `uncertainty_ms` in a manual net test; Fake remains for offline.
-7. No OMS / user-order channel / mutation capability added.
-8. Architecture import firewalls hold.
-9. Full pytest suite green.
+6. Clock sync provider emits `ClockSyncSnapshot`; core `TimeAuthority` interprets only (Fake remains for offline).
+7. Late/OOO ticks are retained in ingress facts; current view rejection is tested.
+8. No OMS / user-order channel / mutation capability added.
+9. Architecture import firewalls hold.
+10. Full pytest suite green.
 
 ---
 
@@ -290,8 +329,9 @@ Use recorded fixtures; do not require live network in CI.
 |------|-------|
 | RTDS Binance vs direct Binance | Prefer direct for \(S\); confirm with N1 latency |
 | Book snapshot after gap | REST rebuild vs wait for WS snapshot |
-| Clock source set | SNTP primary + Binance cross-check (legacy-proven concept) |
+| Clock sync provider | Adapter/ops; OS-disciplined host preferred; app monitors uncertainty |
 | Multi-feed supervisor ownership | Prefer generic runtime helper, not Z-Gap module |
+| Lateness budget | Measured N1; frozen N3 |
 
 ---
 
@@ -301,6 +341,6 @@ Use recorded fixtures; do not require live network in CI.
 N2 commit theme:
   "Add read-only RTDS, dual-reference, and time-sync adapters"
 
-Include: adapters, TimeAuthority live impl, market_data freshness, tests, N2 acceptance docs
+Include: adapters, clock sync provider, TimeAuthority interpret path, market_data freshness, tests, N2 acceptance docs
 Exclude: Z-Gap host real-input productization, PTB lock policy completion (N3), OMS, live orders
 ```

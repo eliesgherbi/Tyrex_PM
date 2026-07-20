@@ -90,9 +90,23 @@ Evaluate and recommend:
 | Deterministic 5m slug | `btc-updown-5m-{epoch}` via `btc_5m_window.py` | Confirm vs live Gamma |
 | Gamma lookup by exact slug | `GammaMarketDiscovery` | Latency, failure modes, retries |
 | Active-event discovery fallback | Partial / CLI-era patterns | When slug miss → how to recover without wrong market |
-| Token / outcome mapping | YES/NO token IDs from Gamma | Validation checklist |
+| Token / outcome mapping | **Up/Down** (not YES/NO) via normalized labels | Validation checklist |
 | Start/end timestamps | Slug-epoch = trading start (Gamma `startDate` must not override) | Reconfirm |
 | Resolution rule / source validation | `BinaryResolutionRule` contract exists | Proof that rules text matches Chainlink Data Streams |
+| Prep lead / boundary lateness | — | Measure discover lead time and late-tick arrival distribution |
+| Scope A timing inputs | — | Measure source/execution latency to inform entry/flatten deadlines |
+
+**Outcome mapping (mandatory):** BTC 5m markets use venue labels `"Up"` / `"Down"`.
+Normalize by **label**, never by array position:
+
+| Venue label | Normalized leg |
+|-------------|----------------|
+| `"Up"` | `UP` |
+| `"Down"` | `DOWN` |
+
+Reject: missing outcomes, duplicates, unknown labels, reversed/ambiguous maps,
+token-count mismatches. Binding must include market ID, condition ID, token ID,
+normalized leg, and window identity.
 
 ### D. `old/` review (concepts only)
 
@@ -273,17 +287,32 @@ Optional: schema validation of capture JSONL only if scripts are added.
 
 ## 16. Deterministic acceptance criteria
 
+### Evidence strength (bounded sample)
+
+A small consecutive-window sample may validate **capture plumbing** but does
+**not**, by itself, prove permanent boundary semantics.
+
+| Rule | Requirement |
+|------|-------------|
+| Bounded sample | Use a finite N so implementation can continue (recommend ≥3; freeze in report) |
+| Provisional freeze | Freeze a provisional capture rule **only** when every captured window agrees with the best available attestation |
+| Exact match/mismatch | Record per-window exact agreement, not only average error |
+| Runtime attestation | Keep PTB attestation active after N1; any live-window mismatch blocks entry |
+| Unproven label | If sampling rule remains unproven, label **provisional** — do not claim canonical certainty |
+| Non-goal | Do not turn N1 into an unbounded statistical study |
+
 N1 is accepted when **all** are true:
 
-1. Market-rule evidence supports or refutes Chainlink Data Streams for BTC 5m UP/DOWN (cited).
+1. Market-rule evidence supports or refutes Chainlink Data Streams for BTC 5m Up/Down (cited).
 2. RTDS subscription parameters documented from official sources.
 3. Displayed-PTB provenance classified (structured / RTDS / embedded / other) with capture evidence.
-4. At least one explicit statement: boundary sampling rule is **proven**, **refuted**, or **still open** — never silently assumed.
-5. Latency comparison completed for the four sources in §3B across a bounded window sample (recommend ≥3 consecutive windows; freeze actual N in report).
-6. Discovery evaluation covers slug, Gamma, tokens, timestamps, resolution-rule validation.
-7. `old/` keep/adapt/reject table complete for §3D items.
-8. Frozen recommendations listed for N2/N3; open decisions linked to master decision table.
-9. No application code shipped.
+4. At least one explicit statement: boundary sampling rule is **proven**, **refuted**, or **still provisional/open** — never silently assumed canonical.
+5. Latency comparison completed for the four sources in §3B across a bounded window sample; per-window match/mismatch recorded.
+6. Discovery evaluation covers slug, Gamma, **Up/Down label mapping**, timestamps, resolution-rule validation.
+7. Lateness distribution and preparation-lead observations recorded for N3/N4 freezes.
+8. `old/` keep/adapt/reject table complete for §3D items.
+9. Frozen/provisional recommendations listed for N2/N3; open decisions linked to initiative README.
+10. No application code shipped.
 
 ---
 
@@ -324,7 +353,8 @@ Stop N1 and escalate if:
 - Treat RTDS Chainlink as **candidate** settlement reference, not confirmed K
 - Treat direct Binance Spot as primary trading \(S\)
 - Treat RTDS Binance as comparison/fallback only
-- Max lag / mismatch numbers remain provisional (legacy candidates: 5000 ms lag, 0.5 bps mismatch) until measured
+- Max lag / mismatch / lateness budget remain provisional (legacy candidates: 5000 ms lag, 0.5 bps mismatch) until measured
+- Outcome mapping: label-based Up→UP / Down→DOWN only
 
 ---
 

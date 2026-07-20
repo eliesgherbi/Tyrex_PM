@@ -33,10 +33,10 @@ no `old/` / `runtime/r7*` imports into Z-Gap.
 |-----------|----------|------|
 | **N1** | [n1_source_and_legacy_audit.md](n1_source_and_legacy_audit.md) | Evidence audit: PTB/Chainlink, latency, discovery, `old/` keep-adapt-reject |
 | **N2** | [n2_real_data_adapters.md](n2_real_data_adapters.md) | Real read-only adapters (RTDS, Binance, CLOB, time sync) |
-| **N3** | [n3_ptb_and_reference_alignment.md](n3_ptb_and_reference_alignment.md) | PTB lifecycle + Chainlink/Binance basis alignment |
-| **N4** | [n4_real_observe.md](n4_real_observe.md) | Real-input OBSERVE (no OMS); one-run + continuous |
-| **N5** | [n5_real_data_shadow.md](n5_real_data_shadow.md) | Real-input SHADOW (ShadowOMS); labeled simulation |
-| **N6** | [n6_live_execution_and_reconciliation.md](n6_live_execution_and_reconciliation.md) | Generic live OMS + recon design (Scope A/B); not Z-Gap money |
+| **N3** | [n3_ptb_and_reference_alignment.md](n3_ptb_and_reference_alignment.md) | PTB axes + causal Chainlink/Binance basis alignment |
+| **N4** | [n4_real_observe.md](n4_real_observe.md) | Real-input OBSERVE (no OMS); prepared-next rollover |
+| **N5** | [n5_real_data_shadow.md](n5_real_data_shadow.md) | Real-input SHADOW; precise depth-walk fill model |
+| **N6** | [n6_live_execution_and_reconciliation.md](n6_live_execution_and_reconciliation.md) | Generic live OMS + recon + authenticated read-only gate |
 | **N7** | [n7_tiny_operator_live.md](n7_tiny_operator_live.md) | Operator-gated tiny live one-shot (Scope A) |
 
 ---
@@ -85,21 +85,125 @@ flowchart TD
 | Blocks | Dependency |
 |--------|------------|
 | N2 coding | N1 frozen source recommendations |
-| N3 lock/entry policy | N1 boundary + confirmation semantics |
-| N4 product OBSERVE | N2 + N3 |
-| N5 | N4 engineering acceptance |
-| N6 implementation | N5 + generic reuse of execution stack |
-| N7 money | N1–N6 evidence + operator go/no-go |
+| N3 lock/entry policy | N1 boundary + confirmation + lateness |
+| N4 product OBSERVE | N2 + N3 + EWMA warm-up policy + prep lead |
+| N5 | N4 engineering acceptance + fill-model freeze |
+| N6 implementation | N5 + authenticated read-only preflight |
+| N7 money | N1–N6 evidence + Scope A timing ladder frozen + operator go/no-go |
 
 ### Safe parallel work
 
 | Parallelizable | Constraint |
 |----------------|------------|
 | N1 browser/PTB proof vs latency capture scripts | Both read-only; freeze jointly before N2 |
-| Adapter normalize fixtures vs TimeAuthority design | After N1 provisional sources known |
-| N6 design detailing vs N4/N5 implementation | N6 **code** should not enable Z-Gap live before N5 |
+| Adapter normalize fixtures vs clock-provider design | After N1 provisional sources known |
+| N6 design detailing vs N4/N5 implementation | N6 **code** must not enable Z-Gap live before N5; auth read-only may precede N7 |
 | Calibration notebook sketches vs N4 facts | Non-blocking research |
 | Docs/runbook drafts for N7 | No credentials, no mutate flags on |
+
+---
+
+## Shared policies (initiative-wide)
+
+### Outcome mapping (BTC Up/Down)
+
+These markets use **`Up` / `Down`**, not YES/NO.
+
+Discovery must map by **normalized label**:
+
+| Venue label | Normalized leg |
+|-------------|----------------|
+| `"Up"` | `UP` |
+| `"Down"` | `DOWN` |
+
+**Never** map by array position. Reject missing, duplicate, unknown, reversed,
+ambiguous, or token-count-mismatched outcomes. Binding must include market ID,
+condition ID, token ID, normalized leg, and window identity.
+
+### Causal Chainlink/Binance pairing
+
+**Live/production policy:** `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK`
+
+- Pair on **source** timestamps.
+- Binance `source_ts` must be `≤` Chainlink `source_ts`.
+- Enforce maximum age/skew.
+- Record source_ts, corrected receive-wall ts, monotonic receive ts, clock uncertainty.
+- Symmetric nearest pairing or interpolation that uses **later** ticks is allowed
+  **only** for explicitly labelled offline analysis (look-ahead bias otherwise).
+- Deterministic replay preserves original arrival order; live and replay must
+  yield the same aligned snapshot from the same ordered ingress.
+
+### PTB: three orthogonal axes (not one linear machine)
+
+| Axis | Values |
+|------|--------|
+| **A. Capture quality** | candidate/provisional · attested/confirmed · mismatched |
+| **B. Lock state** | unlocked · locked |
+| **C. Entry readiness** | allowed · blocked |
+
+Rules:
+
+- Locked \(K\) **never mutates**.
+- Locked \(K\) may later receive mismatch evidence → readiness **blocked**; value preserved.
+- Real SHADOW and live entry require **attested and locked** \(K\).
+- OBSERVE may evaluate provisional \(K\) only with provisional + counterfactual labels.
+- Lock **before** any real SHADOW/live entry evaluation is accepted (not “at entry” after economics ran).
+- Exact capture/attestation rule is an N1 evidence outcome (provisional until proven).
+
+### Failure behavior by exposure state
+
+| Exposure state | Failure behavior |
+|----------------|------------------|
+| FLAT | Block new exposure |
+| ACTIVE with confirmed inventory | Continue risk management; seek a safe exit |
+| Inventory UNKNOWN | Reconcile; never guess quantity |
+| Entry order ambiguous | Stop new actions; reconcile before retry |
+| Exit partially filled | Manage only confirmed residual quantity |
+| Resolution committed | Remain pending; do not fabricate a sell |
+
+Entry readiness ≠ exit capability. PTB mismatch / stale basis / reference
+degradation **blocks entry** but must **not** prevent management of confirmed
+exposure. Book/feed loss while ACTIVE needs an explicit risk/exit/escalation
+policy (see N4–N7).
+
+### Cross-window vs window-local state
+
+| Window-local (reset on promote) | Continuous cross-window (preserve) |
+|---------------------------------|------------------------------------|
+| PTB | Binance price history |
+| Market / token binding | **EWMA volatility** |
+| Entry lineage / thesis confirm | Shared Chainlink/Binance connections |
+| Books / window timers | Clock health / connection health |
+
+Do **not** reset EWMA every five-minute window. Restart warm-up policy must be
+frozen before N4 (restore validated state **or** bounded backfill **or**
+explicit warm-up wait).
+
+### Prepared-next rollover
+
+Continuous mode **pre-stages** the next market before the boundary (discover,
+validate Up/Down map, prepare CLOB subscriptions). Atomic promote to active;
+no strategy evaluation on prepared-next before promotion.
+
+### Scope A timing ladder (relative to authoritative `event_end`)
+
+Numeric values measured in N1/N4 and **frozen before N7**:
+
+| Deadline | Meaning |
+|----------|---------|
+| Last allowed entry | Skip late entry |
+| Discretionary exit cutoff | Last rich/thesis discretionary sell window |
+| Mandatory flatten start | Begin forced exit |
+| Order ack timeout | Ambiguous if exceeded |
+| Cancel / recon budget | Time reserved for cancel+reconcile |
+| Final residual / operator deadline | Hard stop; escalate |
+| Event-end safety buffer | Never silent hold-to-resolution in Scope A |
+
+### Hard collateral cap
+
+Provisional **$5 fee-inclusive** is a **hard maximum**, not a target. If the
+smallest valid fee-inclusive order exceeds the cap → **SKIP**. Never auto-raise
+the cap to meet venue minimums.
 
 ---
 
@@ -107,15 +211,19 @@ flowchart TD
 
 | Gate | Must freeze before |
 |------|--------------------|
-| Boundary sampling + PTB confirmation source | N3 implementation complete |
+| Boundary sampling + PTB confirmation + lateness budget | N3 complete |
+| Causal pairing + max skew | N3 |
 | Direct Binance vs RTDS Binance for \(S\) | N2 primary wiring |
-| Max skew / basis freshness | N3 gates |
+| EWMA restart/warm-up + prep lead time | N4 |
 | Real OBSERVE sample size | N4 acceptance |
-| SHADOW fill assumptions | N5 acceptance |
+| N5 depth-walk fill model | N5 acceptance |
+| Venue idempotency capability | N6 |
+| Authenticated read-only N6 preflight | Before N7 |
+| Scope A timing ladder + residual exit budget | Before N7 |
 | Live Scope A vs B | N6/N7 (recommend A) |
-| Order type + tiny caps + one-shot workflow | N7 |
-| Deployment / clock sync | N4 continuous + N7 |
-| Resolution finality / redeem ownership | Scope B only (after N7 A) |
+| Hard cap / daily limits / min-order behavior | N7 authorization |
+| Clock sync provider / monitoring | N2 design; N4/N7 ops |
+| Resolution finality / redeem | Scope B only |
 
 ---
 
@@ -123,16 +231,18 @@ flowchart TD
 
 ### Technical live-readiness gates (blocking)
 
-- Correct market identity and token map  
-- PTB/display (or attestation) agreement; lock immutability  
-- Dual-reference basis fail-closed; Binance ≠ Chainlink truth  
+- Correct Up/Down market identity and token map  
+- PTB attested+locked (or explicit OBSERVE provisional labels); lock immutability  
+- Causal dual-reference basis; Binance ≠ Chainlink truth  
 - Feed freshness + TimeAuthority READY  
-- Sealed epochs; no mixed windows  
-- UNKNOWN inventory → block + recon  
+- Sealed epochs; no mixed windows; prepared-next cutover safe  
+- Exposure-state-aware failure policy (table above)  
 - Execution truth from fills/balances, not submitted price  
-- Restart/recon recovery  
+- Authenticated read-only recon proven in N6 (mutations still OFF)  
+- Restart/recon recovery; bounded exit ladder  
 - Kill switch + ack timeout + ambiguous-order stop  
-- Operator opt-in; mutations default OFF  
+- Scope A timing ladder frozen  
+- Operator opt-in; mutations default OFF; hard cap not auto-raised  
 - Post-trade recon clean  
 
 ### Profitability / calibration (intentionally non-blocking)
@@ -184,7 +294,7 @@ Useful from N4+ facts; **not** required to start N7 Scope A:
 
 ---
 
-## Recommended architecture defaults (provisional until N1/N3 freeze)
+## Recommended architecture defaults (provisional until evidence freezes)
 
 | Topic | Recommendation |
 |-------|----------------|
@@ -192,28 +302,42 @@ Useful from N4+ facts; **not** required to start N7 Scope A:
 | Trading reference \(S\) | Direct Binance Spot WebSocket |
 | RTDS Binance | Comparison / fallback only |
 | PTB hot path | Structured RTDS (+ attestation); HTML secondary only |
-| Basis | \(b_t=\ln(C_t/B_t)\); \(\hat{C}_t=B_t e^{b}\) — never raw \(B\) vs \(K\) |
+| Basis pairing (live) | `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK` |
+| Basis formula | \(b_t=\ln(C_t/B_t)\); \(\hat{C}_t=B_t e^{b}\) — never raw \(B\) vs \(K\) |
 | First live | **Scope A** (no resolution hold, no redeem) |
-| Caps | ~$5 fee-inclusive BUY; one position; one-shot |
+| Caps | $5 fee-inclusive **hard max**; SKIP if min valid order exceeds cap |
 
 ---
 
 ## Consolidated open decisions
 
-| # | Decision | Why it matters | Decide by | Provisional default |
-|---|----------|----------------|-----------|---------------------|
-| 1 | Exact Chainlink boundary sampling semantics | Wrong \(K\) invalidates model | End N1 / before N3 done | First RTDS tick with `source_ts ≥ event_start` within max lag — **unproven until N1** |
-| 2 | PTB confirmation source | Live entry gate | End N1 | Display agreement and/or dual-source bps; structured preferred |
-| 3 | Direct Binance vs Polymarket-proxied Binance | Latency / basis quality | End N1 | Direct Binance primary |
-| 4 | Max Chainlink/Binance timestamp skew | Pairing validity | N1 measure → N3 | Open — do not invent |
-| 5 | Basis drift/freshness thresholds | Entry/validity gates | N3 (tune later) | Wire config; start from legacy-order magnitudes, label provisional |
-| 6 | Required real OBSERVE engineering sample | N4 acceptance bound | N4 start | **5** consecutive windows |
-| 7 | SHADOW fill assumptions | Honesty of N5 PnL | N5 start | Latency + slip ticks; no queue model |
-| 8 | Initial live Scope A vs B | Redeem/finality burden | Before N6 impl / N7 | **Scope A** |
-| 9 | Initial order type / marketable limit | Fill semantics | N6 | FAK-style marketable limit (R7-validated family) |
-| 10 | Tiny per-order / per-window / daily limits | Risk | Before N7 run | $5 order; 1 pos/window; daily loss TBD numeric freeze |
-| 11 | Live one-shot operator workflow | Safety ceremony | N7 | Explicit opt-in; preflight; post recon; disable after |
-| 12 | Deployment location and clock sync | τ / boundary lag | N4 continuous + N7 | Stable host; SNTP+cross-check READY |
-| 13 | Resolution finality and redemption ownership | Scope B only | Before any Scope B live | Framework settlement/redeem ports; strategy never redeems |
+| # | Decision | Why it matters | Owner | Decide by | Status | Provisional recommendation |
+|---|----------|----------------|-------|-----------|--------|----------------------------|
+| 1 | Exact Chainlink boundary sampling | Wrong \(K\) invalidates model | N1 ops + domain | End N1 / before N3 done | **OPEN** | First RTDS tick with `source_ts ≥ event_start` within max lag — unproven |
+| 2 | PTB confirmation / attestation source | Live entry gate | N1 | End N1 | **OPEN** | Display and/or dual-source bps; structured preferred; keep runtime attestation |
+| 3 | Direct Binance vs RTDS Binance for \(S\) | Latency / basis | N1 | End N1 | Provisional | Direct Binance primary |
+| 4 | Max Chainlink/Binance timestamp skew | Pairing validity | N1→N3 | N3 | **OPEN** | Measure in N1; do not invent |
+| 5 | Basis drift/freshness thresholds | Entry/validity | N3 | N3 (tune later) | Provisional | Wire config; legacy-order magnitudes, labelled provisional |
+| 6 | Real OBSERVE engineering sample size | N4 bound | N4 | N4 start | Provisional | **5** consecutive windows |
+| 7 | N5 fill model | Honest simulated PnL | N5 | N5 start | Provisional | Depth-walk after simulated latency (see N5); no queue claim |
+| 8 | Initial live Scope A vs B | Redeem burden | Product | Before N6/N7 | Provisional | **Scope A** |
+| 9 | Order type / marketable limit | Fill semantics | N6 | N6 | Provisional | FAK-style marketable limit (R7 family) |
+| 10 | Tiny per-order / daily limits | Risk | Operator | Before N7 | **OPEN** | $5 hard max order; 1 pos/window; daily TBD |
+| 11 | Live one-shot operator workflow | Safety | N7 | N7 | Provisional | Explicit opt-in; preflight; post recon; disable after |
+| 12 | Deployment location / clock sync | τ / lag | Ops | N4 continuous + N7 | Provisional | OS-disciplined host; app monitors uncertainty; no silent clock set |
+| 13 | Resolution finality / redeem ownership | Scope B | Framework | Before Scope B | **OPEN** | Framework ports; strategy never redeems |
+| 14 | Causal pairing policy | Look-ahead bias | N3 | N3 | Provisional | `LATEST_BINANCE_AT_OR_BEFORE_CHAINLINK` for live |
+| 15 | Bounded lateness policy (PTB/ingress) | Late boundary ticks | N1→N3 | N3 | **OPEN** | Measure lateness budget in N1; freeze in N3 |
+| 16 | PTB quality vs lock vs readiness | Entry safety | N3 | N3 | Provisional | Three orthogonal axes (above) |
+| 17 | PTB lock trigger | When K freezes | N3 | Before N5/N7 entry | Provisional | Lock after attested capture, **before** entry evaluation |
+| 18 | EWMA restart / warm-up | σ validity | N4 | Before N4 | **OPEN** | Restore validated **or** backfill **or** explicit warm-up |
+| 19 | Next-window preparation lead time | Rollover safety | N4 | Before N4 continuous | **OPEN** | Pre-discover before boundary; measure lead in N1/N4 |
+| 20 | Clock sync provider ownership | Core purity | N2 | N2 | Provisional | Adapter emits `ClockSyncSnapshot`; core interprets only |
+| 21 | Venue idempotency capability | Safe retry | N6 | N6 audit | **OPEN** | Verify Polymarket; else framework lineage IDs |
+| 22 | Authenticated read-only N6 preflight | Auth before money | N6 | Before N7 | Required gate | Mutations disabled; balances/orders/recon |
+| 23 | Scope A last-entry / flatten / residual deadlines | Implementable exits | N1/N4→N7 | Before N7 | **OPEN** | Relative to `event_end`; latency + safety margin |
+| 24 | Min-order vs hard-cap behavior | Cap integrity | Risk/planning | Before N7 | Provisional | SKIP if min valid > cap; never auto-raise |
+| 25 | Bounded exit retry budget | Abort with exposure | N7 | Before N7 | **OPEN** | Ack-aware retries + recon; hard residual deadline |
 
-Unresolved items above are **not** accepted decisions. Assumptions are labeled provisional.
+Unresolved **OPEN** rows are not accepted decisions. Provisional rows may guide
+implementation but remain labelled until frozen by their milestone evidence.

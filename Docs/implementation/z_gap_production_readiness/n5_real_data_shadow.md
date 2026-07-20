@@ -10,13 +10,14 @@
 ## 1. Objective
 
 Operate Z-Gap SHADOW with **real market inputs** and **simulated execution**
-via the existing ShadowOMS path:
+via the existing ShadowOMS path (extended if needed for depth-walk fills):
 
-- real books/depth, PTB, references, time;
-- simulated fills under explicit latency/slippage assumptions;
+- real books/depth, **attested+locked** PTB for entry, references, time;
+- simulated fills under the **precise depth-walk model** below;
 - full entry → rich/thesis/time/risk exit lifecycle;
 - optional simulated resolution (F5 capability, labeled);
 - Portfolio + TradeLifecycle + restart/recovery + full reporting;
+- prepared-next continuous mode rules from N4 (require flat before promote);
 
 with clear `simulated_shadow` and `estimated` labels everywhere economics are
 not venue-confirmed.
@@ -36,15 +37,37 @@ label what cannot be proven without real orders.
 
 | Area | Plan |
 |------|------|
-| Inputs | Same real adapters/PTB/basis as N4 |
+| Inputs | Same real adapters/PTB/basis as N4; entry requires attested+locked K |
 | Decision path | Same sealed binding as OBSERVE |
-| Execution | Current `ShadowOMS` only |
-| Fill model | Configurable latency delay, slippage ticks, optional partial fills if ShadowOMS supports |
+| Execution | `ShadowOMS` (+ extensions for depth-walk / partials if needed) |
+| Fill model | See **Initial fill model** below (model ID recorded) |
 | Exits | Market-rich, thesis, time, risk flatten |
-| Resolution | Optional F5 simulated path; capability default per config |
+| Resolution | Optional F5 simulated path; capability default OFF (Scope A alignment) |
 | Portfolio / lifecycle | Framework owners |
 | Restart | `StateSnapshotStore` recovery (extend for real window ids) |
 | Labels | `simulated_shadow`, `estimated` fees/PnL |
+| Continuous | Prepared-next; **require flat** before promote |
+
+### Initial fill model (implementable)
+
+Model ID (provisional): `shadow_depth_walk_v1`
+
+1. Record decision/plan time.  
+2. Apply configured simulated latency → simulated arrival time.  
+3. Select the first eligible **recorded** order book at or after arrival time.  
+4. Walk executable depth for requested quantity.  
+5. Apply configured additional slippage only if required by config (no double-count with depth walk).  
+6. Produce **full fill**, **partial fill**, or **no fill**.  
+7. Record model ID and all assumptions on facts.
+
+Constraints:
+
+- No queue-position claim.  
+- No fill if executable depth is absent.  
+- Never use a future book earlier than simulated order arrival (no look-ahead).  
+- Deterministic replay from ordered book ingress + model params.  
+- All P&L remains `simulated_shadow`; fees `estimated` unless a confirmed field exists (it will not in SHADOW).  
+- Partial-entry / partial-exit / residual recovery must be testable even if ShadowOMS needs extension.
 
 ### What SHADOW cannot prove
 
@@ -84,8 +107,10 @@ label what cannot be proven without real orders.
 - Same decision path OBSERVE/SHADOW
 - ShadowOMS is paper-only
 - Economics labels honesty
-- Fill assumption policy id recorded in facts (open decision #7 must be chosen before N5 acceptance)
+- Fill model `shadow_depth_walk_v1` (decision #7) frozen before N5 acceptance
+- Real entry requires attested+locked PTB (N3)
 - Resolution capability default OFF unless explicitly testing hold path
+- Prepared-next + require_flat (N4)
 
 ---
 
@@ -107,11 +132,12 @@ label what cannot be proven without real orders.
 
 | Item | Change |
 |------|--------|
-| Shadow fill model config | `latency_ms`, `slip_ticks`, `partial_fill_mode` |
+| Shadow fill model config | `model_id`, `latency_ms`, `extra_slip_ticks`, depth-walk flags |
+| Partial fill / residual | Portfolio + lifecycle handle confirmed residual only |
 | Fact labels | Enforce `economics_label=simulated_shadow` on fills/PnL |
 | Real-input shadow config | New JSON distinct from F4/F5 fixtures |
 | Recovery | Window_id + market_id + config hash continuity on real runs |
-| Optional resolution evidence | Real resolution feed **or** continue fixture-style evidence injector behind port (must be labeled) |
+| Optional resolution evidence | Real resolution feed **or** fixture-style injector (labelled) |
 
 ---
 
@@ -132,28 +158,39 @@ Docs/latest/how_to/run_modes.md
 ## 10. End-to-end data or control flow
 
 ```text
-Real feeds → sealed evaluate (same as N4)
+Real feeds → sealed evaluate (same as N4; entry needs attested+locked PTB)
   → Enter/Exit/Flatten intents
   → RiskEngine → Planner
-  → ShadowOMS (simulated fill under model)
+  → ShadowOMS depth-walk fill model (shadow_depth_walk_v1)
   → OrderStore / FillLedger → Portfolio / TradeLifecycle
   → next DecisionContext
   → exits / optional resolution simulation
   → facts + operator report
 ```
 
-Continuous mode: rollover only when flat (or fail-closed if position open at boundary — **must specify**: recommended **forbid rollover while open**; force time/risk exit before boundary).
+Continuous mode: prepared-next as N4; **require flat** before promote (force
+time/risk exit before boundary). Never evaluate prepared-next.
 
 ---
 
 ## 11. Failure and degraded-mode behavior
 
+| Exposure state | Failure behavior |
+|----------------|------------------|
+| FLAT | Block new exposure when PTB/basis/feeds not ready |
+| ACTIVE with confirmed inventory | Continue risk management; seek safe exit (book loss → explicit exit/escalation policy) |
+| Inventory UNKNOWN | Reconcile; never guess quantity; no blind sell |
+| Entry order ambiguous | N/A (sim model); treat no-fill / partial via lifecycle |
+| Exit partially filled | Manage only confirmed residual quantity |
+| Resolution committed | Remain pending; do not fabricate a sell |
+
 | Failure | Behavior |
 |---------|----------|
-| Stale books mid-position | Fail-closed exit policy / BLOCKED per readiness |
-| UNKNOWN inventory (sim) | Block; no blind sell |
-| Open position at window end without resolution capability | Mandatory time/risk flatten before end |
-| Feed loss | Kill or flatten per risk config |
+| Stale books while ACTIVE | Seek safe exit / escalate per risk; do not open new risk |
+| PTB/basis degrade while FLAT | Block entry |
+| PTB/basis degrade while ACTIVE | Do not prevent exit management |
+| Open position at window end (capability OFF) | Mandatory time/risk flatten before end |
+| No depth at simulated arrival | No fill; consume lineage per policy |
 | Restart with exit pending | Resume exit; no re-entry |
 
 ---
@@ -183,10 +220,11 @@ Continuous mode: rollover only when flat (or fail-closed if position open at bou
 
 | Key | Owner | Units |
 |-----|-------|-------|
+| `shadow.fill.model_id` | shadow config | string |
 | `shadow.fill.latency_ms` | shadow config | ms |
-| `shadow.fill.slip_ticks` | shadow config | ticks |
+| `shadow.fill.extra_slip_ticks` | shadow config | ticks |
 | `shadow.persistence_path` | shadow config | path |
-| `risk.max_order_notional` | risk | USDC |
+| `risk.max_order_notional` | risk | USDC (hard max) |
 | `z_gap.resolution_capability` | z_gap | bool |
 | `rollover.require_flat` | runtime | bool (default true) |
 
@@ -197,21 +235,26 @@ Continuous mode: rollover only when flat (or fail-closed if position open at bou
 | Scenario | Assert |
 |----------|--------|
 | Real-input recorded books → entry→rich exit | Terminal flat; labels correct |
+| Depth-walk full / partial / no-fill | Deterministic from recorded books + latency |
+| Partial entry + residual recovery | Confirmed qty only |
+| Partial exit + residual | Confirmed residual only |
 | Thesis / time / risk | Same as F4 on recorded real timeline |
 | Resolution optional | F5 semantics if enabled |
 | Restart active / exit pending | Recovery |
+| No look-ahead book | Reject fill using book before arrival time |
 | No LiveOMS import on path | Architecture |
-| Acceptance scenarios checklist | Documented below |
 
 ### Acceptance scenarios (engineering)
 
 1. Entry + market-rich exit on real books (recorded or live net-read)
-2. Thesis invalidation path
-3. Time flatten near expiry
-4. Kill switch flatten
-5. UNKNOWN block
-6. Restart recovery
-7. Continuous: flat→rollover→second window evaluate (no open cross-window)
+2. Depth-walk full fill, partial fill, and no-fill
+3. Partial entry + residual recovery; partial exit + residual
+4. Thesis invalidation path
+5. Time flatten near expiry
+6. Kill switch flatten
+7. UNKNOWN block
+8. Restart recovery
+9. Continuous: flat → prepared-next promote → second window (no open cross-window)
 
 ---
 
@@ -220,8 +263,8 @@ Continuous mode: rollover only when flat (or fail-closed if position open at bou
 1. Real-input SHADOW completes scenarios in §15 without venue mutation.
 2. All economic facts labeled `simulated_shadow` / `estimated` as appropriate.
 3. Same sealed decision entrypoint as N4 OBSERVE (shared test).
-4. Rollover never carries open simulated position into a new window (default).
-5. Fill model parameters recorded and stable for the acceptance run.
+4. Prepared-next never evaluates; promote requires flat.
+5. Fill model `shadow_depth_walk_v1` parameters recorded; no look-ahead books; no queue claim.
 6. Explicit written list of **unproven** live effects (queue, real slip, fees, settlement races).
 7. Pytest green.
 
@@ -249,10 +292,11 @@ Continuous mode: rollover only when flat (or fail-closed if position open at bou
 
 | Decision | Provisional default |
 |----------|---------------------|
-| SHADOW fill assumptions | Latency + slip ticks; no queue model |
-| Partial fills | Follow ShadowOMS capability; strategy still full-exit policy |
+| SHADOW fill model | `shadow_depth_walk_v1` (latency → book@arrival → depth walk) |
+| Partial fills | Supported in tests; strategy still prefers full-exit policy |
 | Resolution in N5 acceptance | Optional off by default (Scope A alignment) |
-| Continuous shadow | Allowed only with require_flat rollover |
+| Continuous shadow | Allowed only with require_flat + prepared-next |
+| Entry PTB | Attested and locked |
 
 ---
 

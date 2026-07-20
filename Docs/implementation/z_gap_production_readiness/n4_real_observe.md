@@ -42,13 +42,36 @@ counterfactual facts from live markets.
 | Capability | Requirement |
 |------------|-------------|
 | Single-window OBSERVE | Discover → sync → feeds → evaluate until window end → stop |
-| Continuous OBSERVE | Rollover to next window; replace CLOB subscriptions; reset PTB/EWMA policy per window |
+| Continuous OBSERVE | **Prepared-next** discover/subscribe before boundary; atomic promote; preserve EWMA |
 | Decision path | Identical pure path as fixture OBSERVE / SHADOW |
+| Outcome map | Label-based `"Up"`→`UP`, `"Down"`→`DOWN` only |
 | Facts | Decisions, rejections, quality, latency, basis, valuations, counterfactuals |
 | Snapshots | Reconstructible sealed decision inputs |
 | Operator status | Readable run status + summary report |
-| Restart | No duplicate processing of the same sealed decision epoch |
+| Restart | No duplicate processing of the same sealed decision epoch; EWMA warm-up policy |
 | Config | Explicit real-input observe config (separate from fixture F3) |
+| Timing measurements | Collect latency samples informing Scope A deadlines (N7 freeze) |
+
+### Window-local vs continuous cross-window state
+
+| Window-local (reset on atomic promote) | Continuous cross-window (**preserve**) |
+|----------------------------------------|----------------------------------------|
+| PTB (quality/lock/readiness) | Binance price history |
+| Market / token / condition binding | **EWMA volatility** |
+| Entry lineage / thesis confirm | Shared Chainlink/Binance connections |
+| Books / window timers | Clock health / connection health |
+
+**Do not reset EWMA at every five-minute rollover.**
+
+### Restart / cold-start warm-up (freeze before N4 implementation)
+
+Choose and document one (or ordered fallback):
+
+1. Restore validated persisted EWMA state; or  
+2. Perform bounded market-data backfill; or  
+3. Wait through an explicit warm-up period.
+
+Never silently use an unseeded or stale volatility estimator.
 
 **Proposed engineering acceptance sample (configurable):**
 
@@ -90,9 +113,11 @@ Extended tuning is **useful** and should be documented as ongoing research —
 
 - OBSERVE records intents without OMS dispatch
 - Atomic epochs / window identity
-- PTB quality labeling for provisional vs confirmed
+- PTB axes: provisional OBSERVE OK with labels; SHADOW/live need attested+locked (N3)
 - One-run vs continuous share adapters (N2)
 - Capture rule + confirmation policy (N1/N3)
+- EWMA warm-up policy (#18)
+- Prepared-next lead time (#19)
 
 ---
 
@@ -114,11 +139,13 @@ Extended tuning is **useful** and should be documented as ongoing research —
 
 | Item | Change |
 |------|--------|
-| Observe orchestration | Window session state: `discovering`, `warming`, `active`, `rolling`, `stopped` |
-| Rollover event | Explicit market identity swap + store clear / rebind |
+| Observe orchestration | Sessions: `active`, `prepared_next`, `warming`, `stopped` |
+| Prepared-next | Discover + validate Up/Down map + prepare CLOB before boundary |
+| Atomic promote | Prepared → active; then retire previous market-specific subscriptions |
 | Dedup key | `(window_id, decision_epoch_id)` for restart safety |
 | Config | `strategy_kind=z_gap` real observe JSON; `mode=OBSERVE`; no shadow/OMS block |
-| Status schema | Operator JSON: feeds ready, PTB quality, last decision, rollover count |
+| Status schema | Operator JSON: feeds ready, PTB axes, active/prepared ids, EWMA warm status |
+| EWMA persistence | Optional validated snapshot for restart warm-up |
 
 ---
 
@@ -142,18 +169,26 @@ tests/test_n4_*                                # orchestration + no-OMS guards
 ```text
 CLI observe --config observe_z_gap_real_n4.json [--continuous]
 
-→ TimeAuthority sync
-→ Discover market (current/next per policy)
-→ Start feeds (RTDS CL, Binance, CLOB tokens)
-→ Warm EWMA / wait PTB class acceptable for OBSERVE
-→ On book/ref/timer:
-     build DecisionSnapshot
-     → ZGapBinding.evaluate (sealed)
-     → record StrategyDecision + counterfactual intents (NO OMS)
-→ Window end:
-     emit window summary
-     if continuous: discover next → resubscribe → reset window-local state
-     else: stop
+→ ClockSyncProvider + TimeAuthority view
+→ Start shared feeds (RTDS CL, Binance) — keep across windows
+→ Discover + validate active market (Up/Down label map)
+→ Subscribe active CLOB tokens
+→ Warm EWMA per frozen policy; wait PTB quality acceptable for OBSERVE labels
+→ On book/ref/timer (active session only):
+     sealed evaluate → counterfactual intents (NO OMS)
+
+Continuous prepared-next (before boundary):
+  1. Keep shared Binance/Chainlink running
+  2. Pre-compute next 5m window identity
+  3. Discover next Gamma market
+  4. Validate Up/Down token map and rules
+  5. Prepare/subscribe next CLOB books
+  6. At boundary: capture next PTB
+  7. Atomically promote prepared → active
+  8. Retire previous market-specific subscriptions after safe cutover
+
+No order or strategy evaluation may use prepared-next before it becomes active.
+
 → Graceful shutdown on SIGINT
 ```
 
@@ -161,14 +196,17 @@ CLI observe --config observe_z_gap_real_n4.json [--continuous]
 
 ## 11. Failure and degraded-mode behavior
 
-| Failure | Behavior |
-|---------|----------|
-| Feed stale | SKIP/WAIT/BLOCKED per existing readiness; fact reason |
-| PTB missing/late | No entry desire; OBSERVE still records evaluations |
-| PTB mismatch | Block trading desires; continue diagnostics |
-| Rollover discover fail | Stop continuous loop fail-closed; do not keep old tokens |
-| Mixed epoch detected | Reject evaluation; fact + alert |
+| Exposure / situation | Behavior |
+|----------------------|----------|
+| FLAT (always in OBSERVE inventory sense) | Block “entry desire” when readiness fails; still record diagnostics |
+| Feed stale | SKIP/WAIT/BLOCKED reasons; no silent decide-on-stale |
+| PTB provisional | Evaluate only with provisional + counterfactual labels |
+| PTB mismatch | Entry desire blocked; continue diagnostics |
+| Prepared-next discover/map fail | Do not promote; keep active until safe stop; fact + alert |
+| Mixed epoch / mixed books | Reject evaluation; fact + alert |
+| Restart mid-preparation | Discard incomplete prepared-next; rebuild prep |
 | Accidental OMS wiring | Hard assert / test failure — stop |
+| Unseeded EWMA | Do not evaluate entry-class decisions until warm-up complete |
 
 ---
 
@@ -176,8 +214,10 @@ CLI observe --config observe_z_gap_real_n4.json [--continuous]
 
 - OBSERVE does not require Portfolio persistence
 - Persist optional: last processed `(window_id, decision_epoch_id)` + config fingerprint
+- Optional: validated EWMA snapshot for warm-up on restart
 - On restart: do not re-emit identical decision facts for the same epoch
-- Mid-rollover crash: restart as new discover; never keep half-swapped token subscriptions
+- Restart during preparation: never keep half-swapped token subscriptions; rebuild prepared-next
+- Mid-promote crash: reconvene from discover; prevent mixed epochs/books
 
 ---
 
@@ -185,14 +225,14 @@ CLI observe --config observe_z_gap_real_n4.json [--continuous]
 
 | Family | Examples |
 |--------|----------|
-| Quality | freshness, basis, PTB class, clock uncertainty |
-| Latency | feed receive delays, evaluate lag |
+| Quality | freshness, basis, PTB axes, clock uncertainty, EWMA warm status |
+| Latency | feed receive delays, evaluate lag (feeds Scope A timing) |
 | Decision | action, reason_code, edges, valuations (counterfactual) |
-| Rollover | old/new market_id, resubscribe OK |
+| Rollover | active/prepared ids, promote OK, retire OK |
 | Guard | `oms_dispatch=false` invariant fact/metric |
 
-Operator report: per-window table of market identity, PTB vs display agreement,
-token map OK, epoch violations=0, readiness summary, decision counts by reason.
+Operator report: per-window table of market identity, Up/Down map, PTB vs display
+agreement, epoch violations=0, readiness summary, decision counts by reason.
 
 ---
 
@@ -203,9 +243,11 @@ token map OK, epoch violations=0, readiness summary, decision counts by reason.
 | `btc_window` / `which` | runtime | current\|next |
 | `continuous` | runtime | bool |
 | `acceptance.windows` | runtime/n4 | count |
+| `prep_lead_s` | runtime | s (OPEN until measured) |
+| `ewma.warm_policy` | runtime | restore\|backfill\|wait |
 | `duration_s` | runtime (one-run cap) | s |
 | `z_gap.*` thresholds | strategy config | existing units |
-| `ptb.require_confirmed_for_entry` | may be false for OBSERVE eval | bool |
+| OBSERVE provisional PTB labels | runtime/z_gap | bool / label flags |
 | Output paths | reporting | path |
 
 ---
@@ -215,7 +257,8 @@ token map OK, epoch violations=0, readiness summary, decision counts by reason.
 | Test | Assert |
 |------|--------|
 | Fake real-input timeline | Decisions match sealed path; zero OMS calls |
-| Rollover | Token subscription replaced; no mixed market_id in snapshot |
+| Prepared-next promote | No evaluate on prepared; no mixed market_id after promote |
+| EWMA preserved across promote | σ continuity (unless warm-up restart path) |
 | Restart dedup | Same epoch not double-facted |
 | Architecture | Host has no Z-Gap formulas; no LiveOMS |
 | Regression | Fixture F3/F4/F5 still pass |
@@ -228,15 +271,16 @@ Net-read smoke: manual operator checklist (§16), not CI-mandatory if secrets/ne
 
 For the configured consecutive-window sample (default proposal: **5**):
 
-1. **Correct market** each window (slug/Gamma identity matches intended BTC 5m UP/DOWN).
-2. **PTB/display agreement** within N3 tolerance (or explicit documented mismatch rate = 0 for acceptance windows).
-3. **Valid token mapping** (YES/NO IDs match outcomes).
-4. **No mixed epochs** (zero sealed-snapshot mismatches).
+1. **Correct market** each window (slug/Gamma identity matches intended BTC 5m Up/Down).
+2. **PTB/display agreement** within N3 tolerance (or explicit documented mismatch rate = 0 for acceptance windows); provisional labelled when used.
+3. **Valid token mapping** (`"Up"`→`UP`, `"Down"`→`DOWN` by label; rejects invalid maps).
+4. **No mixed epochs** (zero sealed-snapshot mismatches; prepared-next never evaluated).
 5. **Acceptable data freshness** (no silent decide-on-stale; stale → gated reasons only).
-6. **Successful rollover** in continuous mode (resubscribe + new window_id).
-7. **No unintended order path** (static + runtime guard: OMS submit count = 0).
-8. Reconstructible decision snapshots for spot-checked evaluations.
-9. Pytest green.
+6. **Successful prepared-next rollover** (discover before boundary → atomic promote → retire prior).
+7. **EWMA continuity** across windows (or documented warm-up after restart).
+8. **No unintended order path** (static + runtime guard: OMS submit count = 0).
+9. Reconstructible decision snapshots for spot-checked evaluations.
+10. Pytest green.
 
 **Non-criteria:** positive expected edge, calibration convergence, threshold tuning.
 
@@ -266,9 +310,11 @@ For the configured consecutive-window sample (default proposal: **5**):
 | Item | Recommendation |
 |------|----------------|
 | Acceptance window count | 5 consecutive; configurable |
-| Provisional K in OBSERVE | Allowed with labels; do not claim confirmed |
+| Provisional K in OBSERVE | Allowed with provisional + counterfactual labels |
 | Continuous default | Off; operator enables |
-| Deployment location | Prefer low-latency stable clock host (open decision #12) |
+| EWMA warm-up | **OPEN** — restore / backfill / wait (freeze before impl) |
+| Prep lead time | **OPEN** — measure; discover before boundary |
+| Deployment location | Prefer low-latency stable clock host (decision #12) |
 
 ---
 

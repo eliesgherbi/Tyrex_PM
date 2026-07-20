@@ -35,19 +35,51 @@ rollback into a repeatable first-run procedure.
 | Explicit operator opt-in | Typed phrase / flag; no silent default |
 | Default OFF | `live.enabled=false`, `mutations_enabled=false` |
 | One-shot mode first | Single window; process exits after terminal |
-| Fixed tiny max order value | Provisional **$5** fee-inclusive BUY cap (decision #10) |
+| Fixed tiny max order value | Provisional **$5 fee-inclusive hard maximum** (not a target) |
+| Cap vs venue minimum | If min valid fee-inclusive order > cap → **SKIP** (never auto-raise) |
 | One position per window | Existing Z-Gap policy |
-| Max daily exposure/loss | Configured hard caps |
+| Max daily exposure/loss | Configured hard caps (OPEN numeric freeze) |
 | No same-window reverse/re-entry | Existing policy |
 | Kill switch | Operator + risk |
-| Preflight balance/inventory recon | Must pass before submit |
-| Feed / PTB / time readiness | Must be READY |
-| Order ack timeout | Ambiguous → stop |
-| Ambiguous-order stop | No automated guess |
+| Preflight | Includes **N6 authenticated read-only** gates + balance/inventory recon |
+| Feed / PTB / time readiness | Attested+locked PTB; TimeAuthority READY |
+| Scope A timing ladder | Frozen numerics relative to `event_end` (below) |
+| Order ack timeout | Ambiguous → stop / recon |
+| Ambiguous-order stop | No automated guess; no fresh entry on lost ack |
+| Bounded exit ladder | Ack-aware retries + recon; not a single blind flatten |
 | Post-trade recon | Mandatory |
 | Operator report | Full evidence pack |
 | Rollback / disable | Documented procedure |
 | No unattended continuous | Until separate acceptance |
+
+### Scope A timing ladder (freeze before N7)
+
+All relative to authoritative `event_end` (values from N1/N4 measured latency + safety margin):
+
+| Deadline | Behavior |
+|----------|----------|
+| Last allowed entry | Skip late entry |
+| Discretionary exit cutoff | Last rich/thesis discretionary sell window |
+| Mandatory flatten start | Begin forced exit |
+| Order ack timeout | AMBIGUOUS if exceeded |
+| Cancel / recon budget | Reserved for cancel+reconcile |
+| Final residual / operator deadline | Hard stop; escalate to operator |
+| Event-end safety buffer | Never silent hold-to-resolution |
+
+### Bounded exit ladder (replaces “one flatten attempt”)
+
+On abort or mandatory flatten with confirmed inventory:
+
+1. Bounded, acknowledgement-aware exit attempts.  
+2. Reconciliation before each retry.  
+3. Never sell more than confirmed residual quantity.  
+4. Explicit retry count / time budget (decision #25).  
+5. Cancel/replace only when prior order state is known.  
+6. Hard stop at final residual/operator deadline.  
+7. Operator escalation for unresolved exposure.  
+8. Complete audit facts.
+
+**Never** perform blind repeated sells.
 
 ### Live scope
 
@@ -73,15 +105,17 @@ Evidence required from prior milestones:
 
 | Milestone | Evidence |
 |-----------|----------|
-| N1 | PTB source proof + latency source choice |
-| N2 | Adapter reliability (reconnect/heartbeat) |
-| N3 | PTB lock + basis gates fail-closed |
-| N4 | Real OBSERVE engineering sample passed |
-| N5 | Real SHADOW scenarios passed; limitations documented |
-| N6 | Generic live Scope A fake-transport + recon accepted; mutations composable |
+| N1 | PTB source proof + latency + lateness inputs for timing ladder |
+| N2 | Adapter reliability (reconnect/heartbeat); clock provider |
+| N3 | PTB axes + causal basis; attested+locked entry rule |
+| N4 | Real OBSERVE engineering sample; EWMA/prep policies |
+| N5 | Real SHADOW scenarios; fill model limitations documented |
+| N6 | Fake-transport Scope A + **authenticated read-only** acceptance; idempotency audit |
 
 Additional:
 
+- Scope A timing ladder numerics frozen
+- Bounded exit retry budget frozen
 - Clean git worktree for mutate path
 - Credentials roles validated on operator host
 - Clock sync acceptable on deployment host
@@ -93,11 +127,15 @@ Additional:
 
 1. Scope A first (#8)  
 2. Order type / marketable limit (#9)  
-3. Tiny per-order / per-window / daily limits (#10)  
+3. Tiny hard-cap / daily limits / min-order SKIP (#10, #24)  
 4. One-shot operator workflow (#11)  
 5. Deployment / clock sync expectations (#12)  
-6. Kill and ambiguous-order stop behavior (N6)  
-7. PTB confirmed required for live entry (N3)
+6. Venue idempotency audit result (#21)  
+7. Scope A timing ladder (#23)  
+8. Bounded exit retry budget (#25)  
+9. Kill and ambiguous-order stop behavior (N6)  
+10. PTB attested+locked required for live entry (N3)  
+11. N6 authenticated read-only gate passed (#22)
 
 ---
 
@@ -145,14 +183,15 @@ tests/                         # gates, opt-in, caps (no live money in CI)
 
 ```text
 Operator checklist (go/no-go)
-→ preflight (net-read recon, feeds, PTB, clock, clean worktree)
+→ N6 authenticated read-only preflight (mutations OFF) already accepted
+→ preflight (recon, feeds, attested+locked PTB, clock, clean worktree, timing ladder loaded)
 → explicit opt-in
 → one-shot live host start
 → discover window → READY gates
-→ at most one EnterIntent lineage
-→ LiveOMS → fills → active manage
-→ mandatory exit before resolution
-→ terminal flat
+→ at most one EnterIntent lineage (skip if past last-entry or min order > hard cap)
+→ LiveOMS → fills → active manage within discretionary window
+→ mandatory flatten start → bounded exit ladder
+→ terminal flat before residual/operator deadline
 → post-trade recon + report
 → disable live / rollback
 → post-run review
@@ -162,12 +201,21 @@ Operator checklist (go/no-go)
 
 ## 11. Failure and degraded-mode behavior / abort conditions
 
+| Exposure state | Failure behavior |
+|----------------|------------------|
+| FLAT | Block new exposure |
+| ACTIVE with confirmed inventory | Bounded exit ladder; seek safe exit |
+| Inventory UNKNOWN | Reconcile; never guess quantity |
+| Entry order ambiguous | Stop new actions; recon; no fresh entry |
+| Exit partially filled | Manage only confirmed residual |
+| Resolution committed | N/A in Scope A (hold disabled) |
+
 Abort immediately (no new risk) if:
 
-- Preflight fail  
-- PTB mismatch / unconfirmed  
+- Preflight fail (including N6 auth read-only not previously accepted)  
+- PTB not attested+locked / mismatch  
 - Clock not READY  
-- Feed stale critical  
+- Feed stale critical while FLAT (while ACTIVE → exit ladder)  
 - Ack timeout / ambiguous order  
 - UNKNOWN inventory  
 - Kill switch  
@@ -175,9 +223,10 @@ Abort immediately (no new risk) if:
 - Dirty worktree (mutate path)  
 - Credential role mismatch  
 - Any recon disagreement  
+- Past residual/operator deadline without flat  
 
-On abort with open confirmed qty: controlled flatten attempt once; else manual
-intervention path (documented). Never invent inventory.
+On abort with open confirmed qty: execute **bounded exit ladder** (not a single
+blind flatten). Escalate to operator if unresolved at final deadline. Never invent inventory.
 
 ---
 
@@ -185,7 +234,7 @@ intervention path (documented). Never invent inventory.
 
 - One-shot: prefer **no auto-resume** after crash with pending live order —
   recon + manual continue decision
-- Persist enough to reconcilable client_order_ids
+- Persist enough for reconcilable lineage IDs (`intent_id` / attempt / venue id)
 - After any crash: mutations stay disabled until operator re-approves
 
 ---
@@ -210,11 +259,14 @@ estimate vs actual, fees estimate vs actual, basis, timing.
 | Key | Provisional default | Units |
 |-----|---------------------|-------|
 | `live.scope` | `A` | enum |
-| `live.max_buy_collateral` | `5.00` | USDC |
+| `live.max_buy_collateral` | `5.00` **hard max** | USDC |
+| `live.skip_if_min_exceeds_cap` | `true` | bool |
 | `live.max_positions_per_window` | `1` | count |
 | `live.max_daily_loss` | tiny (freeze numerically before run) | USDC |
 | `live.max_daily_notional` | tiny | USDC |
 | `live.ack_timeout_ms` | freeze before run | ms |
+| `live.timing.*` | Scope A ladder offsets | s before `event_end` |
+| `live.exit_retry.*` | count / budget | count / ms |
 | `z_gap.resolution_capability` | `false` | bool |
 | Opt-in | required | — |
 
@@ -238,21 +290,22 @@ estimate vs actual, fees estimate vs actual, basis, timing.
 
 ### Go / no-go checklist (all must be YES)
 
-1. N1–N6 evidence packs accepted  
+1. N1–N6 evidence packs accepted (including N6 authenticated read-only)  
 2. Scope A confirmed; Scope B disabled  
-3. Caps set and reviewed  
-4. Clean worktree  
-5. Preflight pass on operator host  
-6. PTB confirmation path working on recent windows  
-7. Kill switch tested in dry/shadow  
-8. Rollback/disable procedure understood  
-9. Operator present for full window  
+3. Timing ladder + exit retry budget frozen  
+4. Caps set as hard maxima; min-order SKIP behavior confirmed  
+5. Clean worktree  
+6. Preflight pass on operator host  
+7. PTB attestation path working on recent windows  
+8. Kill switch tested in dry/shadow  
+9. Rollback/disable procedure understood  
+10. Operator present for full window  
 
 ### First-run success (engineering)
 
-1. At most one live entry attempt lineage  
-2. All orders acked or aborted cleanly  
-3. Position flattened before resolution  
+1. At most one live entry attempt lineage (or intentional SKIP for late/min-cap)  
+2. All orders acked or aborted cleanly via bounded exit ladder  
+3. Position flattened before residual/operator deadline (no silent hold)  
 4. Post-trade recon: no UNKNOWN; no unexpected open orders  
 5. Report complete with realized fill prices/fees when available  
 6. Live disabled after run  
@@ -299,7 +352,9 @@ Only after **separate** acceptance:
 
 | Item | Notes |
 |------|-------|
-| Exact daily loss limit | Freeze before first run |
+| Exact daily loss / notional | Freeze before first run (**OPEN**) |
+| Timing ladder numerics | Freeze from measured latency + margin (**OPEN** until frozen) |
+| Exit retry budget | Freeze before first run (**OPEN**) |
 | Deployment host | Prefer stable clock / low jitter (decision #12) |
 | Interactive approval phrase | Adapt R7/old ceremony concepts; new code |
 | Fee uncertainty | Bound collateral; label confirmed vs estimated |
