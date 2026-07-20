@@ -1,9 +1,8 @@
-"""Pure per-share taker fee φ(p) for economic edge math.
+"""Polymarket binary fee-curve φ(p) — pure domain math (not execution transport).
 
-Reusable outside execution packages. Same curve as venue ``fd``:
-``φ(p) = r · (p · (1 − p))^e`` for probability price ``p ∈ [0, 1]``.
-
-F2 labels results as **estimated** planned fees — never confirmed actuals.
+Authoritative owner of ``φ(p) = r · (p · (1 − p))^e`` for probability prices.
+Execution ``fees_fd`` consumes this for USDC sizing; Z-Gap valuations import here
+and must not import ``execution.polymarket``.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ class FeeEstimateKind(str, Enum):
 
 @dataclass(frozen=True, kw_only=True)
 class FeeCurveParams:
-    """Minimal fee-curve parameters (mirrors fd.r / fd.e)."""
+    """Polymarket ``fd`` curve parameters (r, e)."""
 
     fee_rate: Decimal
     exponent: Decimal
@@ -65,7 +64,9 @@ class EstimatedUnitFee:
             )
         object.__setattr__(self, "amount", as_decimal(self.amount, field_name="amount"))
         object.__setattr__(
-            self, "price", require_polymarket_price(as_decimal(self.price, field_name="price"))
+            self,
+            "price",
+            require_polymarket_price(as_decimal(self.price, field_name="price")),
         )
 
 
@@ -78,7 +79,6 @@ def phi_taker_fee_per_share(price: Decimal, curve: FeeCurveParams) -> Decimal:
     exp = curve.exponent
     if exp == exp.to_integral_value():
         return curve.fee_rate * (base ** int(exp))
-    # Explicit float bridge only for non-integer exponents.
     return curve.fee_rate * Decimal(str(float(base) ** float(exp)))
 
 

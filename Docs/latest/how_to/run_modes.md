@@ -20,6 +20,14 @@ Working directory: repository root.
 tyrex-pm observe --config config/observe_fixture_r3.json
 ```
 
+### Z-Gap fixture OBSERVE (F3; offline only)
+
+```bash
+tyrex-pm observe --config config/observe_z_gap_fixture_f3.json
+```
+
+Records counterfactual Z-Gap decisions/facts. **No OMS, fills, or public live support.**
+
 ## Observe (public live) — Net-read + Report
 
 ```bash

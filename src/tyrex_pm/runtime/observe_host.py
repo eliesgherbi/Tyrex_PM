@@ -15,10 +15,18 @@ from tyrex_pm.adapters.polymarket.discovery import (
 )
 from tyrex_pm.adapters.polymarket.fixture_source import PolymarketFixtureSource
 from tyrex_pm.core.clock import Clock, FakeClock, SystemClock
-from tyrex_pm.core.events import ReferencePriceUpdated
-from tyrex_pm.core.ids import CorrelationId, RunId, new_correlation_id, new_run_id
+from tyrex_pm.core.events import EventSource, ReferencePriceUpdated, TimerElapsed
+from tyrex_pm.core.ids import (
+    CorrelationId,
+    EventId,
+    RunId,
+    new_correlation_id,
+    new_event_id,
+    new_run_id,
+)
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.domain.polymarket.market import BinaryMarket, MarketRequest
+from tyrex_pm.domain.polymarket.ptb import make_fixture_ptb
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.indicators.momentum import ShortHorizonMomentum
 from tyrex_pm.market_data.book_store import MarketStateStore
@@ -37,12 +45,10 @@ from tyrex_pm.risk.dedup import IntentDedupRegistry
 from tyrex_pm.risk.engine import RiskEngine
 from tyrex_pm.risk.reasons import RiskReason
 from tyrex_pm.runtime.config import ObserveConfig, SourceMode
-from tyrex_pm.signals.directional import DirectionalSignal, build_directional_signal
+from tyrex_pm.runtime.strategy_binding import StrategyBinding, build_strategy_binding
+from tyrex_pm.signals.directional import DirectionalSignal
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.decisions import IntentLike, StrategyDecision
-from tyrex_pm.strategies.framework_validation.reference_momentum import (
-    ReferenceMomentumStrategy,
-)
 
 
 @dataclass
@@ -79,7 +85,9 @@ class ObserveHost:
         self.book_store = MarketStateStore()
         self.reference_store = ReferenceDataStore()
         self.momentum = ShortHorizonMomentum(config.momentum)
-        self.strategy = ReferenceMomentumStrategy()
+        self.binding: StrategyBinding = self._build_binding()
+        # Compatibility alias for tests/shadow that still touch host.strategy
+        self.strategy = getattr(self.binding, "strategy", self.binding)
         self.risk_engine = RiskEngine()
         self.planner = ExecutionPlanner()
         from datetime import timedelta as _td
@@ -99,6 +107,20 @@ class ObserveHost:
         self.plans: list[PlanningResult] = []
         self._attached = False
         self._kill_switch = bool(config.risk.kill_switch_active) if config.risk else False
+        self._timer_fire_count = 0
+        self._last_eval_trigger = "feed"
+
+    def _build_binding(self) -> StrategyBinding:
+        kind = self.config.strategy_kind
+        if kind in {"z_gap", "zgap"}:
+            assert self.config.z_gap is not None
+            return build_strategy_binding(
+                strategy_kind="z_gap",
+                zgap_runtime=self.config.z_gap,
+                fixture_ptb=None,
+                clock=self.clock,
+            )
+        return build_strategy_binding(strategy_kind="reference_momentum")
 
     def set_kill_switch(self, active: bool) -> None:
         prev = self._kill_switch
@@ -238,11 +260,11 @@ class ObserveHost:
                         "reason": transition.suppress_reason,
                         "signal_direction": signal.direction.value,
                         "last_direction": None
-                        if self.strategy.last_direction is None
-                        else self.strategy.last_direction.value,
+                        if getattr(self.binding, "last_direction", None) is None
+                        else self.binding.last_direction.value,
                     },
                     causation_id=signal.causation_id,
-                    strategy_id=ReferenceMomentumStrategy.STRATEGY_ID,
+                    strategy_id=self.binding.strategy_id,
                 )
             return
 
@@ -371,7 +393,21 @@ class ObserveHost:
                         causation_id=decision.causation_id,
                     )
 
-    def evaluate_once(self, *, causation_id=None) -> StrategyDecision:
+    def evaluate_once(
+        self, *, causation_id=None, trigger: str | None = None
+    ) -> StrategyDecision:
+        eval_trigger = trigger or self._last_eval_trigger or "feed"
+        self._last_eval_trigger = eval_trigger
+        if self.config.strategy_kind in {"z_gap", "zgap"}:
+            return self._evaluate_zgap_once(
+                causation_id=causation_id, trigger=eval_trigger
+            )
+        return self._evaluate_momentum_once(causation_id=causation_id)
+
+    def _evaluate_momentum_once(self, *, causation_id=None) -> StrategyDecision:
+        """ReferenceMomentum path (unchanged semantics; ShadowHost hooks preserved)."""
+        from tyrex_pm.signals.directional import build_directional_signal
+
         snapshot = self.build_snapshot(causation_id=causation_id)
         self._emit(
             "freshness_assessment",
@@ -432,10 +468,9 @@ class ObserveHost:
                 "evidence": signal.evidence,
             },
             causation_id=signal.causation_id,
-            strategy_id=ReferenceMomentumStrategy.STRATEGY_ID,
+            strategy_id=self.binding.strategy_id,
         )
 
-        # R3 observe decision math via evaluate(); R4 transition is additive.
         if self.config.risk is None:
             decision = self.strategy.evaluate(signal)
             self.decisions.append(decision)
@@ -456,6 +491,69 @@ class ObserveHost:
         self._process_transition(signal, snapshot, transition)
         return decision
 
+    def _evaluate_zgap_once(
+        self, *, causation_id=None, trigger: str = "feed"
+    ) -> StrategyDecision:
+        """Z-Gap fixture OBSERVE path via strategy binding (no host formulas)."""
+        snapshot = self.build_snapshot(causation_id=causation_id)
+        self._emit(
+            "freshness_assessment",
+            {
+                "yes": snapshot.yes_freshness.reason_code.value,
+                "no": snapshot.no_freshness.reason_code.value,
+                "reference": snapshot.reference_freshness.reason_code.value,
+                "yes_age_ms": snapshot.yes_freshness.age_ms,
+                "no_age_ms": snapshot.no_freshness.age_ms,
+                "reference_age_ms": snapshot.reference_freshness.age_ms,
+                "trigger": trigger,
+            },
+            causation_id=causation_id,
+        )
+        target = (
+            self.config.z_gap.target_notional
+            if self.config.z_gap is not None
+            else Decimal("5")
+        )
+        context = DecisionContext(
+            run_id=self.run_id,
+            mode=self._runtime_mode(),
+            snapshot=snapshot,
+            target_notional=target,
+            max_price=None if self.config.risk is None else self.config.risk.max_price,
+            kill_switch_active=self._kill_switch,
+            now=self.clock.now_utc(),
+        )
+        result = self.binding.evaluate(
+            market_snapshot=snapshot,
+            causation_id=causation_id,
+            correlation_id=self.correlation_id,
+            trigger=trigger,
+            decision_context=context,
+            momentum_value=None,
+            momentum_ready=False,
+            momentum_reason="N/A",
+            momentum_threshold=self.config.momentum_threshold,
+            max_book_spread=self.config.max_book_spread,
+        )
+        self._emit(
+            "signal",
+            result.signal_payload,
+            causation_id=causation_id,
+            strategy_id=result.strategy_id,
+        )
+        for fact_type, payload in result.extra_facts:
+            self._emit(
+                fact_type,
+                payload,
+                causation_id=causation_id,
+                strategy_id=result.strategy_id,
+            )
+        self.decisions.append(result.decision)
+        self._emit_observe_decision(result.decision)
+        if result.intents:
+            self._record_observe_intents(result.intents)
+        return result.decision
+
     def _build_decision_context(
         self, snapshot: DecisionSnapshot, signal: DirectionalSignal
     ) -> DecisionContext | None:
@@ -474,6 +572,39 @@ class ObserveHost:
             target_notional=self.config.risk.target_notional,
             max_price=self.config.risk.max_price,
         )
+
+    def _record_observe_intents(self, intents: list[IntentLike]) -> None:
+        """Record economic intents as facts only — no OMS, fills, or portfolio."""
+        for intent in intents:
+            self.intents.append(intent)
+            self._emit(
+                "intent_created",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "kind": intent.kind.value,
+                    "instrument_id": intent.instrument_id.value,
+                    "market_id": intent.market_id.value,
+                    "target_notional": str(intent.target_notional),
+                    "outcome": intent.outcome.value,
+                    "semantic_key": intent.semantic_key(),
+                    "reason_code": intent.reason_code,
+                    "observe_only": True,
+                    "oms_submit": False,
+                    "economics_label": "estimated",
+                    "valuation_label": "counterfactual",
+                },
+                causation_id=intent.causation_id,
+                strategy_id=intent.strategy_id,
+            )
+            self._emit(
+                "intent_observe_no_oms",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "note": "OBSERVE records would-enter intent; no order/fill/portfolio",
+                },
+                causation_id=intent.causation_id,
+                strategy_id=intent.strategy_id,
+            )
 
     def _process_transition(
         self,
@@ -547,15 +678,71 @@ class ObserveHost:
 
     def _start_strategy(self, market: BinaryMarket) -> None:
         mode = self._runtime_mode()
-        self.strategy.on_start(
+        if self.config.strategy_kind in {"z_gap", "zgap"} and self.config.z_gap is not None:
+            self._ensure_zgap_ptb(market)
+        self.binding.on_start(
             StrategyContext(
                 run_id=self.run_id,
-                strategy_id=ReferenceMomentumStrategy.STRATEGY_ID,
+                strategy_id=self.binding.strategy_id,
                 mode=mode,
                 market=market,
             )
         )
         self.dedup.reset_market()
+
+    def _ensure_zgap_ptb(self, market: BinaryMarket) -> None:
+        """Bind fixture PTB into the Z-Gap strategy binding (no network provider)."""
+        zg = self.config.z_gap
+        assert zg is not None
+        assert market.event_start is not None and market.event_end is not None
+        ptb = make_fixture_ptb(
+            market_id=market.market_id,
+            window_id=zg.window_id,
+            event_start=market.event_start,
+            event_end=market.event_end,
+            k=zg.ptb_k,
+            receive_ts=self.clock.now_utc(),
+            provenance_ref="fixture_f3",
+        )
+        # Duck-typed binding surface — no concrete strategy type checks in the host.
+        if hasattr(self.binding, "fixture_ptb"):
+            setattr(self.binding, "fixture_ptb", ptb)
+        if hasattr(self.binding, "window_id"):
+            setattr(self.binding, "window_id", zg.window_id)
+
+    def _run_timer_evaluations(self) -> None:
+        """Host-owned deterministic timer → same evaluate path as feed triggers."""
+        zg = self.config.z_gap
+        if zg is None or zg.timer_eval_count <= 0:
+            return
+        if not isinstance(self.clock, FakeClock):
+            return
+        from datetime import timedelta as _td
+
+        for _ in range(zg.timer_eval_count):
+            self.clock.advance(wall=_td(seconds=zg.evaluate_interval_s))
+            self._timer_fire_count += 1
+            timer_event = TimerElapsed(
+                event_id=new_event_id(),
+                ts_event=self.clock.now_utc(),
+                ts_received=self.clock.now_utc(),
+                source=EventSource.TIMER,
+                correlation_id=self.correlation_id,
+                timer_name="zgap_observe",
+                fire_count=self._timer_fire_count,
+            )
+            self._emit(
+                "timer_elapsed",
+                {
+                    "timer_name": timer_event.timer_name,
+                    "fire_count": timer_event.fire_count,
+                },
+                causation_id=timer_event.event_id,
+                strategy_id=self.binding.strategy_id,
+            )
+            self.evaluate_once(
+                causation_id=timer_event.event_id, trigger="timer"
+            )
 
     def run_fixture(self) -> ObserveRunResult:
         if self.config.mode is not SourceMode.FIXTURE:
@@ -569,6 +756,7 @@ class ObserveHost:
                 "mode": self.config.mode.value,
                 "runtime_mode": self._runtime_mode().value,
                 "config_fingerprint": self.config.fingerprint(),
+                "strategy_kind": self.config.strategy_kind,
             },
         )
         try:
@@ -598,7 +786,9 @@ class ObserveHost:
                 correlation_id=self.correlation_id,
                 symbol=self.config.binance_symbol,
             )
-            self.strategy.on_stop("NORMAL")
+            if self.config.strategy_kind in {"z_gap", "zgap"}:
+                self._run_timer_evaluations()
+            self.binding.on_stop("NORMAL")
             self._emit(
                 "runtime_stop",
                 {
@@ -606,6 +796,7 @@ class ObserveHost:
                     "intent_count": len(self.intents),
                     "risk_count": len(self.risk_decisions),
                     "plan_count": len(self.plans),
+                    "strategy_kind": self.config.strategy_kind,
                 },
             )
         except Exception as exc:

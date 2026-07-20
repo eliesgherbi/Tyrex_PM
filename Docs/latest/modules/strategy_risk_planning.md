@@ -5,7 +5,8 @@
 ## Packages
 
 - `tyrex_pm.strategies` (+ `framework_validation.reference_momentum`)
-- `tyrex_pm.strategies.z_gap` — pure model/valuation/policy modules (F2; no host orchestration)
+- `tyrex_pm.strategies.z_gap` — pure model/valuation/policy (F2) + thin `ZGapStrategy` (F3)
+- Fixture OBSERVE: `config/observe_z_gap_fixture_f3.json` (`strategy_kind=z_gap`; no OMS; not a public live path)
 - `tyrex_pm.core.intents`
 - `tyrex_pm.risk`
 - `tyrex_pm.planning`

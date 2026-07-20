@@ -1,12 +1,15 @@
-# Z-Gap offline fixtures (F2)
+# Z-Gap offline fixtures
 
-`fair_value_golden.json` inputs (`S`, `K`, `sigma`, `τ`, not-ready cases) were
-recovered from the trusted legacy fixture
+## Fair-value golden (`fair_value_golden.json`)
+
+**Inputs** and **legacy_expected_*** values come from the trusted legacy fixture
 `old/tests/fixtures/z_gap/fair_value_golden.json` (read-only provenance).
 
-Expected `z` / `p_UP` / `p_DOWN` for ready cases were **independently recomputed**
-in F2 using `math.log` + `math.erf` (`normal_cdf`). Legacy fixture probabilities
-used a slightly different rounded CDF approximation; F2 locks the erf semantics.
+**Production expectations** are **not** stored as F2 `compute_fair_value` outputs.
+Tests assert production against the independent dual in
+`tests/oracles/binary_fair_value_oracle.py` (does not import indicators).
 
-Active tests load **only** this path under `tests/fixtures/z_gap/`.
-They must not import `old/` or depend on legacy filesystem paths.
+Legacy rounded Φ values may differ slightly from `math.erf`; tests document an
+explicit legacy-tolerance check separately from the dual-oracle lock.
+
+Active tests must not import `old/` or depend on legacy filesystem paths.

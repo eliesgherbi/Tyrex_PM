@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from tyrex_pm.core.fees_phi import FeeCurveParams, PROVISIONAL_SAMPLE_FEE
+from tyrex_pm.domain.polymarket.fees import FeeCurveParams, PROVISIONAL_SAMPLE_FEE
 from tyrex_pm.core.numerics import as_decimal
 
 

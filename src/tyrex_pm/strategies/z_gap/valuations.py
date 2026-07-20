@@ -11,7 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from tyrex_pm.core.fees_phi import (
+from tyrex_pm.domain.polymarket.fees import (
     FeeCurveParams,
     FeeEstimateKind,
     phi_taker_fee_per_share,

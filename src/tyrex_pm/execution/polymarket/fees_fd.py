@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, Mapping
 
+from tyrex_pm.domain.polymarket.fees import FeeCurveParams, phi_taker_fee_per_share
+
 
 class FeeError(RuntimeError):
     pass
@@ -33,6 +35,9 @@ class FeeDescriptor:
     @property
     def resolved(self) -> bool:
         return self.fee_rate >= 0 and self.exponent >= 0
+
+    def as_curve(self) -> FeeCurveParams:
+        return FeeCurveParams(fee_rate=self.fee_rate, exponent=self.exponent)
 
 
 def parse_fd(raw: Mapping[str, Any] | None, *, condition_id: str | None = None) -> FeeDescriptor:
@@ -69,11 +74,8 @@ def taker_fee_usdc_for_shares(
         raise FeeError("price_out_of_range")
     if shares == 0 or price in (0, 1):
         return Decimal("0")
-    base = price * (Decimal("1") - price)
-    if fee.exponent == fee.exponent.to_integral_value():
-        phi = fee.fee_rate * (base ** int(fee.exponent))
-    else:
-        phi = fee.fee_rate * Decimal(str(float(base) ** float(fee.exponent)))
+    # Shared φ(p) owned by domain/polymarket/fees.py — no duplicated curve math.
+    phi = phi_taker_fee_per_share(price, fee.as_curve())
     # Official tables round fees to 5 decimal places.
     return (shares * phi).quantize(Decimal("0.00001"), rounding=ROUND_UP)
 
@@ -108,11 +110,7 @@ def max_buy_amount_under_collateral_cap(
     # fee = amount * r * (1-p)^e * p^(e-1); for e=1: fee = amount * r * (1-p)
     # Solve amount * (1 + k) <= cap where k = fee/amount
     one = Decimal("1")
-    base = price * (one - price)
-    if fee.exponent == fee.exponent.to_integral_value():
-        phi = fee.fee_rate * (base ** int(fee.exponent))
-    else:
-        phi = fee.fee_rate * Decimal(str(float(base) ** float(fee.exponent)))
+    phi = phi_taker_fee_per_share(price, fee.as_curve())
     # fee per USDC of amount at this price: (shares/amount)*phi = phi/price
     k = phi / price
     # amount + amount*k <= cap → amount <= cap/(1+k)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from tyrex_pm.core.fees_phi import (
+from tyrex_pm.domain.polymarket.fees import (
     FeeEstimateKind,
     PROVISIONAL_SAMPLE_FEE,
     phi_taker_fee_per_share,

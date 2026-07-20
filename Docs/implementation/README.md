@@ -30,5 +30,6 @@ Key anchors:
 |----------|------|
 | [f1_generic_strategy_contracts.md](f1_generic_strategy_contracts.md) | F1 — neutral `StrategyDecision` / `IntentLike` / protocol |
 | [f2_z_gap_model_and_policies.md](f2_z_gap_model_and_policies.md) | F2 — PTB/time/indicators/valuations/policies (pure) |
+| [f3_z_gap_observe.md](f3_z_gap_observe.md) | F3 — fixture OBSERVE wiring (no OMS) |
 
 All files in this directory are preserved as historical evidence (plus the P0 design baseline and milestone reports above).

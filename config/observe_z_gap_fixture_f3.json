@@ -1,0 +1,40 @@
+{
+  "mode": "fixture",
+  "strategy_kind": "z_gap",
+  "fixture_path": "tests/fixtures/z_gap/observe_f3_window.json",
+  "output_path": "var/reporting/f3/z_gap_fixture_observe_facts.jsonl",
+  "binance_symbol": "BTCUSDT",
+  "momentum_lookback_ms": 5000,
+  "momentum_threshold": "0.001",
+  "max_book_spread": "0.50",
+  "freshness": {
+    "book_threshold_ms": 120000,
+    "reference_threshold_ms": 120000,
+    "future_tolerance_ms": 500,
+    "timestamp_basis": "EVENT_TIME"
+  },
+  "runtime_duration_s": null,
+  "evaluate_on_reference": true,
+  "z_gap": {
+    "window_id": "zgap-f3-w1",
+    "ptb_k": "100000",
+    "fee_rate": "0.07",
+    "fee_exponent": "1",
+    "target_notional": "5",
+    "evaluate_interval_s": 1.0,
+    "timer_eval_count": 2,
+    "half_life_s": 5.0,
+    "min_samples_s": 3.0,
+    "sample_interval_s": 1.0,
+    "tau_floor_s": 1.0,
+    "theta_take": "0.01",
+    "z_min": "0.0",
+    "z_max": "20.0",
+    "tau_min_s": 1.0,
+    "tau_max_s": 600.0,
+    "basis_max_bps": "10000",
+    "expected_slippage_buy": "0",
+    "expected_slippage_sell": "0",
+    "reject_both_legs_edge": false
+  }
+}

@@ -76,6 +76,45 @@ class RiskPlanConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ZGapObserveRuntimeConfig:
+    """Fixture OBSERVE wiring for Z-Gap (no live/network provider settings)."""
+
+    window_id: str
+    ptb_k: Decimal
+    fee_rate: Decimal = Decimal("0.07")
+    fee_exponent: Decimal = Decimal("1")
+    target_notional: Decimal = Decimal("5")
+    evaluate_interval_s: float = 1.0
+    timer_eval_count: int = 2
+    # Provisional threshold overrides for deterministic fixture evidence
+    half_life_s: float = 5.0
+    min_samples_s: float = 3.0
+    sample_interval_s: float = 1.0
+    tau_floor_s: float = 1.0
+    theta_take: Decimal = Decimal("0.01")
+    z_min: Decimal = Decimal("0.0")
+    z_max: Decimal = Decimal("20.0")
+    tau_min_s: float = 1.0
+    tau_max_s: float = 600.0
+    basis_max_bps: Decimal = Decimal("10000")
+    expected_slippage_buy: Decimal = Decimal("0")
+    expected_slippage_sell: Decimal = Decimal("0")
+    reject_both_legs_edge: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.window_id.strip():
+            raise ValueError("z_gap.window_id required")
+        if self.ptb_k <= 0:
+            raise ValueError("z_gap.ptb_k must be > 0")
+        if self.target_notional <= 0:
+            raise ValueError("z_gap.target_notional must be > 0")
+        if self.evaluate_interval_s <= 0:
+            raise ValueError("z_gap.evaluate_interval_s must be > 0")
+        if self.timer_eval_count < 0:
+            raise ValueError("z_gap.timer_eval_count must be >= 0")
+
+
+@dataclass(frozen=True, kw_only=True)
 class ObserveConfig:
     mode: SourceMode
     output_path: Path
@@ -93,6 +132,8 @@ class ObserveConfig:
     momentum_min_samples: int = 2
     risk: RiskPlanConfig | None = None
     shadow: ShadowConfig | None = None
+    strategy_kind: str = "reference_momentum"
+    z_gap: ZGapObserveRuntimeConfig | None = None
 
     def __post_init__(self) -> None:
         if self.mode is SourceMode.FIXTURE and self.fixture_path is None:
@@ -109,6 +150,10 @@ class ObserveConfig:
             raise ValueError("momentum_threshold must be > 0 (no hidden default)")
         if self.max_book_spread <= 0:
             raise ValueError("max_book_spread must be > 0")
+        kind = self.strategy_kind.strip().lower().replace("-", "_")
+        object.__setattr__(self, "strategy_kind", kind)
+        if kind in {"z_gap", "zgap"} and self.z_gap is None:
+            raise ValueError("strategy_kind=z_gap requires z_gap runtime config")
         object.__setattr__(self, "binance_symbol", self.binance_symbol.upper())
 
     @property
@@ -137,6 +182,8 @@ class ObserveConfig:
             "condition_id": self.condition_id,
             "risk_fingerprint": None if self.risk is None else self.risk.fingerprint(),
             "shadow_fingerprint": None if self.shadow is None else self.shadow.fingerprint(),
+            "strategy_kind": self.strategy_kind,
+            "z_gap_window": None if self.z_gap is None else self.z_gap.window_id,
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -196,6 +243,7 @@ def observe_config_from_mapping(data: Mapping[str, Any]) -> ObserveConfig:
     fixture = data.get("fixture_path")
     risk_raw = data.get("risk")
     shadow_raw = data.get("shadow")
+    zgap_raw = data.get("z_gap")
     return ObserveConfig(
         mode=mode,
         output_path=Path(str(data["output_path"])),
@@ -213,6 +261,37 @@ def observe_config_from_mapping(data: Mapping[str, Any]) -> ObserveConfig:
         momentum_min_samples=int(data.get("momentum_min_samples", 2)),
         risk=None if risk_raw is None else _risk_from_mapping(risk_raw),
         shadow=None if shadow_raw is None else shadow_config_from_mapping(shadow_raw),
+        strategy_kind=str(data.get("strategy_kind", "reference_momentum")),
+        z_gap=None if zgap_raw is None else _zgap_from_mapping(zgap_raw),
+    )
+
+
+def _zgap_from_mapping(data: Mapping[str, Any]) -> ZGapObserveRuntimeConfig:
+    required = ("window_id", "ptb_k")
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ValueError(f"z_gap config missing required fields: {missing}")
+    return ZGapObserveRuntimeConfig(
+        window_id=str(data["window_id"]),
+        ptb_k=Decimal(str(data["ptb_k"])),
+        fee_rate=Decimal(str(data.get("fee_rate", "0.07"))),
+        fee_exponent=Decimal(str(data.get("fee_exponent", "1"))),
+        target_notional=Decimal(str(data.get("target_notional", "5"))),
+        evaluate_interval_s=float(data.get("evaluate_interval_s", 1.0)),
+        timer_eval_count=int(data.get("timer_eval_count", 2)),
+        half_life_s=float(data.get("half_life_s", 5.0)),
+        min_samples_s=float(data.get("min_samples_s", 3.0)),
+        sample_interval_s=float(data.get("sample_interval_s", 1.0)),
+        tau_floor_s=float(data.get("tau_floor_s", 1.0)),
+        theta_take=Decimal(str(data.get("theta_take", "0.01"))),
+        z_min=Decimal(str(data.get("z_min", "0"))),
+        z_max=Decimal(str(data.get("z_max", "20"))),
+        tau_min_s=float(data.get("tau_min_s", 1.0)),
+        tau_max_s=float(data.get("tau_max_s", 600.0)),
+        basis_max_bps=Decimal(str(data.get("basis_max_bps", "10000"))),
+        expected_slippage_buy=Decimal(str(data.get("expected_slippage_buy", "0"))),
+        expected_slippage_sell=Decimal(str(data.get("expected_slippage_sell", "0"))),
+        reject_both_legs_edge=bool(data.get("reject_both_legs_edge", False)),
     )
 
 
