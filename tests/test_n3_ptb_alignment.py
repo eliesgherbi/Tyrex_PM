@@ -199,7 +199,8 @@ def test_attestation_mismatch_and_missing() -> None:
     )
     att = engine.attest(market_id=mid, window_id=wid)
     assert att.result is AttestationResult.MISMATCH
-    assert engine.get_window(mid, wid).phase is PtbLifecyclePhase.FAILED
+    assert engine.get_window(mid, wid).phase is PtbLifecyclePhase.DEGRADED
+    assert "attestation_mismatch" in engine.get_window(mid, wid).blockers
 
     missing = compare_attestation(
         market_id=mid,
@@ -586,7 +587,7 @@ def test_deterministic_restart_replay() -> None:
     assert s1.sealed is not None and s2.sealed is not None
     assert s1.sealed.ptb_k == s2.sealed.ptb_k
     assert s1.sealed.boundary_rule_id == s2.sealed.boundary_rule_id
-    assert s1.sealed.pairing_source_skew_ms == s2.sealed.pairing_source_skew_ms
+    assert s1.last_boundary_pair_skew_ms == s2.last_boundary_pair_skew_ms
 
 
 def test_threshold_not_configured_visible() -> None:

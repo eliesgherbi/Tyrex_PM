@@ -1,9 +1,10 @@
 # Z-Gap production readiness (N1–N7)
 
-**Status:** N1 `PASS_WITH_BLOCKERS` · N2 `PASS_WITH_ENVIRONMENT_BLOCKER` · N3 `PASS_WITH_ENVIRONMENT_BLOCKER` (N3A) · N4–N7 planned  
+**Status:** N1 `PASS_WITH_BLOCKERS` · N2–N4 `PASS_WITH_ENVIRONMENT_BLOCKER` · N5–N7 planned  
 **Acceptance (N1):** [n1_acceptance_report.md](n1_acceptance_report.md)  
 **Acceptance (N2):** [n2_acceptance_report.md](n2_acceptance_report.md)  
 **Acceptance (N3):** [n3_acceptance_report.md](n3_acceptance_report.md)  
+**Acceptance (N4):** [n4_acceptance_report.md](n4_acceptance_report.md)  
 **Initiative:** one major track taking Z-Gap from fixture OBSERVE/SHADOW to
 trustworthy real inputs, real-input OBSERVE/SHADOW, and reconciled
 operator-controlled tiny live.  
@@ -90,7 +91,8 @@ flowchart TD
 | N2 coding | Done — see [n2_acceptance_report.md](n2_acceptance_report.md) |
 | N3 coding | N3A done — see [n3_acceptance_report.md](n3_acceptance_report.md); N3B live deferred (TLS) |
 | N3 lock/entry policy | Boundary rule PROVISIONAL (`EXACT_AT_START`); numeric thresholds still OPEN |
-| N4 product OBSERVE | N3A contracts + N3B on healthy TLS for live acceptance; EWMA warm-up / prep lead OPEN |
+| N4 product OBSERVE | N4A done — [n4_acceptance_report.md](n4_acceptance_report.md); N4B live deferred (TLS) |
+| N5 real SHADOW | N4A contracts + N4B live OBSERVE evidence; fill-model freeze |
 | N5 | N4 engineering acceptance + fill-model freeze |
 | N6 **starts after** N5 | N5 acceptance; N6 builds generic live capability with mutations OFF |
 | N6 **completion / N7 gate** | Authenticated **read-only** preflight is an N6 completion criterion and a prerequisite for N7 — not a blocker to *starting* N6 after N5 |

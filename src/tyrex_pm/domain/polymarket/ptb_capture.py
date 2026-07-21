@@ -46,7 +46,7 @@ from tyrex_pm.domain.polymarket.ptb_attestation import (
     compare_attestation,
 )
 from tyrex_pm.domain.polymarket.reference_blockers import ReferenceBlockerReason
-from tyrex_pm.domain.polymarket.sealed_reference import SealedReferenceInput
+from tyrex_pm.domain.polymarket.sealed_reference import SealedWindowPtb
 from tyrex_pm.indicators.causal_pairing import (
     PAIRING_POLICY_ID,
     PriceTickView,
@@ -58,6 +58,9 @@ from tyrex_pm.indicators.reference_alignment import (
     BasisEwmaState,
     build_aligned_reference,
 )
+
+# N3 alias — sealed package is window PTB only (dynamic refs live elsewhere).
+SealedReferenceInput = SealedWindowPtb
 
 
 class PtbLifecyclePhase(str, Enum):
@@ -90,12 +93,13 @@ class WindowPtbState:
     candidate_set: BoundaryCandidateSet | None = None
     selected_candidate: BoundaryCandidate | None = None
     attestation: PtbAttestationRecord | None = None
-    sealed: SealedReferenceInput | None = None
+    sealed: SealedWindowPtb | None = None
     ptb_snapshot: PtbSnapshot | None = None
     blockers: list[str] = field(default_factory=list)
     conflict_evidence: list[dict[str, Any]] = field(default_factory=list)
     late_after_seal: list[IngressEvidenceRow] = field(default_factory=list)
     last_connection_generation: int | None = None
+    last_boundary_pair_skew_ms: int | None = None
     _seen_fingerprints: set[str] = field(default_factory=set)
 
 
@@ -350,8 +354,11 @@ class PtbCaptureEngine:
             if state.phase is PtbLifecyclePhase.CANDIDATE_CAPTURED:
                 state.phase = PtbLifecyclePhase.DEGRADED
         elif rec.result is AttestationResult.MISMATCH:
+            # Exact-zero compare failed. Record evidence and degrade readiness.
+            # Do not invent a nonzero tolerance. Sealing K for audit remains
+            # allowed; readiness_ready stays false via attestation result.
             state.blockers.append(ReferenceBlockerReason.ATTESTATION_MISMATCH.value)
-            state.phase = PtbLifecyclePhase.FAILED
+            state.phase = PtbLifecyclePhase.DEGRADED
         else:
             if state.phase is PtbLifecyclePhase.CANDIDATE_CAPTURED:
                 state.phase = PtbLifecyclePhase.ATTESTED
@@ -367,8 +374,8 @@ class PtbCaptureEngine:
         window_id: str,
         sealed_at: datetime | None = None,
         require_attestation_match: bool = False,
-    ) -> SealedReferenceInput:
-        """Explicit seal operation — immutable thereafter."""
+    ) -> SealedWindowPtb:
+        """Explicit seal of window PTB/K — does not freeze B_t / basis / C_hat."""
         state = self._require(market_id, window_id)
         if state.sealed is not None:
             return state.sealed
@@ -390,7 +397,7 @@ class PtbCaptureEngine:
         sealed_at = sealed_at or datetime.now(timezone.utc)
         sealed_at = require_utc(sealed_at, field_name="sealed_at")
 
-        # Causal pair for boundary tick as trading ref sample
+        # Boundary-time causal pair is provenance only — not a frozen trading S.
         cl_view = PriceTickView(
             value=cand.value,
             source_ts=cand.chainlink_source_ts,
@@ -411,8 +418,8 @@ class PtbCaptureEngine:
         for b in pair.blocker_reasons:
             if b not in state.blockers:
                 state.blockers.append(b)
+        state.last_boundary_pair_skew_ms = pair.source_skew_ms
 
-        alignment: AlignedReferenceSnapshot | None = None
         if pair.paired and pair.binance is not None:
             alignment = build_aligned_reference(
                 chainlink=cand.value,
@@ -444,13 +451,9 @@ class PtbCaptureEngine:
             not in {PtbLifecyclePhase.FAILED, PtbLifecyclePhase.DEGRADED}
             and ReferenceBlockerReason.ATTESTATION_MISMATCH.value not in state.blockers
         )
-        # Degraded clocks / missing attestation still allow seal of K for audit,
-        # but readiness_ready stays false.
         if cand.clock_status in {"UNSYNCHRONIZED", "DEGRADED"}:
             readiness_ready = False
         if att_result is not AttestationResult.MATCH:
-            readiness_ready = False
-        if pair.paired is False:
             readiness_ready = False
 
         evidence_ids = [
@@ -458,7 +461,7 @@ class PtbCaptureEngine:
             for e in state.evidence
         ]
 
-        sealed = SealedReferenceInput(
+        sealed = SealedWindowPtb(
             market_id=market_id,
             window_id=window_id,
             event_start=state.event_start,
@@ -468,34 +471,25 @@ class PtbCaptureEngine:
             boundary_classification=cand.rule_classification,
             ptb_attestation_result=att_result,
             ptb_attestation_classification=att_class,
-            trading_reference=None if pair.binance is None else pair.binance.value,
-            trading_reference_identity=(
-                None if pair.binance is None else pair.binance.identity.value
-            ),
-            trading_reference_source_ts=(
-                None if pair.binance is None else pair.binance.source_ts
-            ),
-            aligned_chainlink_raw=None if alignment is None else alignment.chainlink_raw,
-            aligned_binance_raw=None if alignment is None else alignment.binance_raw,
-            basis_ln_instant=None if alignment is None else alignment.basis_ln_instant,
-            basis_ln_smoothed=None if alignment is None else alignment.basis_ln_smoothed,
-            c_hat=None if alignment is None else alignment.c_hat,
-            alignment_init_state=None if alignment is None else alignment.init_state,
-            pairing_policy_id=PAIRING_POLICY_ID,
-            pairing_source_skew_ms=pair.source_skew_ms,
             chainlink_boundary_source_ts=cand.chainlink_source_ts,
+            chainlink_boundary_value=cand.value,
             clock_status=cand.clock_status,
             clock_uncertainty_ms=cand.clock_uncertainty_ms,
             clock_snapshot_id=cand.clock_snapshot_id,
-            freshness_ready=pair.paired,
-            readiness_ready=readiness_ready,
-            blocker_reasons=tuple(dict.fromkeys(state.blockers)),
             sealed_at=sealed_at,
             evidence_ids=tuple(x for x in evidence_ids if x),
+            blocker_reasons=tuple(dict.fromkeys(state.blockers)),
+            readiness_ready=readiness_ready,
             provenance={
                 "preferred_rule": PROVISIONAL_PREFERRED_RULE.value,
                 "preferred_classification": PROVISIONAL_PREFERRED_CLASSIFICATION.value,
                 "lifecycle_phase_at_seal": state.phase.value,
+                "pairing_policy_id": PAIRING_POLICY_ID,
+                "boundary_pair_skew_ms": pair.source_skew_ms,
+                "boundary_binance_value": (
+                    None if pair.binance is None else str(pair.binance.value)
+                ),
+                "dynamic_refs_not_sealed": True,
             },
         )
 

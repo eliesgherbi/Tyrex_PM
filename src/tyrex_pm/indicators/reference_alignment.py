@@ -105,6 +105,14 @@ class AlignmentInitState(str, Enum):
     EWMA_NOT_CONFIGURED = "EWMA_NOT_CONFIGURED"
 
 
+class AlignmentMode(str, Enum):
+    """How C_hat was produced for this evaluation."""
+
+    RECONSTRUCTION = "RECONSTRUCTION"  # same causal pair → C_hat ≡ C algebraically
+    BETWEEN_TICKS = "BETWEEN_TICKS"  # current B_t × prior accepted basis estimate
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 @dataclass(frozen=True, kw_only=True)
 class AlignedReferenceSnapshot:
     """Dual-reference alignment view (immutable)."""
@@ -189,6 +197,52 @@ class BasisEwmaState:
         return AlignmentInitState.READY
 
 
+@dataclass
+class AcceptedBasisEstimate:
+    """Latest causally accepted basis estimate for between-tick alignment.
+
+    Updated only when a new Chainlink tick is paired; never from future Binance.
+    """
+
+    basis_ln: Decimal | None = None
+    as_of_chainlink_source_ts: datetime | None = None
+    as_of_binance_source_ts: datetime | None = None
+    chainlink_value: Decimal | None = None
+    binance_value: Decimal | None = None
+    source_skew_ms: int | None = None
+    samples: int = 0
+
+    def accept(
+        self,
+        *,
+        basis_ln: Decimal,
+        chainlink_source_ts: datetime,
+        binance_source_ts: datetime,
+        chainlink_value: Decimal,
+        binance_value: Decimal,
+        source_skew_ms: int | None,
+    ) -> None:
+        chainlink_source_ts = require_utc(
+            chainlink_source_ts, field_name="chainlink_source_ts"
+        )
+        binance_source_ts = require_utc(
+            binance_source_ts, field_name="binance_source_ts"
+        )
+        if (
+            self.as_of_chainlink_source_ts is not None
+            and chainlink_source_ts < self.as_of_chainlink_source_ts
+        ):
+            # Ignore out-of-order Chainlink for estimate advancement.
+            return
+        self.basis_ln = as_decimal(basis_ln, field_name="basis_ln")
+        self.as_of_chainlink_source_ts = chainlink_source_ts
+        self.as_of_binance_source_ts = binance_source_ts
+        self.chainlink_value = as_decimal(chainlink_value, field_name="chainlink_value")
+        self.binance_value = as_decimal(binance_value, field_name="binance_value")
+        self.source_skew_ms = source_skew_ms
+        self.samples += 1
+
+
 def build_aligned_reference(
     *,
     chainlink: Decimal | str | int,
@@ -252,4 +306,131 @@ def build_aligned_reference(
         clock_status=clock_status,
         blocker_reasons=tuple(dict.fromkeys(blockers)),
         ewma_half_life_s=half,
+    )
+
+
+def evaluate_dynamic_alignment(
+    *,
+    current_binance: Decimal | str | int,
+    binance_source_ts: datetime,
+    trading_identity: str,
+    pairing_policy_id: str,
+    accepted: AcceptedBasisEstimate,
+    ewma: BasisEwmaState | None = None,
+    current_chainlink: Decimal | str | int | None = None,
+    chainlink_source_ts: datetime | None = None,
+    pairing_source_skew_ms: int | None = None,
+    clock_status: str | None = None,
+    evaluated_at: datetime | None = None,
+    update_accepted_from_current_pair: bool = False,
+):
+    """Build dynamic alignment for one evaluation without freezing into sealed K.
+
+    Between Chainlink ticks: use ``accepted`` basis estimate with current B_t.
+    When ``update_accepted_from_current_pair`` and a current Chainlink pair is
+    supplied, instantaneous basis updates the accepted estimate (causal only).
+
+    Returns ``DynamicAlignedReference``.
+    """
+    from tyrex_pm.domain.polymarket.sealed_reference import DynamicAlignedReference
+
+    b = as_decimal(current_binance, field_name="current_binance")
+    binance_source_ts = require_utc(binance_source_ts, field_name="binance_source_ts")
+    blockers: list[str] = []
+    half = None if ewma is None else ewma.half_life_s
+    if ewma is None or ewma.half_life_s is None:
+        blockers.append("threshold_not_configured")
+
+    instant: Decimal | None = None
+    mode = AlignmentMode.UNAVAILABLE
+    includes_current = False
+    estimate = accepted.basis_ln
+    estimate_as_of = accepted.as_of_chainlink_source_ts
+    cl_raw = None if accepted.chainlink_value is None else accepted.chainlink_value
+    cl_ts = accepted.as_of_chainlink_source_ts
+    skew = pairing_source_skew_ms if pairing_source_skew_ms is not None else accepted.source_skew_ms
+
+    if current_chainlink is not None and chainlink_source_ts is not None:
+        chainlink_source_ts = require_utc(
+            chainlink_source_ts, field_name="chainlink_source_ts"
+        )
+        # Causal guard: Binance used for this pair must not be after Chainlink.
+        if binance_source_ts > chainlink_source_ts:
+            blockers.append("no_causal_binance_pair")
+        else:
+            log = compute_log_basis(chainlink=current_chainlink, binance=b)
+            if log.ready and log.basis_ln is not None:
+                instant = log.basis_ln
+                cl_raw = log.chainlink
+                cl_ts = chainlink_source_ts
+                includes_current = True
+                if update_accepted_from_current_pair:
+                    if ewma is not None:
+                        ewma.update(basis_ln=log.basis_ln, source_ts=chainlink_source_ts)
+                        estimate = ewma.value if ewma.value is not None else log.basis_ln
+                    else:
+                        estimate = log.basis_ln
+                    accepted.accept(
+                        basis_ln=estimate,
+                        chainlink_source_ts=chainlink_source_ts,
+                        binance_source_ts=binance_source_ts,
+                        chainlink_value=log.chainlink,
+                        binance_value=log.binance,
+                        source_skew_ms=int(
+                            (chainlink_source_ts - binance_source_ts).total_seconds()
+                            * 1000.0
+                        ),
+                    )
+                    estimate_as_of = chainlink_source_ts
+                    skew = accepted.source_skew_ms
+                mode = AlignmentMode.RECONSTRUCTION
+            else:
+                blockers.append(log.reason_code or "basis_not_ready")
+
+    if mode is AlignmentMode.UNAVAILABLE and estimate is not None:
+        mode = AlignmentMode.BETWEEN_TICKS
+        includes_current = False
+
+    c_hat = None
+    if estimate is not None and b > 0:
+        c_hat = aligned_chainlink_estimate(binance=b, basis_ln_latest=estimate)
+        if mode is AlignmentMode.RECONSTRUCTION and instant is not None and cl_raw is not None:
+            # Algebraic identity check (float noise tolerant).
+            if abs(float(c_hat) - float(cl_raw)) > max(1e-4, float(cl_raw) * 1e-9):
+                blockers.append("reconstruction_identity_unexpected")
+
+    if estimate is None:
+        blockers.append("basis_estimate_unavailable")
+        mode = AlignmentMode.UNAVAILABLE
+
+    init = AlignmentInitState.READY
+    if estimate is None:
+        init = AlignmentInitState.UNINITIALIZED
+    elif half is None:
+        init = AlignmentInitState.EWMA_NOT_CONFIGURED
+
+    return DynamicAlignedReference(
+        binance_raw=b,
+        binance_source_ts=binance_source_ts,
+        trading_identity=trading_identity,
+        chainlink_raw=cl_raw,
+        chainlink_source_ts=cl_ts,
+        instantaneous_basis_ln=instant,
+        basis_estimate_used_ln=estimate,
+        basis_estimate_as_of_ts=estimate_as_of,
+        basis_estimate_includes_current_chainlink=includes_current,
+        c_hat=c_hat,
+        alignment_mode=mode,
+        pairing_policy_id=pairing_policy_id,
+        pairing_source_skew_ms=skew,
+        init_state=init,
+        clock_status=clock_status,
+        blocker_reasons=tuple(dict.fromkeys(blockers)),
+        ewma_half_life_s=half,
+        evaluated_at=evaluated_at,
+        provenance={
+            "accepted_samples": accepted.samples,
+            "formula_id": "ln_C_over_B",
+            "c_hat_formula": "B_t * exp(basis_estimate_used)",
+        },
     )

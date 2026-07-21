@@ -1,9 +1,13 @@
 # N4 — Real-input OBSERVE
 
-**Status:** planned (no implementation in this planning commit)  
+**Status:** `PASS_WITH_ENVIRONMENT_BLOCKER` (N4A executed; N4B deferred)  
+**Acceptance:** [n4_acceptance_report.md](n4_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n4_real_observe.md`  
 **Depends on:** N2 adapters + N3 PTB/basis  
-**Unblocks:** N5 real-input SHADOW (engineering gate)
+**Unblocks:** N5 offline SHADOW design; N5 live needs N4B on healthy TLS  
+
+N4A delivers sealed-window PTB + dynamic alignment composition into existing
+Z-Gap OBSERVE (no OMS). Live Polymarket OBSERVE remains environment-blocked here.
 
 ---
 

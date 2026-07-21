@@ -314,6 +314,8 @@ class ZGapBinding:
         momentum_reason: str,
         momentum_threshold: Decimal,
         max_book_spread: Decimal,
+        settlement_ref: Decimal | None = None,
+        settlement_ref_fresh: bool | None = None,
     ) -> StrategyEvalResult:
         del momentum_value, momentum_ready, momentum_reason, momentum_threshold, max_book_spread
         if market_snapshot.reference is not None:
@@ -341,6 +343,16 @@ class ZGapBinding:
             "unknown_inventory": bool(decision_context.unknown_inventory),
         }
 
+        if settlement_ref is None:
+            settlement_ref = (
+                None
+                if market_snapshot.reference is None
+                else market_snapshot.reference.price
+            )
+            settlement_ref_fresh = market_snapshot.reference_freshness.is_fresh
+        elif settlement_ref_fresh is None:
+            settlement_ref_fresh = market_snapshot.reference_freshness.is_fresh
+
         decision_input = assemble_zgap_decision_snapshot(
             market_snapshot=market_snapshot,
             vol=vol,
@@ -354,12 +366,8 @@ class ZGapBinding:
             correlation_id=correlation_id,
             causation_id=causation_id,
             window_id=self.window_id,
-            settlement_ref=(
-                None
-                if market_snapshot.reference is None
-                else market_snapshot.reference.price
-            ),
-            settlement_ref_fresh=market_snapshot.reference_freshness.is_fresh,
+            settlement_ref=settlement_ref,
+            settlement_ref_fresh=bool(settlement_ref_fresh),
             position=position,
             capabilities=capabilities,
         )
