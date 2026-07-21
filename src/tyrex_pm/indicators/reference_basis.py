@@ -1,6 +1,14 @@
 """Reference-alignment / basis indicator (reusable — threshold is policy-owned).
 
-basis_bps = (S − S_settlement_ref) / S_settlement_ref × 10000
+Legacy linear form (F2 gates / compatibility):
+
+    basis_bps = (S − S_settlement_ref) / S_settlement_ref × 10000
+
+N3 production causal form lives in ``reference_alignment.compute_log_basis``:
+
+    b_t = ln(C_t / B_t)
+
+These are **not** identical; do not mix silently.
 """
 
 from __future__ import annotations

@@ -1,9 +1,15 @@
 # N3 — PTB and reference alignment
 
-**Status:** planned (no implementation in this planning commit)  
+**Status:** `PASS_WITH_ENVIRONMENT_BLOCKER` (N3A executed; N3B deferred)  
+**Acceptance:** [n3_acceptance_report.md](n3_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n3_ptb_and_reference_alignment.md`  
 **Depends on:** N1 evidence + N2 settlement/trading reference feeds  
-**Unblocks:** N4 real-input OBSERVE, N5 real-input SHADOW
+**Unblocks:** N4 offline real-input OBSERVE wiring; N4 live acceptance needs N3B  
+
+N3A delivers deterministic boundary capture, attestation port, causal pairing,
+log-basis alignment, and `SealedReferenceInput` without strategy/OMS binding.
+N3B live Polymarket evidence remains blocked on the current host TLS interceptor
+(see N2).
 
 ---
 
