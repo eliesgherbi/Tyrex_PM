@@ -248,170 +248,64 @@ async def run_live(
     out_path: Path,
     prep_lead_s: float,
 ) -> dict:
-    """Live public-data OBSERVE — requires healthy Polymarket TLS.
+    """Live public-data OBSERVE with EXACT Chainlink seal → Z-Gap evaluation.
 
-    Explicit arguments only; no placeholders. TLS verification always on.
+    TLS verification always on. No OMS / orders / auth.
     """
-    _ = prep_lead_s
-    # Refuse insecure contexts
-    _ = ssl.create_default_context()
+    from tyrex_pm.runtime.live_zgap_compose import run_live_zgap_compose
 
-    summary: dict = {
+    _ = ssl.create_default_context()
+    run_id = datetime.now(timezone.utc).strftime("n4b_%Y%m%dT%H%M%SZ")
+    out_dir = out_path.parent / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def on_eval(runtime: N4ObserveRuntime) -> list[dict]:
+        return [runtime.evaluate_active(trigger="feed").to_dict()]
+
+    composed = await run_live_zgap_compose(
+        mode="n4_observe",
+        out_dir=out_dir,
+        run_id=run_id,
+        min_seals=max(1, max_windows),
+        max_duration_s=duration_s,
+        prep_lead_s=prep_lead_s,
+        on_after_seal_eval=on_eval,
+        stop_when_seals_met=True,
+    )
+    d = composed.to_dict()
+    summary = {
         "mode": "live",
         "not_live_evidence": False,
         "tls_verify": True,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": d["started_at"],
+        "ended_at": d["ended_at"],
         "auth_touched": False,
         "orders_touched": False,
-        "oms_touched": False,
+        "oms_touched": d["oms_touched"],
+        "orders_planned": 0,
+        "orders_shadow": 0,
+        "orders_live": 0,
+        "venue_mutation": False,
         "max_windows": max_windows,
         "duration_s": duration_s,
         "classification_if_tls_fails": "NOT_RUN_ENVIRONMENT_BLOCKED",
-        "feeds": {},
-        "observations": [],
+        "discovery": d["discovery"],
+        "feeds": d["feeds"],
+        "seals": d["seals"],
+        "missed_windows": d["missed_windows"],
+        "observations": d["observations"],
+        "observation_count": d["observation_count"],
+        "errors": d["errors"],
+        "out_dir": str(out_dir),
     }
-
-    clock = SystemClock()
-    auth = SnapshotTimeAuthority(clock=clock, max_uncertainty_ms=10_000)
-    provider = OsMonitorClockSyncProvider(enable_binance_cross_check=True)
-    try:
-        snap = await provider.measure()
-        auth.apply_snapshot(snap)
-    except Exception as exc:
-        summary["clock_error"] = f"{type(exc).__name__}:{exc}"
-
-    discovery = GammaMarketDiscovery()
-    try:
-        active_binding = await discovery.resolve_btc_5m_window(
-            slug=current_btc_updown_slug(),
-            session_role=DiscoverySessionRole.ACTIVE,
-        )
-        prepared = await discovery.prepare_next_btc_5m()
-        summary["discovery"] = {
-            "active_slug": active_binding.window_slug,
-            "prepared_slug": prepared.window_slug,
-            "outcome_semantics": active_binding.outcome_semantics,
-        }
-    except Exception as exc:
-        summary["discovery_error"] = f"{type(exc).__name__}:{exc}"
+    if d["feeds"].get("chainlink_ticks", 0) == 0:
         summary["n4b_status"] = "NOT_RUN_ENVIRONMENT_BLOCKED"
-        # Fixture binding for structure only — do not claim live
-        event = json.loads(DEFAULT_GAMMA.read_text(encoding="utf-8"))
-        active_binding = bind_btc_5m_gamma_event(
-            event,
-            expected_slug=event["slug"],
-            session_role=DiscoverySessionRole.ACTIVE,
-        )
-        prepared = None
-        summary["discovery_fallback"] = "fixture_gamma_binding_not_live"
-
-    runtime = N4ObserveRuntime.create(
-        clock=FakeClock(_wall=datetime.now(timezone.utc)),
-        basis_ewma_half_life_s=None,  # OPEN — do not invent
-        zgap_config=ZGapConfig(
-            ptb_time_quality=ZGapPtbTimeQualityConfig(basis_max_bps=Decimal("10000"))
-        ),
-    )
-    runtime.open_session(
-        slot=SessionSlot.ACTIVE,
-        market=active_binding.market,
-        window_id=active_binding.window_slug,
-        binding=active_binding,
-    )
-    if prepared is not None:
-        runtime.open_session(
-            slot=SessionSlot.PREPARED_NEXT,
-            market=prepared.market,
-            window_id=prepared.window_slug,
-            binding=prepared,
-            publish_as_active=False,
-        )
-
-    disp = EventDispatcher()
-    counts = {"chainlink": 0, "binance": 0, "clob": 0}
-
-    def on_cl(e: SettlementReferenceUpdated) -> None:
-        counts["chainlink"] += 1
-        if runtime.active is None:
-            return
-        meta = e.ingress
-        tick = BoundaryTickView(
-            value=e.settlement.price,
-            source_ts=e.ts_event,
-            receive_wall_raw_utc=e.ts_received,
-            receive_wall_corrected_utc=(
-                None if meta is None else meta.receive_wall_corrected_utc
-            ),
-            receive_monotonic_ns=0 if meta is None else meta.receive_monotonic_ns,
-            ingress=meta,
-            raw_fingerprint=None if meta is None else meta.raw_fingerprint,
-        )
-        runtime.ingest_chainlink(
-            window_id=runtime.active.window_id,
-            market_id=runtime.active.market_id,
-            tick=tick,
-        )
-
-    def on_bn(e: ReferencePriceUpdated) -> None:
-        if e.source.value != "binance":
-            return
-        counts["binance"] += 1
-        meta = e.ingress
-        runtime.ingest_binance(
-            PriceTickView(
-                value=e.reference.price,
-                source_ts=e.ts_event,
-                receive_wall_raw_utc=e.ts_received,
-                receive_wall_corrected_utc=(
-                    None if meta is None else meta.receive_wall_corrected_utc
-                ),
-                receive_monotonic_ns=0 if meta is None else meta.receive_monotonic_ns,
-                identity=TradingReferenceIdentity.BINANCE_SPOT,
-                ingress=meta,
-            )
-        )
-        if runtime.active and runtime.active.sealed is not None:
-            rec = runtime.evaluate_active(trigger="feed")
-            summary["observations"].append(rec.to_dict())
-
-    disp.subscribe(SettlementReferenceUpdated, on_cl)
-    disp.subscribe(ReferencePriceUpdated, on_bn)
-
-    cl = RtdsChainlinkAdapter(time_authority=auth, heartbeat_timeout_s=25)
-    bn = BinanceTradeWsAdapter(
-        symbol="BTCUSDT", time_authority=auth
-    )
-    clob = PolymarketMarketWsAdapter.from_binding(active_binding)
-    tasks = [
-        asyncio.create_task(cl.run(disp), name="cl"),
-        asyncio.create_task(bn.run(disp), name="bn"),
-        asyncio.create_task(clob.run(disp), name="clob"),
-    ]
-    try:
-        await asyncio.sleep(duration_s)
-    finally:
-        await cl.stop()
-        await bn.stop()
-        await clob.stop()
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    summary["feeds"] = {
-        "chainlink_ticks": counts["chainlink"],
-        "binance_ticks": counts["binance"],
-        "clob_ready": clob.ready,
-        "shutdown": "graceful",
-    }
-    summary["oms_touched"] = runtime.oms_touched
-    summary["orders_submitted"] = runtime.orders_submitted
-    if counts["chainlink"] == 0:
-        summary["n4b_status"] = "NOT_RUN_ENVIRONMENT_BLOCKED"
+    elif d["observation_count"] > 0 and d["seals"]:
+        summary["n4b_status"] = "LIVE_OK"
     else:
         summary["n4b_status"] = "LIVE_PARTIAL_OR_OK"
-    summary["ended_at"] = datetime.now(timezone.utc).isoformat()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: summary[k] for k in summary if k != "observations"}, indent=2)[:4000])
     return summary
 

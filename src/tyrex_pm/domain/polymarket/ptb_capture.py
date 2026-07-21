@@ -304,13 +304,33 @@ class PtbCaptureEngine:
         }:
             state.phase = PtbLifecyclePhase.CANDIDATE_CAPTURED
 
+        # Drop stale pre-boundary candidate blockers once EXACT is owned.
+        if selected.rule_id is BoundaryRuleId.EXACT_AT_START:
+            for obsolete in (
+                "exact_candidate_absent",
+                "incomplete_fallback_candidates",
+                "no_boundary_candidate",
+                "ambiguous_fallback_candidates",
+            ):
+                while obsolete in state.blockers:
+                    state.blockers.remove(obsolete)
+
         clock = selected.clock_status
         if clock == "UNSYNCHRONIZED":
-            state.blockers.append(ReferenceBlockerReason.CLOCK_UNSYNCHRONIZED.value)
+            if ReferenceBlockerReason.CLOCK_UNSYNCHRONIZED.value not in state.blockers:
+                state.blockers.append(ReferenceBlockerReason.CLOCK_UNSYNCHRONIZED.value)
             state.phase = PtbLifecyclePhase.DEGRADED
         elif clock == "DEGRADED":
-            state.blockers.append(ReferenceBlockerReason.CLOCK_DEGRADED.value)
+            if ReferenceBlockerReason.CLOCK_DEGRADED.value not in state.blockers:
+                state.blockers.append(ReferenceBlockerReason.CLOCK_DEGRADED.value)
             state.phase = PtbLifecyclePhase.DEGRADED
+        elif clock == "READY":
+            for obsolete in (
+                ReferenceBlockerReason.CLOCK_UNSYNCHRONIZED.value,
+                ReferenceBlockerReason.CLOCK_DEGRADED.value,
+            ):
+                while obsolete in state.blockers:
+                    state.blockers.remove(obsolete)
 
     def attest(self, *, market_id: MarketId, window_id: str) -> PtbAttestationRecord:
         state = self._require(market_id, window_id)
@@ -350,16 +370,28 @@ class PtbCaptureEngine:
         )
         state.attestation = rec
         if rec.result is AttestationResult.INCOMPLETE:
-            state.blockers.append(ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value)
+            if ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value not in state.blockers:
+                state.blockers.append(ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value)
             if state.phase is PtbLifecyclePhase.CANDIDATE_CAPTURED:
                 state.phase = PtbLifecyclePhase.DEGRADED
         elif rec.result is AttestationResult.MISMATCH:
             # Exact-zero compare failed. Record evidence and degrade readiness.
             # Do not invent a nonzero tolerance. Sealing K for audit remains
             # allowed; readiness_ready stays false via attestation result.
-            state.blockers.append(ReferenceBlockerReason.ATTESTATION_MISMATCH.value)
+            while ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value in state.blockers:
+                state.blockers.remove(
+                    ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value
+                )
+            if ReferenceBlockerReason.ATTESTATION_MISMATCH.value not in state.blockers:
+                state.blockers.append(ReferenceBlockerReason.ATTESTATION_MISMATCH.value)
             state.phase = PtbLifecyclePhase.DEGRADED
         else:
+            while ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value in state.blockers:
+                state.blockers.remove(
+                    ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value
+                )
+            while ReferenceBlockerReason.ATTESTATION_MISMATCH.value in state.blockers:
+                state.blockers.remove(ReferenceBlockerReason.ATTESTATION_MISMATCH.value)
             if state.phase is PtbLifecyclePhase.CANDIDATE_CAPTURED:
                 state.phase = PtbLifecyclePhase.ATTESTED
             elif state.phase is PtbLifecyclePhase.DEGRADED:

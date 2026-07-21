@@ -14,11 +14,16 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from tyrex_pm.core.clock import FakeClock, require_utc
+from tyrex_pm.core.clock import Clock, FakeClock, require_utc
 from tyrex_pm.core.ids import MarketId, new_correlation_id, new_event_id, new_run_id
 from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.core.snapshots import ReferencePriceSnapshot
-from tyrex_pm.core.time_authority import FakeTimeAuthority, TimeSyncStatus
+from tyrex_pm.core.time_authority import (
+    ClockTimeAuthority,
+    FakeTimeAuthority,
+    TimeAuthority,
+    TimeSyncStatus,
+)
 from tyrex_pm.domain.polymarket.boundary_candidates import BoundaryTickView
 from tyrex_pm.domain.polymarket.discovery_binding import DiscoveredMarketBinding
 from tyrex_pm.domain.polymarket.market import BinaryMarket
@@ -214,9 +219,9 @@ def config_fingerprint(config: ZGapConfig) -> str:
 
 @dataclass
 class N4ObserveRuntime:
-    """Deterministic offline OBSERVE composition over N2/N3 contracts."""
+    """OBSERVE composition over N2/N3 contracts (fixture FakeClock or live SystemClock)."""
 
-    clock: FakeClock
+    clock: Clock
     ptb_engine: PtbCaptureEngine
     zgap: ZGapBinding
     accepted_basis: AcceptedBasisEstimate = field(default_factory=AcceptedBasisEstimate)
@@ -234,17 +239,30 @@ class N4ObserveRuntime:
     def create(
         cls,
         *,
-        clock: FakeClock | None = None,
+        clock: Clock | None = None,
         attestation_port: PtbAttestationPort | None = None,
         basis_ewma_half_life_s: float | None = None,
         zgap_config: ZGapConfig | None = None,
+        time_authority: TimeAuthority | None = None,
     ) -> "N4ObserveRuntime":
         clock = clock or FakeClock(
             _wall=datetime(2026, 7, 20, 21, 15, 0, tzinfo=timezone.utc)
         )
-        auth = FakeTimeAuthority(
-            clock=clock, sync_status=TimeSyncStatus.READY, uncertainty_ms=50
-        )
+        if time_authority is not None:
+            auth = time_authority
+        elif isinstance(clock, FakeClock):
+            auth = FakeTimeAuthority(
+                clock=clock, sync_status=TimeSyncStatus.READY, uncertainty_ms=50
+            )
+        else:
+            # Live wall clock: READY with loose uncertainty for validation runs.
+            # Production uncertainty limits remain OPEN.
+            auth = ClockTimeAuthority(
+                clock=clock,
+                sync_status=TimeSyncStatus.READY,
+                uncertainty_ms=50,
+                max_uncertainty_ms=10_000,
+            )
         engine = PtbCaptureEngine(
             attestation_port=attestation_port,
             ewma=BasisEwmaState(half_life_s=basis_ewma_half_life_s),
@@ -472,7 +490,7 @@ class N4ObserveRuntime:
                 model_spot=None,
                 model_anchor=None,
             )
-        now = self.clock.now_utc()
+        now = self.zgap.time_authority.now_corrected_utc()
         reasons: list[str] = []
         if sess.sealed is None:
             reasons.append("exact_candidate_absent")

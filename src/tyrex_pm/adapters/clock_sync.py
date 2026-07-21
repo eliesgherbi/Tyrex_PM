@@ -114,7 +114,6 @@ class OsMonitorClockSyncProvider:
                 detail="application monitors OS clock; does not set it",
             )
         ]
-        offsets: list[float] = [0.0]
         status = TimeSyncStatus.READY
         uncertainty = 0
         primary = "os_clock"
@@ -133,7 +132,6 @@ class OsMonitorClockSyncProvider:
                         ok=True,
                     )
                 )
-                offsets.append(offset)
                 uncertainty = max(uncertainty, int(rtt_ms / 2.0) + 1)
             except Exception as exc:
                 logger.info("binance time cross-check failed: %s", exc)
@@ -148,15 +146,32 @@ class OsMonitorClockSyncProvider:
                 status = TimeSyncStatus.DEGRADED
                 uncertainty = max(uncertainty, 250)
 
-        disagreement = max(offsets) - min(offsets) if len(offsets) > 1 else 0.0
-        # Prefer OS as primary; estimated_offset from Binance cross-check when present
+        # OS row is a monitor baseline (offset_ms=0 by definition), not a second
+        # independent estimate of "true" time. A non-zero Binance cross-check is
+        # the estimated_offset to *apply*, not a disagreement that forces DEGRADED.
+        # DEGRADED only when the cross-check fails (above) or when multiple
+        # successful *external* sources diverge beyond the threshold.
+        external_ok = [
+            s
+            for s in sources
+            if s.source != "os_clock" and s.ok and s.offset_ms is not None
+        ]
+        external_offsets = [float(s.offset_ms) for s in external_ok]  # type: ignore[arg-type]
+        disagreement = (
+            max(external_offsets) - min(external_offsets)
+            if len(external_offsets) > 1
+            else 0.0
+        )
         est_offset = 0.0
         binance_obs = next((s for s in sources if s.source == "binance_api_time" and s.ok), None)
         if binance_obs is not None and binance_obs.offset_ms is not None:
             est_offset = float(binance_obs.offset_ms)
-            if abs(disagreement) >= self.disagreement_degraded_ms:
-                status = TimeSyncStatus.DEGRADED
-                uncertainty = max(uncertainty, int(abs(disagreement)))
+        if (
+            len(external_offsets) > 1
+            and abs(disagreement) >= self.disagreement_degraded_ms
+        ):
+            status = TimeSyncStatus.DEGRADED
+            uncertainty = max(uncertainty, int(abs(disagreement)))
 
         return ClockSyncSnapshot(
             measured_at_wall_utc=wall,
@@ -166,7 +181,9 @@ class OsMonitorClockSyncProvider:
             sync_status=status,
             primary_source=primary,
             sources=tuple(sources),
-            max_source_disagreement_ms=disagreement if len(offsets) > 1 else None,
+            max_source_disagreement_ms=(
+                disagreement if len(external_offsets) > 1 else None
+            ),
             valid_for_ms=60_000,
         )
 

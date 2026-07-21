@@ -90,7 +90,7 @@ class N5ShadowRuntime:
         cls,
         config: ObserveConfig,
         *,
-        clock: FakeClock | None = None,
+        clock=None,
         attestation_port: PtbAttestationPort | None = None,
         basis_ewma_half_life_s: float | None = None,
     ) -> "N5ShadowRuntime":

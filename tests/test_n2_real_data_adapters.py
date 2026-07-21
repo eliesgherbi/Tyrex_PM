@@ -493,9 +493,13 @@ async def test_clock_sync_snapshot_ready_degraded_unsync() -> None:
 
 
 @pytest.mark.asyncio
-async def test_os_monitor_disagreement_degraded() -> None:
+async def test_os_monitor_binance_offset_is_ready_not_disagreement() -> None:
+    """OS baseline offset=0 vs Binance cross-check is the estimated_offset to apply.
+
+    It must not be treated as multi-source disagreement forcing DEGRADED.
+    """
+
     def fetcher() -> tuple[float, float]:
-        # remote far ahead → large offset / disagreement
         local = datetime.now(timezone.utc).timestamp() * 1000.0
         return local + 2000.0, 10.0
 
@@ -506,7 +510,21 @@ async def test_os_monitor_disagreement_degraded() -> None:
     )
     snap = await provider.measure()
     assert snap.primary_source == "os_clock"
-    assert snap.max_source_disagreement_ms is not None
+    assert snap.max_source_disagreement_ms is None
+    assert snap.sync_status is TimeSyncStatus.READY
+    assert abs(snap.estimated_offset_ms - 2000.0) < 20.0
+
+
+@pytest.mark.asyncio
+async def test_os_monitor_failed_cross_check_degraded() -> None:
+    def fetcher() -> tuple[float, float]:
+        raise TimeoutError("binance time unreachable")
+
+    provider = OsMonitorClockSyncProvider(
+        enable_binance_cross_check=True,
+        time_fetcher=fetcher,
+    )
+    snap = await provider.measure()
     assert snap.sync_status is TimeSyncStatus.DEGRADED
 
 
