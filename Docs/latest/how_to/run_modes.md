@@ -56,6 +56,19 @@ tyrex-pm shadow --config config/observe_shadow_z_gap_f5.json
 
 Optional simulated hold-to-resolution (capability + fixture evidence → simulated payout). **No redeem, network settlement, or live venue.**
 
+### Z-Gap N5A SHADOW (offline depth-walk; not live evidence)
+
+```bash
+python tools/n5_shadow/run_n5_shadow.py --mode fixture \
+  --config config/observe_shadow_z_gap_n5a.json \
+  --out var/reporting/n5/shadow_summary.json
+```
+
+Uses N4-aligned model price \(\hat{C}_t\) vs sealed Chainlink \(K\), and
+`shadow_depth_walk_v1` simulated fills. Labels: `simulated_shadow` /
+`estimated`. **N5B live SHADOW is environment-blocked on hosts with Polymarket
+TLS hostname mismatch; fixture output is not live evidence.**
+
 ## Discover BTC window — Net-read
 
 ```bash

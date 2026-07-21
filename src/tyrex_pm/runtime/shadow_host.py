@@ -121,6 +121,10 @@ class ShadowHost(ObserveHost):
                 config=ShadowFillConfig(
                     cancel_unfilled_residual=config.shadow.cancel_unfilled_residual,
                     fee=fee,
+                    fill_model_id=config.shadow.fill_model_id,
+                    latency_ms=config.shadow.fill_latency_ms,
+                    extra_slip_ticks=config.shadow.fill_extra_slip_ticks,
+                    tick_size=config.shadow.fill_tick_size,
                 ),
             )
             self._persist = StateSnapshotStore(config.shadow.persistence_path)
@@ -145,7 +149,9 @@ class ShadowHost(ObserveHost):
 
     def _on_book_updated(self, event: BookUpdated) -> None:
         if self.oms is not None:
-            self.oms.on_book_updated(event.book)
+            # Prefer ingress/receive time for depth-walk availability ordering.
+            avail = getattr(event, "ts_received", None) or event.book.ts_event
+            self.oms.on_book_updated(event.book, available_at=avail)
 
     def _on_lifecycle_transition(self, prev, new, when) -> None:
         self._emit(

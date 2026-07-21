@@ -1,9 +1,14 @@
 # N5 — Real-data SHADOW
 
-**Status:** planned (no implementation in this planning commit)  
+**Status:** `PASS_WITH_ENVIRONMENT_BLOCKER` (N5A executed; N5B deferred)  
+**Acceptance:** [n5_acceptance_report.md](n5_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n5_real_data_shadow.md`  
 **Depends on:** N4 real-input OBSERVE engineering acceptance  
 **Unblocks:** N6 live execution planning completion / N7 evidence gate
+
+N5A delivers offline deterministic SHADOW composition over N4-aligned inputs
+(`S=\hat{C}_t`, sealed Chainlink \(K\)) with `shadow_depth_walk_v1`. Live
+real-input SHADOW (N5B) remains environment-blocked on this host (TLS).
 
 ---
 
@@ -54,11 +59,16 @@ Model ID (provisional): `shadow_depth_walk_v1`
 
 1. Record decision/plan time.  
 2. Apply configured simulated latency → simulated arrival time.  
-3. Select the first eligible **recorded** order book at or after arrival time.  
-4. Walk executable depth for requested quantity.  
-5. Apply configured additional slippage only if required by config (no double-count with depth walk).  
-6. Produce **full fill**, **partial fill**, or **no fill**.  
-7. Record model ID and all assumptions on facts.
+3. Wait until recorded ingress time has reached arrival (no pre-arrival fill).  
+4. Select the latest recorded book with `available_at ≤ arrival` when present;
+   otherwise the first book at/after arrival once latency elapsed.  
+5. Walk executable depth for requested quantity.  
+6. Apply configured additional slippage only if required by config (no double-count with depth walk).  
+7. Produce **full fill**, **partial fill**, or **no fill**.  
+8. Record model ID and all assumptions on facts.
+
+Never use a book with `available_at > arrival` when a pre-arrival book exists
+(no look-ahead).
 
 Constraints:
 

@@ -86,6 +86,23 @@ class MarketSession:
 
 
 @dataclass(frozen=True, kw_only=True)
+class AlignedEvalReady:
+    """Immutable N4 evaluation input shared by OBSERVE and SHADOW (parity)."""
+
+    ok: bool
+    skip_reasons: tuple[str, ...]
+    session: MarketSession | None
+    sealed: SealedWindowPtb | None
+    dyn: DynamicAlignedReference | None
+    snapshot: DecisionSnapshot | None
+    binding: ZGapBinding | None
+    binance_raw: Decimal | None
+    binance_source_ts: datetime | None
+    model_spot: Decimal | None
+    model_anchor: Decimal | None
+
+
+@dataclass(frozen=True, kw_only=True)
 class ObserveRecord:
     """One OBSERVE evaluation or skip — replayable fact payload."""
 
@@ -429,13 +446,32 @@ class N4ObserveRuntime:
             include_current_chainlink=include_current_chainlink,
         )
 
-    def _evaluate_session(
+    def prepare_aligned_eval(
         self,
-        sess: MarketSession,
         *,
-        trigger: str,
-        include_current_chainlink: bool,
-    ) -> ObserveRecord:
+        include_current_chainlink: bool = False,
+        yes_book=None,
+        no_book=None,
+    ) -> AlignedEvalReady:
+        """Build the immutable N4 evaluation input (S=C_hat, K=sealed) without deciding.
+
+        Shared by OBSERVE and SHADOW so both consume the same sealed path.
+        """
+        sess = self.active
+        if sess is None or not sess.publish_as_active:
+            return AlignedEvalReady(
+                ok=False,
+                skip_reasons=("no_active_session",),
+                session=None,
+                sealed=None,
+                dyn=None,
+                snapshot=None,
+                binding=None,
+                binance_raw=None,
+                binance_source_ts=None,
+                model_spot=None,
+                model_anchor=None,
+            )
         now = self.clock.now_utc()
         reasons: list[str] = []
         if sess.sealed is None:
@@ -443,10 +479,18 @@ class N4ObserveRuntime:
             st = self.ptb_engine.get_window(sess.market_id, sess.window_id)
             if st is not None:
                 reasons.extend(st.blockers)
-            return self._skip(
-                window_id=sess.window_id,
-                market_id=sess.market_id.value,
-                reasons=tuple(dict.fromkeys(reasons)),
+            return AlignedEvalReady(
+                ok=False,
+                skip_reasons=tuple(dict.fromkeys(reasons)),
+                session=sess,
+                sealed=None,
+                dyn=None,
+                snapshot=None,
+                binding=None,
+                binance_raw=None,
+                binance_source_ts=None,
+                model_spot=None,
+                model_anchor=None,
             )
 
         sealed = sess.sealed
@@ -461,11 +505,18 @@ class N4ObserveRuntime:
 
         if self._latest_binance is None:
             reasons.append("stale_reference")
-            return self._skip(
-                window_id=sess.window_id,
-                market_id=sess.market_id.value,
-                reasons=tuple(dict.fromkeys(reasons)),
+            return AlignedEvalReady(
+                ok=False,
+                skip_reasons=tuple(dict.fromkeys(reasons)),
+                session=sess,
                 sealed=sealed,
+                dyn=None,
+                snapshot=None,
+                binding=None,
+                binance_raw=None,
+                binance_source_ts=None,
+                model_spot=None,
+                model_anchor=None,
             )
 
         bn = self._latest_binance
@@ -523,18 +574,22 @@ class N4ObserveRuntime:
             "stale_reference",
             "basis_estimate_unavailable",
         }
-        # Never evaluate Z-Gap fair value on raw Binance vs Chainlink K.
-        if hard_skip or dyn.c_hat is None:
-            return self._skip(
-                window_id=sess.window_id,
-                market_id=sess.market_id.value,
-                reasons=tuple(reasons),
+        zg = self._strategy_by_window.get(sess.window_id)
+        if hard_skip or dyn.c_hat is None or zg is None:
+            return AlignedEvalReady(
+                ok=False,
+                skip_reasons=tuple(reasons),
+                session=sess,
                 sealed=sealed,
                 dyn=dyn,
+                snapshot=None,
+                binding=zg,
+                binance_raw=bn.value,
+                binance_source_ts=bn.source_ts,
+                model_spot=None,
+                model_anchor=sealed.ptb_k,
             )
 
-        zg = self._strategy_by_window[sess.window_id]
-        # Model price level = C_hat (Chainlink space). Raw Binance remains for sigma.
         model_spot = dyn.c_hat
         ref = ReferencePriceSnapshot(
             symbol="BTCUSD_ALIGNED",
@@ -544,8 +599,8 @@ class N4ObserveRuntime:
         )
         snap = DecisionSnapshot(
             market=sess.market,
-            yes_book=None,
-            no_book=None,
+            yes_book=yes_book,
+            no_book=no_book,
             yes_quote=_quote(sess.up_ask, sess.up_bid),
             no_quote=_quote(sess.down_ask, sess.down_bid),
             reference=ref,
@@ -556,6 +611,57 @@ class N4ObserveRuntime:
             correlation_id=new_correlation_id(),
             causation_id=new_event_id(),
         )
+        return AlignedEvalReady(
+            ok=True,
+            skip_reasons=tuple(reasons),
+            session=sess,
+            sealed=sealed,
+            dyn=dyn,
+            snapshot=snap,
+            binding=zg,
+            binance_raw=bn.value,
+            binance_source_ts=bn.source_ts,
+            model_spot=model_spot,
+            model_anchor=sealed.ptb_k,
+        )
+
+    def _evaluate_session(
+        self,
+        sess: MarketSession,
+        *,
+        trigger: str,
+        include_current_chainlink: bool,
+    ) -> ObserveRecord:
+        ready = self.prepare_aligned_eval(
+            include_current_chainlink=include_current_chainlink
+        )
+        if not ready.ok:
+            return self._skip(
+                window_id=sess.window_id,
+                market_id=sess.market_id.value,
+                reasons=ready.skip_reasons,
+                sealed=ready.sealed,
+                dyn=ready.dyn,
+            )
+
+        assert ready.snapshot is not None
+        assert ready.binding is not None
+        assert ready.dyn is not None
+        assert ready.sealed is not None
+        assert ready.binance_raw is not None
+        assert ready.binance_source_ts is not None
+        assert ready.model_spot is not None
+
+        zg = ready.binding
+        snap = ready.snapshot
+        dyn = ready.dyn
+        sealed = ready.sealed
+        bn_value = ready.binance_raw
+        bn_ts = ready.binance_source_ts
+        model_spot = ready.model_spot
+        now = snap.observed_at
+        reasons = list(ready.skip_reasons)
+
         ctx = DecisionContext(
             run_id=new_run_id(),
             mode=RuntimeMode.OBSERVE,
@@ -578,8 +684,8 @@ class N4ObserveRuntime:
             max_book_spread=Decimal("1"),
             settlement_ref=settlement,
             settlement_ref_fresh=settlement is not None,
-            volatility_price=bn.value,
-            volatility_ts=bn.source_ts,
+            volatility_price=bn_value,
+            volatility_ts=bn_ts,
         )
 
         p_up = p_down = basis_bps = None
@@ -660,7 +766,7 @@ class N4ObserveRuntime:
                 "model_anchor": str(sealed.ptb_k),
                 "model_anchor_source": "sealed_chainlink_ptb",
                 "sigma_source": "binance_raw_returns",
-                "binance_raw_price": str(bn.value),
+                "binance_raw_price": str(bn_value),
                 "aligned_model_price": str(model_spot),
                 "sealed_ptb_k": str(sealed.ptb_k),
                 "zgap_S_equals_c_hat": True,
