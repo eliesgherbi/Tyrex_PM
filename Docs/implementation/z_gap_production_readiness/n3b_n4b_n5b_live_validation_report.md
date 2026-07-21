@@ -11,10 +11,10 @@ Caveat: Gate 3 naturally produced strategy `WAIT`/`SKIP` only (no simulated entr
 | Item | Start | End |
 |------|-------|-----|
 | Branch | `rest_project` | `rest_project` |
-| HEAD | `6d1b202ff83e3603486519314008610d76271eb1` | (commit after this report) |
+| HEAD | `6d1b202ff83e3603486519314008610d76271eb1` | `328da5c93385840c4bc822cbe54c7474dd3a2be5` |
 | Tests | 560 passed | **575 passed** |
 | Python | 3.12.3 (conda-forge) | same |
-| Worktree | dirty with N3B/N4B/N5B integration | committed integration only |
+| Worktree | dirty with N3B/N4B/N5B integration | clean after commit `328da5c` |
 
 ---
 
