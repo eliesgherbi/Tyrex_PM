@@ -27,7 +27,9 @@ INST = InstrumentId("tok-up")
 MID = MarketId("m-n5")
 
 
-def _oms(*, latency_ms: float = 100.0, cancel_residual: bool = False) -> tuple[ShadowOMS, OrderStore, Portfolio]:
+def _oms(*, latency_ms: float = 100.0, cancel_residual: bool = False, clock=None) -> tuple[ShadowOMS, OrderStore, Portfolio]:
+    from tyrex_pm.core.clock import FakeClock
+
     d = EventDispatcher()
     store = OrderStore()
     ledger = FillLedger()
@@ -36,6 +38,7 @@ def _oms(*, latency_ms: float = 100.0, cancel_residual: bool = False) -> tuple[S
     store.attach(d)
     ledger.attach(d)
     port.attach(d)
+    clk = clock or FakeClock(_wall=TS0)
     oms = ShadowOMS(
         dispatcher=d,
         order_store=store,
@@ -48,7 +51,9 @@ def _oms(*, latency_ms: float = 100.0, cancel_residual: bool = False) -> tuple[S
             extra_slip_ticks=Decimal("0"),
             tick_size=Decimal("0.01"),
         ),
+        clock=clk,
     )
+    oms._test_clock = clk  # type: ignore[attr-defined]
     return oms, store, port
 
 
@@ -82,7 +87,10 @@ def _submit(oms: ShadowOMS, *, qty: str, limit: str, when: datetime, side: Order
 
 
 def test_depth_walk_no_lookahead_waits_for_arrival_book() -> None:
-    oms, store, _ = _oms(latency_ms=200.0)
+    from tyrex_pm.core.clock import FakeClock
+
+    clock = FakeClock(_wall=TS0)
+    oms, store, _ = _oms(latency_ms=200.0, clock=clock)
     t0 = TS0
     # Book before arrival must not fill while latency has not elapsed
     oms.on_book_updated(_book([("0.50", "100")], at=t0), available_at=t0)
@@ -92,25 +100,26 @@ def test_depth_walk_no_lookahead_waits_for_arrival_book() -> None:
     assert rec.filled_quantity == 0
     assert oms.last_match_trace is not None
     assert oms.last_match_trace.outcome == "no_fill"
-    # A future book must not be used before arrival either
+    # Future more-favorable book must not be selected early
     future = t0 + timedelta(milliseconds=500)
-    oms2, store2, _ = _oms(latency_ms=200.0)
+    oms2_clock = FakeClock(_wall=TS0)
+    oms2, store2, _ = _oms(latency_ms=200.0, clock=oms2_clock)
     oms2.on_book_updated(_book([("0.50", "100")], at=t0), available_at=t0)
     oms2.on_book_updated(_book([("0.40", "100")], at=future), available_at=future)
-    # Advance "now" via an intermediate book at arrival — fill uses book at/before arrival
+    oms2_clock.set_utc(t0 + timedelta(milliseconds=200))
+    oid2 = _submit(oms2, qty="10", limit="0.55", when=t0)
+    rec2 = store2.get(oid2)
+    assert rec2 is not None and rec2.status is OrderStatus.FILLED
+    assert rec2.average_fill_price == Decimal("0.50")  # not the future 0.40 book
+    # Original order fills after clock reaches arrival with a book at arrival
     arrival = t0 + timedelta(milliseconds=200)
+    clock.set_utc(arrival)
     oms.on_book_updated(_book([("0.50", "100")], at=arrival), available_at=arrival)
     rec = store.get(oid)
     assert rec is not None
     assert rec.status is OrderStatus.FILLED
     assert rec.filled_quantity == Decimal("10")
     assert oms.last_match_trace.outcome == "full"
-    # Prove look-ahead: with only t0 + future books, fill at arrival uses t0 price not 0.40
-    oid2 = _submit(oms2, qty="10", limit="0.55", when=t0)
-    # now_proxy=future >= arrival → select latest <= arrival → t0 @ 0.50
-    rec2 = store2.get(oid2)
-    assert rec2 is not None and rec2.status is OrderStatus.FILLED
-    assert rec2.average_fill_price == Decimal("0.50")
 
 
 def test_depth_walk_full_partial_no_fill() -> None:
@@ -157,7 +166,10 @@ def test_depth_walk_deterministic_replay() -> None:
 
 
 def test_sell_cannot_exceed_confirmed_inventory() -> None:
-    oms, store, port = _oms(latency_ms=0.0)
+    from tyrex_pm.core.clock import FakeClock
+
+    clock = FakeClock(_wall=TS0)
+    oms, store, port = _oms(latency_ms=0.0, clock=clock)
     # Seed long inventory via buy
     oms.on_book_updated(
         _book([("0.50", "100")], at=TS0, bids=[("0.45", "100")]),
@@ -168,6 +180,7 @@ def test_sell_cannot_exceed_confirmed_inventory() -> None:
     assert port.net_quantity(INST) == Decimal("5")
     # Attempt sell 10 → only confirmed 5 fills (book must be available at/after arrival)
     t1 = TS0 + timedelta(seconds=1)
+    clock.set_utc(t1)
     oms.on_book_updated(
         _book([("0.50", "100")], at=t1, bids=[("0.45", "100")]),
         available_at=t1,

@@ -407,3 +407,11 @@ def test_fixture_cli_smoke(tmp_path: Path) -> None:
     assert summary.get("not_live_evidence") is True
     assert summary.get("fill_model_id") == FILL_MODEL_DEPTH_WALK_V1
     assert summary.get("orders_live") in (0, None) or summary.get("live_oms") is False
+    life = summary.get("depth_walk_lifecycle") or {}
+    assert life.get("fill_model_id") == FILL_MODEL_DEPTH_WALK_V1
+    assert life.get("portfolio_flat") is True
+    assert life.get("lifecycle_terminal") == "FLAT"
+    assert "ENTER" in (life.get("decisions") or [])
+    assert "EXIT" in (life.get("decisions") or [])
+    assert life.get("orders_live") == 0
+    assert life.get("not_live_evidence") is True

@@ -110,11 +110,13 @@ class ShadowOMS:
         order_store: OrderStore,
         portfolio: Portfolio,
         config: ShadowFillConfig | None = None,
+        clock=None,
     ) -> None:
         self._dispatcher = dispatcher
         self._orders = order_store
         self._portfolio = portfolio
         self._config = config or ShadowFillConfig()
+        self._clock = clock
         self._stopped = False
         self._books: dict[str, BookSnapshot] = {}
         self._book_history: dict[str, list[_BookObservation]] = {}
@@ -129,6 +131,11 @@ class ShadowOMS:
             OrderPartiallyFilled, self._on_fill_residual_policy, priority=40
         )
         dispatcher.subscribe(OrderFilled, self._on_fill_residual_policy, priority=40)
+
+    def _now(self) -> datetime:
+        if self._clock is not None:
+            return self._clock.now_utc()
+        return datetime.now(timezone.utc)
 
     @property
     def fee_model_id(self) -> str:
@@ -311,35 +318,8 @@ class ShadowOMS:
             return
         decision_plan_time = rec.created_at
         arrival = decision_plan_time + timedelta(milliseconds=self._config.latency_ms)
-        # Do not match before simulated arrival (latency). Use wall of the latest
-        # recorded book as a proxy for "now" in offline replay.
         hist = self._book_history.get(rec.instrument_id.value) or []
-        if not hist:
-            return
-        now_proxy = max(o.available_at for o in hist)
-        if now_proxy < arrival:
-            # Still waiting for simulated latency to elapse / later books.
-            trace = _MatchTrace(
-                fill_model_id=FILL_MODEL_DEPTH_WALK_V1,
-                decision_plan_time=decision_plan_time,
-                simulated_arrival=arrival,
-                latency_ms=self._config.latency_ms,
-                extra_slip_ticks=self._config.extra_slip_ticks,
-                residual_qty=rec.remaining_quantity,
-                outcome="no_fill",
-            )
-            self.last_match_trace = trace
-            self.match_traces.append(trace)
-            return
-        # Book known at arrival: latest ingress observation with
-        # available_at <= arrival. Never use a book that arrived after arrival
-        # (no look-ahead). If none, wait for a book that is eligible.
-        selected: _BookObservation | None = None
-        for obs in hist:
-            if obs.available_at <= arrival:
-                selected = obs
-            else:
-                break
+        now = self._now()
         trace = _MatchTrace(
             fill_model_id=FILL_MODEL_DEPTH_WALK_V1,
             decision_plan_time=decision_plan_time,
@@ -349,11 +329,25 @@ class ShadowOMS:
             residual_qty=rec.remaining_quantity,
             outcome="no_fill",
         )
+        # Latency gate uses the host clock, not max(book.available_at).
+        if now < arrival:
+            self.last_match_trace = trace
+            self.match_traces.append(trace)
+            return
+        if not hist:
+            self.last_match_trace = trace
+            self.match_traces.append(trace)
+            return
+        # Book known at arrival: latest ingress observation with
+        # available_at <= arrival (no look-ahead of later books).
+        selected: _BookObservation | None = None
+        for obs in hist:
+            if obs.available_at <= arrival:
+                selected = obs
+            elif obs.available_at > arrival:
+                break
         if selected is None:
-            # No book was available at/before arrival yet — wait. A later book
-            # with available_at<=arrival cannot appear after a later one, so
-            # also accept the first book at/after arrival once latency elapsed
-            # (ingress ordering): first obs with available_at >= arrival.
+            # First book observed at/after arrival once latency has elapsed.
             for obs in hist:
                 if obs.available_at >= arrival:
                     selected = obs
@@ -362,24 +356,22 @@ class ShadowOMS:
             self.last_match_trace = trace
             self.match_traces.append(trace)
             return
-        # Reject look-ahead: never select a book whose availability is after
-        # arrival when a pre-arrival book exists; already handled above.
-        # If we fell through to first post-arrival book, that book is the first
-        # eligible observation at/after arrival (N5 step 4).
         trace.selected_book_available_at = selected.available_at
         trace.selected_book_ts_event = selected.book.ts_event
+        # Local remaining: OrderStore may not have applied fills yet while this
+        # match runs inside a reentrant publish (dispatcher queues nested events).
+        remaining_before = rec.remaining_quantity
         filled = self._apply_fills_from_book(
             order_id,
             selected.book,
             decision_plan_time=decision_plan_time,
             apply_extra_slip=True,
         )
-        rec2 = self._orders.get(order_id)
-        rem = Decimal("0") if rec2 is None else rec2.remaining_quantity
+        rem = max(Decimal("0"), remaining_before - filled)
         if filled <= 0:
             trace.outcome = "no_fill"
             trace.filled_qty = Decimal("0")
-            trace.residual_qty = rem
+            trace.residual_qty = remaining_before
         elif rem <= 0:
             trace.outcome = "full"
             trace.filled_qty = filled

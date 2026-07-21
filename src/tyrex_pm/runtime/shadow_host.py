@@ -126,6 +126,7 @@ class ShadowHost(ObserveHost):
                     extra_slip_ticks=config.shadow.fill_extra_slip_ticks,
                     tick_size=config.shadow.fill_tick_size,
                 ),
+                clock=self.clock,
             )
             self._persist = StateSnapshotStore(config.shadow.persistence_path)
             self.lifecycle.on_transition(self._on_lifecycle_transition)
@@ -149,9 +150,10 @@ class ShadowHost(ObserveHost):
 
     def _on_book_updated(self, event: BookUpdated) -> None:
         if self.oms is not None:
-            # Prefer ingress/receive time for depth-walk availability ordering.
-            avail = getattr(event, "ts_received", None) or event.book.ts_event
-            self.oms.on_book_updated(event.book, available_at=avail)
+            # Depth-walk availability is ingress/receive order relative to the
+            # host clock — not provider source timestamps alone (those may lead
+            # FakeClock and would otherwise create decision/fill skew).
+            self.oms.on_book_updated(event.book, available_at=self.clock.now_utc())
 
     def _on_lifecycle_transition(self, prev, new, when) -> None:
         self._emit(

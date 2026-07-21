@@ -93,7 +93,7 @@ flowchart TD
 | N3 coding | N3A done — see [n3_acceptance_report.md](n3_acceptance_report.md); N3B live deferred (TLS) |
 | N3 lock/entry policy | Boundary rule PROVISIONAL (`EXACT_AT_START`); numeric thresholds still OPEN |
 | N4 product OBSERVE | N4A done — [n4_acceptance_report.md](n4_acceptance_report.md); N4B live deferred (TLS) |
-| N5 real SHADOW | N5A done — [n5_acceptance_report.md](n5_acceptance_report.md); N5B live deferred (TLS) |
+| N5 real SHADOW | N5A E2E depth-walk lifecycle proven — [n5_acceptance_report.md](n5_acceptance_report.md); N5B live deferred (TLS) |
 | N5 | N4 engineering acceptance + fill-model freeze |
 | N6 **starts after** N5 | N5 acceptance; N6 builds generic live capability with mutations OFF |
 | N6 **completion / N7 gate** | Authenticated **read-only** preflight is an N6 completion criterion and a prerequisite for N7 — not a blocker to *starting* N6 after N5 |

@@ -144,8 +144,13 @@ class N5ShadowRuntime:
     def publish_book(
         self, book: BookSnapshot, *, available_at: datetime | None = None
     ) -> None:
-        """Publish a deterministic book to both host state and ShadowOMS history."""
-        now = available_at or book.ts_event
+        """Publish a deterministic book to both host state and ShadowOMS history.
+
+        Ingress availability defaults to the host clock (not provider ts_event),
+        matching ShadowHost's BookUpdated path so fills cannot look ahead of
+        causal ingest time.
+        """
+        now = available_at or self._host.clock.now_utc()
         self._host.dispatcher.publish(
             BookUpdated(
                 event_id=new_event_id(),

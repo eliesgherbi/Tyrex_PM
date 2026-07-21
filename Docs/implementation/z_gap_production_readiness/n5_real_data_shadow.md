@@ -1,14 +1,18 @@
 # N5 — Real-data SHADOW
 
-**Status:** `PASS_WITH_ENVIRONMENT_BLOCKER` (N5A executed; N5B deferred)  
+**Status:** `PASS_WITH_ENVIRONMENT_BLOCKER` (N5A E2E depth-walk lifecycle proven;
+N5B deferred)  
 **Acceptance:** [n5_acceptance_report.md](n5_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n5_real_data_shadow.md`  
 **Depends on:** N4 real-input OBSERVE engineering acceptance  
 **Unblocks:** N6 live execution planning completion / N7 evidence gate
 
 N5A delivers offline deterministic SHADOW composition over N4-aligned inputs
-(`S=\hat{C}_t`, sealed Chainlink \(K\)) with `shadow_depth_walk_v1`. Live
-real-input SHADOW (N5B) remains environment-blocked on this host (TLS).
+(`S=\hat{C}_t`, sealed Chainlink \(K\)) with `shadow_depth_walk_v1`, including
+composed end-to-end proofs for full/partial/no-fill entry and exit, ACTIVE
+degradation, residual ownership, restart/idempotency, and require-flat
+prepared-next. Live real-input SHADOW (N5B) remains environment-blocked on this
+host (TLS). Fixture CLI output is synthetic evidence only.
 
 ---
 
