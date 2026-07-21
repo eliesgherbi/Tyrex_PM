@@ -509,8 +509,8 @@ class N4ObserveRuntime:
             )
 
         reasons.extend(list(dyn.blocker_reasons))
-        if dyn.alignment_mode is AlignmentMode.UNAVAILABLE:
-            reasons.append("no_causal_binance_pair")
+        if dyn.alignment_mode is AlignmentMode.UNAVAILABLE or dyn.c_hat is None:
+            reasons.append("basis_estimate_unavailable")
         reasons = list(dict.fromkeys(reasons))
 
         hard_skip = set(reasons) & {
@@ -523,7 +523,8 @@ class N4ObserveRuntime:
             "stale_reference",
             "basis_estimate_unavailable",
         }
-        if hard_skip:
+        # Never evaluate Z-Gap fair value on raw Binance vs Chainlink K.
+        if hard_skip or dyn.c_hat is None:
             return self._skip(
                 window_id=sess.window_id,
                 market_id=sess.market_id.value,
@@ -533,11 +534,13 @@ class N4ObserveRuntime:
             )
 
         zg = self._strategy_by_window[sess.window_id]
+        # Model price level = C_hat (Chainlink space). Raw Binance remains for sigma.
+        model_spot = dyn.c_hat
         ref = ReferencePriceSnapshot(
-            symbol="BTCUSDT",
-            price=bn.value,
+            symbol="BTCUSD_ALIGNED",
+            price=model_spot,
             ts_event=bn.source_ts,
-            venue="binance",
+            venue="aligned_estimate",
         )
         snap = DecisionSnapshot(
             market=sess.market,
@@ -560,6 +563,7 @@ class N4ObserveRuntime:
             target_notional=zg.target_notional,
             now=now,
         )
+        # Residual alignment gate: C_hat vs latest accepted Chainlink observation.
         settlement = dyn.chainlink_raw
         result = zg.evaluate(
             market_snapshot=snap,
@@ -574,6 +578,8 @@ class N4ObserveRuntime:
             max_book_spread=Decimal("1"),
             settlement_ref=settlement,
             settlement_ref_fresh=settlement is not None,
+            volatility_price=bn.value,
+            volatility_ts=bn.source_ts,
         )
 
         p_up = p_down = basis_bps = None
@@ -649,6 +655,15 @@ class N4ObserveRuntime:
                 "oms_touched": self.oms_touched,
                 "portfolio_touched": self.portfolio_touched,
                 "orders_submitted": self.orders_submitted,
+                "model_spot": str(model_spot),
+                "model_spot_source": "aligned_c_hat",
+                "model_anchor": str(sealed.ptb_k),
+                "model_anchor_source": "sealed_chainlink_ptb",
+                "sigma_source": "binance_raw_returns",
+                "binance_raw_price": str(bn.value),
+                "aligned_model_price": str(model_spot),
+                "sealed_ptb_k": str(sealed.ptb_k),
+                "zgap_S_equals_c_hat": True,
             },
         )
         self.observations.append(rec)

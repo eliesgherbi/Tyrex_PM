@@ -9,6 +9,21 @@
 N4A delivers sealed-window PTB + dynamic alignment composition into existing
 Z-Gap OBSERVE (no OMS). Live Polymarket OBSERVE remains environment-blocked here.
 
+### Price-space contract (N4A correction)
+
+| Concept | Required source |
+|---------|-----------------|
+| Sealed anchor \(K\) | Chainlink PTB |
+| Raw fast reference | Binance \(B_t\) |
+| Model price level \(S\) | Aligned \(\hat{C}_t = B_t\exp(b^{\mathrm{est}})\) |
+| Volatility source | Binance-return EWMA (distinct from model \(S\)) |
+| Latest settlement observation | Chainlink \(C_t\) |
+| Basis estimate | Causal accepted estimate with as-of provenance |
+
+Strategy fair value uses \(z=\ln(S/K)/\sigma\sqrt{\tau}\) with
+\(S=\hat{C}_t\) and \(K=K_{\mathrm{chainlink}}\). Alignment unavailable → skip
+(`basis_estimate_unavailable`); never silently fall back to raw \(B_t\) vs \(K\).
+
 ---
 
 ## 1. Objective

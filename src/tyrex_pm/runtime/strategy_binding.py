@@ -316,9 +316,15 @@ class ZGapBinding:
         max_book_spread: Decimal,
         settlement_ref: Decimal | None = None,
         settlement_ref_fresh: bool | None = None,
+        volatility_price: Decimal | None = None,
+        volatility_ts=None,
     ) -> StrategyEvalResult:
         del momentum_value, momentum_ready, momentum_reason, momentum_threshold, max_book_spread
-        if market_snapshot.reference is not None:
+        # High-frequency returns for sigma may use a different series than model S
+        # (N4: Binance raw for EWMA; C_hat on market_snapshot.reference for fair value).
+        if volatility_price is not None and volatility_ts is not None:
+            self.ewma.update(volatility_price, volatility_ts)
+        elif market_snapshot.reference is not None:
             self.ewma.update(
                 market_snapshot.reference.price,
                 market_snapshot.reference.ts_event,
