@@ -1,7 +1,8 @@
 # Z-Gap production readiness (N1–N7)
 
-**Status:** N1 `PASS_WITH_BLOCKERS` · N2–N7 planned  
+**Status:** N1 `PASS_WITH_BLOCKERS` · N2 `PASS_WITH_BLOCKERS` · N3–N7 planned  
 **Acceptance (N1):** [n1_acceptance_report.md](n1_acceptance_report.md)  
+**Acceptance (N2):** [n2_acceptance_report.md](n2_acceptance_report.md)  
 **Initiative:** one major track taking Z-Gap from fixture OBSERVE/SHADOW to
 trustworthy real inputs, real-input OBSERVE/SHADOW, and reconciled
 operator-controlled tiny live.  
@@ -85,7 +86,8 @@ flowchart TD
 
 | Blocks | Dependency |
 |--------|------------|
-| N2 coding | N1 frozen source recommendations (done — see decision table) |
+| N2 coding | Done — see [n2_acceptance_report.md](n2_acceptance_report.md) |
+| N3 coding | N2 contracts available; OPEN thresholds remain |
 | N3 lock/entry policy | N1 boundary + confirmation + lateness (provisional boundary; numeric OPEN) |
 | N4 product OBSERVE | N2 + N3 + EWMA warm-up policy + prep lead |
 | N5 | N4 engineering acceptance + fill-model freeze |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from tyrex_pm.core.time_authority import ClockSyncSnapshot
 from tyrex_pm.domain.polymarket.market import BinaryMarket, MarketRequest
 from tyrex_pm.engine.dispatcher import EventDispatcher
 
@@ -18,3 +19,9 @@ class MarketDataAdapter(Protocol):
     async def run(self, dispatcher: EventDispatcher) -> None: ...
 
     async def stop(self) -> None: ...
+
+
+class ClockSyncProvider(Protocol):
+    """Network/ops clock evidence — never implemented inside core."""
+
+    async def measure(self) -> ClockSyncSnapshot: ...

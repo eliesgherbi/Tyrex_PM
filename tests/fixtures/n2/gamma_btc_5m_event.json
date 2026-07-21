@@ -1,0 +1,23 @@
+{
+  "id": "723067",
+  "slug": "btc-updown-5m-1784582100",
+  "title": "Bitcoin Up or Down - July 20, 5:15PM-5:20PM ET",
+  "description": "This market will resolve to \"Up\" if the Bitcoin price at the end of the time range specified in the title is greater than or equal to the price at the beginning of that range. Otherwise, it will resolve to \"Down\".\nThe resolution source for this market is information from Chainlink, specifically the BTC/USD data stream available at https://data.chain.link/streams/btc-usd.",
+  "markets": [
+    {
+      "id": "2993863",
+      "question": "Bitcoin Up or Down - July 20, 5:15PM-5:20PM ET",
+      "conditionId": "0xb8c3b4d7eed8cb114a30991dc0a62c29c362565c7b64f4aea00113b8e68961dc",
+      "outcomes": "[\"Up\", \"Down\"]",
+      "clobTokenIds": "[\"43399593310464410744230163410597027206971508270771427568925078221187116096561\", \"14649551861935369355246569234695196138334497644542054009032169363238885711908\"]",
+      "eventStartTime": "2026-07-20T21:15:00Z",
+      "endDate": "2026-07-20T21:20:00Z",
+      "resolutionSource": "https://data.chain.link/streams/btc-usd",
+      "description": "This market will resolve to \"Up\" if the Bitcoin price at the end of the time range specified in the title is greater than or equal to the price at the beginning of that range. Otherwise, it will resolve to \"Down\".\nThe resolution source for this market is information from Chainlink, specifically the BTC/USD data stream available at https://data.chain.link/streams/btc-usd.",
+      "active": true,
+      "closed": false,
+      "orderPriceMinTickSize": 0.01,
+      "orderMinSize": 5
+    }
+  ]
+}

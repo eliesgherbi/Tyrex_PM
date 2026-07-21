@@ -121,12 +121,39 @@ class BookSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ReferencePriceSnapshot:
-    """External reference price (e.g. Binance BTC) for one symbol."""
+    """External trading/comparison reference price (e.g. Binance BTC).
+
+    Never labelled as settlement / Chainlink truth.
+    """
 
     symbol: str
     price: Decimal
     ts_event: datetime
     venue: str = "binance"
+
+    def __post_init__(self) -> None:
+        if not self.symbol.strip():
+            raise ValueError("symbol must be non-empty")
+        object.__setattr__(
+            self,
+            "price",
+            require_non_negative(
+                as_decimal(self.price, field_name="price"),
+                field_name="price",
+            ),
+        )
+        object.__setattr__(self, "ts_event", require_utc(self.ts_event, field_name="ts_event"))
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementReferenceSnapshot:
+    """Settlement-associated reference (e.g. Polymarket RTDS Chainlink BTC/USD)."""
+
+    symbol: str
+    price: Decimal
+    ts_event: datetime
+    venue: str = "polymarket_rtds_chainlink"
+    provider: str = "chainlink"
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():

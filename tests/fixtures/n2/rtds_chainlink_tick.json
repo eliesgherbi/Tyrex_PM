@@ -1,0 +1,11 @@
+{
+  "topic": "crypto_prices_chainlink",
+  "type": "update",
+  "timestamp": 1784582101988,
+  "payload": {
+    "symbol": "btc/usd",
+    "timestamp": 1784582100000,
+    "value": 65276.78644629988,
+    "full_accuracy_value": "65276786446299880000000"
+  }
+}

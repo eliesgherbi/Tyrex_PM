@@ -1,9 +1,11 @@
 # N2 — Real read-only data adapters
 
-**Status:** planned (no implementation in this planning commit)  
+**Status:** `PASS_WITH_BLOCKERS` (executed)  
+**Acceptance:** [n2_acceptance_report.md](n2_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n2_real_data_adapters.md`  
 **Depends on:** N1 frozen source recommendations  
-**Unblocks:** N3 (PTB/basis), N4 (real OBSERVE)
+**Unblocks:** N3 (PTB/basis), N4 (real OBSERVE)  
+**Note:** Offline adapters + tests complete; manual Polymarket smoke blocked on this host by TLS interception (see acceptance).
 
 ---
 

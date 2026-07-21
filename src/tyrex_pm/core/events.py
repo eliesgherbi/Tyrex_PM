@@ -9,13 +9,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from decimal import Decimal
+
 from tyrex_pm.core.clock import require_utc
 from tyrex_pm.core.ids import CorrelationId, EventId
-from tyrex_pm.core.snapshots import BookSnapshot, ReferencePriceSnapshot
+from tyrex_pm.core.ingress import IngressMeta
+from tyrex_pm.core.snapshots import BookSnapshot, ReferencePriceSnapshot, SettlementReferenceSnapshot
 
 
 class EventSource(str, Enum):
     POLYMARKET_CLOB = "polymarket_clob"
+    POLYMARKET_RTDS_CHAINLINK = "polymarket_rtds_chainlink"
+    POLYMARKET_RTDS_BINANCE = "polymarket_rtds_binance"
     BINANCE = "binance"
     TIMER = "timer"
     SYSTEM = "system"
@@ -64,12 +69,38 @@ class BookUpdated(Event):
 
 @dataclass(frozen=True, kw_only=True)
 class ReferencePriceUpdated(Event):
-    """External reference price update."""
+    """External trading/comparison reference price update (never settlement truth)."""
 
     reference: ReferencePriceSnapshot
+    ingress: IngressMeta | None = None
 
     def __post_init__(self) -> None:
         _validate_event_times(self)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SettlementReferenceUpdated(Event):
+    """Settlement-associated reference tick (e.g. RTDS Chainlink).
+
+    Distinct from Binance ``ReferencePriceUpdated``. Does not select or lock PTB.
+    """
+
+    settlement: SettlementReferenceSnapshot
+    ingress: IngressMeta | None = None
+
+    def __post_init__(self) -> None:
+        _validate_event_times(self)
+        if self.source not in (
+            EventSource.POLYMARKET_RTDS_CHAINLINK,
+            EventSource.TEST,
+            EventSource.SYSTEM,
+        ):
+            raise ValueError(
+                "SettlementReferenceUpdated.source must be POLYMARKET_RTDS_CHAINLINK "
+                "(or TEST/SYSTEM in tests)"
+            )
+        if self.settlement.price <= Decimal("0"):
+            raise ValueError("settlement price must be positive")
 
 
 @dataclass(frozen=True, kw_only=True)
