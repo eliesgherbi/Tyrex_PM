@@ -10,7 +10,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from tyrex_pm.adapters.binance.normalize import normalize_trade_message
 from tyrex_pm.core.ids import CorrelationId, new_correlation_id
@@ -36,6 +36,7 @@ class BinanceTradeWsAdapter:
         sequencer: IngressSequencer | None = None,
         reconnect_backoff_s: float = 1.0,
         max_backoff_s: float = 30.0,
+        time_authority: Any | None = None,
     ) -> None:
         self._symbol = symbol.upper()
         self._url = binance_trade_ws_url(self._symbol)
@@ -47,6 +48,7 @@ class BinanceTradeWsAdapter:
         self._conn_gen = ConnectionGeneration()
         self._reconnect_backoff_s = reconnect_backoff_s
         self._max_backoff_s = max_backoff_s
+        self._time_authority = time_authority
         self._stop = asyncio.Event()
         self._ws = None
         self._ever_connected = False
@@ -132,6 +134,9 @@ class BinanceTradeWsAdapter:
             logger.warning("non-json binance ws message ignored")
             return
         ts_received = datetime.now(timezone.utc)
+        time_view = None
+        if self._time_authority is not None:
+            time_view = self._time_authority.view()
         event = normalize_trade_message(
             payload,
             ts_received=ts_received,
@@ -142,6 +147,7 @@ class BinanceTradeWsAdapter:
             ingress_sequence=self._sequencer.next(),
             connection_generation=generation,
             last_trade_id=self._last_trade_id,
+            time_view=time_view,
         )
         trade_id = payload.get("data", payload).get("t") if isinstance(payload, dict) else None
         if trade_id is not None:

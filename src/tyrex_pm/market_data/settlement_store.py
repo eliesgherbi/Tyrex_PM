@@ -59,13 +59,14 @@ class SettlementReferenceStore:
             reject_reason = "stale_source_ts"
         meta = event.ingress
         if meta is not None:
+            raw_wall = meta.receive_wall_raw_utc or event.ts_received
             self.ingress.append(
                 IngressRecord(
                     source=event.source.value,
                     symbol=symbol,
                     role=FeedRole.SETTLEMENT_REFERENCE,
                     source_ts=event.ts_event,
-                    receive_wall_utc=event.ts_received,
+                    receive_wall_utc=raw_wall,
                     value=str(event.settlement.price),
                     meta=meta,
                     accepted_by_current_view=accepted,

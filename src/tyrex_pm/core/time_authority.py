@@ -46,6 +46,7 @@ class ClockSyncSnapshot:
     uncertainty_ms: int
     sync_status: TimeSyncStatus
     primary_source: str
+    snapshot_id: str = ""
     sources: tuple[ClockSourceObservation, ...] = ()
     max_source_disagreement_ms: float | None = None
     valid_for_ms: int | None = None
@@ -60,6 +61,14 @@ class ClockSyncSnapshot:
             raise ValueError("uncertainty_ms must be >= 0")
         if self.measured_at_monotonic_ns < 0:
             raise ValueError("measured_at_monotonic_ns must be >= 0")
+        if not self.snapshot_id:
+            # Stable-enough provenance id without network I/O
+            sid = (
+                f"{self.primary_source}:"
+                f"{int(self.measured_at_wall_utc.timestamp() * 1000)}:"
+                f"{self.measured_at_monotonic_ns}"
+            )
+            object.__setattr__(self, "snapshot_id", sid)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -74,6 +83,7 @@ class TimeAuthorityView:
     reason_code: str | None = None
     estimated_offset_ms: float = 0.0
     snapshot_age_ms: int | None = None
+    clock_snapshot_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -240,6 +250,7 @@ class SnapshotTimeAuthority:
                 reason_code="time_unsynchronized",
                 estimated_offset_ms=0.0,
                 snapshot_age_ms=None,
+                clock_snapshot_id=None,
             )
         age_ms = int((now_wall - snap.measured_at_wall_utc).total_seconds() * 1000.0)
         status = snap.sync_status
@@ -264,6 +275,7 @@ class SnapshotTimeAuthority:
             reason_code=reason,
             estimated_offset_ms=snap.estimated_offset_ms,
             snapshot_age_ms=age_ms,
+            clock_snapshot_id=snap.snapshot_id,
         )
 
     def now_corrected_utc(self) -> datetime:

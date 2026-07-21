@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded public-data smoke for N2 adapters (mutation-free).
 
-No auth, wallets, orders, user channels, or old/ imports.
+No auth, wallets, orders, user channels, TLS bypass, or old/ imports.
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import ssl
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,19 +52,13 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--duration-s", type=float, default=25.0)
     ap.add_argument("--out", type=Path, default=Path("var/reporting/n2/smoke_summary.json"))
-    ap.add_argument(
-        "--insecure-ssl",
-        action="store_true",
-        help="Diagnostic only: disable TLS verify for Polymarket sockets "
-        "(broken corporate proxies). Not for production.",
-    )
     args = ap.parse_args()
-    ssl_ctx = ssl._create_unverified_context() if args.insecure_ssl else None
 
     summary: dict = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "auth_touched": False,
         "orders_touched": False,
+        "tls_verify": True,
         "feeds": {},
     }
     health_log: list[dict] = []
@@ -95,8 +88,10 @@ async def main() -> None:
         "current_slug": binding.window_slug,
         "next_slug": next_note,
         "condition_id": binding.market.condition_id,
+        "outcome_semantics": binding.outcome_semantics,
         "up_token": binding.up_token_id,
         "down_token": binding.down_token_id,
+        "compatibility_note": binding.compatibility_yes_no_note,
         "resolution_source": binding.resolution_source,
         "ok": True,
     }
@@ -112,6 +107,7 @@ async def main() -> None:
         "uncertainty_ms": view.uncertainty_ms,
         "estimated_offset_ms": view.estimated_offset_ms,
         "ready": view.ready,
+        "clock_snapshot_id": view.clock_snapshot_id,
         "disagreement_ms": snap.max_source_disagreement_ms,
         "sources": [
             {
@@ -132,24 +128,39 @@ async def main() -> None:
         "clob_book": 0,
     }
     first_latencies: dict[str, float | None] = {
-        "rtds_chainlink_recv_minus_source_ms": None,
-        "binance_recv_minus_source_ms": None,
+        "binance_raw_recv_minus_source_ms": None,
+        "binance_corrected_recv_minus_source_ms": None,
+        "binance_clock_offset_ms": None,
+        "binance_clock_status": None,
+        "rtds_chainlink_raw_recv_minus_source_ms": None,
+        "rtds_chainlink_corrected_recv_minus_source_ms": None,
     }
 
     def on_cl(e: SettlementReferenceUpdated) -> None:
         counts["rtds_chainlink"] += 1
-        if first_latencies["rtds_chainlink_recv_minus_source_ms"] is None:
-            first_latencies["rtds_chainlink_recv_minus_source_ms"] = (
+        if first_latencies["rtds_chainlink_raw_recv_minus_source_ms"] is None:
+            first_latencies["rtds_chainlink_raw_recv_minus_source_ms"] = (
                 e.ts_received - e.ts_event
             ).total_seconds() * 1000.0
+            if e.ingress and e.ingress.receive_wall_corrected_utc is not None:
+                first_latencies["rtds_chainlink_corrected_recv_minus_source_ms"] = (
+                    e.ingress.receive_wall_corrected_utc - e.ts_event
+                ).total_seconds() * 1000.0
 
     def on_ref(e: ReferencePriceUpdated) -> None:
         if e.source.value == "binance":
             counts["binance_spot"] += 1
-            if first_latencies["binance_recv_minus_source_ms"] is None:
-                first_latencies["binance_recv_minus_source_ms"] = (
+            if first_latencies["binance_raw_recv_minus_source_ms"] is None:
+                first_latencies["binance_raw_recv_minus_source_ms"] = (
                     e.ts_received - e.ts_event
                 ).total_seconds() * 1000.0
+                if e.ingress is not None:
+                    first_latencies["binance_clock_offset_ms"] = e.ingress.clock_offset_ms
+                    first_latencies["binance_clock_status"] = e.ingress.clock_status
+                    if e.ingress.receive_wall_corrected_utc is not None:
+                        first_latencies["binance_corrected_recv_minus_source_ms"] = (
+                            e.ingress.receive_wall_corrected_utc - e.ts_event
+                        ).total_seconds() * 1000.0
         elif e.source.value == "polymarket_rtds_binance":
             counts["rtds_binance"] += 1
 
@@ -162,22 +173,19 @@ async def main() -> None:
     disp.subscribe(BookDeltaReceived, on_book)
 
     cl = RtdsChainlinkAdapter(
-        on_health=on_health, heartbeat_timeout_s=25, ssl=ssl_ctx
+        on_health=on_health, heartbeat_timeout_s=25, time_authority=auth
     )
-    bn = BinanceTradeWsAdapter(symbol="BTCUSDT", on_health=on_health)
+    bn = BinanceTradeWsAdapter(
+        symbol="BTCUSDT", on_health=on_health, time_authority=auth
+    )
     rtds_bn = RtdsBinanceComparisonAdapter(
         mode="auto",
         filtered_idle_s=6.0,
         on_health=on_health,
         heartbeat_timeout_s=25,
-        ssl=ssl_ctx,
+        time_authority=auth,
     )
-    # CLOB adapter uses websockets.connect without ssl override in N2;
-    # book smoke may remain blocked when TLS interception is present.
-    clob = PolymarketMarketWsAdapter.from_binding(
-        binding, on_health=on_health, ssl=ssl_ctx
-    )
-    summary["insecure_ssl"] = bool(args.insecure_ssl)
+    clob = PolymarketMarketWsAdapter.from_binding(binding, on_health=on_health)
 
     tasks = [
         asyncio.create_task(cl.run(disp), name="cl"),
@@ -212,6 +220,7 @@ async def main() -> None:
             "rtds_binance": rtds_bn.connection_generation,
             "clob": clob.connection_generation,
         },
+        "shutdown": "graceful",
     }
     summary["health_tail"] = health_log[-40:]
     summary["ended_at"] = datetime.now(timezone.utc).isoformat()
@@ -222,10 +231,12 @@ async def main() -> None:
         )
     if counts["rtds_chainlink"] == 0:
         summary["blockers"].append(
-            "RTDS Chainlink not reachable (TLS/proxy interception observed)"
+            "RTDS Chainlink not reachable (TLS hostname mismatch / environment block)"
         )
     if counts["clob_book"] == 0:
-        summary["blockers"].append("CLOB book events not observed (network or stale tokens)")
+        summary["blockers"].append(
+            "CLOB book events not observed (environment TLS block or unreachable)"
+        )
     if counts["rtds_binance"] == 0:
         summary["blockers"].append("RTDS Binance comparison ticks not observed in window")
 
@@ -234,11 +245,19 @@ async def main() -> None:
     summary["polymarket_ok"] = counts["rtds_chainlink"] > 0 and counts["clob_book"] > 0
     summary["pass"] = summary["binance_ok"] and summary["polymarket_ok"]
     summary["pass_partial"] = summary["binance_ok"] and not summary["pass"]
+    summary["classification_hint"] = (
+        "PASS"
+        if summary["pass"]
+        else (
+            "PASS_WITH_ENVIRONMENT_BLOCKER"
+            if summary["pass_partial"]
+            else "FAIL"
+        )
+    )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(json.dumps(summary, indent=2)[:5000])
-    # Exit 0 on partial when Binance+clock work but Polymarket is environment-blocked.
+    print(json.dumps(summary, indent=2)[:6000])
     if not (summary["pass"] or summary["pass_partial"]):
         raise SystemExit(1)
 

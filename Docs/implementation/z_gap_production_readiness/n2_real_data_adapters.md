@@ -1,11 +1,13 @@
 # N2 — Real read-only data adapters
 
-**Status:** `PASS_WITH_BLOCKERS` (executed)  
+**Status:** `PASS_WITH_ENVIRONMENT_BLOCKER` (executed + correction)  
 **Acceptance:** [n2_acceptance_report.md](n2_acceptance_report.md)  
 **Document:** `Docs/implementation/z_gap_production_readiness/n2_real_data_adapters.md`  
 **Depends on:** N1 frozen source recommendations  
-**Unblocks:** N3 (PTB/basis), N4 (real OBSERVE)  
-**Note:** Offline adapters + tests complete; manual Polymarket smoke blocked on this host by TLS interception (see acceptance).
+**Unblocks:** N3 offline PTB/basis wiring; N3 live acceptance needs healthy Polymarket TLS  
+**Note:** Offline adapters + timing/UpDown proofs complete. Polymarket live smoke on
+this host is blocked by conclusive TLS hostname mismatch (`ENVIRONMENT_NETWORK_BLOCK`).
+Binance Spot + ClockSyncSnapshot are live-OK.
 
 ---
 
@@ -170,20 +172,23 @@ possible; application **monitors and cross-checks** uncertainty via
 
 ```text
 Gamma resolve(window) with Up/Down label map
-  → BinaryMarket {market_id, condition_id, tokens[UP|DOWN], start, end, rule}
+  → DiscoveredMarketBinding {outcomes UP/DOWN, book_legs, BinaryMarket yes←Up/no←Down slots}
 
 ClockSyncProvider → ClockSyncSnapshot
-TimeAuthority.view() → READY | DEGRADED | UNSYNCHRONIZED (+ uncertainty)
+TimeAuthority.view() → READY | DEGRADED | UNSYNCHRONIZED (+ offset, uncertainty, snapshot_id)
 
 Parallel shared feeds (survive rollover):
-  RTDS Chainlink → SettlementRefUpdated(source_ts, receive_wall, receive_mono, value)
-  Binance Spot   → ReferencePriceUpdated(...)
-  [optional] RTDS Binance → comparison series
+  RTDS Chainlink → SettlementRefUpdated(
+       ts_event=source_ts,
+       ts_received=receive_wall_raw_utc,
+       ingress={receive_wall_corrected_utc, receive_monotonic_ns, clock_*})
+  Binance Spot   → ReferencePriceUpdated(... same raw/corrected contract ...)
+  [optional] RTDS Binance → comparison series (never primary S)
 
 Market-specific:
-  CLOB market WS → BookUpdated(token_id for active and/or prepared-next)
+  CLOB market WS → BookUpdated(token_id from Up/Down label map; active and/or prepared-next)
 
-→ Append-only ingress facts (retain late/OOO)
+→ Append-only ingress facts (retain late/OOO; store raw wall)
 → Current-price view may reject older updates after recording them
 → Stores / readiness
 → (N3+) PTB capture / causal basis

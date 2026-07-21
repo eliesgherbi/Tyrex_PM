@@ -35,12 +35,25 @@ class FeedReadiness(str, Enum):
 
 @dataclass(frozen=True, kw_only=True)
 class IngressMeta:
-    """Timing and provenance attached to a normalized ingress event."""
+    """Timing and provenance attached to a normalized ingress event.
+
+    Wall-clock semantics (N2 correction):
+
+    * ``receive_wall_raw_utc`` — host OS wall UTC observed at ingress (uncorrected).
+    * ``receive_wall_corrected_utc`` — raw + ``clock_offset_ms`` from TimeAuthority.
+    * ``Event.ts_received`` on the parent event **must** equal ``receive_wall_raw_utc``.
+      Adapters must never write corrected time into ``Event.ts_received``.
+    """
 
     receive_monotonic_ns: int
-    clock_uncertainty_ms: int | None
     ingress_sequence: int
     connection_generation: int
+    receive_wall_raw_utc: datetime | None = None
+    receive_wall_corrected_utc: datetime | None = None
+    clock_offset_ms: float | None = None
+    clock_uncertainty_ms: int | None = None
+    clock_status: str | None = None
+    clock_snapshot_id: str | None = None
     provider_sequence_id: str | None = None
     raw_fingerprint: str = ""
     late_or_out_of_order: str | None = None
@@ -56,6 +69,85 @@ class IngressMeta:
             raise ValueError("receive_monotonic_ns must be >= 0")
         if self.clock_uncertainty_ms is not None and self.clock_uncertainty_ms < 0:
             raise ValueError("clock_uncertainty_ms must be >= 0 when set")
+        if self.receive_wall_raw_utc is not None:
+            object.__setattr__(
+                self,
+                "receive_wall_raw_utc",
+                require_utc(self.receive_wall_raw_utc, field_name="receive_wall_raw_utc"),
+            )
+        if self.receive_wall_corrected_utc is not None:
+            object.__setattr__(
+                self,
+                "receive_wall_corrected_utc",
+                require_utc(
+                    self.receive_wall_corrected_utc,
+                    field_name="receive_wall_corrected_utc",
+                ),
+            )
+
+
+def build_ingress_timing(
+    *,
+    receive_wall_raw_utc: datetime,
+    receive_monotonic_ns: int,
+    ingress_sequence: int,
+    connection_generation: int,
+    time_view: Any | None = None,
+    provider_sequence_id: str | None = None,
+    raw_fingerprint: str = "",
+    late_or_out_of_order: str | None = None,
+    role: FeedRole = FeedRole.TRADING_REFERENCE,
+    subscription_mode: str | None = None,
+    clock_snapshot_id: str | None = None,
+) -> IngressMeta:
+    """Build IngressMeta with explicit raw vs corrected receive walls.
+
+    ``time_view`` is a ``TimeAuthorityView`` (or compatible). When absent,
+    corrected wall equals raw and clock_status is UNSYNCHRONIZED.
+    """
+    from datetime import timedelta
+
+    from tyrex_pm.core.time_authority import TimeSyncStatus
+
+    raw = require_utc(receive_wall_raw_utc, field_name="receive_wall_raw_utc")
+    if time_view is None:
+        return IngressMeta(
+            receive_monotonic_ns=receive_monotonic_ns,
+            ingress_sequence=ingress_sequence,
+            connection_generation=connection_generation,
+            receive_wall_raw_utc=raw,
+            receive_wall_corrected_utc=raw,
+            clock_offset_ms=None,
+            clock_uncertainty_ms=None,
+            clock_status=TimeSyncStatus.UNSYNCHRONIZED.value,
+            clock_snapshot_id=clock_snapshot_id,
+            provider_sequence_id=provider_sequence_id,
+            raw_fingerprint=raw_fingerprint,
+            late_or_out_of_order=late_or_out_of_order,
+            role=role,
+            subscription_mode=subscription_mode,
+        )
+    offset = float(getattr(time_view, "estimated_offset_ms", 0.0) or 0.0)
+    corrected = raw + timedelta(milliseconds=offset)
+    status = getattr(time_view, "sync_status", TimeSyncStatus.UNSYNCHRONIZED)
+    status_s = status.value if hasattr(status, "value") else str(status)
+    snap_id = clock_snapshot_id or getattr(time_view, "clock_snapshot_id", None)
+    return IngressMeta(
+        receive_monotonic_ns=receive_monotonic_ns,
+        ingress_sequence=ingress_sequence,
+        connection_generation=connection_generation,
+        receive_wall_raw_utc=raw,
+        receive_wall_corrected_utc=corrected,
+        clock_offset_ms=offset,
+        clock_uncertainty_ms=int(getattr(time_view, "uncertainty_ms", 0) or 0),
+        clock_status=status_s,
+        clock_snapshot_id=snap_id,
+        provider_sequence_id=provider_sequence_id,
+        raw_fingerprint=raw_fingerprint,
+        late_or_out_of_order=late_or_out_of_order,
+        role=role,
+        subscription_mode=subscription_mode,
+    )
 
 
 def fingerprint_payload(payload: Any) -> str:

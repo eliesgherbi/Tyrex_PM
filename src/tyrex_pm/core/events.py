@@ -41,8 +41,10 @@ class Event:
     * ``event_id`` — unique identity of this event.
     * ``correlation_id`` — broader decision/operation chain.
     * ``causation_id`` — direct cause event id; None for root external events.
-    * ``ts_event`` — source occurrence time (UTC).
-    * ``ts_received`` — local ingestion/creation time (UTC).
+    * ``ts_event`` — provider/source occurrence time (UTC).
+    * ``ts_received`` — **raw** local host wall UTC at ingress (uncorrected).
+      Corrected receive time lives on ``IngressMeta.receive_wall_corrected_utc``;
+      never write corrected time into ``ts_received``.
     * ``source`` — validated origin identifier.
     """
 

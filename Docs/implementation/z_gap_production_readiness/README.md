@@ -1,6 +1,6 @@
 # Z-Gap production readiness (N1–N7)
 
-**Status:** N1 `PASS_WITH_BLOCKERS` · N2 `PASS_WITH_BLOCKERS` · N3–N7 planned  
+**Status:** N1 `PASS_WITH_BLOCKERS` · N2 `PASS_WITH_ENVIRONMENT_BLOCKER` · N3–N7 planned  
 **Acceptance (N1):** [n1_acceptance_report.md](n1_acceptance_report.md)  
 **Acceptance (N2):** [n2_acceptance_report.md](n2_acceptance_report.md)  
 **Initiative:** one major track taking Z-Gap from fixture OBSERVE/SHADOW to

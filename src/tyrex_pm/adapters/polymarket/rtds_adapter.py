@@ -50,6 +50,7 @@ class RtdsChainlinkAdapter:
         sequencer: IngressSequencer | None = None,
         connect: Any | None = None,
         ssl: Any = None,
+        time_authority: Any | None = None,
     ) -> None:
         self._url = url
         self._symbol = symbol.lower()
@@ -64,6 +65,7 @@ class RtdsChainlinkAdapter:
         self._conn_gen = ConnectionGeneration()
         self._connect = connect  # injectable for tests
         self._ssl = ssl  # optional; default system trust store
+        self._time_authority = time_authority
         self._stop = asyncio.Event()
         self._ws = None
         self._last_source_ts_ms: int | None = None
@@ -195,6 +197,9 @@ class RtdsChainlinkAdapter:
             return
         wall = datetime.now(timezone.utc)
         mono = time.perf_counter_ns()
+        time_view = (
+            self._time_authority.view() if self._time_authority is not None else None
+        )
         event = normalize_chainlink_tick(
             msg,
             ts_received=wall,
@@ -205,6 +210,7 @@ class RtdsChainlinkAdapter:
             correlation_id=self._correlation_id,
             expected_symbol=self._symbol,
             last_source_ts_ms=self._last_source_ts_ms,
+            time_view=time_view,
         )
         if event is None:
             return
@@ -232,6 +238,7 @@ class RtdsBinanceComparisonAdapter:
         sequencer: IngressSequencer | None = None,
         connect: Any | None = None,
         ssl: Any = None,
+        time_authority: Any | None = None,
     ) -> None:
         self._url = url
         self._symbol = symbol.lower()
@@ -248,6 +255,7 @@ class RtdsBinanceComparisonAdapter:
         self._conn_gen = ConnectionGeneration()
         self._connect = connect
         self._ssl = ssl
+        self._time_authority = time_authority
         self._stop = asyncio.Event()
         self._ws = None
         self._last_source_ts_ms: int | None = None
@@ -375,6 +383,11 @@ class RtdsBinanceComparisonAdapter:
                             continue
                         wall = datetime.now(timezone.utc)
                         mono = time.perf_counter_ns()
+                        time_view = (
+                            self._time_authority.view()
+                            if self._time_authority is not None
+                            else None
+                        )
                         event = normalize_rtds_binance_tick(
                             msg,
                             ts_received=wall,
@@ -386,6 +399,7 @@ class RtdsBinanceComparisonAdapter:
                             correlation_id=self._correlation_id,
                             expected_symbol=self._symbol,
                             last_source_ts_ms=self._last_source_ts_ms,
+                            time_view=time_view,
                         )
                         if event is None:
                             continue

@@ -80,13 +80,14 @@ class ReferenceDataStore:
             role = FeedRole.COMPARISON_REFERENCE
         meta = event.ingress
         if meta is not None:
+            raw_wall = meta.receive_wall_raw_utc or event.ts_received
             self.ingress.append(
                 IngressRecord(
                     source=event.source.value,
                     symbol=symbol,
                     role=role,
                     source_ts=event.ts_event,
-                    receive_wall_utc=event.ts_received,
+                    receive_wall_utc=raw_wall,
                     value=str(event.reference.price),
                     meta=meta,
                     accepted_by_current_view=accepted,

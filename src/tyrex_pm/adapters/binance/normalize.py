@@ -1,15 +1,9 @@
 """Normalize Binance public trade stream payloads.
 
-Feed choice (R3 validation):
-- Stream: ``wss://stream.binance.com:9443/ws/<symbol>@trade``
-  (individual trades; e.g. ``btcusdt@trade``).
-- Event timestamp: trade time ``T`` (ms), not receive time.
-- Sufficient for short-horizon momentum: dense prints give P_t samples
-  without requiring account/ticker aggregation APIs.
-- Reconnect: adapter reconnects and publishes; indicator may reset;
-  reference store simply updates on next valid trade (no latched freshness).
-
-N2: optional ``IngressMeta`` for corrected receive timing / connection generation.
+N2 timing contract:
+- ``Event.ts_received`` = raw host wall UTC at ingress (never corrected).
+- ``IngressMeta.receive_wall_corrected_utc`` = raw + clock offset when a
+  TimeAuthorityView is supplied.
 Trading reference only — never settlement truth.
 """
 
@@ -21,7 +15,7 @@ from typing import Any, Mapping
 
 from tyrex_pm.core.events import EventSource, ReferencePriceUpdated
 from tyrex_pm.core.ids import CorrelationId, new_correlation_id, new_event_id
-from tyrex_pm.core.ingress import FeedRole, IngressMeta, fingerprint_payload
+from tyrex_pm.core.ingress import FeedRole, IngressMeta, build_ingress_timing, fingerprint_payload
 from tyrex_pm.core.snapshots import ReferencePriceSnapshot
 
 
@@ -37,6 +31,8 @@ def normalize_trade_message(
     ingress_sequence: int | None = None,
     connection_generation: int | None = None,
     last_trade_id: int | None = None,
+    time_view: Any | None = None,
+    clock_snapshot_id: str | None = None,
 ) -> ReferencePriceUpdated:
     # Combined streams wrap as {"stream": "...", "data": {...}}
     data = payload.get("data", payload)
@@ -56,17 +52,43 @@ def normalize_trade_message(
         ooo = "out_of_order"
     meta = ingress
     if meta is None and ingress_sequence is not None and connection_generation is not None:
-        meta = IngressMeta(
+        meta = build_ingress_timing(
+            receive_wall_raw_utc=ts_received,
             receive_monotonic_ns=receive_monotonic_ns or 0,
-            clock_uncertainty_ms=clock_uncertainty_ms,
             ingress_sequence=ingress_sequence,
             connection_generation=connection_generation,
+            time_view=time_view,
             provider_sequence_id=None if trade_id is None else str(trade_id),
             raw_fingerprint=fingerprint_payload(data),
             late_or_out_of_order=ooo,
             role=FeedRole.TRADING_REFERENCE,
             subscription_mode="binance_spot_trade",
+            clock_snapshot_id=clock_snapshot_id
+            or (getattr(time_view, "clock_snapshot_id", None) if time_view else None),
         )
+        if time_view is None and clock_uncertainty_ms is not None:
+            # Preserve legacy uncertainty-only path without claiming correction.
+            meta = IngressMeta(
+                receive_monotonic_ns=meta.receive_monotonic_ns,
+                ingress_sequence=meta.ingress_sequence,
+                connection_generation=meta.connection_generation,
+                receive_wall_raw_utc=meta.receive_wall_raw_utc,
+                receive_wall_corrected_utc=meta.receive_wall_corrected_utc,
+                clock_offset_ms=meta.clock_offset_ms,
+                clock_uncertainty_ms=clock_uncertainty_ms,
+                clock_status=meta.clock_status,
+                clock_snapshot_id=meta.clock_snapshot_id,
+                provider_sequence_id=meta.provider_sequence_id,
+                raw_fingerprint=meta.raw_fingerprint,
+                late_or_out_of_order=meta.late_or_out_of_order,
+                role=meta.role,
+                subscription_mode=meta.subscription_mode,
+            )
+    if meta is not None and meta.receive_wall_raw_utc is not None:
+        if meta.receive_wall_raw_utc != ts_received:
+            raise ValueError(
+                "IngressMeta.receive_wall_raw_utc must equal Event.ts_received (raw wall)"
+            )
     snap = ReferencePriceSnapshot(
         symbol=sym,
         price=Decimal(str(price)),
