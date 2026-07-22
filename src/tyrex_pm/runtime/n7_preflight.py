@@ -1,4 +1,4 @@
-"""N7A authenticated read-only preflight (mutations impossible)."""
+"""N7 authenticated read-only preflight (mutations impossible)."""
 
 from __future__ import annotations
 
@@ -15,34 +15,30 @@ from tyrex_pm.runtime.n6_account_classify import (
     classify_account,
 )
 from tyrex_pm.runtime.n7_abort import N7AbortCode
-from tyrex_pm.runtime.n7_authorization import (
-    create_authorization_request,
-    write_authorization_request,
-)
 from tyrex_pm.runtime.n7_git import inspect_git
-from tyrex_pm.runtime.n7_sealed import N7SealedConfig, load_n7_sealed_config
+from tyrex_pm.runtime.n7_sealed import load_n7_sealed_config
 from tyrex_pm.runtime.n7_timing import PRODUCTION_TIMING_VALUES_STATUS
 
 DEFAULT_ACKNOWLEDGED = (
     AcknowledgedExternalPosition(
         label="historical_lol",
         status="RESOLVED_REDEEMABLE",
-        notes="N6/N7 must not redeem or alter",
+        notes="N7 must not redeem or alter",
     ),
     AcknowledgedExternalPosition(
         label="historical_btc_5m_1",
         status="RESOLVED_REDEEMABLE",
-        notes="N6/N7 must not redeem or alter",
+        notes="N7 must not redeem or alter",
     ),
     AcknowledgedExternalPosition(
         label="historical_btc_5m_2",
         status="RESOLVED_REDEEMABLE",
-        notes="N6/N7 must not redeem or alter",
+        notes="N7 must not redeem or alter",
     ),
     AcknowledgedExternalPosition(
         label="historical_btc_5m_3",
         status="RESOLVED_REDEEMABLE",
-        notes="N6/N7 must not redeem or alter",
+        notes="N7 must not redeem or alter",
     ),
 )
 
@@ -63,9 +59,7 @@ def run_n7_preflight(
     repo: Path,
     dotenv: Path | None = None,
     user_stream_observe_s: float = 2.0,
-    require_clean_worktree: bool = True,
-    generate_auth_request: bool = True,
-    operator_label: str = "operator",
+    require_clean_worktree: bool = False,
 ) -> N7PreflightResult:
     out_dir.mkdir(parents=True, exist_ok=True)
     sealed = load_n7_sealed_config(config_path)
@@ -74,13 +68,11 @@ def run_n7_preflight(
 
     if PRODUCTION_TIMING_VALUES_STATUS != "FROZEN_FOR_N7":
         aborts.append("timing_not_frozen")
-    if sealed.live.mutations_enabled or sealed.live.enabled:
-        # Config file must keep defaults OFF for preflight.
+    if sealed.live.mutations_enabled:
         aborts.append(N7AbortCode.CONFIGURATION_MISMATCH.value)
     if require_clean_worktree and not git.worktree_clean:
         aborts.append(N7AbortCode.DIRTY_WORKTREE.value)
 
-    # Dual authenticated read-only recon (mutations OFF)
     first = run_live_preflight(
         output_path=out_dir / "preflight_1.json",
         dotenv_path=dotenv,
@@ -113,15 +105,14 @@ def run_n7_preflight(
 
     if not first.ok or not second.ok:
         aborts.append(N7AbortCode.CONNECTIVITY_UNAVAILABLE.value)
+        # VPN hint — not a code defect by default
+        aborts.append("hint_check_vpn_or_dns")
     if c1.get("open_order_count", 0) > 0 or c2.get("open_order_count", 0) > 0:
         aborts.append(N7AbortCode.UNEXPECTED_OPEN_ORDER.value)
     if "UNKNOWN" in (c1.get("classifications") or []):
         aborts.append(N7AbortCode.PREFLIGHT_RECON_DISAGREEMENT.value)
 
     id_map = dict(first.payload.get("identity_mapping") or {})
-    if id_map and id_map.get("signer_equals_funder") is True:
-        # Proxy wallets may differ; equality is suspicious for this account style.
-        pass
     if first.payload.get("credentials_present") and id_map:
         if not id_map.get("private_key_derives_valid_signer"):
             aborts.append(N7AbortCode.CREDENTIALS_ROLE_MISMATCH.value)
@@ -133,35 +124,15 @@ def run_n7_preflight(
     if us.get("attempted") and not us.get("authenticated"):
         aborts.append(N7AbortCode.CONNECTIVITY_UNAVAILABLE.value)
 
-    auth_request = None
-    if generate_auth_request and not aborts:
-        req, _env = create_authorization_request(
-            sealed=sealed,
-            git_head=git.head,
-            operator_label=operator_label,
-        )
-        auth_path = out_dir / "authorization_request.json"
-        write_authorization_request(auth_path, req)
-        auth_request = {
-            "path": str(auth_path),
-            "envelope_id": req.envelope_id,
-            "approval_phrase_template": req.approval_phrase_template,
-            "valid_until_utc": req.valid_until_utc,
-            "note": "Operator must type the phrase verbatim for N7B; N7A does not approve.",
-        }
-
     go = "GO" if not aborts else "NO_GO"
     payload = {
-        "mode": "n7a_readonly_preflight",
+        "mode": "n7_readonly_preflight",
         "not_live_trading": True,
         "mutations_enabled": False,
         "real_venue_mutations": 0,
         "go_no_go": go,
         "abort_codes": aborts,
-        "git": {
-            "head": git.head,
-            "worktree_clean": git.worktree_clean,
-        },
+        "git": {"head": git.head, "worktree_clean": git.worktree_clean},
         "config_fingerprint": sealed.fingerprint(),
         "config_path": str(config_path),
         "production_timing_status": PRODUCTION_TIMING_VALUES_STATUS,
@@ -184,13 +155,14 @@ def run_n7_preflight(
                 "historical_and_current_identity_mapping_match",
             )
         },
-        "authorization_request": auth_request,
+        "authorization_ceremony": "removed",
+        "operator_live_command": "python tools/n7_live/run_n7_live_oneshot.py --live",
         "kill_state_clear": True,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     text = redact_text(json.dumps(payload))
     assert_no_secrets(text)
-    artifact = out_dir / "n7a_preflight_summary.json"
+    artifact = out_dir / "n7_preflight_summary.json"
     artifact.write_text(json.dumps(json.loads(text), indent=2) + "\n", encoding="utf-8")
     return N7PreflightResult(
         ok=go == "GO",

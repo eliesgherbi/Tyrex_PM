@@ -1,4 +1,4 @@
-"""Builders for N7A one-shot acceptance tests (FakeTransport only)."""
+"""Builders for N7 one-shot acceptance tests (FakeTransport only)."""
 
 from __future__ import annotations
 
@@ -19,14 +19,12 @@ from tyrex_pm.domain.polymarket.market import (
 from tyrex_pm.execution.polymarket.fake_transport import FakeTransport
 from tyrex_pm.execution.polymarket.transport import VenueTradeSnapshot
 from tyrex_pm.runtime.live_config import LiveConfig, LiveScope
-from tyrex_pm.runtime.n7_authorization import make_test_envelope
 from tyrex_pm.runtime.n7_oneshot_host import N7OneShotHost
 from tyrex_pm.runtime.n7_sealed import N7SealedConfig
 from tyrex_pm.runtime.n7_timing import N7_TIMING
 
 T0 = datetime(2026, 7, 22, 14, 0, 0, tzinfo=timezone.utc)
 EVENT_END = T0 + timedelta(minutes=5)
-GIT_HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def make_market(
@@ -75,33 +73,26 @@ def make_sealed(
 
 def make_n7_host(
     *,
-    approve: bool = True,
     arm: bool = True,
     clock: FakeClock | None = None,
     market: BinaryMarket | None = None,
     sealed: N7SealedConfig | None = None,
     persistence_path: Path | None = None,
     min_valid_order_notional: Decimal = Decimal("1"),
-    git_head: str = GIT_HEAD,
 ) -> N7OneShotHost:
     clock = clock or FakeClock(T0)
     market = market or make_market()
     sealed = sealed or make_sealed()
-    env = make_test_envelope(sealed=sealed, git_head=git_head, approve=approve, now=T0)
     host = N7OneShotHost(
         sealed=sealed,
         clock=clock,
         transport=FakeTransport(),
         market=market,
-        envelope=env,
         persistence_path=persistence_path,
         min_valid_order_notional=min_valid_order_notional,
     )
-    if approve:
-        err = host.bind_envelope_to_market()
-        assert err is None, err
-    if arm and approve:
-        err = host.arm_from_envelope_fake()
+    if arm:
+        err = host.arm_fake()
         assert err is None, err
     return host
 

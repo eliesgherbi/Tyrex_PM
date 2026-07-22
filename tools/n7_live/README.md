@@ -1,13 +1,23 @@
 # N7 live tools
 
-## N7A (this milestone)
+## Operator live one-shot (you run this)
 
-- `run_n7_fixture_acceptance.py` — FakeTransport one-shot entry→exit→FLAT
-- `run_n7_readonly_preflight.py` — authenticated read-only preflight + auth request
+From the repo root in Git Bash:
 
-Mutations remain OFF unless an operator consumes a single-use authorization for N7B.
+```bash
+python tools/n7_live/run_n7_live_oneshot.py --live
+```
 
-## N7B
+Invoking with `--live` **is** the authorization. No phrase, envelope, or nonce.
 
-Not enabled by these tools alone. Requires the exact operator approval phrase
-presented after N7A commit.
+## Read-only diagnosis
+
+```bash
+python tools/n7_live/run_n7_readonly_preflight.py --out-dir var/reporting/n7/readonly_diag
+```
+
+## Fake rehearsal (no venue)
+
+```bash
+python tools/n7_live/run_n7_live_oneshot.py --fake-rehearsal
+```

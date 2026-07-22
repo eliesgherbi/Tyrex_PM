@@ -1,11 +1,11 @@
 # N7 — Tiny operator-controlled live
 
-**Status:** N7A **PASS** (implementation + fake one-shot + auth RO + window PTB).  
-N7B real mutation **not enabled** — requires fresh operator authorization phrase.  
-See `n7a_implementation_and_preflight_report.md`.  
+**Status:** Simplified operator one-shot — **no authorization ceremony**.  
+Operator runs `python tools/n7_live/run_n7_live_oneshot.py --live` (invocation = authorization).  
+Fee-inclusive entry debit ≤ $5.00. Scope A only.  
 **Document:** `Docs/implementation/z_gap_production_readiness/n7_tiny_operator_live.md`  
-**Depends on:** N1–N6 accepted evidence + explicit operator authorization  
-**Unblocks:** N7B tiny one-shot ops event (after phrase) / later continuous (separate)
+**Depends on:** N1–N6 accepted evidence  
+**Unblocks:** Operator-executed tiny live one-shot / later continuous (separate)
 
 ---
 

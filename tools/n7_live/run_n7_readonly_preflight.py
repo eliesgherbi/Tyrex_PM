@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""N7A authenticated read-only preflight (mutations impossible)."""
+"""N7 authenticated read-only preflight (mutations impossible)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="N7A read-only preflight + authorization request (no mutations)"
+        description="N7 read-only preflight (no mutations; no authorization ceremony)"
     )
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument(
@@ -25,11 +25,6 @@ def main() -> None:
     )
     ap.add_argument("--dotenv", type=Path, default=REPO / ".env")
     ap.add_argument("--user-stream-s", type=float, default=2.0)
-    ap.add_argument(
-        "--allow-dirty",
-        action="store_true",
-        help="Allow dirty worktree for N7A preflight only (N7B still requires clean)",
-    )
     args = ap.parse_args()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = args.out_dir or (REPO / "var" / "reporting" / "n7" / f"readonly_{stamp}")
@@ -39,8 +34,7 @@ def main() -> None:
         repo=REPO,
         dotenv=args.dotenv if args.dotenv.exists() else None,
         user_stream_observe_s=args.user_stream_s,
-        require_clean_worktree=not args.allow_dirty,
-        generate_auth_request=True,
+        require_clean_worktree=False,
     )
     print(json.dumps(result.payload, indent=2)[:6000])
     raise SystemExit(0 if result.ok else 2)

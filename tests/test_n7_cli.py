@@ -1,28 +1,26 @@
-"""N7 CLI safety ceremony tests (no venue I/O)."""
+"""N7 CLI: no ceremony; --live is the authorization."""
 
 from __future__ import annotations
 
 from tyrex_pm.application.cli import build_parser, main
 
 
-def test_cli_help_describes_n7_ceremony():
+def test_cli_help_has_live_not_phrase():
     parser = build_parser()
-    help_text = parser.format_help()
-    n7 = parser._subparsers._group_actions[0].choices["n7-oneshot"]
-    oneshot_help = n7.format_help()
-    assert "authorization-phrase" in oneshot_help
-    assert "authorization" in oneshot_help.lower()
-    assert "dry-run" in oneshot_help
-    auth_help = parser._subparsers._group_actions[0].choices["n7-auth-request"].format_help()
-    assert "request" in auth_help.lower()
-    assert "n7-auth-request" in help_text or "n7-oneshot" in help_text
+    n7 = parser._subparsers._group_actions[0].choices["n7-live"]
+    help_text = n7.format_help().lower()
+    assert "--live" in help_text
+    assert "authorization-phrase" not in help_text
+    assert "envelope" not in help_text or "no envelope" in help_text
 
 
-def test_n7_oneshot_refuses_without_phrase():
-    code = main(["n7-oneshot", "--dry-run"])
-    assert code == 2
+def test_n7_status_no_ceremony():
+    assert main(["n7-status"]) == 0
 
 
-def test_n7_status_mutations_off():
-    code = main(["n7-status"])
-    assert code == 0
+def test_n7_auth_request_removed():
+    # Subcommand should not exist
+    parser = build_parser()
+    choices = parser._subparsers._group_actions[0].choices
+    assert "n7-auth-request" not in choices
+    assert "n7-oneshot" not in choices or "n7-live" in choices

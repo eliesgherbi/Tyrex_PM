@@ -150,6 +150,7 @@ async def run_live_zgap_compose(
     on_after_seal_eval: Callable[[N4ObserveRuntime], list[dict[str, Any]]] | None = None,
     n5_evaluate: Callable[[], list[dict[str, Any]]] | None = None,
     on_active_session: Callable[[Any], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
     stop_when_seals_met: bool = True,
     runtime: N4ObserveRuntime | None = None,
 ) -> LiveComposeSummary:
@@ -488,6 +489,9 @@ async def run_live_zgap_compose(
                 summary.gate_notes.append(
                     f"stop: reached min_seals={min_seals}"
                 )
+                break
+            if should_stop is not None and should_stop():
+                summary.gate_notes.append("stop: caller_requested")
                 break
             if elapsed >= max_duration_s:
                 summary.gate_notes.append(

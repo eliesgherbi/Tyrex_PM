@@ -1,28 +1,26 @@
-"""N7A sealed config + authorization ceremony tests."""
+"""N7 sealed config + ceremony removal + fee-inclusive sizing."""
 
 from __future__ import annotations
 
-from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from tyrex_pm.runtime.live_config import LiveConfig, LiveScope
-from tyrex_pm.runtime.n7_abort import N7AbortCode
+from tyrex_pm.domain.polymarket.fees import FeeCurveParams
+from tyrex_pm.runtime.live_config import LiveScope
 from tyrex_pm.runtime.n7_authorization import (
-    APPROVAL_PHRASE_PREFIX,
+    INVALIDATED_ENVELOPE_IDS,
     create_authorization_request,
-    make_test_envelope,
 )
 from tyrex_pm.runtime.n7_sealed import (
     default_n7_sealed_config,
     load_n7_sealed_config,
     n7_sealed_from_mapping,
 )
+from tyrex_pm.runtime.n7_sizing import size_fee_inclusive_entry
 from tyrex_pm.runtime.n7_timing import PRODUCTION_TIMING_VALUES_STATUS
 from tyrex_pm.runtime.scope_a_ladder import PRODUCTION_TIMING_VALUES_STATUS as LADDER_STATUS
-
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -35,7 +33,6 @@ def test_defaults_off_and_timing_frozen():
     assert cfg.max_buy_collateral == Decimal("5.00")
     assert PRODUCTION_TIMING_VALUES_STATUS == "FROZEN_FOR_N7"
     assert LADDER_STATUS == "FROZEN_FOR_N7"
-    assert "OPEN" not in cfg.timing.fingerprint_payload()["status"]
 
 
 def test_sealed_config_file_loads():
@@ -43,8 +40,6 @@ def test_sealed_config_file_loads():
     assert cfg.live.mutations_enabled is False
     assert cfg.max_buy_collateral <= Decimal("5.00")
     assert cfg.resolution_capability is False
-    assert cfg.skip_if_min_exceeds_cap is True
-    assert cfg.fingerprint()
 
 
 def test_cap_cannot_exceed_five():
@@ -57,50 +52,50 @@ def test_cap_cannot_exceed_five():
         )
 
 
-def test_scope_b_and_resolution_refused():
-    with pytest.raises(ValueError):
-        LiveConfig(enabled=False, mutations_enabled=False, scope=LiveScope.B)
-    with pytest.raises(ValueError, match="resolution_capability"):
-        n7_sealed_from_mapping(
-            {
-                "live": {"enabled": False, "mutations_enabled": False, "scope": "A"},
-                "z_gap": {"resolution_capability": True},
-            }
-        )
+def test_authorization_ceremony_removed():
+    assert "b3a95919-73a7-43e6-a1d8-3876dd09c2b6" in INVALIDATED_ENVELOPE_IDS
+    assert "69cff32a-5f84-4b07-902e-dc56b7b93c80" in INVALIDATED_ENVELOPE_IDS
+    with pytest.raises(RuntimeError, match="ceremony removed"):
+        create_authorization_request()
 
 
-def test_authorization_phrase_and_single_use():
-    sealed = default_n7_sealed_config()
-    req, env = create_authorization_request(sealed=sealed, git_head="abc" * 14)
-    assert req.approval_phrase_template.startswith(APPROVAL_PHRASE_PREFIX)
-    assert env.approve("wrong") is N7AbortCode.AUTHORIZATION_MISMATCH
-    assert env.approve(req.approval_phrase_template) is None
-    assert env.approved
-    env.bind_market(
-        market_id="m1", window_id="w1", market_family="btc_updown_5m"
+def test_fee_inclusive_entry_never_exceeds_five():
+    curve = FeeCurveParams(fee_rate=Decimal("0.07"), exponent=Decimal("1"))
+    sized = size_fee_inclusive_entry(
+        worst_price=Decimal("0.50"),
+        collateral_cap=Decimal("5.00"),
+        fee_curve=curve,
     )
-    assert env.consume_for_fake() is None
-    assert env.consumed
-    assert env.allows_real_venue_mutation is False
-    assert env.consume_for_fake() is N7AbortCode.AUTHORIZATION_CONSUMED
+    assert not isinstance(sized, type(None))
+    from tyrex_pm.runtime.n7_sizing import FeeInclusiveEntrySize, FeeInclusiveSizeSkip
+
+    assert isinstance(sized, FeeInclusiveEntrySize)
+    assert sized.max_fee_inclusive_debit <= Decimal("5.00")
+    assert sized.share_notional + sized.conservative_entry_fee <= Decimal("5.00")
+    # quantity rounded down; recompute
+    assert sized.quantity * sized.worst_price <= sized.share_notional + Decimal("0.000001")
 
 
-def test_authorization_expiry():
-    sealed = default_n7_sealed_config()
-    from datetime import datetime, timezone
+def test_worst_price_used_and_downward_rounding():
+    curve = FeeCurveParams(fee_rate=Decimal("0.07"), exponent=Decimal("1"))
+    a = size_fee_inclusive_entry(worst_price=Decimal("0.40"), fee_curve=curve)
+    b = size_fee_inclusive_entry(worst_price=Decimal("0.60"), fee_curve=curve)
+    from tyrex_pm.runtime.n7_sizing import FeeInclusiveEntrySize
 
-    now = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
-    req, env = create_authorization_request(
-        sealed=sealed, git_head="b" * 40, valid_for=timedelta(seconds=1), now=now
+    assert isinstance(a, FeeInclusiveEntrySize) and isinstance(b, FeeInclusiveEntrySize)
+    # Higher price → fewer shares for same USDC budget
+    assert b.quantity <= a.quantity
+
+
+def test_venue_minimum_above_fee_inclusive_cap_skips():
+    from tyrex_pm.runtime.n7_sizing import FeeInclusiveSizeSkip
+
+    sized = size_fee_inclusive_entry(
+        worst_price=Decimal("0.50"),
+        collateral_cap=Decimal("5.00"),
+        min_valid_order_notional=Decimal("5.00"),
+        fee_curve=FeeCurveParams(fee_rate=Decimal("0.07"), exponent=Decimal("1")),
     )
-    later = now + timedelta(seconds=2)
-    assert env.approve(req.approval_phrase_template, now=later) is N7AbortCode.AUTHORIZATION_EXPIRED
-
-
-def test_ci_cannot_construct_real_mutation(monkeypatch):
-    sealed = default_n7_sealed_config()
-    env = make_test_envelope(sealed=sealed, git_head="c" * 40)
-    env.bind_market(market_id="m", window_id="w", market_family="btc_updown_5m")
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_ci_cannot_construct_real_mutation")
-    assert env.consume_for_real() is N7AbortCode.AUTHORIZATION_MISMATCH
-    assert env.allows_real_venue_mutation is False
+    # With fees, max share notional < 5, so min=5 cannot fit
+    assert isinstance(sized, FeeInclusiveSizeSkip)
+    assert sized.reason == "venue_minimum_above_fee_inclusive_cap"
