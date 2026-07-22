@@ -1,9 +1,11 @@
 # N6 — Live execution and reconciliation
 
-**Status:** planned (design only — do not implement or enable live in this milestone’s planning commit)  
+**Status:** **ACCEPTED** — Gates 1–3 PASS (see `n6_acceptance_report.md`).  
+Gate 3 authenticated read-only: `LIVE_READONLY_OK` on operator host  
+(`var/reporting/n6/readonly_manual/`). Mutations remain disabled; N7 not enabled.  
 **Document:** `Docs/implementation/z_gap_production_readiness/n6_live_execution_and_reconciliation.md`  
 **Depends on:** N5 real-input SHADOW acceptance + existing R7 LiveOMS/recon evidence (concepts only)  
-**Unblocks:** N7 tiny operator-controlled live
+**Unblocks:** N7 tiny operator-controlled live planning (mutations still off until N7)
 
 ---
 

@@ -287,6 +287,35 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("var/reporting/r7d/ack_regenerate_report.json"),
         help="Disposable regeneration report path",
     )
+
+    n6_status = sub.add_parser(
+        "n6-status",
+        help="N6: print live config defaults and Scope A capability (read-only; no mutations)",
+    )
+    n6_preflight = sub.add_parser(
+        "n6-preflight",
+        help=(
+            "N6: authenticated read-only preflight via live-preflight "
+            "(no submit/cancel/redeem; mutations remain OFF)"
+        ),
+    )
+    n6_preflight.add_argument(
+        "--output",
+        type=Path,
+        default=Path("var/reporting/n6/live_preflight.json"),
+    )
+    n6_preflight.add_argument("--dotenv", type=Path, default=Path(".env"))
+    n6_preflight.add_argument("--user-stream-s", type=float, default=2.0)
+    n6_recon = sub.add_parser(
+        "n6-recon",
+        help="N6: authenticated read-only recon + restart (wrapper; mutations OFF)",
+    )
+    n6_recon.add_argument("--out-dir", type=Path, default=None)
+    n6_recon.add_argument("--dotenv", type=Path, default=Path(".env"))
+    n6_kill = sub.add_parser(
+        "n6-kill-inspect",
+        help="N6: inspect kill-switch / block-new-exposure semantics (no venue I/O)",
+    )
     return parser
 
 
@@ -635,6 +664,66 @@ def main(argv: list[str] | None = None) -> int:
             f"live shadow complete decisions={len(result.decisions)} "
             f"intents={len(result.intents)} facts={result.fact_count} "
             f"path={result.facts_path}"
+        )
+        return 0
+
+    if args.command == "n6-status":
+        from tyrex_pm.runtime.live_config import LiveConfig
+        from tyrex_pm.runtime.scope_a_ladder import PRODUCTION_TIMING_VALUES_STATUS
+
+        cfg = LiveConfig()
+        print(
+            __import__("json").dumps(
+                {
+                    "live": cfg.to_dict(),
+                    "production_timing_values": PRODUCTION_TIMING_VALUES_STATUS,
+                    "mutations_default": False,
+                    "zgap_execute_live": False,
+                    "scope_b_available": False,
+                    "n7_authorized": False,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.command == "n6-preflight":
+        from tyrex_pm.runtime.live_preflight import run_live_preflight
+
+        result = run_live_preflight(
+            output_path=args.output,
+            dotenv_path=args.dotenv if args.dotenv.exists() else None,
+            user_stream_observe_s=args.user_stream_s,
+            skip_auth=False,
+        )
+        print(
+            f"n6-preflight complete ok={result.ok} "
+            f"mutations_attempted={result.payload.get('mutations_attempted')} "
+            f"path={result.artifact_path}"
+        )
+        return 0 if result.payload.get("mutations_attempted") is False else 3
+    if args.command == "n6-recon":
+        import subprocess
+
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve().parents[2] / "tools" / "n6_live" / "run_n6_readonly_recon.py"),
+        ]
+        if args.out_dir is not None:
+            cmd.extend(["--out-dir", str(args.out_dir)])
+        if args.dotenv is not None:
+            cmd.extend(["--dotenv", str(args.dotenv)])
+        return subprocess.call(cmd)
+    if args.command == "n6-kill-inspect":
+        print(
+            __import__("json").dumps(
+                {
+                    "kill_blocks_new_exposure": True,
+                    "kill_exits_confirmed_qty_only": True,
+                    "heartbeat_cancel_all": False,
+                    "venue_io": False,
+                },
+                indent=2,
+            )
         )
         return 0
 
