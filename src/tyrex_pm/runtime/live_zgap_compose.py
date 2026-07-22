@@ -21,6 +21,7 @@ from tyrex_pm.adapters.polymarket.discovery import (
 )
 from tyrex_pm.adapters.polymarket.rtds_adapter import RtdsChainlinkAdapter
 from tyrex_pm.adapters.polymarket.ssr_ptb_attestation import (
+    DisabledSsrAttestationProvider,
     SsrDisplayedPtbAttestationProvider,
 )
 from tyrex_pm.adapters.polymarket.ws_adapter import PolymarketMarketWsAdapter
@@ -61,6 +62,10 @@ class SealRecord:
     attestation_bps_diff: str | None
     blockers: list[str]
     immutable_check_ok: bool
+    ptb_authority: str = "chainlink_sealed_k_and_ssr_match"
+    ssr_match_required: bool = True
+    ssr_check_status: str = "REQUIRED"
+    ptb_ready: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +83,10 @@ class SealRecord:
             "attestation_bps_diff": self.attestation_bps_diff,
             "blockers": list(self.blockers),
             "immutable_check_ok": self.immutable_check_ok,
+            "ptb_authority": self.ptb_authority,
+            "ssr_match_required": self.ssr_match_required,
+            "ssr_check_status": self.ssr_check_status,
+            "ptb_ready": self.ptb_ready,
         }
 
 
@@ -153,6 +162,7 @@ async def run_live_zgap_compose(
     should_stop: Callable[[], bool] | None = None,
     stop_when_seals_met: bool = True,
     runtime: N4ObserveRuntime | None = None,
+    require_ssr_price_match: bool = True,
 ) -> LiveComposeSummary:
     """Bounded live composition: discover → ingest → EXACT seal → optional eval."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -186,24 +196,39 @@ async def run_live_zgap_compose(
     except Exception as exc:
         summary.errors.append(f"clock:{type(exc).__name__}:{exc}")
 
-    # Single-attempt + 2s neg-cache; compose retries across ticks during grace.
-    attestation = SsrDisplayedPtbAttestationProvider(retries=1, retry_delay_s=2.0)
+    if not isinstance(require_ssr_price_match, bool):
+        raise ValueError("require_ssr_price_match must be a boolean")
+    # When SSR match is not required, do not scrape Polymarket HTML at all.
+    attestation = (
+        SsrDisplayedPtbAttestationProvider(retries=1, retry_delay_s=2.0)
+        if require_ssr_price_match
+        else DisabledSsrAttestationProvider()
+    )
     if runtime is None:
         runtime = N4ObserveRuntime.create(
             clock=clock,
-            attestation_port=attestation,
+            attestation_port=None if not require_ssr_price_match else attestation,
             basis_ewma_half_life_s=basis_ewma_half_life_s,
             time_authority=auth,
             zgap_config=ZGapConfig(
                 ptb_time_quality=ZGapPtbTimeQualityConfig(basis_max_bps=Decimal("10000"))
             ),
+            require_ssr_price_match=require_ssr_price_match,
         )
     else:
-        runtime.ptb_engine.attestation_port = attestation
+        runtime.require_ssr_price_match = require_ssr_price_match
+        runtime.ptb_engine.attestation_port = (
+            None if not require_ssr_price_match else attestation
+        )
         # Rebind strategy time authority to the shared corrected clock view.
         runtime.zgap.time_authority = auth
         for child in runtime._strategy_by_window.values():
             child.time_authority = auth
+    summary.gate_notes.append(
+        "ssr_match_required=true"
+        if require_ssr_price_match
+        else "ssr_match_required=false; ptb_authority=chainlink_sealed_k; ssr_check_status=DISABLED"
+    )
 
     discovery = GammaMarketDiscovery()
     try:
@@ -263,34 +288,35 @@ async def run_live_zgap_compose(
         if state.sealed is not None:
             sealed_windows.add(window_id)
             return
-        # Refresh comparison attestation; delay seal while SSR openPrice is unpublished.
-        try:
-            runtime.ptb_engine.attest(
-                market_id=sess.market_id, window_id=window_id
-            )
-        except Exception as exc:
-            if window_id not in seal_fail_logged:
-                summary.errors.append(
-                    f"attest:{window_id}:{type(exc).__name__}:{exc}"
-                )
-                seal_fail_logged.add(window_id)
-            return
-        state = runtime.ptb_engine.get_window(sess.market_id, window_id)
-        assert state is not None
-        att = state.attestation
         now_c = auth.now_corrected_utc()
-        age_s = (now_c - state.event_start).total_seconds()
-        if (
-            att is None
-            or att.result is AttestationResult.INCOMPLETE
-        ) and age_s < ATTESTATION_SEAL_GRACE_S:
-            return
+        if require_ssr_price_match:
+            # Refresh comparison attestation; delay seal while SSR openPrice is unpublished.
+            try:
+                runtime.ptb_engine.attest(
+                    market_id=sess.market_id, window_id=window_id
+                )
+            except Exception as exc:
+                if window_id not in seal_fail_logged:
+                    summary.errors.append(
+                        f"attest:{window_id}:{type(exc).__name__}:{exc}"
+                    )
+                    seal_fail_logged.add(window_id)
+                return
+            state = runtime.ptb_engine.get_window(sess.market_id, window_id)
+            assert state is not None
+            att = state.attestation
+            age_s = (now_c - state.event_start).total_seconds()
+            if (
+                att is None or att.result is AttestationResult.INCOMPLETE
+            ) and age_s < ATTESTATION_SEAL_GRACE_S:
+                return
         try:
             sealed = runtime.attest_and_seal(
                 market_id=sess.market_id,
                 window_id=window_id,
                 sealed_at=now_c,
                 require_attestation_match=False,
+                skip_attestation=not require_ssr_price_match,
             )
         except Exception as exc:
             summary.missed_windows.append(
@@ -310,6 +336,31 @@ async def run_live_zgap_compose(
         recv_wall = ""
         if state.selected_candidate is not None:
             recv_wall = state.selected_candidate.receive_wall_raw_utc.isoformat()
+        ssr_status = "REQUIRED" if require_ssr_price_match else "DISABLED"
+        report_blockers = list(sealed.blocker_reasons)
+        if not require_ssr_price_match:
+            report_blockers = [
+                b
+                for b in report_blockers
+                if b
+                not in {
+                    "attestation_unavailable",
+                    "attestation_mismatch",
+                }
+            ]
+        chainlink_ok = (
+            sealed.ptb_k > 0
+            and sealed.boundary_rule_id.value == "EXACT_AT_START"
+            and immutable_ok
+            and sealed.clock_status not in {"UNSYNCHRONIZED", "DEGRADED"}
+        )
+        ptb_ready = bool(
+            chainlink_ok
+            and (
+                not require_ssr_price_match
+                or sealed.ptb_attestation_result is AttestationResult.MATCH
+            )
+        )
         rec = SealRecord(
             window_id=window_id,
             market_id=sess.market_id.value,
@@ -318,21 +369,41 @@ async def run_live_zgap_compose(
             chainlink_source_ts=sealed.chainlink_boundary_source_ts.isoformat(),
             receive_wall_raw_utc=recv_wall,
             sealed_at=sealed.sealed_at.isoformat(),
-            attestation_result=sealed.ptb_attestation_result.value,
+            attestation_result=(
+                "DISABLED"
+                if not require_ssr_price_match
+                else sealed.ptb_attestation_result.value
+            ),
             attestation_source=(
-                "none" if att_rec is None else att_rec.attestation_source
+                "ssr_check_disabled"
+                if not require_ssr_price_match
+                else ("none" if att_rec is None else att_rec.attestation_source)
             ),
             attested_value=None
-            if att_rec is None or att_rec.attested_value is None
+            if (not require_ssr_price_match)
+            or att_rec is None
+            or att_rec.attested_value is None
             else str(att_rec.attested_value),
             attestation_exact_diff=None
-            if att_rec is None or att_rec.exact_diff is None
+            if (not require_ssr_price_match)
+            or att_rec is None
+            or att_rec.exact_diff is None
             else str(att_rec.exact_diff),
             attestation_bps_diff=None
-            if att_rec is None or att_rec.bps_diff is None
+            if (not require_ssr_price_match)
+            or att_rec is None
+            or att_rec.bps_diff is None
             else str(att_rec.bps_diff),
-            blockers=list(sealed.blocker_reasons),
+            blockers=report_blockers,
             immutable_check_ok=immutable_ok,
+            ptb_authority=(
+                "chainlink_sealed_k"
+                if not require_ssr_price_match
+                else "chainlink_sealed_k_and_ssr_match"
+            ),
+            ssr_match_required=require_ssr_price_match,
+            ssr_check_status=ssr_status,
+            ptb_ready=ptb_ready,
         )
         summary.seals.append(rec.to_dict())
         sealed_windows.add(window_id)

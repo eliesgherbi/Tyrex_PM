@@ -231,6 +231,9 @@ class N4ObserveRuntime:
     oms_touched: bool = False
     portfolio_touched: bool = False
     orders_submitted: int = 0
+    # Default True preserves historical N3/N4/N5 strict SSR MATCH gating.
+    # N7 live testing sets False so sealed Chainlink K alone is PTB-ready.
+    require_ssr_price_match: bool = True
     _latest_binance: PriceTickView | None = None
     _latest_chainlink: PriceTickView | None = None
     _strategy_by_window: dict[str, ZGapBinding] = field(default_factory=dict)
@@ -244,6 +247,7 @@ class N4ObserveRuntime:
         basis_ewma_half_life_s: float | None = None,
         zgap_config: ZGapConfig | None = None,
         time_authority: TimeAuthority | None = None,
+        require_ssr_price_match: bool = True,
     ) -> "N4ObserveRuntime":
         clock = clock or FakeClock(
             _wall=datetime(2026, 7, 20, 21, 15, 0, tzinfo=timezone.utc)
@@ -274,7 +278,14 @@ class N4ObserveRuntime:
             clock=clock,
         )
         assert isinstance(binding, ZGapBinding)
-        return cls(clock=clock, ptb_engine=engine, zgap=binding)
+        if not isinstance(require_ssr_price_match, bool):
+            raise ValueError("require_ssr_price_match must be a boolean")
+        return cls(
+            clock=clock,
+            ptb_engine=engine,
+            zgap=binding,
+            require_ssr_price_match=require_ssr_price_match,
+        )
 
     def open_session(
         self,
@@ -391,8 +402,10 @@ class N4ObserveRuntime:
         window_id: str,
         sealed_at: datetime | None = None,
         require_attestation_match: bool = False,
+        skip_attestation: bool = False,
     ) -> SealedWindowPtb:
-        self.ptb_engine.attest(market_id=market_id, window_id=window_id)
+        if not skip_attestation:
+            self.ptb_engine.attest(market_id=market_id, window_id=window_id)
         sealed = self.ptb_engine.seal(
             market_id=market_id,
             window_id=window_id,
@@ -512,10 +525,11 @@ class N4ObserveRuntime:
             )
 
         sealed = sess.sealed
-        if sealed.ptb_attestation_result is AttestationResult.MISMATCH:
-            reasons.append("attestation_mismatch")
-        if sealed.ptb_attestation_result is AttestationResult.INCOMPLETE:
-            reasons.append("attestation_unavailable")
+        if self.require_ssr_price_match:
+            if sealed.ptb_attestation_result is AttestationResult.MISMATCH:
+                reasons.append("attestation_mismatch")
+            if sealed.ptb_attestation_result is AttestationResult.INCOMPLETE:
+                reasons.append("attestation_unavailable")
         if sealed.clock_status == "UNSYNCHRONIZED":
             reasons.append("unsynchronized_clock")
         if sealed.clock_status == "DEGRADED":
@@ -582,9 +596,7 @@ class N4ObserveRuntime:
             reasons.append("basis_estimate_unavailable")
         reasons = list(dict.fromkeys(reasons))
 
-        hard_skip = set(reasons) & {
-            "attestation_mismatch",
-            "attestation_unavailable",
+        hard_skip_codes = {
             "exact_candidate_absent",
             "unsynchronized_clock",
             "no_causal_binance_pair",
@@ -592,6 +604,9 @@ class N4ObserveRuntime:
             "stale_reference",
             "basis_estimate_unavailable",
         }
+        if self.require_ssr_price_match:
+            hard_skip_codes |= {"attestation_mismatch", "attestation_unavailable"}
+        hard_skip = set(reasons) & hard_skip_codes
         zg = self._strategy_by_window.get(sess.window_id)
         if hard_skip or dyn.c_hat is None or zg is None:
             return AlignedEvalReady(

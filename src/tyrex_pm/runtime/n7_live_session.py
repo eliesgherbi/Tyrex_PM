@@ -25,6 +25,7 @@ from tyrex_pm.runtime.live_zgap_compose import (
 )
 from tyrex_pm.runtime.n4_observe_runtime import N4ObserveRuntime
 from tyrex_pm.runtime.n7_oneshot_host import N7OneShotHost
+from tyrex_pm.runtime.n7_ptb_policy import no_entry_reason, ptb_trust_fields
 from tyrex_pm.runtime.n7_sealed import N7SealedConfig
 from tyrex_pm.strategies.context import DecisionContext
 
@@ -60,6 +61,7 @@ def _capture_intents(runtime: N4ObserveRuntime, captured: dict[str, Any]) -> lis
     """Evaluate sealed active session; stash EnterIntent if any."""
     ready = runtime.prepare_aligned_eval()
     if not ready.ok or ready.session is None or ready.snapshot is None:
+        captured["last_skip_reasons"] = list(ready.skip_reasons)
         return [{"kind": "skip", "reasons": list(ready.skip_reasons)}]
     assert ready.binding is not None and ready.dyn is not None
     assert ready.sealed is not None and ready.binance_raw is not None
@@ -93,6 +95,8 @@ def _capture_intents(runtime: N4ObserveRuntime, captured: dict[str, Any]) -> lis
     captured["market"] = ready.session.market
     captured["book"] = _book_from_session(runtime)
     captured["last_decision"] = type(result.decision).__name__ if result.decision else None
+    captured["model_anchor_k"] = None if ready.model_anchor is None else str(ready.model_anchor)
+    captured["sealed_k"] = str(ready.sealed.ptb_k)
     enters = [i for i in result.intents if isinstance(i, EnterIntent)]
     if enters and not captured.get("intents"):
         captured["intents"] = enters
@@ -103,8 +107,21 @@ def _capture_intents(runtime: N4ObserveRuntime, captured: dict[str, Any]) -> lis
             "decision": captured.get("last_decision"),
             "intent_types": [type(i).__name__ for i in result.intents],
             "enter_captured": bool(enters),
+            "sealed_k": captured.get("sealed_k"),
+            "model_anchor_k": captured.get("model_anchor_k"),
         }
     ]
+
+
+def _trust_from_seal(
+    seal: dict[str, Any], *, require_ssr: bool
+) -> dict[str, Any]:
+    return ptb_trust_fields(
+        sealed_k=seal.get("sealed_k"),
+        require_ssr_price_match=require_ssr,
+        ptb_ready=bool(seal.get("ptb_ready", True)),
+        ssr_check_status=str(seal.get("ssr_check_status") or ("REQUIRED" if require_ssr else "DISABLED")),
+    )
 
 
 async def run_live_oneshot_session(
@@ -117,11 +134,13 @@ async def run_live_oneshot_session(
     preflight: dict[str, Any],
 ) -> dict[str, Any]:
     """Discover → seal → evaluate → at most one live entry → Scope A exit."""
+    _ = repo
     wait = seconds_until_next_boundary() - 45.0
     if wait > 1:
         await asyncio.sleep(min(wait, 180.0))
 
-    captured: dict[str, Any] = {"intents": [], "evals": 0}
+    require_ssr = sealed.require_ssr_price_match
+    captured: dict[str, Any] = {"intents": [], "evals": 0, "last_skip_reasons": []}
 
     def on_eval(runtime: N4ObserveRuntime) -> list[dict]:
         return _capture_intents(runtime, captured)
@@ -136,12 +155,13 @@ async def run_live_oneshot_session(
         stop_when_seals_met=False,
         on_after_seal_eval=on_eval,
         should_stop=lambda: bool(captured.get("stop_requested")),
+        require_ssr_price_match=require_ssr,
     )
     d = summary.to_dict()
     seals = d.get("seals") or []
 
     if not seals:
-        return {
+        payload = {
             "mode": "n7_operator_oneshot",
             "outcome": "ABORTED_BEFORE_MUTATION",
             "live": True,
@@ -156,35 +176,57 @@ async def run_live_oneshot_session(
             "vpn_hint": bool(d.get("errors")),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        payload.update(
+            ptb_trust_fields(
+                sealed_k=None,
+                require_ssr_price_match=require_ssr,
+                ptb_ready=False,
+            )
+        )
+        return payload
 
+    seal0 = seals[0]
+    trust = _trust_from_seal(seal0, require_ssr=require_ssr)
     enters = list(captured.get("intents") or [])
+    evals = int(captured.get("evals") or 0)
     if not enters:
-        return {
+        reason = no_entry_reason(
+            evals=evals,
+            last_skip_reasons=list(captured.get("last_skip_reasons") or []),
+            require_ssr_price_match=require_ssr,
+        )
+        payload = {
             "mode": "n7_operator_oneshot",
             "outcome": "PASS_N7_SAFE_NO_ENTRY",
             "live": True,
-            "reason": "intentional_no_signal_or_wait",
+            "reason": reason,
             "real_venue_mutations": 0,
             "preflight": preflight,
-            "seal": seals[0],
+            "seal": seal0,
             "discovery": d.get("discovery"),
-            "evals": captured.get("evals"),
+            "evals": evals,
+            "model_anchor_k": captured.get("model_anchor_k"),
             "mutations_disabled": True,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        payload.update(trust)
+        return payload
 
     market = captured.get("market")
     book = captured.get("book")
     if market is None or book is None:
-        return {
+        payload = {
             "mode": "n7_operator_oneshot",
             "outcome": "ABORTED_BEFORE_MUTATION",
             "live": True,
             "reason": "market_or_book_unavailable",
             "real_venue_mutations": 0,
             "preflight": preflight,
+            "evals": evals,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        payload.update(trust)
+        return payload
 
     env = _load_dotenv(dotenv)
     client = build_official_readonly_client(env=env)
@@ -199,15 +241,18 @@ async def run_live_oneshot_session(
     )
     arm_err = host.arm_operator_live()
     if arm_err is not None:
-        return {
+        payload = {
             "mode": "n7_operator_oneshot",
             "outcome": "ABORTED_BEFORE_MUTATION",
             "live": True,
             "reason": arm_err.value,
             "real_venue_mutations": 0,
             "preflight": preflight,
+            "evals": evals,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        payload.update(trust)
+        return payload
 
     entered = host.try_enter(enters[0], book=book)
     mutations = (
@@ -236,21 +281,28 @@ async def run_live_oneshot_session(
     residual = econ.get("remaining_inventory") or {}
     if mutations == 0:
         outcome = "PASS_N7_SAFE_NO_ENTRY"
+        reason = "entry_not_dispatched"
     elif flat:
         outcome = "PASS_N7_ONE_SHOT_FLAT"
+        reason = "one_shot_flat"
     elif residual:
         outcome = "PARTIAL_N7_RESIDUAL_OPERATOR_ACTION_REQUIRED"
+        reason = "residual_inventory"
     else:
         outcome = "PASS_N7_SAFE_NO_ENTRY"
+        reason = "safe_no_entry"
 
-    return {
+    payload = {
         "mode": "n7_operator_oneshot",
         "outcome": outcome,
         "live": True,
+        "reason": reason,
         "real_venue_mutations": mutations,
         "preflight": preflight,
-        "seal": seals[0],
+        "seal": seal0,
         "discovery": d.get("discovery"),
+        "evals": evals,
+        "model_anchor_k": captured.get("model_anchor_k"),
         "entry": entered,
         "exit": exit_report,
         "economics": econ,
@@ -259,3 +311,5 @@ async def run_live_oneshot_session(
         "config_fingerprint": sealed.fingerprint(),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
+    payload.update(trust)
+    return payload

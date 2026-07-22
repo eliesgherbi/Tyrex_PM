@@ -50,8 +50,12 @@ class N7SealedConfig:
     resolution_capability: bool = False
     market_family: str = "btc_updown_5m"
     one_shot: bool = True
+    # When false: sealed Chainlink K is PTB-ready; SSR openPrice is not fetched/gated.
+    require_ssr_price_match: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.require_ssr_price_match, bool):
+            raise ValueError("require_ssr_price_match must be a boolean")
         if self.live.scope is not LiveScope.A:
             raise ValueError("N7 requires live.scope=A")
         if self.max_buy_collateral > Decimal("5.00"):
@@ -105,6 +109,7 @@ class N7SealedConfig:
             "resolution_capability": self.resolution_capability,
             "market_family": self.market_family,
             "one_shot": self.one_shot,
+            "require_ssr_price_match": self.require_ssr_price_match,
             "production_timing_status": PRODUCTION_TIMING_VALUES_STATUS,
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -124,6 +129,13 @@ class N7SealedConfig:
             "resolution_capability": self.resolution_capability,
             "market_family": self.market_family,
             "one_shot": self.one_shot,
+            "require_ssr_price_match": self.require_ssr_price_match,
+            "ssr_match_required": self.require_ssr_price_match,
+            "ptb_authority": (
+                "chainlink_sealed_k_and_ssr_match"
+                if self.require_ssr_price_match
+                else "chainlink_sealed_k"
+            ),
             "fingerprint": self.fingerprint(),
             "scope_b_available": False,
             "hold_to_resolution_available": False,
@@ -221,7 +233,17 @@ def n7_sealed_from_mapping(raw: Mapping[str, Any]) -> N7SealedConfig:
         resolution_capability=bool(z_gap.get("resolution_capability", False)),
         market_family=str(raw.get("market_family", "btc_updown_5m")),
         one_shot=bool(raw.get("one_shot", True)),
+        require_ssr_price_match=_as_bool(
+            raw.get("require_ssr_price_match", False),
+            field="require_ssr_price_match",
+        ),
     )
+
+
+def _as_bool(value: Any, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field} must be a boolean, got {type(value).__name__}")
 
 
 def load_n7_sealed_config(path: Path) -> N7SealedConfig:

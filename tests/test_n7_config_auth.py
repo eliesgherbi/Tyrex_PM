@@ -40,6 +40,7 @@ def test_sealed_config_file_loads():
     assert cfg.live.mutations_enabled is False
     assert cfg.max_buy_collateral <= Decimal("5.00")
     assert cfg.resolution_capability is False
+    assert cfg.require_ssr_price_match is False
 
 
 def test_cap_cannot_exceed_five():

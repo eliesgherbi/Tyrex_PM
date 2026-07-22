@@ -20,6 +20,29 @@ from tyrex_pm.core.numerics import as_decimal
 UA = "TyrexPM-N3B-Attestation/1.0 (read-only)"
 
 
+class DisabledSsrAttestationProvider:
+    """No-op SSR port used when ``require_ssr_price_match`` is false.
+
+    Fetch must never be invoked in the disabled path; calling it is a wiring bug.
+    """
+
+    fetch_count: int = 0
+
+    def fetch_attestation(
+        self,
+        *,
+        market_id: MarketId,
+        window_id: str,
+        event_start: datetime,
+    ) -> tuple[Decimal | None, str, Mapping[str, Any], datetime | None]:
+        _ = market_id, window_id, event_start
+        type(self).fetch_count += 1
+        raise RuntimeError(
+            "SSR attestation disabled (require_ssr_price_match=false); "
+            "fetch_attestation must not be called"
+        )
+
+
 def fetch_event_html(slug: str, *, timeout_s: float = 30.0) -> str:
     url = f"https://polymarket.com/event/{slug}"
     req = Request(url, headers={"User-Agent": UA, "Accept": "text/html"})

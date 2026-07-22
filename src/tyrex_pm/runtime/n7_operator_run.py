@@ -6,6 +6,7 @@ mutations unless ``live=True`` is passed by the operator tool.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from typing import Any
 
 from tyrex_pm.execution.polymarket.auth import assert_no_secrets, redact_text
 from tyrex_pm.runtime.n7_preflight import run_n7_preflight
+from tyrex_pm.runtime.n7_ptb_policy import ptb_trust_fields
 from tyrex_pm.runtime.n7_sealed import load_n7_sealed_config
 
 
@@ -74,8 +76,16 @@ def run_fake_oneshot_rehearsal(*, out_dir: Path, config_path: Path) -> N7Operato
         "economics": econ,
         "status": host.status(),
         "config_fingerprint": sealed.fingerprint(),
+        "evals": 1 if entered.get("status") == "ACKNOWLEDGED" else 0,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
+    payload.update(
+        ptb_trust_fields(
+            sealed_k="fake_host_fixture_k",
+            require_ssr_price_match=sealed.require_ssr_price_match,
+            ptb_ready=True,
+        )
+    )
     path = _write_report(out_dir, payload)
     return N7OperatorResult(
         ok=bool(econ.get("flat")) and host.inner.real_venue_mutations == 0,
@@ -98,7 +108,10 @@ async def run_operator_oneshot(
     sealed = load_n7_sealed_config(config_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pf = run_n7_preflight(
+    # Preflight is sync and may use asyncio.run (user stream). Always run it
+    # off the operator event loop to avoid nested-loop failures.
+    pf = await asyncio.to_thread(
+        run_n7_preflight,
         out_dir=out_dir / "preflight",
         config_path=config_path,
         repo=repo,

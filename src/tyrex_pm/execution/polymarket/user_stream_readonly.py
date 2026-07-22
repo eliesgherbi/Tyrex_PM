@@ -24,8 +24,11 @@ def observe_user_stream_readonly(
 
     Idle accounts may receive zero order/trade events. Connection + auth send +
     absence of auth errors + ping/pong is sufficient evidence.
+
+    Safe to call from a running event loop (runs the probe on a worker thread).
     """
-    try:
+
+    def _run() -> dict[str, Any]:
         return asyncio.run(
             _observe_async(
                 creds=creds,
@@ -34,6 +37,20 @@ def observe_user_stream_readonly(
                 on_ready=on_ready,
             )
         )
+
+    try:
+        try:
+            asyncio.get_running_loop()
+            in_loop = True
+        except RuntimeError:
+            in_loop = False
+        if in_loop:
+            # Nested asyncio.run() is illegal; isolate on a thread with its own loop.
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_run).result(timeout=max(30.0, observe_s + 20.0))
+        return _run()
     except Exception as exc:  # noqa: BLE001
         return {
             "attempted": True,
