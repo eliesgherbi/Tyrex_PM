@@ -1,4 +1,4 @@
-"""Scope A timing ladder — structure only; production numerics OPEN for N7."""
+"""Scope A timing ladder — structure validated; production numerics frozen in n7_timing."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from typing import Any
 class ScopeATimingLadder:
     """Deadlines relative to authoritative ``event_end``.
 
-    Production values remain OPEN. Tests must construct explicit timedeltas.
+    Production values are frozen in ``n7_timing.N7_TIMING`` for N7.
+    Tests may still construct explicit timedeltas.
     Late entry is skipped. Scope A never silently becomes hold-to-resolution.
     """
 
@@ -94,10 +95,10 @@ class ScopeATimingLadder:
             "hard_stop_at": self.hard_stop_at.isoformat(),
             "acknowledgment_timeout_s": self.acknowledgment_timeout.total_seconds(),
             "cancel_recon_budget_s": self.cancel_recon_budget.total_seconds(),
-            "production_values": "OPEN",
+            "production_values": "FROZEN_FOR_N7",
             "hold_to_resolution": False,
         }
 
 
-# Documented OPEN production placeholders (not defaults for live trading).
-PRODUCTION_TIMING_VALUES_STATUS = "OPEN_FOR_N7"
+# Production numerics live in n7_timing; this alias keeps N6 CLI compatible.
+PRODUCTION_TIMING_VALUES_STATUS = "FROZEN_FOR_N7"

@@ -1,9 +1,11 @@
 # N7 — Tiny operator-controlled live
 
-**Status:** planned (no implementation or live enablement in this planning commit)  
+**Status:** N7A **PASS** (implementation + fake one-shot + auth RO + window PTB).  
+N7B real mutation **not enabled** — requires fresh operator authorization phrase.  
+See `n7a_implementation_and_preflight_report.md`.  
 **Document:** `Docs/implementation/z_gap_production_readiness/n7_tiny_operator_live.md`  
 **Depends on:** N1–N6 accepted evidence + explicit operator authorization  
-**Unblocks:** Later limited continuous live (separate acceptance) / Scope B (separate)
+**Unblocks:** N7B tiny one-shot ops event (after phrase) / later continuous (separate)
 
 ---
 
@@ -352,9 +354,9 @@ Only after **separate** acceptance:
 
 | Item | Notes |
 |------|-------|
-| Exact daily loss / notional | Freeze before first run (**OPEN**) |
-| Timing ladder numerics | Freeze from measured latency + margin (**OPEN** until frozen) |
-| Exit retry budget | Freeze before first run (**OPEN**) |
+| Exact daily loss / notional | **FROZEN** at $5 / $5 (N7A) |
+| Timing ladder numerics | **FROZEN** in `n7_timing.py` / `config/n7_tiny_live.json` |
+| Exit retry budget | **FROZEN** 3 attempts / 60s |
 | Deployment host | Prefer stable clock / low jitter (decision #12) |
 | Interactive approval phrase | Adapt R7/old ceremony concepts; new code |
 | Fee uncertainty | Bound collateral; label confirmed vs estimated |

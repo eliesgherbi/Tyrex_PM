@@ -1,6 +1,6 @@
 # Z-Gap production readiness (N1–N7)
 
-**Status:** N1 `PASS_WITH_BLOCKERS` · N2–N5 `PASS_WITH_ENVIRONMENT_BLOCKER` · N6 `PASS` · N7 planned  
+**Status:** N1 `PASS_WITH_BLOCKERS` · N2–N5 `PASS_WITH_ENVIRONMENT_BLOCKER` · N6 `PASS` · N7A `PASS` · N7B pending operator auth  
 **Acceptance (N1):** [n1_acceptance_report.md](n1_acceptance_report.md)  
 **Acceptance (N2):** [n2_acceptance_report.md](n2_acceptance_report.md)  
 **Acceptance (N3):** [n3_acceptance_report.md](n3_acceptance_report.md)  

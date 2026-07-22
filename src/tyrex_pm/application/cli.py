@@ -316,6 +316,88 @@ def build_parser() -> argparse.ArgumentParser:
         "n6-kill-inspect",
         help="N6: inspect kill-switch / block-new-exposure semantics (no venue I/O)",
     )
+
+    n7_status = sub.add_parser(
+        "n7-status",
+        help=(
+            "N7: print sealed tiny-live defaults (mutations OFF; Scope A; "
+            "no real venue mutation)"
+        ),
+    )
+    n7_preflight = sub.add_parser(
+        "n7-preflight",
+        help=(
+            "N7A: authenticated read-only preflight + authorization request "
+            "(mutations remain OFF; does not approve or submit)"
+        ),
+    )
+    n7_preflight.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Evidence directory under var/reporting/n7/",
+    )
+    n7_preflight.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/n7_tiny_live.json"),
+    )
+    n7_preflight.add_argument("--dotenv", type=Path, default=Path(".env"))
+    n7_preflight.add_argument("--user-stream-s", type=float, default=2.0)
+    n7_preflight.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="N7A only: allow dirty worktree for read-only preflight",
+    )
+    n7_auth = sub.add_parser(
+        "n7-auth-request",
+        help=(
+            "N7A: generate a single-use authorization *request* artifact. "
+            "Does not approve. Operator must supply the exact phrase for N7B."
+        ),
+    )
+    n7_auth.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/n7_tiny_live.json"),
+    )
+    n7_auth.add_argument(
+        "--output",
+        type=Path,
+        default=Path("var/reporting/n7/authorization_request.json"),
+    )
+    n7_auth.add_argument("--operator-label", type=str, default="operator")
+    n7_auth.add_argument(
+        "--valid-minutes",
+        type=int,
+        default=20,
+        help="UTC validity window length for the next eligible BTC 5m window",
+    )
+    n7_oneshot = sub.add_parser(
+        "n7-oneshot",
+        help=(
+            "N7B: operator-gated tiny live one-shot (Scope A). "
+            "Requires --authorization-phrase matching the current request. "
+            "Without the phrase this command refuses and does not mutate. "
+            "N7A does not authorize real venue mutation."
+        ),
+    )
+    n7_oneshot.add_argument(
+        "--authorization-phrase",
+        type=str,
+        default=None,
+        help="Exact one-use operator approval phrase (required for real mutation)",
+    )
+    n7_oneshot.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config/n7_tiny_live.json"),
+    )
+    n7_oneshot.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Refuse real mutation; print ceremony requirements only",
+    )
     return parser
 
 
@@ -726,6 +808,136 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if args.command == "n7-status":
+        from tyrex_pm.runtime.n7_sealed import default_n7_sealed_config, load_n7_sealed_config
+        from tyrex_pm.runtime.n7_timing import PRODUCTION_TIMING_VALUES_STATUS
+
+        cfg_path = Path("config/n7_tiny_live.json")
+        sealed = (
+            load_n7_sealed_config(cfg_path) if cfg_path.exists() else default_n7_sealed_config()
+        )
+        print(
+            __import__("json").dumps(
+                {
+                    "n7": sealed.to_dict(),
+                    "production_timing_values": PRODUCTION_TIMING_VALUES_STATUS,
+                    "mutations_default": False,
+                    "n7b_authorized": False,
+                    "scope_b_available": False,
+                    "real_venue_mutation": False,
+                    "ceremony": (
+                        "n7-auth-request -> operator phrase -> n7-oneshot "
+                        "--authorization-phrase ..."
+                    ),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "n7-preflight":
+        import subprocess
+
+        cmd = [
+            sys.executable,
+            str(
+                Path(__file__).resolve().parents[2]
+                / "tools"
+                / "n7_live"
+                / "run_n7_readonly_preflight.py"
+            ),
+            "--config",
+            str(args.config),
+        ]
+        if args.out_dir is not None:
+            cmd.extend(["--out-dir", str(args.out_dir)])
+        if args.dotenv is not None:
+            cmd.extend(["--dotenv", str(args.dotenv)])
+        cmd.extend(["--user-stream-s", str(args.user_stream_s)])
+        if args.allow_dirty:
+            cmd.append("--allow-dirty")
+        return subprocess.call(cmd)
+
+    if args.command == "n7-auth-request":
+        from datetime import timedelta
+
+        from tyrex_pm.runtime.n7_authorization import (
+            create_authorization_request,
+            write_authorization_request,
+        )
+        from tyrex_pm.runtime.n7_git import inspect_git
+        from tyrex_pm.runtime.n7_sealed import load_n7_sealed_config
+
+        repo = Path(__file__).resolve().parents[2]
+        git = inspect_git(repo)
+        sealed = load_n7_sealed_config(args.config)
+        req, _env = create_authorization_request(
+            sealed=sealed,
+            git_head=git.head,
+            operator_label=args.operator_label,
+            valid_for=timedelta(minutes=int(args.valid_minutes)),
+        )
+        write_authorization_request(args.output, req)
+        print(
+            __import__("json").dumps(
+                {
+                    "written": str(args.output),
+                    "envelope_id": req.envelope_id,
+                    "git_head": req.git_head,
+                    "config_fingerprint": req.config_fingerprint,
+                    "valid_until_utc": req.valid_until_utc,
+                    "approval_phrase_template": req.approval_phrase_template,
+                    "approved": False,
+                    "note": (
+                        "This is a request only. N7B requires the operator to "
+                        "provide this phrase verbatim; the CLI does not auto-approve."
+                    ),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "n7-oneshot":
+        # N7A / safety: never silently mutate. Phrase required for any arming.
+        if not args.authorization_phrase or args.dry_run:
+            print(
+                __import__("json").dumps(
+                    {
+                        "refused": True,
+                        "reason": "authorization_phrase_required",
+                        "n7b_authorized": False,
+                        "mutations_enabled": False,
+                        "real_venue_mutations": 0,
+                        "help": (
+                            "1) Commit N7A and ensure clean worktree. "
+                            "2) Run n7-preflight / n7-auth-request. "
+                            "3) Operator supplies the exact approval phrase. "
+                            "4) Re-run: n7-oneshot --authorization-phrase '...'"
+                        ),
+                    },
+                    indent=2,
+                )
+            )
+            return 2
+        print(
+            __import__("json").dumps(
+                {
+                    "refused": True,
+                    "reason": "n7b_not_enabled_in_this_task",
+                    "note": (
+                        "Phrase received by CLI but N7B live mutation path is "
+                        "gated behind an explicit post-N7A operator go. "
+                        "Complete N7A acceptance first; do not infer approval."
+                    ),
+                    "mutations_enabled": False,
+                    "real_venue_mutations": 0,
+                },
+                indent=2,
+            )
+        )
+        return 3
 
     parser.print_help()
     return 2
