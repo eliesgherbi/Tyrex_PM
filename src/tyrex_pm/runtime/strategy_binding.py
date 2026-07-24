@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
 from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, TimeAuthority
-from tyrex_pm.domain.polymarket.fees import FeeCurveParams, PROVISIONAL_SAMPLE_FEE
+from tyrex_pm.domain.polymarket.fees import PROVISIONAL_SAMPLE_FEE, FeeCurveParams
 from tyrex_pm.domain.polymarket.market import BinaryMarket
 from tyrex_pm.domain.polymarket.ptb import PtbLockStore, PtbSnapshot, make_fixture_ptb
 from tyrex_pm.indicators.ewma_volatility import EwmaVolatilityEstimator, SigmaConfig
@@ -586,15 +586,17 @@ def build_strategy_binding(
     if kind in {"z_gap", "zgap"}:
         timer_count = 2
         interval_s = 1.0
-        if zgap_config is None and zgap_runtime is not None:
-            zgap_config = zgap_config_from_runtime(zgap_runtime)
-            target_notional = zgap_runtime.target_notional
+        if zgap_runtime is not None:
+            # Wiring (timers/window) always comes from runtime block when present.
             window_id = zgap_runtime.window_id
             fee_curve = FeeCurveParams(
                 fee_rate=zgap_runtime.fee_rate, exponent=zgap_runtime.fee_exponent
             )
             timer_count = zgap_runtime.timer_eval_count
             interval_s = zgap_runtime.evaluate_interval_s
+            if zgap_config is None:
+                zgap_config = zgap_config_from_runtime(zgap_runtime)
+                target_notional = zgap_runtime.target_notional
         cfg = zgap_config or ZGapConfig()
         ewma = EwmaVolatilityEstimator(
             SigmaConfig(

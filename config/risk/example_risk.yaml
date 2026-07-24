@@ -1,0 +1,35 @@
+# Risk plan — sizing and permitted exposure (RiskPlanConfig).
+# Owner: risk. Sole owner of target_notional.
+# runtime_mode is set from CLI --mode (do not put it here).
+#
+# Distinct from runtime.signal_max_book_spread:
+#   max_spread here → RiskEngine SPREAD_TOO_WIDE on intents.
+
+# Desired entry notional (USDC share notional before fees). Must be > 0 and <= max_notional.
+# Increasing raises intended size; risk/planner may still shrink. type: Decimal string
+target_notional: "5"
+
+# Hard notional cap for risk authorization. Must be >= target_notional.
+max_notional: "10"
+
+# Minimum acceptable ask price for entry (probability [0,1]).
+min_price: "0.01"
+
+# Maximum acceptable ask price for entry (probability [0,1]); must be >= min_price.
+max_price: "0.99"
+
+# Maximum quote spread allowed by RiskEngine (price units). Wider books → deny SPREAD_TOO_WIDE.
+# This is NOT the host signal gate (see runtime.signal_max_book_spread).
+max_spread: "0.50"
+
+# Minimum touch liquidity (notional) required to approve entry.
+min_liquidity_notional: "1"
+
+# Block new entries this many seconds before market close (0 = disabled).
+no_entry_before_close_s: 0
+
+# Dedup registry lifetime for identical intents (seconds). Must be > 0.
+duplicate_lifetime_s: 3600
+
+# When true, risk denies new exposure (kill switch). default: false
+kill_switch_active: false

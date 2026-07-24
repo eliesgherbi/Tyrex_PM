@@ -1,0 +1,31 @@
+# Default execution example for OBSERVE demos (ShadowOMS off).
+# Alias of observe_noop.yaml — kept so docs using --execution config/execution/example.yaml work.
+#
+# For SHADOW runs use: config/execution/shadow_example.yaml
+
+kind: shadow
+
+shadow:
+  # OBSERVE: false. SHADOW commands must switch to shadow_example.yaml (true).
+  enable_oms: false
+
+  max_position_notional: "20"
+  max_total_exposure: "50"
+  max_hold_s: 600
+  flatten_before_close_s: 20
+  exit_on_flat: true
+  persistence_path: "var/state/z_gap_observe_noop_snapshot.json"
+  cancel_unfilled_residual: false
+  fee_rate: "0"
+  fee_model_id: "shadow_zero_fee_v1"
+  entry_retry_cooldown_s: 5.0
+  entry_max_attempts: 3
+  exit_retry_cooldown_s: 3.0
+  exit_max_normal_retries: 3
+  exit_escalate_after: 2
+  require_flat_for_promote: true
+  fills:
+    model_id: "shadow_immediate_visible_depth_v0"
+    latency_ms: 0.0
+    extra_slip_ticks: "0"
+    tick_size: "0.01"

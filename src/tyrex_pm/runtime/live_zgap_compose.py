@@ -163,6 +163,8 @@ async def run_live_zgap_compose(
     stop_when_seals_met: bool = True,
     runtime: N4ObserveRuntime | None = None,
     require_ssr_price_match: bool = True,
+    zgap_config: ZGapConfig | None = None,
+    target_notional: Decimal | None = None,
 ) -> LiveComposeSummary:
     """Bounded live composition: discover → ingest → EXACT seal → optional eval."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -205,15 +207,19 @@ async def run_live_zgap_compose(
         else DisabledSsrAttestationProvider()
     )
     if runtime is None:
+        cfg = zgap_config
+        if cfg is None:
+            cfg = ZGapConfig(
+                ptb_time_quality=ZGapPtbTimeQualityConfig(basis_max_bps=Decimal("10000"))
+            )
         runtime = N4ObserveRuntime.create(
             clock=clock,
             attestation_port=None if not require_ssr_price_match else attestation,
             basis_ewma_half_life_s=basis_ewma_half_life_s,
             time_authority=auth,
-            zgap_config=ZGapConfig(
-                ptb_time_quality=ZGapPtbTimeQualityConfig(basis_max_bps=Decimal("10000"))
-            ),
+            zgap_config=cfg,
             require_ssr_price_match=require_ssr_price_match,
+            target_notional=target_notional,
         )
     else:
         runtime.require_ssr_price_match = require_ssr_price_match
@@ -222,8 +228,12 @@ async def run_live_zgap_compose(
         )
         # Rebind strategy time authority to the shared corrected clock view.
         runtime.zgap.time_authority = auth
+        if target_notional is not None:
+            runtime.zgap.target_notional = target_notional
         for child in runtime._strategy_by_window.values():
             child.time_authority = auth
+            if target_notional is not None:
+                child.target_notional = target_notional
     summary.gate_notes.append(
         "ssr_match_required=true"
         if require_ssr_price_match

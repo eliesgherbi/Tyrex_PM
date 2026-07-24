@@ -132,6 +132,8 @@ async def run_live_oneshot_session(
     dotenv: Path | None,
     max_duration_s: float,
     preflight: dict[str, Any],
+    zgap_config: Any | None = None,
+    target_notional: Decimal | None = None,
 ) -> dict[str, Any]:
     """Discover → seal → evaluate → at most one live entry → Scope A exit."""
     _ = repo
@@ -156,6 +158,8 @@ async def run_live_oneshot_session(
         on_after_seal_eval=on_eval,
         should_stop=lambda: bool(captured.get("stop_requested")),
         require_ssr_price_match=require_ssr,
+        zgap_config=zgap_config,
+        target_notional=target_notional,
     )
     d = summary.to_dict()
     seals = d.get("seals") or []

@@ -77,6 +77,7 @@ def run_fake_oneshot_rehearsal(*, out_dir: Path, config_path: Path) -> N7Operato
         "status": host.status(),
         "config_fingerprint": sealed.fingerprint(),
         "evals": 1 if entered.get("status") == "ACKNOWLEDGED" else 0,
+        "mutations_disabled": True,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
     payload.update(
@@ -95,6 +96,49 @@ def run_fake_oneshot_rehearsal(*, out_dir: Path, config_path: Path) -> N7Operato
     )
 
 
+def run_fake_oneshot_no_signal(*, out_dir: Path, config_path: Path) -> N7OperatorResult:
+    """Fake rehearsal with zero EnterIntent / zero mutations."""
+    import sys
+
+    repo = Path(__file__).resolve().parents[3]
+    sys.path.insert(0, str(repo / "tests"))
+    from helpers_n7 import make_n7_host
+
+    sealed = load_n7_sealed_config(config_path)
+    host = make_n7_host(persistence_path=out_dir / "state.json", sealed=sealed)
+    host.inner.preflight_reconcile()
+    econ = host.economics_report()
+    host.terminate(reason="fake_no_signal")
+    payload = {
+        "mode": "n7_fake_oneshot",
+        "outcome": "PASS_N7_SAFE_NO_ENTRY",
+        "live": False,
+        "reason": "evaluated_no_enter_signal",
+        "real_venue_mutations": host.inner.real_venue_mutations,
+        "entry": None,
+        "economics": econ,
+        "status": host.status(),
+        "config_fingerprint": sealed.fingerprint(),
+        "evals": 1,
+        "mutations_disabled": True,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    payload.update(
+        ptb_trust_fields(
+            sealed_k="fake_host_fixture_k",
+            require_ssr_price_match=sealed.require_ssr_price_match,
+            ptb_ready=True,
+        )
+    )
+    path = _write_report(out_dir, payload)
+    return N7OperatorResult(
+        ok=host.inner.real_venue_mutations == 0,
+        outcome=str(payload["outcome"]),
+        report_path=path,
+        payload=payload,
+    )
+
+
 async def run_operator_oneshot(
     *,
     repo: Path,
@@ -103,6 +147,8 @@ async def run_operator_oneshot(
     dotenv: Path | None,
     live: bool,
     max_duration_s: float = 300.0,
+    zgap_config: Any | None = None,
+    target_notional: Decimal | None = None,
 ) -> N7OperatorResult:
     """Full operator path: preflight → (optional) live one-shot for one window."""
     sealed = load_n7_sealed_config(config_path)
@@ -142,6 +188,7 @@ async def run_operator_oneshot(
             "preflight": pf.payload,
             "note": "Pass --live to enable the bounded mutation path for one window.",
             "config_fingerprint": sealed.fingerprint(),
+            "mutations_disabled": True,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
         path = _write_report(out_dir, payload)
@@ -158,6 +205,8 @@ async def run_operator_oneshot(
             dotenv=dotenv,
             max_duration_s=max_duration_s,
             preflight=pf.payload,
+            zgap_config=zgap_config,
+            target_notional=target_notional,
         )
         path = _write_report(out_dir, session)
         return N7OperatorResult(

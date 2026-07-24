@@ -15,6 +15,7 @@ from tyrex_pm.core.modes import RuntimeMode
 from tyrex_pm.indicators.momentum import MomentumConfig
 from tyrex_pm.market_data.freshness import FreshnessConfig, TimestampBasis
 from tyrex_pm.runtime.shadow_config import ShadowConfig, shadow_config_from_mapping
+from tyrex_pm.strategies.z_gap.config import ZGapConfig
 
 
 class SourceMode(str, Enum):
@@ -145,6 +146,10 @@ class ObserveConfig:
     shadow: ShadowConfig | None = None
     strategy_kind: str = "reference_momentum"
     z_gap: ZGapObserveRuntimeConfig | None = None
+    # Complete pure strategy config (YAML run path). When set, binding uses this
+    # instead of the incomplete flat zgap_config_from_runtime bridge.
+    zgap_pure: ZGapConfig | None = None
+    run_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode is SourceMode.FIXTURE and self.fixture_path is None:

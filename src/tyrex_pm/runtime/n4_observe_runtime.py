@@ -248,6 +248,7 @@ class N4ObserveRuntime:
         zgap_config: ZGapConfig | None = None,
         time_authority: TimeAuthority | None = None,
         require_ssr_price_match: bool = True,
+        target_notional: Decimal | None = None,
     ) -> "N4ObserveRuntime":
         clock = clock or FakeClock(
             _wall=datetime(2026, 7, 20, 21, 15, 0, tzinfo=timezone.utc)
@@ -271,12 +272,15 @@ class N4ObserveRuntime:
             attestation_port=attestation_port,
             ewma=BasisEwmaState(half_life_s=basis_ewma_half_life_s),
         )
-        binding = build_strategy_binding(
-            strategy_kind="z_gap",
-            zgap_config=zgap_config or ZGapConfig(),
-            time_authority=auth,
-            clock=clock,
-        )
+        binding_kwargs: dict[str, Any] = {
+            "strategy_kind": "z_gap",
+            "zgap_config": zgap_config or ZGapConfig(),
+            "time_authority": auth,
+            "clock": clock,
+        }
+        if target_notional is not None:
+            binding_kwargs["target_notional"] = target_notional
+        binding = build_strategy_binding(**binding_kwargs)
         assert isinstance(binding, ZGapBinding)
         if not isinstance(require_ssr_price_match, bool):
             raise ValueError("require_ssr_price_match must be a boolean")

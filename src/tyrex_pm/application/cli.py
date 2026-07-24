@@ -11,7 +11,12 @@ from pathlib import Path
 from tyrex_pm import __version__
 from tyrex_pm.core.clock import FakeClock
 from tyrex_pm.operations import current_btc_updown_slug, next_btc_updown_slug
-from tyrex_pm.runtime.config import ObserveConfig, SourceMode, load_observe_config, observe_config_from_mapping
+from tyrex_pm.runtime.config import (
+    ObserveConfig,
+    SourceMode,
+    load_observe_config,
+    observe_config_from_mapping,
+)
 from tyrex_pm.runtime.observe_host import ObserveHost
 
 
@@ -365,7 +370,277 @@ def build_parser() -> argparse.ArgumentParser:
     n7_live.add_argument("--dotenv", type=Path, default=Path(".env"))
     n7_live.add_argument("--out-dir", type=Path, default=None)
     n7_live.add_argument("--max-duration-s", type=float, default=300.0)
+
+    run = sub.add_parser(
+        "run",
+        help=(
+            "YAML-configurable OBSERVE/SHADOW/LIVE run "
+            "(strategy+risk+execution+runtime; optional scenario)"
+        ),
+    )
+    run.add_argument(
+        "--strategy",
+        type=Path,
+        default=None,
+        help="Strategy YAML path (default for --mode live: config/strategies/z_gap.yaml)",
+    )
+    run.add_argument(
+        "--risk",
+        type=Path,
+        default=None,
+        help="Risk YAML path (default for --mode live: config/risk/tiny_live_5usd.yaml)",
+    )
+    run.add_argument(
+        "--execution",
+        type=Path,
+        default=None,
+        help=(
+            "Execution YAML path "
+            "(default for --mode live: config/execution/polymarket_live.yaml)"
+        ),
+    )
+    run.add_argument(
+        "--runtime",
+        type=Path,
+        default=None,
+        help="Runtime YAML path (default for --mode live: config/runtime/live_btc_5m.yaml)",
+    )
+    run.add_argument(
+        "--scenario",
+        type=str,
+        default=None,
+        help="Scenario name under config/scenarios/<name>.yaml",
+    )
+    run.add_argument(
+        "--mode",
+        choices=["observe", "shadow", "live"],
+        required=True,
+        help=(
+            "Host mode: observe (no OMS), shadow (ShadowOMS), "
+            "live (real Polymarket via N7 one-shot)"
+        ),
+    )
+    run.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Operator arming for --mode live: permit bounded real venue mutations "
+            "after authenticated preflight. Omit for read-only preflight only."
+        ),
+    )
+    run.add_argument(
+        "--fake-rehearsal",
+        action="store_true",
+        help="(--mode live) FakeTransport entry→exit rehearsal; zero real mutations",
+    )
+    run.add_argument(
+        "--dotenv",
+        type=Path,
+        default=Path(".env"),
+        help="(--mode live) dotenv path for authenticated preflight / mutations",
+    )
+    run.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="(--mode live) report directory (default: var/reporting/yaml_run/<run_name>)",
+    )
+    run.add_argument(
+        "--max-duration-s",
+        type=float,
+        default=300.0,
+        help="(--mode live) max compose/session duration seconds",
+    )
+    run.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Operational run identity (output directory segment)",
+    )
+    inspect = run.add_mutually_exclusive_group()
+    inspect.add_argument(
+        "--validate-config",
+        action="store_true",
+        help="Resolve and validate; exit without starting a host",
+    )
+    inspect.add_argument(
+        "--show-config",
+        action="store_true",
+        help="Print complete effective configuration; exit without starting a host",
+    )
+    run.add_argument(
+        "--scenarios-dir",
+        type=Path,
+        default=Path("config/scenarios"),
+        help="Directory for named scenarios (default: config/scenarios)",
+    )
     return parser
+
+
+_LIVE_DEFAULT_STRATEGY = Path("config/strategies/z_gap.yaml")
+_LIVE_DEFAULT_RISK = Path("config/risk/tiny_live_5usd.yaml")
+_LIVE_DEFAULT_EXECUTION = Path("config/execution/polymarket_live.yaml")
+_LIVE_DEFAULT_RUNTIME = Path("config/runtime/live_btc_5m.yaml")
+
+
+def _resolve_run_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
+    """Fill YAML paths; live mode may omit strategy/risk/execution/runtime."""
+    if args.mode == "live":
+        strategy = args.strategy or _LIVE_DEFAULT_STRATEGY
+        risk = args.risk or _LIVE_DEFAULT_RISK
+        execution = args.execution or _LIVE_DEFAULT_EXECUTION
+        runtime = args.runtime or _LIVE_DEFAULT_RUNTIME
+        return strategy, risk, execution, runtime
+    missing = [
+        name
+        for name, val in (
+            ("--strategy", args.strategy),
+            ("--risk", args.risk),
+            ("--execution", args.execution),
+            ("--runtime", args.runtime),
+        )
+        if val is None
+    ]
+    if missing:
+        raise SystemExit(
+            f"run --mode {args.mode} requires {', '.join(missing)}"
+        )
+    assert args.strategy is not None
+    assert args.risk is not None
+    assert args.execution is not None
+    assert args.runtime is not None
+    return args.strategy, args.risk, args.execution, args.runtime
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    """YAML-configurable OBSERVE/SHADOW/LIVE entrypoint."""
+    import json
+
+    from tyrex_pm.runtime.yaml_config.adapt import adapt_to_observe_config
+    from tyrex_pm.runtime.yaml_config.errors import ConfigError
+    from tyrex_pm.runtime.yaml_config.resolve import RunMode, resolve_run_config
+    from tyrex_pm.runtime.yaml_config.serialize import resolved_to_show_dict
+
+    if args.live and args.mode != "live":
+        print("--live is only valid with --mode live", file=sys.stderr)
+        return 2
+    if args.fake_rehearsal and args.mode != "live":
+        print("--fake-rehearsal is only valid with --mode live", file=sys.stderr)
+        return 2
+
+    try:
+        strategy_p, risk_p, execution_p, runtime_p = _resolve_run_paths(args)
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    try:
+        resolved = resolve_run_config(
+            strategy_path=strategy_p,
+            risk_path=risk_p,
+            execution_path=execution_p,
+            runtime_path=runtime_p,
+            mode=args.mode,
+            scenario=args.scenario,
+            scenarios_dir=args.scenarios_dir,
+            run_name=args.run_name,
+        )
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.validate_config:
+        print(
+            f"config ok strategy={resolved.strategy_kind} mode={resolved.mode.value} "
+            f"source={resolved.runtime.source} scenario={resolved.scenario_name}"
+        )
+        return 0
+
+    if args.show_config:
+        print(json.dumps(resolved_to_show_dict(resolved), indent=2, sort_keys=False))
+        return 0
+
+    if resolved.mode is RunMode.LIVE:
+        from tyrex_pm.runtime.yaml_config.live_run import run_yaml_live
+
+        # src/tyrex_pm/application/cli.py → repository root is parents[3]
+        repo = Path(__file__).resolve().parents[3]
+        result = run_yaml_live(
+            resolved=resolved,
+            repo=repo,
+            out_dir=args.out_dir,
+            dotenv=args.dotenv if args.dotenv.exists() else None,
+            live=bool(args.live) and not args.fake_rehearsal,
+            fake_rehearsal=bool(args.fake_rehearsal),
+            max_duration_s=float(args.max_duration_s),
+        )
+        summary = {
+            "outcome": result.outcome,
+            "ok": result.ok,
+            "report": str(result.report_path).replace("\\", "/"),
+            "requested_mode": "live",
+            "effective_mode": "live",
+            "live_armed": bool(args.live) and not args.fake_rehearsal,
+            "real_venue_mutations": result.real_venue_mutations,
+            "host_binding": "n7_operator_oneshot",
+        }
+        print(json.dumps(summary, indent=2))
+        print(f"report={result.report_path}", file=sys.stderr)
+        return 0 if result.ok else 2
+
+    cfg = adapt_to_observe_config(resolved)
+    if cfg.mode is SourceMode.FIXTURE:
+        clock = FakeClock(_wall=datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc))
+        if resolved.mode is RunMode.SHADOW:
+            from tyrex_pm.runtime.shadow_host import ShadowHost
+
+            host = ShadowHost(cfg, clock=clock)
+            try:
+                result = host.run_fixture()
+            finally:
+                host.close()
+            print(
+                f"yaml shadow complete run_name={resolved.run_name} "
+                f"decisions={len(result.decisions)} intents={len(result.intents)} "
+                f"lifecycle={host.lifecycle.state.value} facts={result.fact_count} "
+                f"path={result.facts_path}"
+            )
+            return 0
+        host = ObserveHost(cfg, clock=clock)
+        try:
+            result = host.run_fixture()
+        finally:
+            host.close()
+        print(
+            f"yaml observe complete run_name={resolved.run_name} "
+            f"decisions={len(result.decisions)} facts={result.fact_count} "
+            f"path={result.facts_path}"
+        )
+        return 0
+
+    # Live public inputs (source=live) for observe/shadow hosts
+    if resolved.mode is RunMode.SHADOW:
+        from tyrex_pm.runtime.live_shadow import run_live_shadow
+
+        result = asyncio.run(run_live_shadow(cfg))
+        print(
+            f"yaml live shadow complete run_name={resolved.run_name} "
+            f"decisions={len(result.decisions)} facts={result.fact_count} "
+            f"path={result.facts_path}"
+        )
+        return 0
+    from tyrex_pm.runtime.live_observe import run_live_observe
+
+    result = asyncio.run(run_live_observe(cfg))
+    print(
+        f"yaml live observe complete run_name={resolved.run_name} "
+        f"decisions={len(result.decisions)} facts={result.fact_count} "
+        f"path={result.facts_path}"
+    )
+    return 0
 
 
 def _build_observe_config(args: argparse.Namespace) -> ObserveConfig:
@@ -443,6 +718,10 @@ def _build_observe_config(args: argparse.Namespace) -> ObserveConfig:
             momentum_min_samples=cfg.momentum_min_samples,
             risk=cfg.risk,
             shadow=cfg.shadow,
+            strategy_kind=cfg.strategy_kind,
+            z_gap=cfg.z_gap,
+            zgap_pure=cfg.zgap_pure,
+            run_name=cfg.run_name,
         )
     return cfg
 
@@ -665,6 +944,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"facts={result.facts_path}")
         print(f"mutations_attempted={len(report.get('mutations_attempted') or [])}")
         return int(result.exit_code)
+    if args.command == "run":
+        return _cmd_run(args)
+
     if args.command == "observe":
         cfg = _build_observe_config(args)
         if cfg.mode is SourceMode.FIXTURE:

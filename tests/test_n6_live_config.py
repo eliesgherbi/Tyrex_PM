@@ -215,13 +215,26 @@ def test_n6_live_host_does_not_import_r7() -> None:
 
 
 def test_cli_has_no_zgap_execute_live() -> None:
+    from tyrex_pm.application.cli import build_parser
+
     text = (SRC / "application" / "cli.py").read_text(encoding="utf-8")
     lowered = text.lower()
     # --execute-live remains wired only for the r7b operator one-shot.
     assert "--execute-live" in text
-    assert "z-gap" not in lowered
-    assert "z_gap" not in lowered
-    # No generic N6 / Z-Gap live-execution subcommand.
+    # No generic N6 live-execution subcommand / host import.
     assert "n6-live" not in lowered
     imports = _imports_of(SRC / "application" / "cli.py")
     assert not any("n6_live_host" in m for m in imports)
+    # YAML `run --mode live --live` arms N7 (not N6 / not --execute-live).
+    parser = build_parser()
+    run = None
+    for action in parser._subparsers._group_actions:  # noqa: SLF001
+        if getattr(action, "choices", None) and "run" in action.choices:
+            run = action.choices["run"]
+    assert run is not None
+    run_opts = {opt for a in run._actions for opt in a.option_strings}  # noqa: SLF001
+    assert "--live" in run_opts
+    assert "--execute-live" not in run_opts
+    mode_action = next(a for a in run._actions if "--mode" in a.option_strings)
+    assert set(mode_action.choices or ()) == {"observe", "shadow", "live"}
+    assert "n7_operator" in text or "run_yaml_live" in text or "live_run" in text

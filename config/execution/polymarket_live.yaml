@@ -1,0 +1,29 @@
+# Real Polymarket mutation execution for --mode live (N7 Scope A host).
+# Owner: execution. Does NOT select observe/shadow hosts.
+# Mutations stay OFF in this file; CLI --live arms them after preflight.
+
+kind: polymarket_live
+
+polymarket_live:
+  order_style: marketable_limit
+  # Defaults OFF — operator --live arms bounded mutations for one window.
+  live:
+    enabled: false
+    mutations_enabled: false
+    scope: A
+    ack_timeout_ms: 15000
+    max_order_notional: "5.00"
+    hard_collateral_cap: "5.00"
+    order_style: marketable_limit
+  # Frozen N7 timing ladder (entry cutoff → mandatory flatten → residual deadline).
+  timing:
+    last_allowed_entry_before_end_s: 180.0
+    discretionary_exit_cutoff_before_end_s: 120.0
+    mandatory_flatten_start_before_end_s: 90.0
+    residual_operator_deadline_before_end_s: 45.0
+    event_end_safety_buffer_s: 30.0
+    acknowledgment_timeout_s: 15.0
+    cancel_recon_budget_s: 10.0
+    exit_retry_max_attempts: 3
+    exit_retry_time_budget_ms: 60000
+    ack_timeout_ms: 15000

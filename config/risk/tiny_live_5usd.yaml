@@ -1,0 +1,33 @@
+# Tiny-live Scope A risk — fee-inclusive entry debit hard-capped at $5.
+# Owner: risk. Sole owner of target_notional for sizing intent.
+# live_limits feed the N7 sealed host (not RiskPlanConfig itself).
+# runtime_mode is set from CLI --mode=live → LIVE_TINY (do not set here).
+
+# Desired entry share notional (USDC before fees). Cap path sizes downward.
+target_notional: "5"
+
+# Risk plan notional ceiling (must be >= target_notional). Live fee-inclusive
+# hard cap is live_limits.max_buy_collateral ($5), never raised.
+max_notional: "5"
+
+min_price: "0.01"
+max_price: "0.99"
+max_spread: "0.50"
+min_liquidity_notional: "1"
+no_entry_before_close_s: 0
+duplicate_lifetime_s: 3600
+kill_switch_active: false
+
+# N7 sealed budget / lineage rules (required for --mode live).
+live_limits:
+  # Worst-case fee-inclusive entry debit ceiling (USDC). Never raise above 5.00.
+  max_buy_collateral: "5.00"
+  # Daily entry-exposure accounting only; inventory-reducing exits do not add.
+  max_daily_notional: "5.00"
+  max_daily_loss: "5.00"
+  max_positions_per_window: 1
+  max_entry_lineages: 1
+  allow_same_window_reentry: false
+  allow_same_window_reversal: false
+  # If venue min size would exceed the $5 fee-inclusive cap → skip, never raise.
+  skip_if_min_exceeds_cap: true

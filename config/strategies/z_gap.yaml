@@ -1,0 +1,108 @@
+# Z-Gap strategy parameters (mathematics and decision thresholds only).
+# Owner: strategy. Do NOT put window_id, ptb_k, duration, target_notional, or OMS here.
+#
+# Used by: tyrex-pm run --strategy config/strategies/z_gap.yaml ...
+# Omitted optional leaves fall back to typed code defaults in ZGapConfig.
+# Unknown keys are rejected.
+
+strategy: z_gap
+
+parameters:
+  # --- Volatility / EWMA σ ---
+  volatility:
+    # EWMA half-life for σ estimation (seconds). Larger → smoother, slower to react.
+    # type: float > 0; code default: 30.0
+    half_life_s: 30.0
+    # Minimum sampling span before σ is considered ready (seconds).
+    # type: float; code default: 20.0
+    min_samples_s: 20.0
+    # Reject jumps exceeding this many σ (jump guard).
+    # type: float; code default: 4.0
+    jump_threshold_sigma: 4.0
+    # Nominal sample spacing assumed by the estimator (seconds).
+    # type: float > 0; code default: 1.0
+    sample_interval_s: 1.0
+    # Floor applied to τ in volatility math (seconds).
+    # type: float > 0; code default: 1.0
+    tau_floor_s: 1.0
+
+  # --- Entry gates ---
+  entry:
+    # Minimum fee-adjusted edge required to take a trade (probability units).
+    # Lower → more entries; higher → stricter. type: Decimal string; default: "0.05"
+    theta_take: "0.05"
+    # Floor on fill-quality / edge after expected fill friction.
+    # type: Decimal string; code default: "0.03"
+    theta_fill_floor: "0.03"
+    # Minimum |z| for entry band (inclusive lower). type: Decimal; default: "0.8"
+    z_min: "0.8"
+    # Maximum |z| for entry band (inclusive upper). Must be >= z_min. default: "2.2"
+    z_max: "2.2"
+    # Hard block when |z| exceeds this (model sanity). type: Decimal; default: "20"
+    block_abs_z: "20"
+    # Earliest remaining time-to-end for entry (seconds). default: 60.0
+    tau_min_s: 60.0
+    # Latest remaining time-to-end for entry (seconds). Must be >= tau_min_s. default: 210.0
+    tau_max_s: 210.0
+    # Expected buy slippage reserved in edge calc (price units). default: "0.01"
+    expected_slippage_buy: "0.01"
+    # Extra exit-friction reserve subtracted from edge. default: "0.0"
+    exit_friction_reserve: "0.0"
+    # When true, require repricing edge (Correction D). default: true
+    require_repricing_edge: true
+    # Near-tie threshold → no entry when legs are ambiguous. default: "0.001"
+    tie_epsilon: "0.001"
+    # When true, reject if both legs show edge (ambiguous). default: true
+    reject_both_legs_edge: true
+
+  # --- Realization / rich-market exit ---
+  realization:
+    # Edge threshold for "market rich" exit. Higher → harder to exit rich. default: "0.02"
+    theta_rich: "0.02"
+    # Minimum exit book depth (shares); 0 disables. default: "0"
+    min_exit_depth: "0"
+    # Expected sell slippage in exit valuation. default: "0.01"
+    expected_slippage_sell: "0.01"
+    # When true, executable bid already embeds depth-walk slip. default: true
+    slippage_included_in_executable_bid: true
+
+  # --- Thesis / stop ---
+  thesis:
+    # Fair-probability stop level (mapped from legacy z_stop). In [0,1]. default: "0.4013"
+    p_stop: "0.4013"
+    # Seconds thesis must confirm before stop fires. default: 1.0
+    stop_confirm_s: 1.0
+    # Reset thesis state when model goes stale. default: true
+    reset_on_stale_model: true
+
+  # --- Time / resolution preference (strategy-local defaults) ---
+  time_resolution:
+    # Flatten this many seconds before event_end (strategy time-sell). default: 20.0
+    # Note: ShadowOMS also has flatten_before_close_s under execution — different owner.
+    flatten_before_event_end_s: 20.0
+    # Margin for preferring sell over hold-to-resolution value. default: "0.0"
+    sell_vs_resolve_margin: "0.0"
+    # Strategy-local default if composition does not supply capability. default: false
+    # Operational capability flag lives in runtime YAML (resolution_capability).
+    resolution_capability_default: false
+    # Point-of-no-return: block discretionary sells when τ ≤ this (seconds). default: 5.0
+    ponr_before_event_end_s: 5.0
+
+  # --- PTB / basis quality ---
+  ptb_time_quality:
+    # Max |basis| in bps before entry reject. Lower → stricter. default: "3"
+    basis_max_bps: "3"
+    # Max PTB lag tolerated (ms). default: 5000
+    max_ptb_lag_ms: 5000
+    # Max clock uncertainty tolerated (ms). default: 250
+    max_clock_uncertainty_ms: 250
+
+  # --- Fees (strategy edge math; nested fee_curve matches FeeCurveParams) ---
+  friction:
+    fee_curve:
+      # Polymarket φ(p) fee rate r. Quoted string → Decimal. default: "0.07"
+      fee_rate: "0.07"
+      # Fee curve exponent e. default: "1"
+      exponent: "1"
+    # Provisional per-share resolve penalty used in valuation. default: "0.0"
+    provisional_resolve_penalty_per_share: "0.0"

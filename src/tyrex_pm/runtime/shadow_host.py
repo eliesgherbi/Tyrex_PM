@@ -307,9 +307,8 @@ class ShadowHost(ObserveHost):
         # must bypass the strategy's single-outstanding-exit suppression.
         exit_escalate = exit_allowed and exit_outstanding
 
+        # Sole owner of target notional is risk (YAML ownership rule).
         target = self.config.risk.target_notional
-        if self.config.z_gap is not None:
-            target = self.config.z_gap.target_notional
 
         unknown = bool(getattr(self, "_unknown_inventory", False))
         cap = self._compose_resolution_capability()

@@ -18,7 +18,6 @@ from tyrex_pm.core.clock import Clock, FakeClock, SystemClock
 from tyrex_pm.core.events import EventSource, ReferencePriceUpdated, TimerElapsed
 from tyrex_pm.core.ids import (
     CorrelationId,
-    EventId,
     RunId,
     new_correlation_id,
     new_event_id,
@@ -116,11 +115,25 @@ class ObserveHost:
 
     def _build_binding(self) -> StrategyBinding:
         # Composition-time registry only — evaluation path never branches on kind.
+        target = (
+            self.config.risk.target_notional
+            if self.config.risk is not None
+            else (
+                self.config.z_gap.target_notional
+                if self.config.z_gap is not None
+                else Decimal("5")
+            )
+        )
         return build_strategy_binding(
             strategy_kind=self.config.strategy_kind,
             zgap_runtime=self.config.z_gap,
+            zgap_config=self.config.zgap_pure,
             fixture_ptb=None,
             clock=self.clock,
+            target_notional=target,
+            window_id=(
+                self.config.z_gap.window_id if self.config.z_gap is not None else "default"
+            ),
         )
 
     def set_kill_switch(self, active: bool) -> None:
