@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 UA = "TyrexPM-N1-Audit/1.0 (read-only research)"
 GAMMA = "https://gamma-api.polymarket.com/events"
 WINDOW_S = 300
-OUT = Path("var/reporting/n1/discovery_validation.json")
+OUT = Path("var/recordings/n1/discovery_validation.json")
 
 
 def http_json(url: str):

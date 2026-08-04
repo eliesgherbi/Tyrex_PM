@@ -356,7 +356,7 @@ def test_fee_inclusive_notional_exceeds_cap_skips() -> None:
     h = make_host()  # hard cap 10
 
     class _OversizedPlanner:
-        def plan(self, intent, *, risk, market, book, now, causation_id=None):
+        def plan(self, intent, *, risk, market, book, now, causation_id=None, book_evidence=None):
             plan = ExecutionPlan(
                 plan_id=new_plan_id(),
                 intent_id=intent.intent_id,

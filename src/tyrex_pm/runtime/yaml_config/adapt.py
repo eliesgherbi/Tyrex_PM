@@ -55,9 +55,14 @@ def zgap_observe_runtime_from_resolved(resolved: ResolvedRunConfig) -> ZGapObser
 
 
 def output_path_for_run(resolved: ResolvedRunConfig) -> Path:
-    mode = resolved.mode.value
+    """Return the unified run directory ``var/runs/<strategy>/<run_id>/``."""
     name = resolved.run_name or "unnamed"
-    return Path("var/reporting/yaml_run") / name / f"{mode}_facts.jsonl"
+    strategy = "z_gap"
+    return Path("var/runs") / strategy / name
+
+
+def run_dir_for_resolved(resolved: ResolvedRunConfig) -> Path:
+    return output_path_for_run(resolved)
 
 
 def adapt_to_observe_config(
@@ -81,14 +86,15 @@ def adapt_to_observe_config(
         )
     rt = resolved.runtime
     source = SourceMode.FIXTURE if rt.source == "fixture" else SourceMode.LIVE
-    out = output_path if output_path is not None else output_path_for_run(resolved)
+    run_dir = output_path if output_path is not None else output_path_for_run(resolved)
     # SHADOW requires ShadowConfig; OBSERVE may omit OMS when enable_oms is false.
     shadow = None
     if resolved.mode is RunMode.SHADOW or resolved.shadow.enable_oms:
         shadow = resolved.shadow
     return ObserveConfig(
         mode=source,
-        output_path=out,
+        output_path=run_dir / "audit_events.jsonl",
+        run_dir=run_dir,
         binance_symbol=rt.binance_symbol,
         momentum_lookback=rt.momentum_lookback,
         momentum_threshold=rt.momentum_threshold,

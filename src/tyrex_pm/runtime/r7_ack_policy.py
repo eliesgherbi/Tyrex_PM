@@ -4,7 +4,7 @@ Source of truth (committed, not disposable reports):
   ``config/r7/acknowledgment_policy.json``
 
 Runtime mirror (durable state):
-  ``var/state/r7/acknowledgment_policy.json``
+  ``var/runtime_state/r7/acknowledgment_policy.json``
 
 Regeneration must match this policy exactly. It must not acknowledge every
 resolved position on the account, and must not broaden the policy.
@@ -29,7 +29,7 @@ POLICY_ID = "ACK_RESOLVED_REDEEMABLE_UNTOUCHED_R7A1"
 
 # Committed source of truth (survives report cleanup and state wipes if restored from git)
 CONFIG_ACK_POLICY_PATH = Path("config/r7/acknowledgment_policy.json")
-STATE_ACK_POLICY_PATH = Path("var/state/r7/acknowledgment_policy.json")
+STATE_ACK_POLICY_PATH = Path("var/runtime_state/r7/acknowledgment_policy.json")
 
 
 @dataclass(frozen=True)

@@ -91,8 +91,9 @@ def test_e2e_rich_entry_exit_flat_depth_walk(tmp_path: Path) -> None:
     assert sells[0].filled_quantity == buys[0].filled_quantity
     assert host.lifecycle.state is LifecycleState.FLAT
     assert host.portfolio.is_flat()
-    lines = (tmp_path / "facts.jsonl").read_text(encoding="utf-8")
-    assert "estimated" in lines or "simulated_shadow" in lines
+    lines = (tmp_path / "facts" / "analytics_events.jsonl").read_text(encoding="utf-8")
+    lines += (tmp_path / "facts" / "audit_events.jsonl").read_text(encoding="utf-8")
+    assert "estimated" in lines or "simulated_shadow" in lines or "simulated" in lines
 
 
 def test_e2e_thesis_exit_depth_walk(tmp_path: Path) -> None:

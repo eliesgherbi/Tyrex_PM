@@ -57,6 +57,8 @@ from tyrex_pm.execution.polymarket.reconciliation import ReconciliationService
 from tyrex_pm.execution.polymarket.transport import PolymarketTransport, VenueTradeSnapshot
 from tyrex_pm.lifecycle.trade_lifecycle import LifecycleState, TradeLifecycle
 from tyrex_pm.persistence.snapshot import PersistenceError, StateSnapshotStore
+from tyrex_pm.market_data.book_view import BookView
+from tyrex_pm.planning.book_revalidation import revalidate_plan_against_book_view
 from tyrex_pm.planning.exit_planner import ExitPlanner
 from tyrex_pm.planning.plan import PlanStatus
 from tyrex_pm.planning.planner import ExecutionPlanner
@@ -67,6 +69,7 @@ from tyrex_pm.risk.engine import RiskEngine
 from tyrex_pm.runtime.live_config import LiveConfig, LiveScope
 from tyrex_pm.runtime.n6_authorization import MutationAuthorization
 from tyrex_pm.runtime.scope_a_ladder import ScopeATimingLadder
+from tyrex_pm.reporting.reporter import ReportingPort
 
 FactEmitter = Callable[[str, dict[str, Any]], None]
 
@@ -83,6 +86,7 @@ class N6LiveHost:
     authorization: MutationAuthorization | None = None
     strategy_id: StrategyId = field(default_factory=lambda: StrategyId("generic"))
     emit_fact: FactEmitter | None = None
+    reporter: ReportingPort | None = None
     persistence_path: Path | None = None
     min_valid_order_notional: Decimal = Decimal("1")
 
@@ -137,6 +141,7 @@ class N6LiveHost:
             portfolio=self.portfolio,
             mutations_enabled=mutations_ok,
             emit_fact=self._fact,
+            reporter=self.reporter,
             recon=ReconciliationService(
                 order_store=self.order_store, portfolio=self.portfolio
             ),
@@ -158,6 +163,23 @@ class N6LiveHost:
         self.facts.append((fact_type, payload))
         if self.emit_fact is not None:
             self.emit_fact(fact_type, payload)
+        if self.reporter is not None:
+            self.reporter.emit_dict(
+                event_family="lifecycle",
+                event_type=f"host.{fact_type}",
+                payload=payload,
+                producer="n6_live_host",
+                force_critical=fact_type.startswith("n6_entry")
+                or fact_type.startswith("n6_exit")
+                or "recon" in fact_type
+                or fact_type.endswith("_denied"),
+            )
+
+    def attach_reporter(self, reporter: ReportingPort) -> None:
+        """Attach reporter after construction (OMS already built in __post_init__)."""
+        self.reporter = reporter
+        if self.oms is not None:
+            self.oms.reporter = reporter
 
     def _mutations_armed(self) -> bool:
         if not self.live.enabled or not self.live.mutations_enabled:
@@ -352,7 +374,19 @@ class N6LiveHost:
         intent: EnterIntent,
         *,
         book: BookSnapshot,
+        book_view: BookView | None = None,
+        book_evidence: dict[str, Any] | None = None,
+        active_binding_id: str | None = None,
     ) -> dict[str, Any]:
+        if self.reporter is not None and not self.reporter.allows_new_exposure:
+            self._fact(
+                "n6_entry_skipped",
+                {"reasons": ["CRITICAL_AUDIT_FAILURE_BLOCKS_EXPOSURE"]},
+            )
+            return {
+                "status": "SKIP",
+                "reasons": ["CRITICAL_AUDIT_FAILURE_BLOCKS_EXPOSURE"],
+            }
         ok, reasons = self.readiness_ok_for_entry()
         if not ok:
             self._fact("n6_entry_skipped", {"reasons": reasons})
@@ -389,11 +423,35 @@ class N6LiveHost:
             market=self.market,
             book=book,
             now=self._now(),
+            book_evidence=book_evidence,
         )
         if plan_res.status is not PlanStatus.PLANNED or plan_res.plan is None:
             return {"status": "UNPLANNABLE", "reason": str(plan_res.fail_reason)}
 
         plan = plan_res.plan
+        # BS-9: version change triggers revalidation, not automatic reject.
+        if book_view is not None and active_binding_id is not None and book_evidence:
+            rev = revalidate_plan_against_book_view(
+                plan,
+                book_view,
+                active_binding_id=active_binding_id,
+                fee_available=True,
+            )
+            self._fact(
+                "n6_book_revalidation",
+                {
+                    "ok": rev.ok,
+                    "reason": rev.reason,
+                    "audited_version_change": rev.audited_version_change,
+                    **rev.evidence,
+                },
+            )
+            if not rev.ok:
+                return {
+                    "status": "SKIP",
+                    "reasons": [rev.reason or "book_revalidation_failed"],
+                    "revalidation": rev.evidence,
+                }
         # Fee-inclusive notional check (limit * qty as conservative estimate)
         notional = plan.limit_price * plan.quantity
         if cap is not None and notional > cap:

@@ -27,7 +27,7 @@ def main() -> None:
     ap.add_argument("--user-stream-s", type=float, default=2.0)
     args = ap.parse_args()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_dir = args.out_dir or (REPO / "var" / "reporting" / "n7" / f"readonly_{stamp}")
+    out_dir = args.out_dir or (REPO / "var" / "runs" / "_ops" / "n7_preflight" / f"readonly_{stamp}")
     result = run_n7_preflight(
         out_dir=out_dir,
         config_path=args.config,

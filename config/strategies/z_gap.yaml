@@ -43,7 +43,7 @@ parameters:
     # Earliest remaining time-to-end for entry (seconds). default: 60.0
     tau_min_s: 60.0
     # Latest remaining time-to-end for entry (seconds). Must be >= tau_min_s. default: 210.0
-    tau_max_s: 210.0
+    tau_max_s: 290.0
     # Expected buy slippage reserved in edge calc (price units). default: "0.01"
     expected_slippage_buy: "0.01"
     # Extra exit-friction reserve subtracted from edge. default: "0.0"

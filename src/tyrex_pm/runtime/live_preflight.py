@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tyrex_pm.execution.order_store import OrderStore
 from tyrex_pm.execution.fill_ledger import FillLedger
+from tyrex_pm.execution.order_store import OrderStore
 from tyrex_pm.execution.polymarket.auth import (
     CredentialError,
     assert_no_secrets,
@@ -26,8 +26,8 @@ from tyrex_pm.execution.polymarket.auth import (
 )
 from tyrex_pm.execution.polymarket.preflight_client import PreflightReadClient
 from tyrex_pm.execution.polymarket.readiness import ExecutionReadiness, ReadinessReason
-from tyrex_pm.execution.polymarket.reconciliation import ReconciliationService
 from tyrex_pm.execution.polymarket.readonly_transport import AUTH_CLOB_HEARTBEAT
+from tyrex_pm.execution.polymarket.reconciliation import ReconciliationService
 from tyrex_pm.portfolio.portfolio import Portfolio
 
 # Env var *names* only — never values in artifacts.
@@ -133,18 +133,28 @@ def run_live_preflight(
     }
 
     public_client = PreflightReadClient()
-    public_client.get_server_time()
-    public_client.probe_public_book()
+    venue_time = public_client.get_server_time()
     probes = list(public_client.probes)
+    public_clob = dict(public_client.last_public_clob)
+    payload["public_clob"] = public_clob
+    payload["venue_time_unix_s"] = venue_time
 
-    public_ok = any(
+    time_ok = any(
         p.ok and p.category == "public_market_data" and p.path == "/time" for p in probes
     )
-    if not public_ok:
-        readiness.deny(ReadinessReason.TRANSPORT_DISCONNECTED)
+    transport_reachable = bool(public_clob.get("transport_reachable"))
+    venue_time_valid = bool(public_clob.get("venue_time_valid")) and time_ok
+
+    if not venue_time_valid:
         payload["probes"] = [p.to_dict() for p in probes]
+        if not transport_reachable or public_clob.get("failure_kind") == "transport":
+            readiness.deny(ReadinessReason.TRANSPORT_DISCONNECTED)
+            payload["blocker"] = "public_clob_unreachable"
+        else:
+            # Venue (or edge) answered; time body/schema/HTTP app error — not DNS/VPN.
+            readiness.deny(ReadinessReason.PUBLIC_TIME_INVALID)
+            payload["blocker"] = "public_time_invalid"
         payload["readiness"] = readiness.to_dict()
-        payload["blocker"] = "public_clob_unreachable"
         return _finalize(payload, output_path, client=None)
 
     if skip_auth or not credentials_present():
@@ -162,14 +172,14 @@ def run_live_preflight(
         payload["readiness"] = readiness.to_dict()
         return _finalize(payload, output_path, client=None)
 
-    # Prefer official V2 SDK read-only wrapper (Option A); fall back to corrected HMAC client.
+    # Official polymarket-client read-only transport; HMAC PreflightReadClient if SDK init fails.
     auth_transport: Any
     transport_choice = "custom_hmac_signer_poly_address"
     try:
         from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
 
         auth_transport = SdkReadonlyTransport.from_env()
-        transport_choice = "official_py_clob_client_v2_readonly"
+        transport_choice = "official_polymarket_client_readonly"
     except Exception as exc:  # noqa: BLE001
         payload["sdk_oracle_error_class"] = type(exc).__name__
         public_client.creds = creds
@@ -313,8 +323,14 @@ def run_live_preflight(
             on_disconnect=lambda: readiness.deny(ReadinessReason.USER_STREAM_UNREADY),
             on_ready=lambda: readiness.clear(ReadinessReason.USER_STREAM_UNREADY),
         )
-        if not payload["user_stream"].get("authenticated"):
+        us = payload["user_stream"]
+        if not us.get("authenticated"):
             readiness.deny(ReadinessReason.USER_STREAM_UNREADY)
+            kind = str(us.get("failure_kind") or "")
+            if kind in {"adapter_init", "adapter_contract"}:
+                readiness.deny(ReadinessReason.USER_STREAM_INIT_FAILED)
+                readiness.deny(ReadinessReason.ADAPTER_CONTRACT_FAILURE)
+            # Transport/auth/protocol remain USER_STREAM_UNREADY (+ N7 abort mapping).
     elif user_stream_observe_s > 0 and missing_evidence:
         payload["user_stream"] = {
             "attempted": False,
@@ -334,6 +350,9 @@ def run_live_preflight(
         payload["sdk_network_spy"] = list(auth_transport.spy.calls)
     if hasattr(auth_transport, "probes"):
         payload["probes"].extend(p.to_dict() for p in auth_transport.probes)
+    if hasattr(auth_transport, "last_pagination"):
+        # Sanitized page vs record counts (no order/trade payloads).
+        payload["pagination_stats"] = dict(auth_transport.last_pagination)
 
     payload["readiness"] = readiness.to_dict()
     payload["auth_app_validation_reached"] = any(

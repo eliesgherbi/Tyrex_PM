@@ -72,8 +72,8 @@ def _seed_policy(tmp_path: Path, rows: list[dict[str, Any]] | None = None) -> No
 
 
 def test_deleting_reports_does_not_delete_durable_ack(tmp_path: Path) -> None:
-    state = tmp_path / "var" / "state" / "r7"
-    reports = tmp_path / "var" / "reporting" / "r7b"
+    state = tmp_path / "var" / "runtime_state" / "r7"
+    reports = tmp_path / "var" / "runs" / "_ops" / "r7b"
     state.mkdir(parents=True)
     reports.mkdir(parents=True)
     ack_path = state / "position_acknowledgment.json"
@@ -84,9 +84,9 @@ def test_deleting_reports_does_not_delete_durable_ack(tmp_path: Path) -> None:
     shutil.rmtree(reports)
     assert ack_path.exists()
     assert not reports.exists()
-    assert R7_STATE_DIR.as_posix().endswith("var/state/r7")
-    assert "reporting" in R7B_REPORT_DIR.as_posix()
-    assert "state" in DEFAULT_ACKNOWLEDGMENT_PATH.as_posix()
+    assert R7_STATE_DIR.as_posix().endswith("var/runtime_state/r7")
+    assert R7B_REPORT_DIR.as_posix().endswith("var/runs/_ops/r7b")
+    assert "runtime_state" in DEFAULT_ACKNOWLEDGMENT_PATH.as_posix()
 
 
 def test_missing_durable_ack_blocks_dry(tmp_path: Path) -> None:

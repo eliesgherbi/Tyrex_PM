@@ -18,6 +18,8 @@ from tyrex_pm.runtime.observe_host import ObserveHost
 from tyrex_pm.signals.directional import Direction
 from tyrex_pm.strategies.framework_validation.reference_momentum import ObserveDecisionKind
 
+from helpers_reporting import legacy_fact_types, load_run_events
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "r3_observe_complete.json"
 
@@ -82,10 +84,7 @@ def test_e2e_up_intent_approved_planned(tmp_path: Path) -> None:
     assert result.intents[0].target_notional == Decimal("5")
     assert any(r.approved for r in result.risk_decisions)
     assert any(p.status is PlanStatus.PLANNED for p in result.plans)
-    types = {
-        json.loads(line)["fact_type"]
-        for line in result.facts_path.read_text(encoding="utf-8").splitlines()
-    }
+    types = legacy_fact_types(load_run_events(result.run_dir or result.facts_path.parent))
     assert "intent_created" in types
     assert "risk_approved" in types
     assert "execution_plan_created" in types

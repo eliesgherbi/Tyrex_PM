@@ -119,15 +119,16 @@ def test_sdk_wired_fak_uses_market_order_when_armed() -> None:
     calls: list[str] = []
 
     class _FakeClient:
-        def create_and_post_market_order(self, **kwargs):
+        def place_market_order(self, **kwargs):
             calls.append("market")
             return {"success": True, "orderID": "0x1", "status": "matched"}
 
-        def create_and_post_order(self, *a, **k):
+        def place_limit_order(self, **kwargs):
             calls.append("limit")
             return {"success": True, "orderID": "0x2", "status": "live"}
 
-        def cancel_order(self, oid):
+        def cancel_order(self, *args, **kwargs):
+            oid = kwargs.get("order_id") or (args[0] if args else None)
             calls.append(f"cancel:{oid}")
             return {"canceled": [oid]}
 

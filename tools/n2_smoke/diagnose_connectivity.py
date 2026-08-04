@@ -2,7 +2,7 @@
 """Bounded N2 connectivity diagnosis (read-only, no TLS bypass).
 
 Compares N1/N2 client paths vs minimal urllib/websockets against public hosts.
-Writes evidence JSON under var/reporting/n2/ (gitignored).
+Writes evidence JSON under var/runs/_ops/n2_smoke/ (gitignored).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-OUT = Path("var/reporting/n2/connectivity_diagnosis.json")
+OUT = Path("var/runs/_ops/n2_smoke/connectivity_diagnosis.json")
 UA = "TyrexPM-N2-Diag/1.0 (read-only)"
 
 

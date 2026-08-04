@@ -328,7 +328,7 @@ def test_known_non_tradable_dust_does_not_disappear(tmp_path: Path) -> None:
     write_lifecycle_dust(repo_root=tmp_path, record=default_incident_dust_record())
     reg = migrate_dust_to_registry(repo_root=tmp_path, force_incident=False)
     assert any(r.token_id == INCIDENT_DUST_TOKEN for r in reg.open_residuals())
-    path = tmp_path / "var" / "state" / "r7" / "lifecycle_residuals.json"
+    path = tmp_path / "var" / "runtime_state" / "r7" / "lifecycle_residuals.json"
     assert path.exists()
     # Other market residual also retained
     now = datetime.now(timezone.utc).isoformat()

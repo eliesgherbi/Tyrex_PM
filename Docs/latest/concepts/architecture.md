@@ -2,7 +2,8 @@
 
 **Purpose:** current design of the accepted Tyrex_PM framework.  
 **Baseline specs:** [`../../specifications/00_objective.md`](../../specifications/00_objective.md), [`../../specifications/02_architecture.md`](../../specifications/02_architecture.md).  
-**Framework baseline:** commit `fb9d0d8` (R8).
+**Framework baseline:** commit `fb9d0d8` (R8).  
+**N7 Z-Gap tiny live checkpoint:** commit `5b85771` (SSR-optional; Chainlink sealed‑K readiness).
 
 ## Objective and philosophy
 
@@ -33,7 +34,7 @@ src/tyrex_pm/
   risk/ planning/
   execution/         OMS protocol, ShadowOMS, polymarket live adapter
   portfolio/ lifecycle/ persistence/ reporting/
-  runtime/           hosts, R7 gates, one-shot live
+  runtime/           hosts, R7 gates, N7 Z-Gap one-shot / PTB policy
   application/       CLI (composition root)
   engine/            in-process dispatcher
 ```
@@ -126,7 +127,7 @@ These are **active and validated**, but **phase-specific** (R7/R8 tiny-live):
 - `r7b-live-once`
 - `r7_lifecycle_policy`
 - `config/r7/`
-- `var/state/r7/`
+- `var/runtime_state/r7/`
 - R7 acknowledgment / residual CLI commands
 - Guarded `ReferenceMomentumStrategy` composition for LIVE_TINY
 

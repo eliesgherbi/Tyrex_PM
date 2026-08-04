@@ -438,12 +438,24 @@ def test_clob_rejects_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     adapter = PolymarketMarketWsAdapter.from_binding(binding)
     assert set(adapter._allowed) == set(binding.clob_asset_ids)
-    # simulate handle
-    bad = {"event_type": "book", "asset_id": "999", "bids": [], "asks": [], "timestamp": 1}
+    # Simulate official SDK book event for an unknown token.
+    from types import SimpleNamespace
+    from decimal import Decimal
+
+    bad = SimpleNamespace(
+        type="book",
+        payload=SimpleNamespace(
+            token_id="999",
+            timestamp=1,
+            hash=None,
+            bids=(),
+            asks=(),
+        ),
+    )
     disp = EventDispatcher()
 
     async def _run() -> None:
-        await adapter._handle_raw(json.dumps(bad), disp, generation=1)
+        await adapter._handle_sdk_event(bad, disp, generation=1)
 
     asyncio.run(_run())
     assert adapter.rejected_wrong_token == 1

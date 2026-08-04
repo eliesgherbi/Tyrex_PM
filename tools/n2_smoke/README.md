@@ -3,7 +3,7 @@
 Mutation-free connectivity check for N2 adapters. TLS verification is always on.
 
 ```text
-python tools/n2_smoke/smoke_public_feeds.py --duration-s 28 --out var/reporting/n2/smoke_summary.json
+python tools/n2_smoke/smoke_public_feeds.py --duration-s 28
 ```
 
 Connectivity diagnosis (no TLS bypass):
@@ -12,4 +12,4 @@ Connectivity diagnosis (no TLS bypass):
 python tools/n2_smoke/diagnose_connectivity.py
 ```
 
-Writes `var/reporting/n2/connectivity_diagnosis.json` (gitignored).
+Writes `var/runs/_ops/n2_smoke/connectivity_diagnosis.json` (gitignored).

@@ -96,9 +96,9 @@ def bps(a: float, b: float) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--capture", type=Path, default=Path("var/reporting/n1/raw_capture.jsonl"))
-    ap.add_argument("--ptb", type=Path, default=Path("var/reporting/n1/displayed_ptb.jsonl"))
-    ap.add_argument("--out", type=Path, default=Path("var/reporting/n1/analysis_summary.json"))
+    ap.add_argument("--capture", type=Path, default=Path("var/recordings/n1/raw_capture.jsonl"))
+    ap.add_argument("--ptb", type=Path, default=Path("var/recordings/n1/displayed_ptb.jsonl"))
+    ap.add_argument("--out", type=Path, default=Path("var/recordings/n1/analysis_summary.json"))
     ap.add_argument(
         "--windows",
         nargs="*",

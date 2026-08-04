@@ -218,7 +218,11 @@ def test_fake_live_rehearsal_entry_exit(tmp_path: Path):
     assert result.ok
     assert result.real_venue_mutations == 0
     assert result.outcome == "PASS_FAKE_FLAT"
-    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    payload = json.loads(
+        (tmp_path / "fake_full" / "attachments" / "operator_outcome.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert payload["requested_mode"] == "live"
     assert payload["effective_mode"] == "live"
     assert payload["real_venue_mutations"] == 0
@@ -228,6 +232,8 @@ def test_fake_live_rehearsal_entry_exit(tmp_path: Path):
     assert Decimal(payload["max_buy_collateral"]) == Decimal("5.00")
     assert payload["entry"]["status"] == "ACKNOWLEDGED"
     assert payload["economics"]["flat"] is True
+    assert (tmp_path / "fake_full" / "run_summary.json").is_file()
+    assert not (tmp_path / "fake_full" / "n7_oneshot_report.json").exists()
 
 
 def test_fake_no_signal_zero_mutations(tmp_path: Path):
@@ -244,7 +250,11 @@ def test_fake_no_signal_zero_mutations(tmp_path: Path):
     assert result.ok
     assert result.real_venue_mutations == 0
     assert result.outcome == "PASS_N7_SAFE_NO_ENTRY"
-    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    payload = json.loads(
+        (tmp_path / "fake_nosig" / "attachments" / "operator_outcome.json").read_text(
+            encoding="utf-8"
+        )
+    )
     assert payload["entry"] is None
     assert payload["real_venue_mutations"] == 0
 
@@ -340,7 +350,11 @@ def test_reports_preserve_resolved_configuration(tmp_path: Path):
         live=False,
         fake_rehearsal=True,
     )
-    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    payload = json.loads(
+        (tmp_path / "report_cfg" / "attachments" / "operator_outcome.json").read_text(
+            encoding="utf-8"
+        )
+    )
     cfg = payload["resolved_configuration"]
     assert cfg["strategy"]["strategy"] == "z_gap"
     assert cfg["execution"]["kind"] == "polymarket_live"

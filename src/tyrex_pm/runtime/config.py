@@ -150,6 +150,10 @@ class ObserveConfig:
     # instead of the incomplete flat zgap_config_from_runtime bridge.
     zgap_pure: ZGapConfig | None = None
     run_name: str | None = None
+    # Unified reporting: directory for var/runs/<strategy>/<run_id>/ artifacts.
+    # When unset, derived from output_path (legacy .jsonl → parent/stem run dir).
+    run_dir: Path | None = None
+    reporting_config_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.mode is SourceMode.FIXTURE and self.fixture_path is None:

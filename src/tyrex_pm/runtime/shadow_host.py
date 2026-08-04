@@ -1057,10 +1057,11 @@ class ShadowHost(ObserveHost):
             )
         except Exception as exc:
             self._emit("failure", {"error_type": type(exc).__name__, "message": str(exc)})
-            self.sink.flush()
+            self.reporter.checkpoint()
             raise
         finally:
-            self.sink.flush()
+            self.reporter.checkpoint()
+        summary_path = self.reporter.finalize()
         return ObserveRunResult(
             run_id=self.run_id,
             correlation_id=self.correlation_id,
@@ -1070,6 +1071,9 @@ class ShadowHost(ObserveHost):
             intents=list(self.intents),
             risk_decisions=list(self.risk_decisions),
             plans=list(self.plans),
-            facts_path=self.sink.path,
-            fact_count=self.sink.count,
+            facts_path=self.reporter.paths["audit_events"],
+            fact_count=self._event_count,
+            run_dir=self.run_dir,
+            summary_path=summary_path,
+            manifest_path=self.reporter.paths["manifest"],
         )

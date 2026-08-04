@@ -17,7 +17,6 @@ from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
-from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from tyrex_pm.adapters.polymarket.btc_5m_window import (
@@ -151,7 +150,7 @@ class R7BLiveOnceArgs:
     max_buy_collateral: Decimal = MAX_BUY_COLLATERAL
     dry_run: bool = True
     execute_live: bool = False
-    output_dir: Path = Path("var/reporting/r7b")
+    output_dir: Path = Path("var/runs/_ops/r7b")
     acknowledgment_path: Path | None = DEFAULT_ACKNOWLEDGMENT_PATH
     repo_root: Path = Path(".")
     require_acknowledgment: bool = True
@@ -196,21 +195,19 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _get_json(url: str) -> Any:
-    req = Request(url, headers={"User-Agent": "tyrex-pm-r7b-live-once/1.0"}, method="GET")
-    with urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
 def fetch_exit_book(token_id: str, *, now: datetime | None = None) -> Any:
     """Fresh public CLOB book for exit planning (bids authoritative for SELL)."""
-    raw = _get_json(f"https://clob.polymarket.com/book?token_id={token_id}")
-    if not isinstance(raw, dict):
+    from tyrex_pm.adapters.polymarket.rest_book import fetch_clob_book
+
+    try:
+        payload = fetch_clob_book(token_id)
+    except Exception:
         return None
+    book = payload.book
     return book_from_clob_levels(
         token_id=token_id,
-        bids=raw.get("bids") or [],
-        asks=raw.get("asks") or [],
+        bids=[{"price": str(lv.price), "size": str(lv.quantity)} for lv in book.bids],
+        asks=[{"price": str(lv.price), "size": str(lv.quantity)} for lv in book.asks],
         ts_event=now or _utc_now(),
     )
 
@@ -276,13 +273,6 @@ def git_identity(repo: Path) -> tuple[str, str, bool]:
         raise LiveOnceError(f"GIT_IDENTITY_UNAVAILABLE:{exc}") from exc
 
 
-def _append_fact(path: Path, event: str, **payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row = {"ts": _utc_now().isoformat(), "event": event, **payload}
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, sort_keys=True, default=str) + "\n")
-
-
 def _validate_cli_mode(args: R7BLiveOnceArgs) -> None:
     if args.execute_live:
         args.dry_run = False
@@ -306,7 +296,8 @@ def _default_windows(max_windows: int, max_buy: Decimal) -> list[dict[str, Any]]
     for i in range(max_windows):
         slug = f"btc-updown-5m-{epoch + i * 300}"
         try:
-            events = _get_json(f"https://gamma-api.polymarket.com/events?slug={slug}")
+            from tyrex_pm.adapters.polymarket.discovery import fetch_gamma_event
+            events = [fetch_gamma_event(slug)]
             if not isinstance(events, list) or not events:
                 out.append({"slug": slug, "eligible": False, "reason": "MARKET_UNRESOLVED"})
                 continue
@@ -330,7 +321,8 @@ def _default_windows(max_windows: int, max_buy: Decimal) -> list[dict[str, Any]]
                 out.append({"slug": slug, "eligible": False, "reason": "TOKEN_UNRESOLVED"})
                 continue
             condition_id = str(m.get("conditionId") or "")
-            info = _get_json(f"https://clob.polymarket.com/clob-markets/{condition_id}")
+            from tyrex_pm.adapters.polymarket.discovery import market_info_from_gamma_market
+            info = market_info_from_gamma_market(m, condition_id=condition_id)
             if info.get("ao") is False:
                 out.append(
                     {"slug": slug, "eligible": False, "reason": "MARKET_NOT_ACCEPTING_ORDERS"}
@@ -338,7 +330,8 @@ def _default_windows(max_windows: int, max_buy: Decimal) -> list[dict[str, Any]]
                 continue
             fee = parse_fd(info, condition_id=condition_id)
             yes_tok, no_tok = str(tokens[0]), str(tokens[1])
-            book = _get_json(f"https://clob.polymarket.com/book?token_id={yes_tok}")
+            from tyrex_pm.adapters.polymarket.discovery import book_asks_via_sdk
+            book = {"asks": book_asks_via_sdk(yes_tok)}
             asks = book.get("asks") or []
             if not asks:
                 out.append({"slug": slug, "eligible": False, "reason": "ONE_SIDED_BOOK"})
@@ -455,15 +448,22 @@ def _finish(
     ok: bool,
     exit_code: int,
     fact: Callable[..., None],
+    finalize_reporting: Callable[[LiveOnceResult], LiveOnceResult] | None = None,
 ) -> LiveOnceResult:
     report["terminal"] = outcome.value
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
     fact("terminal", outcome=outcome.value, exit_code=exit_code)
-    return LiveOnceResult(ok, exit_code, outcome, report_path, facts_path, report)
+    result = LiveOnceResult(ok, exit_code, outcome, report_path, facts_path, report)
+    if finalize_reporting is not None:
+        return finalize_reporting(result)
+    return result
 
 
 def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
     """Run one dry (read-only) or live one-shot process."""
+    from tyrex_pm.reporting import open_run_reporter
+
     _validate_cli_mode(args)
     execute = bool(args.execute_live)
     dry = not execute
@@ -471,12 +471,49 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     run_id = str(uuid4())
-    facts_path = out_dir / f"facts_{run_id}.jsonl"
-    report_path = out_dir / f"report_{run_id}.json"
-    budget_path = out_dir / f"budget_{run_id}.json"
+    reporter = open_run_reporter(
+        run_dir=out_dir / run_id,
+        run_id=run_id,
+        mode="live",
+        strategy_id="reference_momentum",
+        performance_label="real",
+        fake_transport=args.mutation_transport is not None
+        and type(args.mutation_transport).__name__ in {"SpyMutationTransport", "FakeTransport"},
+        identity_extra={"host": "r7b_live_once", "dry_run": dry},
+    )
+    facts_path = reporter.paths["audit_events"]
+    operator_report_path = reporter.run_dir / "attachments" / "r7b_operator_report.json"
+    operator_report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path = operator_report_path
+    budget_path = reporter.run_dir / f"budget_{run_id}.json"
 
     def fact(event: str, **payload: Any) -> None:
-        _append_fact(facts_path, event, **payload)
+        reporter.emit_dict(
+            event_family="lifecycle",
+            event_type=f"r7b.{event}",
+            payload=payload,
+            producer="r7b_live_once",
+            force_critical=True,
+        )
+
+    def _finalize_reporting(result: LiveOnceResult) -> LiveOnceResult:
+        reporter.add_attachment(
+            name="r7b_operator_report",
+            relative_path="attachments/r7b_operator_report.json",
+        )
+        summary_path = reporter.finalize(
+            terminal_status="COMPLETE" if result.ok else "ABORTED",
+            terminal_reason=result.outcome.value if hasattr(result.outcome, "value") else str(result.outcome),
+            clean_shutdown=bool(result.ok),
+        )
+        return LiveOnceResult(
+            result.ok,
+            result.exit_code,
+            result.outcome,
+            summary_path,
+            facts_path,
+            result.report,
+        )
 
     identity_fn = args.git_identity_provider or git_identity
     branch, commit, clean = identity_fn(args.repo_root)
@@ -547,13 +584,9 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
                     env[k.strip()] = v.strip().strip('"').strip("'")
             creds = load_l2_credentials(env)
             user = positions_wallet_address(creds)
-            raw_positions = [
-                r
-                for r in _get_json(
-                    f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
-                )
-                if isinstance(r, dict)
-            ]
+            from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
+            ro = SdkReadonlyTransport.from_env(env)
+            raw_positions = ro.get_positions_raw()
         except Exception as exc:  # noqa: BLE001
             report["blockers"].append(f"POSITION_FETCH_FAILED:{type(exc).__name__}")
 
@@ -581,6 +614,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     if args.acknowledgment_path is None:
@@ -614,6 +648,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
     ack = gate.acknowledgment
     ack_ok = True
@@ -668,6 +703,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     rt = SessionRuntimeState()
@@ -699,6 +735,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
                 ok=False,
                 exit_code=2,
                 fact=fact,
+        finalize_reporting=_finalize_reporting,
             )
         fact("window_observed", slug=slug, eligible=eligible, reason=w.get("reason"))
         if eligible and bound is None:
@@ -717,6 +754,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # Never switch after binding
@@ -735,6 +773,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
     report["market_switch_blocked"] = True
 
@@ -749,6 +788,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
     # Known lifecycle dust must never be an entry target
     if token_id in ignore_dust:
@@ -761,6 +801,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
     sized: SizedBuyOrder = bound["sized"]
     if sized.max_collateral > args.max_buy_collateral:
@@ -773,6 +814,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # Selected-market flatness (ack positions on other markets remain visible/untouched)
@@ -871,6 +913,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # Dry path stops here — never call mutation transport
@@ -898,6 +941,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
                     ok=False,
                     exit_code=2,
                     fact=fact,
+        finalize_reporting=_finalize_reporting,
                 )
         return _finish(
             report=report,
@@ -907,6 +951,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=True,
             exit_code=0,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     assert transport is not None
@@ -980,6 +1025,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     rt.begin_entry_submit()
@@ -1010,6 +1056,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=2,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     report["mutations_attempted"].append(
@@ -1051,6 +1098,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=3,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     if not result.ok:
@@ -1071,6 +1119,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=True,
             exit_code=0,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # R7C: insert status=matched is NOT inventory
@@ -1211,6 +1260,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=3,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     if settle.phase is SettlementPhase.MANUAL_INTERVENTION or settle.confirmed_acquired <= 0:
@@ -1246,6 +1296,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=3,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # Confirmed + sellable
@@ -1280,6 +1331,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=False,
             exit_code=3,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # Manual flatten detection (restart / external UI)
@@ -1299,6 +1351,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=True,
             exit_code=0,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     if ack is not None and ack_targets_forbidden(token_id, ack):
@@ -1558,7 +1611,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             "realized_result": inventory_terminal,
             "exit_used_buy_limit": False,
         }
-        report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
+        report["audit_events_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
         return _finish(
             report=report,
             report_path=report_path,
@@ -1567,6 +1620,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=True,
             exit_code=0,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     if residual_qty <= 0:
@@ -1593,7 +1647,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             "realized_result": "FLAT",
             "exit_used_buy_limit": False,
         }
-        report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
+        report["audit_events_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
         return _finish(
             report=report,
             report_path=report_path,
@@ -1602,6 +1656,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
             ok=True,
             exit_code=0,
             fact=fact,
+        finalize_reporting=_finalize_reporting,
         )
 
     # Tradable residual remains — fail closed, persist registry, no duplicate storm
@@ -1629,7 +1684,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
         "note": "exit incomplete after side-correct planning; no retry storm",
         "manual_intervention": True,
     }
-    report["facts_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
+    report["audit_events_sha256"] = hashlib.sha256(facts_path.read_bytes()).hexdigest()
     return _finish(
         report=report,
         report_path=report_path,
@@ -1638,6 +1693,7 @@ def run_r7b_live_once(args: R7BLiveOnceArgs) -> LiveOnceResult:
         ok=False,
         exit_code=3,
         fact=fact,
+        finalize_reporting=_finalize_reporting,
     )
 
 

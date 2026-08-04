@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-# Official CLOB V2 Exchange domain (docs / py-clob-client-v2).
+# Official CLOB Exchange EIP-712 domain (docs / polymarket-client).
 CLOB_V2_DOMAIN = {
     "name": "Polymarket CTF Exchange",
     "version": "2",

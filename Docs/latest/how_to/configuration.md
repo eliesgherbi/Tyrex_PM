@@ -194,9 +194,9 @@ Exit fees may reduce proceeds; they never block inventory-reducing exits.
 ## Paths
 
 ```text
-var/state/       local persistent operational state (gitignored)
-var/reporting/   runtime-disposable evidence (incl. var/reporting/n7/)
-config/          committed configs + sealed ack / N7 seals
+var/runtime_state/  local persistent operational state (gitignored; replaces var/state/)
+var/runs/           runtime-disposable evidence (incl. var/runs/_ops/, var/runs/z_gap/)
+config/             committed configs + sealed ack / N7 seals
 ```
 
 ## Secret-handling rules

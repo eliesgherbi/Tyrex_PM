@@ -14,8 +14,8 @@
 | Derived positions | `Portfolio` | `portfolio/portfolio.py` |
 | Host trade phase (shadow path) | `TradeLifecycle` | `lifecycle/trade_lifecycle.py` |
 | Sealed ack identities | Acknowledgment policy | `config/r7/acknowledgment_policy.json` |
-| Regenerated ack artifact | Local ack file | `var/state/r7/position_acknowledgment.json` |
-| Lifecycle residuals | Residual registry | `var/state/r7/lifecycle_residuals.json` |
+| Regenerated ack artifact | Local ack file | `var/runtime_state/r7/position_acknowledgment.json` |
+| Lifecycle residuals | Residual registry | `var/runtime_state/r7/lifecycle_residuals.json` |
 
 Adapters and strategies do **not** own order or portfolio truth.
 
@@ -76,16 +76,21 @@ Shadow host `TradeLifecycle` states (`FLAT`, `ENTRY_PENDING`, `ACTIVE`, …) are
 ## Local persistent state vs runtime-disposable evidence
 
 ```text
-var/state/      local persistent operational state (gitignored)
-var/reporting/  runtime-disposable evidence (reports, facts JSONL)
+var/runtime_state/  local persistent operational state (gitignored; replaces var/state/)
+var/runs/           runtime-disposable evidence (reports, audit events JSONL)
 ```
+
+Historical `var/state/` and `var/reporting/` trees may still exist on disk as evidence
+from before the `var/runtime_state` / `var/runs` migration; they are not active write
+roots. See [reporting_and_operations](../modules/reporting_and_operations.md) for the
+one-time migration helper.
 
 This is **not** database-grade durability (no documented atomicity/backup/recovery SLA).
 
 | Fact | Implication |
 |------|-------------|
-| `var/state` is gitignored | Local machine memory, not git history |
-| Deleting `var/state` | Removes required operational memory for gates |
+| `var/runtime_state` is gitignored | Local machine memory, not git history |
+| Deleting `var/runtime_state` | Removes required operational memory for gates |
 | Acknowledgment artifact | Regenerable from sealed `config/r7/acknowledgment_policy.json` + inventory |
 | Residual records | May need venue recon + historical facts to reconstruct safely |
 | Deleting reports | Does not change policy; destroys audit/incident evidence |

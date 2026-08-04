@@ -379,39 +379,3 @@ def test_no_liveoms_on_n5_decision_path() -> None:
     assert "tyrex_pm.strategies.z_gap.fair_value" not in imports
     assert "tyrex_pm.strategies.z_gap.assemble" not in imports
 
-
-def test_fixture_cli_smoke(tmp_path: Path) -> None:
-    import subprocess
-    import sys
-
-    out = tmp_path / "summary.json"
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "tools" / "n5_shadow" / "run_n5_shadow.py"),
-            "--mode",
-            "fixture",
-            "--config",
-            str(CFG),
-            "--out",
-            str(out),
-        ],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    summary = json.loads(out.read_text(encoding="utf-8"))
-    assert summary["mode"] == "fixture"
-    assert summary.get("not_live_evidence") is True
-    assert summary.get("fill_model_id") == FILL_MODEL_DEPTH_WALK_V1
-    assert summary.get("orders_live") in (0, None) or summary.get("live_oms") is False
-    life = summary.get("depth_walk_lifecycle") or {}
-    assert life.get("fill_model_id") == FILL_MODEL_DEPTH_WALK_V1
-    assert life.get("portfolio_flat") is True
-    assert life.get("lifecycle_terminal") == "FLAT"
-    assert "ENTER" in (life.get("decisions") or [])
-    assert "EXIT" in (life.get("decisions") or [])
-    assert life.get("orders_live") == 0
-    assert life.get("not_live_evidence") is True

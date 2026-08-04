@@ -84,7 +84,7 @@ def test_accepts_live_mode_choice():
     )
 
 
-def test_run_observe_cli():
+def test_run_observe_cli(tmp_path: Path):
     assert (
         main(
             _base_args(
@@ -92,13 +92,17 @@ def test_run_observe_cli():
                 "aggressive",
                 "--run-name",
                 "cli_yaml_observe",
+                "--out-dir",
+                str(tmp_path / "observe_run"),
             )
         )
         == 0
     )
+    assert (tmp_path / "observe_run" / "manifest.json").is_file()
+    assert (tmp_path / "observe_run" / "run_summary.json").is_file()
 
 
-def test_run_shadow_cli():
+def test_run_shadow_cli(tmp_path: Path):
     assert (
         main(
             [
@@ -117,10 +121,13 @@ def test_run_shadow_cli():
                 "shadow",
                 "--run-name",
                 "cli_yaml_shadow",
+                "--out-dir",
+                str(tmp_path / "shadow_run"),
             ]
         )
         == 0
     )
+    assert (tmp_path / "shadow_run" / "manifest.json").is_file()
 
 
 def test_live_flag_on_run_parser_for_live_mode():
@@ -135,5 +142,6 @@ def test_live_flag_on_run_parser_for_live_mode():
     option_strings = {opt for a in run._actions for opt in a.option_strings}  # noqa: SLF001
     assert "--live" in option_strings
     assert "--fake-rehearsal" in option_strings
+    assert "--reporting" in option_strings
     mode_action = next(a for a in run._actions if "--mode" in a.option_strings)
     assert set(mode_action.choices) == {"observe", "shadow", "live"}

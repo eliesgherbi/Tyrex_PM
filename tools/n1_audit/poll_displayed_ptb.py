@@ -83,7 +83,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--duration-s", type=float, default=1100.0)
     ap.add_argument("--interval-s", type=float, default=5.0)
-    ap.add_argument("--out", type=Path, default=Path("var/reporting/n1/displayed_ptb.jsonl"))
+    ap.add_argument("--out", type=Path, default=Path("var/recordings/n1/displayed_ptb.jsonl"))
     args = ap.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     mono0 = time.perf_counter_ns()

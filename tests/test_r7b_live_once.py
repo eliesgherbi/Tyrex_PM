@@ -244,7 +244,7 @@ def test_cumulative_fee_inclusive_budget_never_exceeds_5(tmp_path: Path) -> None
     assert Decimal(pre["buy_amount"]) + Decimal(pre["estimated_max_entry_fee"]) <= Decimal(
         "5.00"
     )
-    budget_files = list((tmp_path / "out").glob("budget_*.json"))
+    budget_files = list((tmp_path / "out").rglob("budget_*.json"))
     assert budget_files
     budget = json.loads(budget_files[0].read_text(encoding="utf-8"))
     filled = Decimal(budget["filled_buy_notional"])

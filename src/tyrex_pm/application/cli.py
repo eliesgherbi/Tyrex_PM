@@ -34,6 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("version", help="Print package version")
     sub.add_parser("help", help="Show help (same as -h)")
 
+    def _add_reporting(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--reporting",
+            type=Path,
+            default=Path("config/reporting/full.yaml"),
+            help="Reporting profile YAML (default: config/reporting/full.yaml)",
+        )
+
     observe = sub.add_parser("observe", help="Run read-only ReferenceMomentum observe path")
     observe.add_argument("--config", type=Path, help="Path to observe JSON config")
     observe.add_argument("--mode", choices=["fixture", "live"], help="Override mode")
@@ -47,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["current", "next"],
         help="Resolve BTC Up/Down 5m slug (live mode helper)",
     )
+    _add_reporting(observe)
 
     shadow = sub.add_parser(
         "shadow",
@@ -61,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resolve BTC Up/Down 5m slug",
     )
     shadow.add_argument("--output", type=Path, help="Facts JSONL output path")
+    _add_reporting(shadow)
 
     discover = sub.add_parser(
         "discover-btc-window",
@@ -78,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument(
         "--output",
         type=Path,
-        default=Path("var/reporting/r6/live_preflight.json"),
+        default=Path("var/runs/_ops/live_preflight/live_preflight.json"),
         help="Sanitized artifact path",
     )
     preflight.add_argument(
@@ -106,13 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
     r7a.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("var/reporting/r7"),
+        default=Path("var/runs/_ops/r7a"),
         help="Directory for r7a_report.json and approval artifact",
     )
     r7a.add_argument(
         "--preflight",
         type=Path,
-        default=Path("var/reporting/r6/live_preflight_r6d.json"),
+        default=Path("var/runs/_ops/live_preflight/live_preflight_r6d.json"),
         help="Prior live-preflight artifact (read-only evidence)",
     )
     r7a.add_argument(
@@ -128,41 +138,19 @@ def build_parser() -> argparse.ArgumentParser:
     r7a2.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("var/reporting/r7"),
+        default=Path("var/runs/_ops/r7a2"),
         help="Directory for acknowledgment and draft session artifacts",
     )
     r7a2.add_argument(
         "--preflight",
         type=Path,
-        default=Path("var/reporting/r7/live_preflight.json"),
+        default=Path("var/runs/_ops/live_preflight/live_preflight.json"),
         help="Prior live-preflight artifact (read-only evidence)",
     )
     r7a2.add_argument(
         "--run-preflight",
         action="store_true",
         help="Run live-preflight with user-stream before recording ack",
-    )
-
-    live_once = sub.add_parser(
-        "live-once",
-        help="Legacy R7B path (refuses; use r7b-live-once)",
-    )
-    live_once.add_argument(
-        "--approval",
-        type=Path,
-        default=None,
-        help="Legacy path to R7B approval artifact",
-    )
-    live_once.add_argument(
-        "--session",
-        type=Path,
-        default=None,
-        help="Path to user-authorized R7B session envelope",
-    )
-    live_once.add_argument(
-        "--i-authorize-r7b",
-        action="store_true",
-        help="Legacy second authorization flag (superseded by r7b-live-once --execute-live)",
     )
 
     r7b = sub.add_parser(
@@ -216,15 +204,15 @@ def build_parser() -> argparse.ArgumentParser:
     r7b.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("var/reporting/r7b"),
-        help="Directory for JSON report + JSONL facts",
+        default=Path("var/runs/_ops/r7b"),
+        help="Parent ops directory (writes var/runs/_ops/r7b/<run_id>/ via RunReporter)",
     )
     r7b.add_argument(
         "--acknowledgment-path",
         "--acknowledgment",
         dest="acknowledgment",
         type=Path,
-        default=Path("var/state/r7/position_acknowledgment.json"),
+        default=Path("var/runtime_state/r7/position_acknowledgment.json"),
         help=(
             "Durable acknowledgment state path (required). "
             "Missing/invalid artifact fails closed for dry and live."
@@ -246,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     r7c.add_argument(
         "--output",
         type=Path,
-        default=Path("var/reporting/r7c/incident_recon.json"),
+        default=Path("var/runs/_ops/r7c/incident_recon.json"),
         help="Sanitized recon report path",
     )
     r7c.add_argument(
@@ -283,43 +271,14 @@ def build_parser() -> argparse.ArgumentParser:
     ack_regen.add_argument(
         "--output",
         type=Path,
-        default=Path("var/state/r7/position_acknowledgment.json"),
+        default=Path("var/runtime_state/r7/position_acknowledgment.json"),
         help="Durable acknowledgment state path (not under var/reporting/)",
     )
     ack_regen.add_argument(
         "--report",
         type=Path,
-        default=Path("var/reporting/r7d/ack_regenerate_report.json"),
+        default=Path("var/runs/_ops/r7d/ack_regenerate_report.json"),
         help="Disposable regeneration report path",
-    )
-
-    n6_status = sub.add_parser(
-        "n6-status",
-        help="N6: print live config defaults and Scope A capability (read-only; no mutations)",
-    )
-    n6_preflight = sub.add_parser(
-        "n6-preflight",
-        help=(
-            "N6: authenticated read-only preflight via live-preflight "
-            "(no submit/cancel/redeem; mutations remain OFF)"
-        ),
-    )
-    n6_preflight.add_argument(
-        "--output",
-        type=Path,
-        default=Path("var/reporting/n6/live_preflight.json"),
-    )
-    n6_preflight.add_argument("--dotenv", type=Path, default=Path(".env"))
-    n6_preflight.add_argument("--user-stream-s", type=float, default=2.0)
-    n6_recon = sub.add_parser(
-        "n6-recon",
-        help="N6: authenticated read-only recon + restart (wrapper; mutations OFF)",
-    )
-    n6_recon.add_argument("--out-dir", type=Path, default=None)
-    n6_recon.add_argument("--dotenv", type=Path, default=Path(".env"))
-    n6_kill = sub.add_parser(
-        "n6-kill-inspect",
-        help="N6: inspect kill-switch / block-new-exposure semantics (no venue I/O)",
     )
 
     n7_status = sub.add_parser(
@@ -340,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-dir",
         type=Path,
         default=None,
-        help="Evidence directory under var/reporting/n7/",
+        help="Evidence directory under var/runs/_ops/n7_preflight/<id>/",
     )
     n7_preflight.add_argument(
         "--config",
@@ -370,6 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     n7_live.add_argument("--dotenv", type=Path, default=Path(".env"))
     n7_live.add_argument("--out-dir", type=Path, default=None)
     n7_live.add_argument("--max-duration-s", type=float, default=300.0)
+    _add_reporting(n7_live)
 
     run = sub.add_parser(
         "run",
@@ -443,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--out-dir",
         type=Path,
         default=None,
-        help="(--mode live) report directory (default: var/reporting/yaml_run/<run_name>)",
+        help="(--mode live) report directory (default: var/runs/z_gap/<run_name>)",
     )
     run.add_argument(
         "--max-duration-s",
@@ -474,6 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("config/scenarios"),
         help="Directory for named scenarios (default: config/scenarios)",
     )
+    _add_reporting(run)
     return parser
 
 
@@ -576,6 +537,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             live=bool(args.live) and not args.fake_rehearsal,
             fake_rehearsal=bool(args.fake_rehearsal),
             max_duration_s=float(args.max_duration_s),
+            reporting_config_path=getattr(args, "reporting", None),
         )
         summary = {
             "outcome": result.outcome,
@@ -591,7 +553,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"report={result.report_path}", file=sys.stderr)
         return 0 if result.ok else 2
 
-    cfg = adapt_to_observe_config(resolved)
+    cfg = adapt_to_observe_config(
+        resolved,
+        output_path=args.out_dir if getattr(args, "out_dir", None) is not None else None,
+    )
+    if getattr(args, "reporting", None) is not None:
+        from dataclasses import replace
+
+        cfg = replace(cfg, reporting_config_path=args.reporting)
     if cfg.mode is SourceMode.FIXTURE:
         clock = FakeClock(_wall=datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc))
         if resolved.mode is RunMode.SHADOW:
@@ -722,7 +691,12 @@ def _build_observe_config(args: argparse.Namespace) -> ObserveConfig:
             z_gap=cfg.z_gap,
             zgap_pure=cfg.zgap_pure,
             run_name=cfg.run_name,
+            reporting_config_path=getattr(args, "reporting", None),
         )
+    if getattr(args, "reporting", None) is not None and args.btc_window is None:
+        from dataclasses import replace
+
+        cfg = replace(cfg, reporting_config_path=args.reporting)
     return cfg
 
 
@@ -745,6 +719,10 @@ def _build_shadow_config(args: argparse.Namespace) -> ObserveConfig:
     cfg = observe_config_from_mapping(raw)
     if cfg.shadow is None or not cfg.shadow.enable_oms:
         raise SystemExit("shadow command requires shadow.enable_oms=true in config")
+    if getattr(args, "reporting", None) is not None:
+        from dataclasses import replace
+
+        cfg = replace(cfg, reporting_config_path=args.reporting)
     return cfg
 
 
@@ -842,13 +820,6 @@ def main(argv: list[str] | None = None) -> int:
             f"mutations_enabled={report.get('mutations_enabled')}"
         )
         return 0
-    if args.command == "live-once":
-        print(
-            "R7B BLOCKED: legacy live-once is retired. "
-            "Use: tyrex-pm r7b-live-once --dry-run | --execute-live. "
-            "Mutations remain disabled."
-        )
-        return 2
     if args.command == "r7-ack-regenerate":
         from tyrex_pm.runtime.r7_ack_regenerate import regenerate_acknowledgment
 
@@ -941,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
         if report.get("blockers"):
             print(f"blockers={report.get('blockers')}")
         print(f"report={result.report_path}")
-        print(f"facts={result.facts_path}")
+        print(f"audit={result.facts_path}")
         print(f"mutations_attempted={len(report.get('mutations_attempted') or [])}")
         return int(result.exit_code)
     if args.command == "run":
@@ -995,66 +966,6 @@ def main(argv: list[str] | None = None) -> int:
             f"live shadow complete decisions={len(result.decisions)} "
             f"intents={len(result.intents)} facts={result.fact_count} "
             f"path={result.facts_path}"
-        )
-        return 0
-
-    if args.command == "n6-status":
-        from tyrex_pm.runtime.live_config import LiveConfig
-        from tyrex_pm.runtime.scope_a_ladder import PRODUCTION_TIMING_VALUES_STATUS
-
-        cfg = LiveConfig()
-        print(
-            __import__("json").dumps(
-                {
-                    "live": cfg.to_dict(),
-                    "production_timing_values": PRODUCTION_TIMING_VALUES_STATUS,
-                    "mutations_default": False,
-                    "zgap_execute_live": False,
-                    "scope_b_available": False,
-                    "n7_authorized": False,
-                },
-                indent=2,
-            )
-        )
-        return 0
-    if args.command == "n6-preflight":
-        from tyrex_pm.runtime.live_preflight import run_live_preflight
-
-        result = run_live_preflight(
-            output_path=args.output,
-            dotenv_path=args.dotenv if args.dotenv.exists() else None,
-            user_stream_observe_s=args.user_stream_s,
-            skip_auth=False,
-        )
-        print(
-            f"n6-preflight complete ok={result.ok} "
-            f"mutations_attempted={result.payload.get('mutations_attempted')} "
-            f"path={result.artifact_path}"
-        )
-        return 0 if result.payload.get("mutations_attempted") is False else 3
-    if args.command == "n6-recon":
-        import subprocess
-
-        cmd = [
-            sys.executable,
-            str(Path(__file__).resolve().parents[2] / "tools" / "n6_live" / "run_n6_readonly_recon.py"),
-        ]
-        if args.out_dir is not None:
-            cmd.extend(["--out-dir", str(args.out_dir)])
-        if args.dotenv is not None:
-            cmd.extend(["--dotenv", str(args.dotenv)])
-        return subprocess.call(cmd)
-    if args.command == "n6-kill-inspect":
-        print(
-            __import__("json").dumps(
-                {
-                    "kill_blocks_new_exposure": True,
-                    "kill_exits_confirmed_qty_only": True,
-                    "heartbeat_cancel_all": False,
-                    "venue_io": False,
-                },
-                indent=2,
-            )
         )
         return 0
 
@@ -1125,6 +1036,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.out_dir is not None:
             cmd.extend(["--out-dir", str(args.out_dir)])
         cmd.extend(["--max-duration-s", str(args.max_duration_s)])
+        if getattr(args, "reporting", None) is not None:
+            cmd.extend(["--reporting", str(args.reporting)])
         return subprocess.call(cmd)
 
     parser.print_help()

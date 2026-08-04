@@ -11,6 +11,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from tyrex_pm.adapters.polymarket.sdk_errors import (
+    primary_blocker_from_compose_errors,
+    vpn_hint_from_error_texts,
+)
 from tyrex_pm.core.clock import SystemClock
 from tyrex_pm.core.ids import new_run_id
 from tyrex_pm.core.intents import EnterIntent
@@ -44,8 +48,15 @@ def _load_dotenv(path: Path | None) -> dict[str, str]:
 
 
 def _book_from_session(runtime: N4ObserveRuntime) -> BookSnapshot | None:
+    """Prefer authoritative store book; session tops are read-only projections."""
     sess = runtime.active
-    if sess is None or sess.up_ask is None or sess.up_bid is None:
+    if sess is None:
+        return None
+    if runtime.book_store is not None:
+        st = runtime.book_store.get(sess.market.yes.instrument_id)
+        if st.book is not None:
+            return st.book
+    if sess.up_ask is None or sess.up_bid is None:
         return None
     if sess.up_bid > sess.up_ask:
         return None
@@ -58,10 +69,22 @@ def _book_from_session(runtime: N4ObserveRuntime) -> BookSnapshot | None:
 
 
 def _capture_intents(runtime: N4ObserveRuntime, captured: dict[str, Any]) -> list[dict]:
-    """Evaluate sealed active session; stash EnterIntent if any."""
+    """Evaluate sealed active session; stash EnterIntent if any.
+
+    Persists full decision diagnostics via optional ``captured['reporter']``
+    (RunReporter). Never reduces the decision to a Python class name.
+    """
     ready = runtime.prepare_aligned_eval()
     if not ready.ok or ready.session is None or ready.snapshot is None:
         captured["last_skip_reasons"] = list(ready.skip_reasons)
+        reporter = captured.get("reporter")
+        if reporter is not None:
+            reporter.emit_dict(
+                event_family="data_health",
+                event_type="data_health.skipped_eval",
+                payload={"skipped": True, "reasons": list(ready.skip_reasons)},
+                producer="n7_live_session",
+            )
         return [{"kind": "skip", "reasons": list(ready.skip_reasons)}]
     assert ready.binding is not None and ready.dyn is not None
     assert ready.sealed is not None and ready.binance_raw is not None
@@ -94,17 +117,68 @@ def _capture_intents(runtime: N4ObserveRuntime, captured: dict[str, Any]) -> lis
     captured["evals"] = int(captured.get("evals") or 0) + 1
     captured["market"] = ready.session.market
     captured["book"] = _book_from_session(runtime)
-    captured["last_decision"] = type(result.decision).__name__ if result.decision else None
+    decision = result.decision
+    captured["last_decision"] = {
+        "action": decision.action.value,
+        "reason_code": decision.reason_code,
+        "decision_id": decision.decision_id,
+        "evidence": dict(decision.evidence),
+    }
     captured["model_anchor_k"] = None if ready.model_anchor is None else str(ready.model_anchor)
     captured["sealed_k"] = str(ready.sealed.ptb_k)
     enters = [i for i in result.intents if isinstance(i, EnterIntent)]
     if enters and not captured.get("intents"):
         captured["intents"] = enters
         captured["stop_requested"] = True
+
+    reporter = captured.get("reporter")
+    if reporter is not None:
+        from tyrex_pm.reporting.adapters import emit_decision_from_eval
+        from tyrex_pm.strategies.z_gap.reporting import (
+            STRATEGY_VERSION,
+            ZGapDiagnosticsContract,
+        )
+
+        diag_contract = captured.get("diagnostics_contract") or ZGapDiagnosticsContract()
+        ctx_rep = result.reporting_context or {
+            "decision": decision,
+            "actionable": bool(result.intents),
+        }
+        diagnostics = None
+        gates: list = []
+        closest = None
+        if result.reporting_context is not None:
+            diagnostics = diag_contract.build_diagnostics(ctx_rep)
+            gates = diag_contract.build_gates(ctx_rep)
+            closest = diag_contract.closest_candidate_fields(ctx_rep)
+        emit_decision_from_eval(
+            reporter,
+            action=decision.action.value,
+            reason_code=decision.reason_code,
+            decision_id=decision.decision_id,
+            evaluation_id=(
+                None
+                if result.reporting_context is None
+                else result.reporting_context["decision_input"].epoch.epoch_id
+            ),
+            gates=gates,
+            diagnostics=diagnostics,
+            closest_candidate=closest,
+            intent_emitted=bool(enters),
+            blocked_safety=decision.action.value == "BLOCKED",
+            producer="n7_live_session",
+            strategy_id=str(result.strategy_id.value),
+            strategy_version=STRATEGY_VERSION,
+            market_id=str(ready.session.market.market_id.value),
+            extra_payload={"evidence": dict(decision.evidence)},
+        )
+
     return [
         {
             "kind": "evaluated",
-            "decision": captured.get("last_decision"),
+            "action": decision.action.value,
+            "reason_code": decision.reason_code,
+            "decision_id": decision.decision_id,
             "intent_types": [type(i).__name__ for i in result.intents],
             "enter_captured": bool(enters),
             "sealed_k": captured.get("sealed_k"),
@@ -120,7 +194,10 @@ def _trust_from_seal(
         sealed_k=seal.get("sealed_k"),
         require_ssr_price_match=require_ssr,
         ptb_ready=bool(seal.get("ptb_ready", True)),
-        ssr_check_status=str(seal.get("ssr_check_status") or ("REQUIRED" if require_ssr else "DISABLED")),
+        ssr_check_status=str(
+            seal.get("ssr_check_status")
+            or ("REQUIRED" if require_ssr else "DISABLED")
+        ),
     )
 
 
@@ -134,6 +211,7 @@ async def run_live_oneshot_session(
     preflight: dict[str, Any],
     zgap_config: Any | None = None,
     target_notional: Decimal | None = None,
+    reporter: Any | None = None,
 ) -> dict[str, Any]:
     """Discover → seal → evaluate → at most one live entry → Scope A exit."""
     _ = repo
@@ -142,7 +220,12 @@ async def run_live_oneshot_session(
         await asyncio.sleep(min(wait, 180.0))
 
     require_ssr = sealed.require_ssr_price_match
-    captured: dict[str, Any] = {"intents": [], "evals": 0, "last_skip_reasons": []}
+    captured: dict[str, Any] = {
+        "intents": [],
+        "evals": 0,
+        "last_skip_reasons": [],
+        "reporter": reporter,
+    }
 
     def on_eval(runtime: N4ObserveRuntime) -> list[dict]:
         return _capture_intents(runtime, captured)
@@ -165,19 +248,24 @@ async def run_live_oneshot_session(
     seals = d.get("seals") or []
 
     if not seals:
+        compose_errors = list(d.get("errors") or [])
+        primary, downstream = primary_blocker_from_compose_errors(compose_errors)
         payload = {
             "mode": "n7_operator_oneshot",
             "outcome": "ABORTED_BEFORE_MUTATION",
             "live": True,
-            "reason": "no_ptb_seal",
+            # Preserve discovery/identity primary cause; no_ptb_seal is downstream.
+            "reason": primary or "no_ptb_seal",
+            "primary_abort_code": primary or "no_ptb_seal",
+            "downstream_abort_codes": [downstream or "PTB_NOT_STARTED", "no_ptb_seal"],
             "real_venue_mutations": 0,
             "preflight": preflight,
             "compose": {
                 "feeds": d.get("feeds"),
                 "discovery": d.get("discovery"),
-                "errors": d.get("errors"),
+                "errors": compose_errors,
             },
-            "vpn_hint": bool(d.get("errors")),
+            "vpn_hint": vpn_hint_from_error_texts(compose_errors),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
         payload.update(
@@ -240,9 +328,11 @@ async def run_live_oneshot_session(
         clock=SystemClock(),
         transport=transport,
         market=market,
-        persistence_path=out_dir / "state.json",
+        persistence_path=out_dir / "runtime_state.json",
         fee_curve=FeeCurveParams(fee_rate=Decimal("0.07"), exponent=Decimal("1")),
     )
+    if reporter is not None:
+        host.attach_reporter(reporter)
     arm_err = host.arm_operator_live()
     if arm_err is not None:
         payload = {

@@ -9,8 +9,8 @@ Working directory: repository root.
 |-----|---------|
 | Offline | No network |
 | Net-read | Public or authenticated reads |
-| Report | Writes `var/reporting/` |
-| Local-state | Writes `var/state/` |
+| Report | Writes `var/runs/` (or `_ops`) |
+| Local-state | Writes `var/runtime_state/` |
 | Venue | Submit/cancel/heartbeat |
 
 ## YAML-configurable Z-Gap (recommended) — Offline + Report
@@ -71,9 +71,10 @@ Operator real one-shot (you run this; agents must not):
 python -m tyrex_pm.application.cli run --mode live --runtime config/runtime/live_btc_5m.yaml --live
 ```
 
-Reports under `var/reporting/yaml_run/<run_name>/` (or `--out-dir`). The legacy
-`tyrex-pm n7-live` / `tools/n7_live/run_n7_live_oneshot.py` path remains as a
-compatibility entry point to the same N7 lifecycle.
+Reports under `var/runs/z_gap/<run_name>/` (or `--out-dir`). Optional
+`--reporting config/reporting/full.yaml` (default) or `minimal.yaml`.
+`tyrex-pm n7-live` / `tools/n7_live/run_n7_live_oneshot.py` remain entry points
+to the same N7 lifecycle and common reporter.
 
 ## Observe (fixture) — Offline + Report
 
@@ -117,18 +118,20 @@ tyrex-pm shadow --config config/observe_shadow_z_gap_f5.json
 
 Optional simulated hold-to-resolution (capability + fixture evidence → simulated payout). **No redeem, network settlement, or live venue.**
 
-### Z-Gap N5A SHADOW (offline depth-walk; not live evidence)
+### Z-Gap SHADOW (YAML; offline)
 
 ```bash
-python tools/n5_shadow/run_n5_shadow.py --mode fixture \
-  --config config/observe_shadow_z_gap_n5a.json \
-  --out var/reporting/n5/shadow_summary.json
+python -m tyrex_pm.application.cli run \
+  --strategy config/strategies/z_gap.yaml \
+  --risk config/risk/example_risk.yaml \
+  --execution config/execution/shadow_example.yaml \
+  --runtime config/runtime/observe_btc_5m.yaml \
+  --scenario aggressive \
+  --mode shadow \
+  --run-name z_gap_shadow_fixture
 ```
 
-Uses N4-aligned model price \(\hat{C}_t\) vs sealed Chainlink \(K\), and
-`shadow_depth_walk_v1` simulated fills. Labels: `simulated_shadow` /
-`estimated`.
-
+Standalone N5 tool scripts were retired; use YAML SHADOW above.
 ## Discover BTC window — Net-read
 
 ```bash
@@ -140,7 +143,7 @@ tyrex-pm discover-btc-window --which next
 ```bash
 tyrex-pm live-preflight --help
 # Public only:
-tyrex-pm live-preflight --skip-auth --output var/reporting/preflight_public.json
+tyrex-pm live-preflight --skip-auth --output var/runs/_ops/live_preflight/preflight_public.json
 ```
 
 Authenticated preflight needs credentials in `.env` (values never printed). Optional `--user-stream-s` on a target host.
@@ -183,7 +186,7 @@ Flow: preflight → discover BTC 5m → seal Chainlink `sealed_k` → evaluate Z
 (with `require_ssr_price_match: false` by default) → at most one entry → bounded
 exit → recon → mutations OFF. Cap: fee-inclusive debit ≤ $5.00.
 
-Reports under `var/reporting/n7/oneshot_<stamp>/` include:
+Reports under `var/runs/z_gap/n7_oneshot_<stamp>/` include:
 
 - `ptb_authority`, `sealed_k`, `ssr_match_required`, `ssr_check_status`, `ptb_ready`
 - `evals`, `reason` (e.g. `evaluated_no_enter_signal` when no edge)
@@ -202,7 +205,7 @@ tyrex-pm r7b-live-once \
   --max-windows 3 \
   --max-buy-collateral 5.00 \
   --dry-run \
-  --output-dir var/reporting/docs_dry
+  --output-dir var/runs/_ops/r7b/docs_dry
 ```
 
 Default without `--execute-live` is dry. Dry is **not** “offline”: it may perform network reads and write reports.

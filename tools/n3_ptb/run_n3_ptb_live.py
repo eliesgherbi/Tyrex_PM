@@ -50,12 +50,12 @@ def main() -> None:
         "--out-dir",
         type=Path,
         default=None,
-        help="Fresh evidence directory (default var/reporting/n3b/<run_id>)",
+        help="Fresh evidence directory (default var/runs/_ops/n3_validation/<run_id>)",
     )
     args = ap.parse_args()
 
-    run_id = datetime.now(timezone.utc).strftime("n3b_%Y%m%dT%H%M%SZ")
-    out_dir = args.out_dir or (REPO / "var" / "reporting" / "n3b" / run_id)
+    run_id = datetime.now(timezone.utc).strftime("n3_%Y%m%dT%H%M%SZ")
+    out_dir = args.out_dir or (REPO / "var" / "runs" / "_ops" / "n3_validation" / run_id)
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 

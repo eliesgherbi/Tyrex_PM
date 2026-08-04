@@ -46,6 +46,8 @@ class StrategyEvalResult:
     # Momentum transition object when risk path needs apply_transition semantics
     momentum_transition: TransitionResult | None = None
     directional_signal: DirectionalSignal | None = None
+    # Optional composition-supplied reporting context (strategy-owned builders consume).
+    reporting_context: dict[str, Any] | None = None
 
 
 class StrategyBinding(Protocol):
@@ -499,12 +501,22 @@ class ZGapBinding:
             "has_position": pos_payload is not None,
         }
 
+        reporting_context = {
+            "decision_input": decision_input,
+            "decision": decision,
+            "up_val": up_val,
+            "down_val": down_val,
+            "config": self.config,
+            "actionable": bool(intents),
+        }
+
         return StrategyEvalResult(
             decision=decision,
             intents=list(intents),
             strategy_id=self.strategy_id,
             signal_payload=signal_payload,
             extra_facts=extra_facts,
+            reporting_context=reporting_context,
         )
 
 

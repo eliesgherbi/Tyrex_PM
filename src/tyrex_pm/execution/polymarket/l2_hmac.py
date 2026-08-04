@@ -1,4 +1,4 @@
-"""L2 HMAC helpers aligned with official ``py_clob_client_v2.signing.hmac``.
+"""L2 HMAC helpers aligned with Polymarket CLOB L2 auth message construction.
 
 Structural logging only — never log secrets, signatures, or addresses.
 """

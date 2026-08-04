@@ -136,8 +136,10 @@ def test_scenario_market_rich_entry_exit_flat(tmp_path: Path) -> None:
     enter_intents = [i for i in result.intents if isinstance(i, EnterIntent)]
     assert len(enter_intents) == 1
 
-    lines = (tmp_path / "facts.jsonl").read_text(encoding="utf-8").splitlines()
-    types = {json.loads(l)["fact_type"] for l in lines}
+    from helpers_reporting import legacy_fact_types, load_events_for_legacy_jsonl
+
+    events = load_events_for_legacy_jsonl(tmp_path, "facts.jsonl")
+    types = legacy_fact_types(events)
     assert "lifecycle_transition" in types
     assert "execution_plan_created" in types
     assert "command_created" in types
@@ -266,8 +268,10 @@ def test_observe_no_oms_portfolio(tmp_path: Path) -> None:
     finally:
         host.close()
     assert any(i.kind.value == "ENTER" for i in result.intents)
-    lines = (tmp_path / "facts.jsonl").read_text(encoding="utf-8").splitlines()
-    types = {json.loads(l)["fact_type"] for l in lines}
+    from helpers_reporting import legacy_fact_types, load_events_for_legacy_jsonl
+
+    events = load_events_for_legacy_jsonl(tmp_path, "facts.jsonl")
+    types = legacy_fact_types(events)
     assert "intent_observe_no_oms" in types
     assert "command_created" not in types
     assert "lifecycle_transition" not in types

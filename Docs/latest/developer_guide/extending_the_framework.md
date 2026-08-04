@@ -60,7 +60,30 @@ Use F1 actions (`WAIT`/`SKIP`/`ENTER`/`HOLD`/`EXIT`/`FLATTEN`/`BLOCKED`) and put
 2. Entry and exit planners stay separate  
 3. Live exit planning must use fresh side-correct books  
 
+## Strategy reporting diagnostics
+
+Each strategy owns its diagnostics builder (for example
+`strategies/z_gap/reporting.py`). The generic `tyrex_pm.reporting` package must
+remain strategy-agnostic.
+
+Composition-time registration:
+
+1. Implement a diagnostics contract with `build_diagnostics`, `build_gates`, and
+   optional `closest_candidate_fields`.
+2. Build values **only** from objects the strategy already calculated
+   (decision snapshots, valuations, readiness results, intents). Do **not**
+   recompute fair values, fees, or gate outcomes inside the reporter.
+3. Pass the contract into `open_run_reporter(..., diagnostics=...)` / the host
+   binding when composing OBSERVE, SHADOW, or LIVE.
+4. Emit decisions through `ReportingPort` / adapters — never write strategy JSON
+   files from the strategy package.
+
+See `tests/test_reporting_second_strategy.py` for a second-strategy registration
+example that does not modify reporting core.
+
 ## Z-Gap
 
-Future work only — [`../../specifications/09_z_gap_future_mapping.md`](../../specifications/09_z_gap_future_mapping.md).  
-Do not document unimplemented Z-Gap contracts as existing. Do not import R7-specific runtime packages from Z-Gap.
+Z-Gap diagnostics live in `src/tyrex_pm/strategies/z_gap/reporting.py`.  
+Do not import R7-specific runtime packages from Z-Gap strategy code.
+Future mapping notes: [`../../specifications/09_z_gap_future_mapping.md`](../../specifications/09_z_gap_future_mapping.md).
+

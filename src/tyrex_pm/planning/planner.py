@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
+from typing import Any, Mapping
 
 from tyrex_pm.core.ids import EventId, TokenId
 from tyrex_pm.core.intents import EnterIntent
@@ -60,6 +61,7 @@ class ExecutionPlanner:
         book: BookSnapshot | None,
         now: datetime,
         causation_id: EventId | None = None,
+        book_evidence: Mapping[str, Any] | None = None,
     ) -> PlanningResult:
         if not risk.approved:
             return PlanningResult(
@@ -174,6 +176,7 @@ class ExecutionPlanner:
                 "best_ask": str(quote.best_ask),
                 "risk_decision_id": risk.decision_id.value,
                 "style": "limit_buy_at_ask",
+                **(dict(book_evidence) if book_evidence else {}),
             },
         )
         return PlanningResult(status=PlanStatus.PLANNED, plan=plan)

@@ -13,7 +13,7 @@ Invoking with `--live` **is** the authorization. No phrase, envelope, or nonce.
 ## Read-only diagnosis
 
 ```bash
-python tools/n7_live/run_n7_readonly_preflight.py --out-dir var/reporting/n7/readonly_diag
+python tools/n7_live/run_n7_readonly_preflight.py --out-dir var/runs/_ops/n7_preflight/readonly_diag
 ```
 
 ## Fake rehearsal (no venue)

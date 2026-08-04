@@ -49,8 +49,12 @@ from tyrex_pm.indicators.reference_alignment import (
     BasisEwmaState,
     evaluate_dynamic_alignment,
 )
+from tyrex_pm.market_data.binding_record import MarketBindingRecord, binding_record_from_discovery
+from tyrex_pm.market_data.book_health import SyncHealth
+from tyrex_pm.market_data.book_store import MarketStateStore
+from tyrex_pm.market_data.book_view import BookView
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
-from tyrex_pm.market_data.executable import ExecutableQuote
+from tyrex_pm.market_data.executable import ExecutableQuote, book_quote
 from tyrex_pm.market_data.freshness import (
     FreshnessAssessment,
     FreshnessReason,
@@ -203,6 +207,26 @@ def _quote(ask: Decimal | None, bid: Decimal | None) -> ExecutableQuote:
     )
 
 
+def _fresh_from_sync(sync: SyncHealth, *, now: datetime) -> FreshnessAssessment:
+    ok = sync is SyncHealth.READY
+    return FreshnessAssessment(
+        is_fresh=ok,
+        age_ms=0 if ok else 10_000,
+        threshold_ms=5_000,
+        timestamp_basis=TimestampBasis.EVENT_TIME,
+        reason_code=FreshnessReason.FRESH if ok else FreshnessReason.STALE,
+        observed_at=now,
+    )
+
+
+def project_session_quotes_from_view(sess: MarketSession, view: BookView) -> None:
+    """Read-only projection of tops onto session fields (never the source of truth)."""
+    sess.up_ask = view.up.quote.best_ask
+    sess.up_bid = view.up.quote.best_bid
+    sess.down_ask = view.down.quote.best_ask
+    sess.down_bid = view.down.quote.best_bid
+
+
 def config_fingerprint(config: ZGapConfig) -> str:
     raw = json.dumps(
         {
@@ -234,6 +258,9 @@ class N4ObserveRuntime:
     # Default True preserves historical N3/N4/N5 strict SSR MATCH gating.
     # N7 live testing sets False so sealed Chainlink K alone is PTB-ready.
     require_ssr_price_match: bool = True
+    # Authoritative quote owner when wired by live compose (BS-5+).
+    book_store: MarketStateStore | None = None
+    active_binding_record: MarketBindingRecord | None = None
     _latest_binance: PriceTickView | None = None
     _latest_chainlink: PriceTickView | None = None
     _strategy_by_window: dict[str, ZGapBinding] = field(default_factory=dict)
@@ -634,19 +661,45 @@ class N4ObserveRuntime:
             ts_event=bn.source_ts,
             venue="aligned_estimate",
         )
+
+        book_view: BookView | None = None
+        yes_q = _quote(sess.up_ask, sess.up_bid)
+        no_q = _quote(sess.down_ask, sess.down_bid)
+        yes_fresh = _fresh(True)
+        no_fresh = _fresh(True)
+        yes_b = yes_book
+        no_b = no_book
+
+        # Authoritative path: MarketStateStore → immutable BookView.
+        if self.book_store is not None:
+            binding_rec = self.active_binding_record
+            if binding_rec is None and sess.binding is not None:
+                binding_rec = binding_record_from_discovery(sess.binding)
+            if binding_rec is not None:
+                book_view = self.book_store.capture_pair(binding_rec)
+                project_session_quotes_from_view(sess, book_view)
+                yes_q = book_view.up.quote if book_view.up.book is not None else book_quote(None)
+                no_q = book_view.down.quote if book_view.down.book is not None else book_quote(None)
+                # Prefer store books over caller overrides unless explicitly provided.
+                yes_b = yes_book if yes_book is not None else book_view.up.book
+                no_b = no_book if no_book is not None else book_view.down.book
+                yes_fresh = _fresh_from_sync(book_view.up.sync_health, now=now)
+                no_fresh = _fresh_from_sync(book_view.down.sync_health, now=now)
+
         snap = DecisionSnapshot(
             market=sess.market,
-            yes_book=yes_book,
-            no_book=no_book,
-            yes_quote=_quote(sess.up_ask, sess.up_bid),
-            no_quote=_quote(sess.down_ask, sess.down_bid),
+            yes_book=yes_b,
+            no_book=no_b,
+            yes_quote=yes_q,
+            no_quote=no_q,
             reference=ref,
-            yes_freshness=_fresh(True),
-            no_freshness=_fresh(True),
+            yes_freshness=yes_fresh,
+            no_freshness=no_fresh,
             reference_freshness=_fresh(True),
             observed_at=now,
             correlation_id=new_correlation_id(),
             causation_id=new_event_id(),
+            book_view=book_view,
         )
         return AlignedEvalReady(
             ok=True,

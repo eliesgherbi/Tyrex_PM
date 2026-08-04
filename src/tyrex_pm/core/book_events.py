@@ -52,6 +52,7 @@ class BookSnapshotReceived(Event):
     book: BookSnapshot
     market_id: MarketId | None = None
     venue_hash: str | None = None
+    connection_epoch: int = 0
 
     def __post_init__(self) -> None:
         _validate_event_times(self)
@@ -63,6 +64,7 @@ class BookDeltaReceived(Event):
 
     changes: tuple[BookLevelDelta, ...]
     market_id: MarketId | None = None
+    connection_epoch: int = 0
 
     def __post_init__(self) -> None:
         _validate_event_times(self)
@@ -78,6 +80,7 @@ class TickSizeChanged(Event):
     old_tick_size: Decimal
     new_tick_size: Decimal
     market_id: MarketId | None = None
+    connection_epoch: int = 0
 
     def __post_init__(self) -> None:
         _validate_event_times(self)

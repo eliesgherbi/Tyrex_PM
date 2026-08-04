@@ -36,12 +36,6 @@ class YamlLiveRunResult:
     real_venue_mutations: int
 
 
-def _rewrite_report(path: Path, payload: dict[str, Any]) -> None:
-    text = redact_text(json.dumps(payload, indent=2, default=str))
-    assert_no_secrets(text)
-    path.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-
-
 def run_yaml_live(
     *,
     resolved: ResolvedRunConfig,
@@ -52,27 +46,49 @@ def run_yaml_live(
     fake_rehearsal: bool,
     fake_no_signal: bool = False,
     max_duration_s: float = 300.0,
+    reporting_config_path: Path | None = None,
 ) -> YamlLiveRunResult:
     """Resolve already validated; bind sealed config; invoke N7 lifecycle."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     name = resolved.run_name or f"yaml_live_{stamp}"
-    out = out_dir or (repo / "var" / "reporting" / "yaml_run" / name)
+    out = out_dir or (repo / "var" / "runs" / "z_gap" / name)
     out.mkdir(parents=True, exist_ok=True)
+
+    from tyrex_pm.reporting.config import load_reporting_config
+
+    reporting_cfg = (
+        load_reporting_config(reporting_config_path)
+        if reporting_config_path is not None
+        else None
+    )
 
     sealed_path = out / "effective_n7_sealed.json"
     write_effective_n7_sealed(resolved, sealed_path)
 
     if fake_rehearsal or fake_no_signal:
         if fake_no_signal:
-            result = run_fake_oneshot_no_signal(out_dir=out, config_path=sealed_path)
+            result = run_fake_oneshot_no_signal(
+                out_dir=out,
+                config_path=sealed_path,
+                reporting_config=reporting_cfg,
+            )
         else:
-            result = run_fake_oneshot_rehearsal(out_dir=out, config_path=sealed_path)
+            result = run_fake_oneshot_rehearsal(
+                out_dir=out,
+                config_path=sealed_path,
+                reporting_config=reporting_cfg,
+            )
         payload = merge_yaml_into_operator_payload(result.payload, resolved=resolved)
         payload["requested_mode"] = "live"
         payload["effective_mode"] = "live"
         payload["live_armed"] = False
         payload["fake_rehearsal"] = True
-        _rewrite_report(result.report_path, payload)
+        # Refresh attachment with merged YAML metadata (primary remains run_summary).
+        attach = out / "attachments" / "operator_outcome.json"
+        if attach.parent.is_dir():
+            text = redact_text(json.dumps(payload, indent=2, default=str))
+            assert_no_secrets(text)
+            attach.write_text(text + "\n", encoding="utf-8")
         return YamlLiveRunResult(
             ok=result.ok,
             outcome=result.outcome,
@@ -91,6 +107,8 @@ def run_yaml_live(
             max_duration_s=float(max_duration_s),
             zgap_config=resolved.zgap,
             target_notional=resolved.risk.target_notional,
+            reporting_config=reporting_cfg,
+            reporting_config_path=reporting_config_path,
         )
     )
     payload = merge_yaml_into_operator_payload(result.payload, resolved=resolved)
@@ -98,10 +116,13 @@ def run_yaml_live(
     payload["effective_mode"] = "live"
     payload["live_armed"] = bool(live)
     payload["fake_rehearsal"] = False
-    # Without --live the operator path is dry preflight only.
     if not live and payload.get("outcome") == "PREFLIGHT_OK_DRY":
         payload["mutations_disabled"] = True
-    _rewrite_report(result.report_path, payload)
+    attach = out / "attachments" / "operator_outcome.json"
+    if attach.parent.is_dir():
+        text = redact_text(json.dumps(payload, indent=2, default=str))
+        assert_no_secrets(text)
+        attach.write_text(text + "\n", encoding="utf-8")
     return YamlLiveRunResult(
         ok=result.ok,
         outcome=result.outcome,

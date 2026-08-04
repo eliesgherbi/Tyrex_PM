@@ -2,8 +2,8 @@
 """Finalize N1 window comparisons + latency summary (read-only).
 
 Writes:
-  var/reporting/n1/window_comparisons.jsonl
-  var/reporting/n1/analysis_summary.json
+  var/recordings/n1/window_comparisons.jsonl
+  var/recordings/n1/analysis_summary.json
   Docs/.../n1_latency_sample.jsonl  (sanitized small sample)
 """
 
@@ -31,9 +31,9 @@ from tools.n1_audit.analyze_capture import (  # noqa: E402
     ticks_from,
 )
 from tools.n1_audit.poll_displayed_ptb import extract_open_close, get_html  # noqa: E402
-CAPTURE = ROOT / "var/reporting/n1/raw_capture.jsonl"
-OUT_WINDOWS = ROOT / "var/reporting/n1/window_comparisons.jsonl"
-OUT_SUMMARY = ROOT / "var/reporting/n1/analysis_summary.json"
+CAPTURE = ROOT / "var/recordings/n1/raw_capture.jsonl"
+OUT_WINDOWS = ROOT / "var/recordings/n1/window_comparisons.jsonl"
+OUT_SUMMARY = ROOT / "var/recordings/n1/analysis_summary.json"
 OUT_SAMPLE = ROOT / "Docs/implementation/z_gap_production_readiness/n1_latency_sample.jsonl"
 
 EPOCHS = [1784582100, 1784582400, 1784582700]

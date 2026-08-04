@@ -2,7 +2,7 @@
 """N1 read-only multi-source capture for BTC 5m windows.
 
 Public data only. No auth, wallets, orders, or old/ imports.
-Outputs JSONL under var/reporting/n1/.
+Outputs JSONL under var/recordings/n1/.
 """
 
 from __future__ import annotations
@@ -349,7 +349,7 @@ def main() -> None:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path("var/reporting/n1/raw_capture.jsonl"),
+        default=Path("var/recordings/n1/raw_capture.jsonl"),
     )
     args = p.parse_args()
     asyncio.run(run(args.duration_s, args.out))

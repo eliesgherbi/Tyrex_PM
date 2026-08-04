@@ -10,6 +10,7 @@
 - `tyrex_pm.execution.order_store` / `fill_ledger`
 - `tyrex_pm.portfolio` / `tyrex_pm.lifecycle`
 - R7 residuals/ack under `tyrex_pm.runtime.r7_*` (**phase-specific**)
+- N7 live host / Scope A ladder under `tyrex_pm.runtime.n7_*` + `SdkMutationTransport` (**Z-Gap; must not import r7***)
 
 ## OMS protocol (active)
 

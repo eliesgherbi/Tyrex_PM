@@ -53,14 +53,14 @@ class FieldProvenance:
 PROVENANCE: tuple[FieldProvenance, ...] = (
     FieldProvenance(
         "market_start",
-        "slug epoch `btc-updown-5m-{unix}` (+ cross-check market.eventStartTime / event.startTime)",
-        "UTC start of the five-minute trading window",
+        "slug epoch `btc-updown-5m-{unix}` (+ optional startTime cross-check)",
+        "UTC start of the five-minute trading/resolution window",
         True,
     ),
     FieldProvenance(
         "market_end",
-        "market_start + 300s (cross-check market.endDate / event.endDate)",
-        "UTC end of the five-minute trading window",
+        "market_start + 300s (cross-check endDate / schedule.end_date)",
+        "UTC end of the five-minute trading/resolution window",
         True,
     ),
     FieldProvenance(
@@ -71,8 +71,14 @@ PROVENANCE: tuple[FieldProvenance, ...] = (
     ),
     FieldProvenance(
         "listed_at",
-        "event.startDate / market.startDate",
-        "Listing / schedule publication time (often ~1 day before window)",
+        "listedAt / schedule.start_date / startDate",
+        "Listing/publication time; NOT the five-minute window start",
+        False,
+    ),
+    FieldProvenance(
+        "event_metadata_start",
+        "legacy market.eventStartTime when present",
+        "Ambiguous venue metadata; never authoritative for BTC 5m",
         False,
     ),
     FieldProvenance(
@@ -146,7 +152,9 @@ def _parse_dt(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _et_wall_to_utc(year: int, month: int, day: int, hour12: int, minute: int, ampm: str) -> datetime:
+def _et_wall_to_utc(
+    year: int, month: int, day: int, hour12: int, minute: int, ampm: str
+) -> datetime:
     """Convert US Eastern wall clock to UTC (EDT=UTC-4 / EST=UTC-5 via fold-free July=EDT)."""
     h = hour12 % 12
     if ampm.upper() == "PM":
@@ -159,7 +167,9 @@ def _et_wall_to_utc(year: int, month: int, day: int, hour12: int, minute: int, a
     return (naive + offset).replace(tzinfo=timezone.utc)
 
 
-def parse_title_window_utc(title: str, *, year: int | None = None) -> tuple[datetime, datetime] | None:
+def parse_title_window_utc(
+    title: str, *, year: int | None = None
+) -> tuple[datetime, datetime] | None:
     m = _TITLE_WINDOW.search(title or "")
     if not m:
         return None
@@ -203,9 +213,17 @@ def resolve_btc_5m_window(
     mkt = market or {}
     title = str(mkt.get("question") or ev.get("title") or "") or None
     created_at = _parse_dt(ev.get("createdAt") or mkt.get("createdAt"))
-    listed_at = _parse_dt(ev.get("startDate") or mkt.get("startDate"))
+    listed_at = _parse_dt(
+        ev.get("listedAt")
+        or mkt.get("listedAt")
+        or ev.get("startDate")
+        or mkt.get("startDate")
+    )
+    # schedule.start_time / event.startTime — recurring window when present.
+    schedule_window_start = _parse_dt(ev.get("startTime"))
+    # Legacy / ambiguous field — never authoritative for BTC 5m window identity.
     event_start_time = _parse_dt(
-        mkt.get("eventStartTime") or ev.get("startTime") or ev.get("eventStartTime")
+        mkt.get("eventStartTime") or ev.get("eventStartTime")
     )
     gamma_end = _parse_dt(mkt.get("endDate") or ev.get("endDate"))
     accepting = mkt.get("acceptingOrders")
@@ -214,18 +232,17 @@ def resolve_btc_5m_window(
     closed = mkt.get("closed") if "closed" in mkt else ev.get("closed")
     active = mkt.get("active") if "active" in mkt else ev.get("active")
 
-    # Creation/listing must never equal market_start for scheduling trust.
+    # Creation/listing must never drive market_start (often ~1 day earlier).
     if listed_at is not None and abs((listed_at - market_start).total_seconds()) > 60:
-        # Expected: listed_at often ~1 day earlier — OK, ignored for scheduling.
         pass
 
-    if event_start_time is not None:
-        if abs((event_start_time - market_start).total_seconds()) > end_tolerance_s:
-            raise MarketWindowError("TITLE_TIME_MISMATCH")
+    if schedule_window_start is not None:
+        if abs((schedule_window_start - market_start).total_seconds()) > end_tolerance_s:
+            raise MarketWindowError("MARKET_WINDOW_ALIGNMENT_INVALID")
 
     if gamma_end is not None:
         if abs((gamma_end - market_end).total_seconds()) > end_tolerance_s:
-            raise MarketWindowError("MARKET_DURATION_MISMATCH")
+            raise MarketWindowError("MARKET_WINDOW_END_MISMATCH")
 
     if title:
         parsed = parse_title_window_utc(title, year=market_start.year)

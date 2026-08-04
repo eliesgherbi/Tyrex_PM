@@ -10,5 +10,5 @@ Public market-data only. No auth, wallets, orders, signers, or `old/` imports.
 | `validate_discovery.py` | Slug/Gamma/Up-Down mapping checks |
 | `probe_open_price.py` | One-off PTB URL probes |
 
-Outputs under `var/reporting/n1/` (gitignored). See
+Outputs under `var/recordings/n1/` (gitignored). See
 `Docs/implementation/z_gap_production_readiness/n1_acceptance_report.md`.

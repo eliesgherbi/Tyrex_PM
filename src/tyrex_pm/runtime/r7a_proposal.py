@@ -11,7 +11,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from tyrex_pm.adapters.polymarket.btc_5m_window import (
     PROVENANCE,
@@ -68,12 +67,6 @@ def git_commit_identity(repo: Path) -> str:
         return "unknown"
 
 
-def _get_json(url: str) -> Any:
-    req = Request(url, headers={"User-Agent": "tyrex-pm-r7a1/1.0"}, method="GET")
-    with urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
 def _empty_trade(slug: str, blocked: str) -> ProposedTrade:
     return ProposedTrade(
         market_title="unavailable",
@@ -108,10 +101,11 @@ def probe_btc_updown_market(*, which: str = "next", now: datetime | None = None)
     """Public-only probe with authoritative 5m window + fee-aware sizing."""
     now = now or datetime.now(timezone.utc)
     slug = next_btc_updown_slug(now)
-    events = _get_json(f"https://gamma-api.polymarket.com/events?slug={slug}")
-    if not isinstance(events, list) or not events:
+    from tyrex_pm.adapters.polymarket.discovery import fetch_gamma_event
+    try:
+        ev = fetch_gamma_event(slug)
+    except Exception:
         return _empty_trade(slug, "MARKET_UNRESOLVED")
-    ev = events[0]
     markets = ev.get("markets") or []
     if not markets:
         return _empty_trade(slug, "MARKET_UNRESOLVED")
@@ -146,7 +140,8 @@ def probe_btc_updown_market(*, which: str = "next", now: datetime | None = None)
     fee = None
     fee_blocked = None
     try:
-        info = _get_json(f"https://clob.polymarket.com/clob-markets/{condition_id}")
+        from tyrex_pm.adapters.polymarket.discovery import market_info_from_gamma_market
+        info = market_info_from_gamma_market(m, condition_id=condition_id)
         fee = parse_fd(info, condition_id=condition_id)
         if info.get("ao") is False:
             fee_blocked = "MARKET_NOT_ACCEPTING_ORDERS"
@@ -154,7 +149,8 @@ def probe_btc_updown_market(*, which: str = "next", now: datetime | None = None)
         fee_blocked = "FEE_PARAMETERS_UNKNOWN"
 
     try:
-        book = _get_json(f"https://clob.polymarket.com/book?token_id={token_id}")
+        from tyrex_pm.adapters.polymarket.discovery import book_asks_via_sdk
+        book = {"asks": book_asks_via_sdk(token_id)}
     except Exception:  # noqa: BLE001
         t = _empty_trade(slug, "BOOK_UNREACHABLE")
         t.market_title = str(m.get("question") or slug)
@@ -232,9 +228,10 @@ def probe_btc_updown_market(*, which: str = "next", now: datetime | None = None)
 
 
 def _fetch_raw_positions(user: str) -> list[dict[str, Any]]:
-    url = f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
-    data = _get_json(url)
-    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    _ = user
+    from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
+
+    return SdkReadonlyTransport.from_env().get_positions_raw()
 
 
 def _load_dotenv_map(path: Path) -> dict[str, str]:
@@ -266,9 +263,8 @@ def prepare_r7a_artifacts(
     window_block = None
     deadlines_dict: dict[str, Any] | None = None
     try:
-        events = _get_json(
-            f"https://gamma-api.polymarket.com/events?slug={trade.market_slug}"
-        )
+        from tyrex_pm.adapters.polymarket.discovery import fetch_gamma_event
+        events = [fetch_gamma_event(trade.market_slug)]
         ev = events[0] if isinstance(events, list) and events else {}
         mkt = (ev.get("markets") or [None])[0] or {}
         window = resolve_btc_5m_window(
@@ -342,6 +338,8 @@ def prepare_r7a_artifacts(
         "MARKET_NOT_ACCEPTING_ORDERS",
         "INVALID_MARKET_WINDOW",
         "MARKET_DURATION_MISMATCH",
+        "MARKET_WINDOW_END_MISMATCH",
+        "MARKET_WINDOW_ALIGNMENT_INVALID",
         "TITLE_TIME_MISMATCH",
         "ENTRY_DEADLINE_AFTER_FLATTEN",
         "INSUFFICIENT_TIME_REMAINING",
@@ -353,6 +351,8 @@ def prepare_r7a_artifacts(
         in {
             "INVALID_MARKET_WINDOW",
             "MARKET_DURATION_MISMATCH",
+            "MARKET_WINDOW_END_MISMATCH",
+            "MARKET_WINDOW_ALIGNMENT_INVALID",
             "TITLE_TIME_MISMATCH",
             "ENTRY_DEADLINE_AFTER_FLATTEN",
             "INSUFFICIENT_TIME_REMAINING",
@@ -397,8 +397,10 @@ def prepare_r7a_artifacts(
         "market_time_correction": {
             "root_cause": (
                 "R7A used Gamma event.startDate / market.startDate (listing time) "
-                "as market_start. Authoritative start is slug epoch "
-                "(cross-checked with eventStartTime/startTime); end = start+300s."
+                "as market_start. Authoritative start is the validated slug epoch "
+                "(optional cross-check event.schedule.start_time / startTime); "
+                "end = start+300s. Listing timestamps and ambiguous eventStartTime "
+                "are never the five-minute boundary."
             ),
             "deadlines": deadlines_dict,
             "listed_at_not_schedule": trade.listed_at,

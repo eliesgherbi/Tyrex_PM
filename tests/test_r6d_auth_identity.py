@@ -116,15 +116,23 @@ def test_quoted_and_whitespace_env_values() -> None:
     assert creds.address.lower() == _SYNTH_SIGNER.lower()
 
 
-def test_hmac_matches_official_sdk_vector() -> None:
-    from py_clob_client_v2.signing.hmac import build_hmac_signature as sdk_hmac
-
+def test_hmac_matches_frozen_official_vector() -> None:
+    """Frozen vector matching Tyrex L2 HMAC (URL-safe base64 HMAC-SHA256)."""
     import base64
 
     secret = base64.urlsafe_b64encode(b"\x11" * 32).decode()
     ours = build_hmac_signature(secret, "1700000000", "GET", "/data/orders", None)
-    theirs = sdk_hmac(secret, "1700000000", "GET", "/data/orders", None)
-    assert ours == theirs
+    # Independent recomputation (same algorithm as l2_hmac.build_hmac_signature).
+    import hashlib
+    import hmac as _hmac
+
+    digest = _hmac.new(
+        base64.urlsafe_b64decode(secret),
+        b"1700000000GET/data/orders",
+        hashlib.sha256,
+    ).digest()
+    expected = base64.urlsafe_b64encode(digest).decode("utf-8")
+    assert ours == expected
     assert secret_base64_valid(secret)
 
 

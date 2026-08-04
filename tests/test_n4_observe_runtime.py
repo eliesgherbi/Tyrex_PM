@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -396,32 +394,9 @@ def test_deterministic_replay_identical_observations() -> None:
             assert x[key] == y[key]
 
 
-def test_fixture_cli_offline() -> None:
-    out = REPO / "var" / "reporting" / "n4" / "_pytest_fixture_summary.json"
-    cmd = [
-        sys.executable,
-        str(REPO / "tools" / "n4_observe" / "run_n4_observe.py"),
-        "--mode",
-        "fixture",
-        "--fixture",
-        str(FIXTURE),
-        "--windows",
-        "2",
-        "--out",
-        str(out),
-    ]
-    proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr + proc.stdout
-    summary = json.loads(out.read_text(encoding="utf-8"))
-    assert summary["not_live_evidence"] is True
-    assert summary["oms_touched"] is False
-    assert summary["orders_submitted"] == 0
-
-
 def test_architecture_no_old_imports() -> None:
     paths = [
         REPO / "src" / "tyrex_pm" / "runtime" / "n4_observe_runtime.py",
-        REPO / "tools" / "n4_observe" / "run_n4_observe.py",
         REPO / "src" / "tyrex_pm" / "domain" / "polymarket" / "sealed_reference.py",
     ]
     for p in paths:

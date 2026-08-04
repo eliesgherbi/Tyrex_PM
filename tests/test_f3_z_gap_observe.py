@@ -99,8 +99,14 @@ def test_fixture_observe_zgap_deterministic_timeline(tmp_path: Path) -> None:
     assert all(i.kind.value == "ENTER" for i in result.intents)
 
     # No OMS / fills / portfolio / realized PnL
-    lines = (tmp_path / "facts.jsonl").read_text(encoding="utf-8").splitlines()
-    types = {json.loads(line)["fact_type"] for line in lines}
+    from helpers_reporting import (
+        legacy_fact_types,
+        load_events_for_legacy_jsonl,
+        payloads_by_legacy_type,
+    )
+
+    events = load_events_for_legacy_jsonl(tmp_path, "facts.jsonl")
+    types = legacy_fact_types(events)
     assert "intent_created" in types
     assert "intent_observe_no_oms" in types
     assert "zgap_model_snapshot" in types
@@ -110,27 +116,24 @@ def test_fixture_observe_zgap_deterministic_timeline(tmp_path: Path) -> None:
     assert "order_submitted" not in types
     assert "fill" not in types
     assert "portfolio_update" not in types
-    assert not any("realized" in json.loads(line).get("payload", {}) for line in lines if False)
 
     # Intent evidence is counterfactual/estimated
-    intent_facts = [
-        json.loads(line)
-        for line in lines
-        if json.loads(line)["fact_type"] == "intent_created"
-    ]
+    intent_facts = payloads_by_legacy_type(events, "intent_created")
     assert intent_facts
-    assert intent_facts[0]["payload"]["oms_submit"] is False
-    assert intent_facts[0]["payload"]["observe_only"] is True
+    assert intent_facts[0]["oms_submit"] is False
+    assert intent_facts[0]["observe_only"] is True
 
-    calib = [
-        json.loads(line)["payload"]
-        for line in lines
-        if json.loads(line)["fact_type"] == "zgap_calibration_row"
-    ]
+    calib = payloads_by_legacy_type(events, "zgap_calibration_row")
     assert calib
     assert calib[0]["schema"] == "z_gap_calibration_v1"
     assert calib[0]["valuation_label"] == "counterfactual"
     assert calib[0]["fee_label"] == "estimated"
+
+    assert result.run_dir is not None
+    assert result.summary_path is not None
+    assert result.summary_path.is_file()
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert summary["performance"]["label"] == "observed_only"
 
     # One entry lineage — later decisions should not storm more enters
     enter_count = sum(1 for a in actions if a is StrategyAction.ENTER)

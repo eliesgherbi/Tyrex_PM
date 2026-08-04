@@ -33,6 +33,7 @@ from tyrex_pm.runtime.n7_sizing import (
     FeeInclusiveSizeSkip,
     size_fee_inclusive_entry,
 )
+from tyrex_pm.reporting.reporter import ReportingPort
 
 
 def _ci_forbids_live() -> bool:
@@ -70,6 +71,7 @@ class N7OneShotHost:
     last_entry_sizing: dict[str, Any] | None = None
     facts: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     last_abort: N7AbortCode | None = None
+    reporter: ReportingPort | None = None
 
     def __post_init__(self) -> None:
         if self.sealed.live.scope is not LiveScope.A:
@@ -110,6 +112,11 @@ class N7OneShotHost:
         self.facts.append((fact_type, payload))
         if self.inner is not None:
             self.inner._fact(fact_type, payload)
+
+    def attach_reporter(self, reporter: ReportingPort) -> None:
+        self.reporter = reporter
+        if self.inner is not None:
+            self.inner.attach_reporter(reporter)
 
     def _now(self) -> datetime:
         return self.clock.now_utc()
@@ -245,6 +252,9 @@ class N7OneShotHost:
         *,
         book: BookSnapshot,
         worst_price: Decimal | None = None,
+        book_view=None,
+        book_evidence: dict[str, Any] | None = None,
+        active_binding_id: str | None = None,
     ) -> dict[str, Any]:
         assert self.inner is not None
         if self.terminated:
@@ -307,7 +317,13 @@ class N7OneShotHost:
                 "reasons": ["mutations_not_armed"],
             }
 
-        result = self.inner.try_enter(sized_intent, book=book)
+        result = self.inner.try_enter(
+            sized_intent,
+            book=book,
+            book_view=book_view,
+            book_evidence=book_evidence,
+            active_binding_id=active_binding_id,
+        )
         result = dict(result)
         result["sizing"] = sized.to_dict()
         if result.get("status") in {

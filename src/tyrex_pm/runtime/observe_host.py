@@ -35,8 +35,9 @@ from tyrex_pm.market_data.reference_store import ReferenceDataStore
 from tyrex_pm.market_data.registry import InstrumentRegistry
 from tyrex_pm.planning.plan import PlanningResult, PlanStatus
 from tyrex_pm.planning.planner import ExecutionPlanner
-from tyrex_pm.reporting.facts import make_fact
-from tyrex_pm.reporting.jsonl import JsonlFactSink
+from tyrex_pm.reporting.adapters import map_legacy_fact_type
+from tyrex_pm.reporting.config import default_reporting_config, load_reporting_config
+from tyrex_pm.reporting.reporter import RunReporter, open_run_reporter
 from tyrex_pm.risk.context import BookReadiness, RiskConfigView, RiskContext
 from tyrex_pm.risk.decision import RiskDecision
 from tyrex_pm.risk.dedup import IntentDedupRegistry
@@ -66,6 +67,18 @@ class ObserveRunResult:
     plans: list[PlanningResult] = field(default_factory=list)
     facts_path: Path | None = None
     fact_count: int = 0
+    run_dir: Path | None = None
+    summary_path: Path | None = None
+    manifest_path: Path | None = None
+
+
+def _resolve_run_dir(config: ObserveConfig) -> Path:
+    if config.run_dir is not None:
+        return Path(config.run_dir)
+    out = Path(config.output_path)
+    if out.suffix == ".jsonl":
+        return out.parent / out.stem
+    return out
 
 
 class ObserveHost:
@@ -78,6 +91,7 @@ class ObserveHost:
         clock: Clock | None = None,
         run_id: RunId | None = None,
         correlation_id: CorrelationId | None = None,
+        reporter: RunReporter | None = None,
     ) -> None:
         self.config = config
         self.clock = clock or SystemClock()
@@ -102,7 +116,55 @@ class ObserveHost:
                 else _td(hours=1)
             )
         )
-        self.sink = JsonlFactSink(config.output_path)
+        self.run_dir = _resolve_run_dir(config)
+        reporting_cfg = (
+            load_reporting_config(config.reporting_config_path)
+            if config.reporting_config_path is not None
+            else default_reporting_config()
+        )
+        strategy_id = (
+            "z_gap"
+            if config.strategy_kind in {"z_gap", "zgap"}
+            else config.strategy_kind
+        )
+        strategy_version = None
+        diagnostics = None
+        if strategy_id == "z_gap":
+            from tyrex_pm.strategies.z_gap.reporting import (
+                STRATEGY_VERSION,
+                ZGapDiagnosticsContract,
+            )
+
+            strategy_version = STRATEGY_VERSION
+            diagnostics = ZGapDiagnosticsContract(config.zgap_pure)
+        mode = "shadow" if config.shadow is not None and config.shadow.enable_oms else "observe"
+        performance = "simulated" if mode == "shadow" else "observed_only"
+        self.reporter = reporter or open_run_reporter(
+            run_dir=self.run_dir,
+            run_id=self.run_id.value,
+            mode=mode,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            config=reporting_cfg,
+            diagnostics=diagnostics,
+            performance_label=performance,
+            configuration={
+                "config_fingerprint": config.fingerprint(),
+                "strategy_kind": config.strategy_kind,
+                "run_name": config.run_name,
+            },
+            simulation_assumptions=(
+                {}
+                if mode != "shadow"
+                else {
+                    "fee_model_id": config.shadow.fee_model_id if config.shadow else None,
+                    "fill_model_id": config.shadow.fill_model_id if config.shadow else None,
+                    "fee_rate": None if config.shadow is None else str(config.shadow.fee_rate),
+                }
+            ),
+            identity_extra={"git_head": None},
+        )
+        self._diagnostics = diagnostics
         self.decisions: list[StrategyDecision] = []
         self.signals: list[DirectionalSignal] = []
         self.intents: list[IntentLike] = []
@@ -112,6 +174,12 @@ class ObserveHost:
         self._kill_switch = bool(config.risk.kill_switch_active) if config.risk else False
         self._timer_fire_count = 0
         self._last_eval_trigger = "feed"
+        self._event_count = 0
+
+    # Backward-compatible alias used by older tests.
+    @property
+    def sink(self):  # noqa: ANN201
+        return _ReporterSinkAdapter(self)
 
     def _build_binding(self) -> StrategyBinding:
         # Composition-time registry only — evaluation path never branches on kind.
@@ -155,16 +223,24 @@ class ObserveHost:
         self._attached = True
 
     def _emit(self, fact_type: str, payload: dict[str, Any], *, causation_id=None, strategy_id=None) -> None:
-        fact = make_fact(
-            fact_type=fact_type,
-            ts=self.clock.now_utc(),
-            run_id=self.run_id,
-            correlation_id=self.correlation_id,
+        family, event_type, force_critical = map_legacy_fact_type(fact_type)
+        # Skip legacy zgap_* triple writes — decision path emits unified diagnostics.
+        if fact_type.startswith("zgap_"):
+            return
+        sid = None if strategy_id is None else str(getattr(strategy_id, "value", strategy_id))
+        cid = None if causation_id is None else str(getattr(causation_id, "value", causation_id))
+        self.reporter.emit_dict(
+            event_family=family,
+            event_type=event_type,
             payload=payload,
-            causation_id=causation_id,
-            strategy_id=strategy_id,
+            producer="observe_host",
+            force_critical=force_critical,
+            strategy_id=sid,
+            causation_id=cid,
+            correlation_id=self.correlation_id.value,
+            event_time=self.clock.now_utc(),
         )
-        self.sink.append(fact)
+        self._event_count += 1
 
     def build_snapshot(self, *, causation_id=None) -> DecisionSnapshot:
         market = self.registry.require_market()
@@ -472,17 +548,74 @@ class ObserveHost:
             causation_id=causation_id,
             strategy_id=result.strategy_id,
         )
-        for fact_type, payload in result.extra_facts:
-            self._emit(
-                fact_type,
-                payload,
-                causation_id=causation_id,
-                strategy_id=result.strategy_id,
-            )
+        self._emit_strategy_decision(result, causation_id=causation_id)
         self.decisions.append(result.decision)
         self._emit_observe_decision(result.decision)
         self._dispatch_eval_result(result, snapshot)
         return result.decision
+
+    def _emit_strategy_decision(
+        self, result: StrategyEvalResult, *, causation_id=None
+    ) -> None:
+        """Emit unified decision + strategy diagnostics (no math recompute)."""
+        from tyrex_pm.reporting.adapters import emit_decision_from_eval
+
+        decision = result.decision
+        diagnostics = None
+        gates: list[dict[str, Any]] = []
+        closest = None
+        strategy_version = self.reporter.strategy_version
+        ctx = result.reporting_context
+        if self._diagnostics is not None and ctx is not None:
+            diagnostics = self._diagnostics.build_diagnostics(ctx)
+            gates = self._diagnostics.build_gates(ctx)
+            closest = self._diagnostics.closest_candidate_fields(ctx)
+            strategy_version = self._diagnostics.strategy_version
+            for fact_type, payload in result.extra_facts:
+                if fact_type == "zgap_active_position_context" and diagnostics is not None:
+                    merged = dict(diagnostics.values)
+                    merged["position"] = dict(payload)
+                    merged["held_leg"] = payload.get("held_leg")
+                    from tyrex_pm.reporting.contracts import StrategyDiagnosticsBlob
+
+                    diagnostics = StrategyDiagnosticsBlob(
+                        namespace=diagnostics.namespace,
+                        schema_version=diagnostics.schema_version,
+                        values=merged,
+                    )
+        eval_id = None
+        market_id = None
+        window_id = None
+        if ctx is not None and "decision_input" in ctx:
+            di = ctx["decision_input"]
+            eval_id = di.epoch.epoch_id
+            market_id = di.market_id.value
+            window_id = di.window_id
+            self.reporter.set_market_window(market_id=market_id, window_id=window_id)
+
+        emit_decision_from_eval(
+            self.reporter,
+            action=decision.action.value,
+            reason_code=decision.reason_code,
+            decision_id=decision.decision_id,
+            evaluation_id=eval_id,
+            gates=gates,
+            diagnostics=diagnostics,
+            closest_candidate=closest,
+            intent_emitted=bool(result.intents),
+            blocked_safety=decision.action.value == "BLOCKED",
+            producer="observe_host",
+            strategy_id=str(result.strategy_id.value),
+            strategy_version=strategy_version,
+            market_id=market_id,
+            window_id=window_id,
+            causation_id=None
+            if causation_id is None
+            else str(getattr(causation_id, "value", causation_id)),
+            correlation_id=self.correlation_id.value,
+            extra_payload={"evidence": dict(decision.evidence)},
+        )
+        self._event_count += 1
 
     def _compose_resolution_capability(self):
         from tyrex_pm.domain.polymarket.resolution_capability import (
@@ -845,10 +978,11 @@ class ObserveHost:
             )
         except Exception as exc:
             self._emit("failure", {"error_type": type(exc).__name__, "message": str(exc)})
-            self.sink.flush()
+            self.reporter.checkpoint()
             raise
         finally:
-            self.sink.flush()
+            self.reporter.checkpoint()
+        summary_path = self.reporter.finalize()
         return ObserveRunResult(
             run_id=self.run_id,
             correlation_id=self.correlation_id,
@@ -858,12 +992,44 @@ class ObserveHost:
             intents=list(self.intents),
             risk_decisions=list(self.risk_decisions),
             plans=list(self.plans),
-            facts_path=self.sink.path,
-            fact_count=self.sink.count,
+            facts_path=self.reporter.paths["audit_events"],
+            fact_count=self._event_count,
+            run_dir=self.run_dir,
+            summary_path=summary_path,
+            manifest_path=self.reporter.paths["manifest"],
         )
 
     def close(self) -> None:
-        self.sink.close()
+        if not self.reporter._finalized:
+            self.reporter.finalize(
+                terminal_status="PARTIAL",
+                terminal_reason="host_close",
+                clean_shutdown=False,
+            )
+
+
+class _ReporterSinkAdapter:
+    """Minimal compatibility shim for tests that still touch ``host.sink``."""
+
+    def __init__(self, host: ObserveHost) -> None:
+        self._host = host
+
+    @property
+    def path(self) -> Path:
+        return self._host.reporter.paths["audit_events"]
+
+    @property
+    def count(self) -> int:
+        return self._host._event_count
+
+    def append(self, fact: Any) -> None:  # pragma: no cover
+        raise RuntimeError("JsonlFactSink removed; use ObserveHost._emit / reporter")
+
+    def flush(self) -> None:
+        self._host.reporter.checkpoint()
+
+    def close(self) -> None:
+        self._host.close()
 
 
 # R5.1 host unification: ObserveHost is the single orchestration path

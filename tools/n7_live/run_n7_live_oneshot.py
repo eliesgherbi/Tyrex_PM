@@ -47,6 +47,12 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--max-duration-s", type=float, default=300.0)
     ap.add_argument(
+        "--reporting",
+        type=Path,
+        default=REPO / "config" / "reporting" / "full.yaml",
+        help="Reporting profile YAML (default: config/reporting/full.yaml)",
+    )
+    ap.add_argument(
         "--fake-rehearsal",
         action="store_true",
         help="Run FakeTransport entry→exit→FLAT (no venue). Ignores --live.",
@@ -54,16 +60,21 @@ def main() -> None:
     args = ap.parse_args()
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_dir = args.out_dir or (REPO / "var" / "reporting" / "n7" / f"oneshot_{stamp}")
+    out_dir = args.out_dir or (REPO / "var" / "runs" / "z_gap" / f"n7_oneshot_{stamp}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    from tyrex_pm.reporting.config import load_reporting_config
     from tyrex_pm.runtime.n7_operator_run import (
         run_fake_oneshot_rehearsal,
         run_operator_oneshot,
     )
 
+    reporting_config = load_reporting_config(args.reporting)
+
     if args.fake_rehearsal:
-        result = run_fake_oneshot_rehearsal(out_dir=out_dir, config_path=args.config)
+        result = run_fake_oneshot_rehearsal(
+            out_dir=out_dir, config_path=args.config, reporting_config=reporting_config
+        )
     else:
         result = asyncio.run(
             run_operator_oneshot(
@@ -73,6 +84,7 @@ def main() -> None:
                 dotenv=args.dotenv if args.dotenv.exists() else None,
                 live=bool(args.live),
                 max_duration_s=float(args.max_duration_s),
+                reporting_config=reporting_config,
             )
         )
 

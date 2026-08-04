@@ -152,11 +152,15 @@ def test_dry_sign_vector_has_no_secrets() -> None:
     assert "0x11" not in str(report)
 
 
-def test_live_once_still_refuses() -> None:
+def test_live_once_removed_from_cli() -> None:
+    from tyrex_pm.application.cli import build_parser
+
     text = (PKG / "application" / "cli.py").read_text(encoding="utf-8")
-    assert "live-once" in text
-    assert "R7B BLOCKED" in text
-    assert "not enabled in this build" in text or "Mutations remain disabled" in text
+    assert '"live-once"' not in text
+    parser = build_parser()
+    subs = parser._subparsers._group_actions[0].choices  # noqa: SLF001
+    assert "live-once" not in subs
+    assert "r7b-live-once" in subs
 
 
 def test_r7a1_prepare_never_issues_approval_by_default() -> None:

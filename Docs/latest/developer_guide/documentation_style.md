@@ -33,8 +33,9 @@ Use compact diagrams for architecture/flows. Tyrex_PM terminology only — do no
 ## Commands
 
 - Verify against `tyrex-pm --help` / subcommand help and tests before documenting
-- Do not invent Docker/deploy/live runbooks
-- Do not provide new real-money live commands in latest docs
+- Do not invent Docker/deploy/unscoped continuous-live runbooks
+- Document **shipped** operator-gated venue commands (e.g. `n7-live --live`, `r7b-live-once --execute-live`) with effect tags (`Venue`) and links to implementation evidence
+- Do not invent *new* unscoped real-money commands that are not in the CLI/tools
 
 ## Secrets
 

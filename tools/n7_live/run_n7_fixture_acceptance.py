@@ -21,7 +21,7 @@ def main() -> None:
     )
     args = ap.parse_args()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_dir = args.out_dir or (REPO / "var" / "reporting" / "n7" / f"fixture_{stamp}")
+    out_dir = args.out_dir or (REPO / "var" / "runs" / "z_gap" / f"n7_fixture_{stamp}")
     from tyrex_pm.runtime.n7_operator_run import run_fake_oneshot_rehearsal
 
     result = run_fake_oneshot_rehearsal(out_dir=out_dir, config_path=args.config)

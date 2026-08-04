@@ -223,10 +223,15 @@ def test_cli_has_no_zgap_execute_live() -> None:
     assert "--execute-live" in text
     # No generic N6 live-execution subcommand / host import.
     assert "n6-live" not in lowered
+    for retired in ("n6-status", "n6-preflight", "n6-recon", "n6-kill-inspect"):
+        assert retired not in lowered
+    parser = build_parser()
+    choices = parser._subparsers._group_actions[0].choices  # noqa: SLF001
+    for retired in ("n6-status", "n6-preflight", "n6-recon", "n6-kill-inspect", "live-once"):
+        assert retired not in choices
     imports = _imports_of(SRC / "application" / "cli.py")
     assert not any("n6_live_host" in m for m in imports)
     # YAML `run --mode live --live` arms N7 (not N6 / not --execute-live).
-    parser = build_parser()
     run = None
     for action in parser._subparsers._group_actions:  # noqa: SLF001
         if getattr(action, "choices", None) and "run" in action.choices:

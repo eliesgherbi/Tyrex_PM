@@ -59,8 +59,9 @@ def _run(tmp: Path, *, cfg_path: Path = CFG_F5, fixture: str | None = None, **zg
 
 
 def _fact_types(tmp: Path) -> set[str]:
-    lines = (tmp / "facts.jsonl").read_text(encoding="utf-8").splitlines()
-    return {json.loads(l)["fact_type"] for l in lines}
+    from helpers_reporting import legacy_fact_types, load_events_for_legacy_jsonl
+
+    return legacy_fact_types(load_events_for_legacy_jsonl(tmp, "facts.jsonl"))
 
 
 def _imports_of(path: Path) -> set[str]:
@@ -106,11 +107,7 @@ def test_scenario_resolution_win(tmp_path: Path) -> None:
     assert "resolution_committed" in types
     assert "resolution_evidence_accepted" in types
     assert "simulated_resolution_settled" in types
-    settle = [
-        json.loads(l)
-        for l in (tmp_path / "facts.jsonl").read_text().splitlines()
-        if json.loads(l)["fact_type"] == "simulated_resolution_settled"
-    ]
+    settle = (__import__('helpers_reporting', fromlist=['legacy_events_with_payload']).legacy_events_with_payload(tmp_path, 'simulated_resolution_settled'))
     assert settle[-1]["payload"]["resolved_side"] == "YES"
     assert settle[-1]["payload"]["economics_label"] == "simulated_shadow"
     assert Decimal(settle[-1]["payload"]["payout_per_share"]) == Decimal("1")
@@ -122,11 +119,7 @@ def test_scenario_resolution_lose(tmp_path: Path) -> None:
     )
     assert any(isinstance(i, HoldToResolutionIntent) for i in result.intents)
     assert host.portfolio.is_flat()
-    settle = [
-        json.loads(l)
-        for l in (tmp_path / "facts.jsonl").read_text().splitlines()
-        if json.loads(l)["fact_type"] == "simulated_resolution_settled"
-    ]
+    settle = (__import__('helpers_reporting', fromlist=['legacy_events_with_payload']).legacy_events_with_payload(tmp_path, 'simulated_resolution_settled'))
     assert settle
     assert settle[-1]["payload"]["resolved_side"] == "NO"
     assert Decimal(settle[-1]["payload"]["payout_per_share"]) == Decimal("0")
@@ -281,11 +274,9 @@ def test_restart_pending_no_duplicate_commitment_or_payout(tmp_path: Path) -> No
     finally:
         h1.close()
     assert h1.lifecycle.state is LifecycleState.RESOLUTION_PENDING
-    commits = sum(
-        1
-        for l in (tmp_path / "facts.jsonl").read_text().splitlines()
-        if json.loads(l)["fact_type"] == "resolution_committed"
-    )
+    from helpers_reporting import legacy_events_with_payload
+
+    commits = len(legacy_events_with_payload(tmp_path, "resolution_committed"))
     assert commits == 1
     assert not h1.portfolio.is_flat()
 
@@ -330,11 +321,7 @@ def test_restart_pending_no_duplicate_commitment_or_payout(tmp_path: Path) -> No
     assert h2.lifecycle.state is LifecycleState.FLAT
     assert h2.portfolio.is_flat()
     assert h2.lifecycle.view().settlement_applied_id == "f5-ev-restart-1"
-    commits2 = sum(
-        1
-        for l in (tmp_path / "facts.jsonl").read_text().splitlines()
-        if json.loads(l)["fact_type"] == "resolution_committed"
-    )
+    commits2 = len(legacy_events_with_payload(tmp_path, "resolution_committed"))
     assert commits2 == 1
 
 

@@ -168,13 +168,29 @@ def assemble_zgap_decision_snapshot(
             entry_cost_total=position.entry_cost_total,
         )
 
+    # Authoritative path: MarketStateStore → BookView → per-leg readiness.
+    # Legacy path: ExecutableQuote tops only (offline fixtures without a store).
+    if market_snapshot.book_view is not None:
+        up_book = market_snapshot.book_view.leg_book_view(up=True)
+        down_book = market_snapshot.book_view.leg_book_view(up=False)
+        evidence = {
+            **evidence,
+            "quote_path": "market_state_store_book_view",
+            "binding_id": market_snapshot.book_view.binding_id,
+            "book_pair_version": list(market_snapshot.book_view.pair_version),
+        }
+    else:
+        up_book = _leg_book(market_snapshot.yes_quote, side="up")
+        down_book = _leg_book(market_snapshot.no_quote, side="down")
+        evidence = {**evidence, "quote_path": "legacy_executable_quote"}
+
     return ZGapDecisionSnapshot(
         epoch=epoch,
         model=model,
         time=time_view,
         ptb=ptb,
-        up_book=_leg_book(market_snapshot.yes_quote, side="up"),
-        down_book=_leg_book(market_snapshot.no_quote, side="down"),
+        up_book=up_book,
+        down_book=down_book,
         fee_curve=fee_curve,
         fee_resolved=fee_resolved,
         target_notional=target_notional,

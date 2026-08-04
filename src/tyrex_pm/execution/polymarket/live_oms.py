@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable
 
 from tyrex_pm.core.commands import CancelOrderCommand, SubmitOrderCommand
-from tyrex_pm.core.execution_events import OrderCancelPending
 from tyrex_pm.core.events import EventSource
+from tyrex_pm.core.execution_events import OrderCancelPending
 from tyrex_pm.core.ids import CorrelationId, OrderId, new_event_id, new_order_id
+from tyrex_pm.core.intents import OrderSide
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.execution.order_store import OrderStore
 from tyrex_pm.execution.polymarket.normalize import (
@@ -31,6 +31,8 @@ from tyrex_pm.execution.polymarket.transport import (
     SubmitOrderRequest,
 )
 from tyrex_pm.portfolio.portfolio import Portfolio
+from tyrex_pm.reporting.contracts import LineageIds
+from tyrex_pm.reporting.reporter import ReportingPort
 
 
 class SubmissionState(str, Enum):
@@ -63,6 +65,7 @@ class LiveOMS:
     portfolio: Portfolio
     mutations_enabled: bool = False
     emit_fact: FactEmitter | None = None
+    reporter: ReportingPort | None = None
     readiness: ExecutionReadiness = field(default_factory=ExecutionReadiness)
     recon: ReconciliationService | None = None
     _tracking: dict[str, LiveOrderTracking] = field(default_factory=dict)
@@ -214,6 +217,15 @@ class LiveOMS:
             )
             return oid
 
+        exposure_increasing = command.side is OrderSide.BUY
+        if exposure_increasing and not self._pre_mutation_barrier(
+            order_id=oid,
+            command=command,
+            when=when,
+            track=track,
+        ):
+            return oid
+
         req = SubmitOrderRequest(
             token_id=command.instrument_id.value,
             side=command.side.value,
@@ -223,6 +235,15 @@ class LiveOMS:
             payload={"plan_id": command.plan_id.value},
         )
         result = self.transport.submit_order(req)
+        self._report_venue_submit_result(
+            order_id=oid,
+            command=command,
+            result_ok=bool(result.ok and result.venue_order_id),
+            uncertain=bool(result.uncertain),
+            venue_order_id=result.venue_order_id,
+            error=result.error,
+            exposure_increasing=exposure_increasing,
+        )
         if result.uncertain:
             track.submission = SubmissionState.UNKNOWN_SUBMISSION
             self.readiness.deny(ReadinessReason.UNKNOWN_SUBMISSION)
@@ -317,3 +338,126 @@ class LiveOMS:
         return any(
             t.submission is SubmissionState.UNKNOWN_SUBMISSION for t in self._tracking.values()
         )
+
+    def _reject_before_transport(
+        self,
+        *,
+        order_id: OrderId,
+        command: SubmitOrderCommand,
+        when: datetime,
+        track: LiveOrderTracking,
+        reason_code: str,
+    ) -> None:
+        self.dispatcher.publish(
+            order_rejected_event(
+                order_id=order_id,
+                reason_code=reason_code,
+                correlation_id=command.correlation_id,
+                when=when,
+            )
+        )
+        track.submission = SubmissionState.REJECTED
+        self._fact(
+            "submission_denied",
+            {"order_id": order_id.value, "reason": reason_code},
+        )
+
+    def _pre_mutation_barrier(
+        self,
+        *,
+        order_id: OrderId,
+        command: SubmitOrderCommand,
+        when: datetime,
+        track: LiveOrderTracking,
+    ) -> bool:
+        """Durable pre-mutation ack for exposure-increasing submits.
+
+        Returns False when the venue mutation must not proceed.
+        """
+        if self.reporter is None:
+            return True
+        if not self.reporter.allows_new_exposure:
+            self._reject_before_transport(
+                order_id=order_id,
+                command=command,
+                when=when,
+                track=track,
+                reason_code="CRITICAL_AUDIT_FAILURE_BLOCKS_EXPOSURE",
+            )
+            return False
+        pre = self.reporter.build_pre_mutation_event(
+            producer="live_oms",
+            payload={
+                "order_id": order_id.value,
+                "side": command.side.value,
+                "instrument_id": command.instrument_id.value,
+                "quantity": str(command.quantity),
+                "limit_price": str(command.limit_price),
+                "plan_id": command.plan_id.value,
+                "intent_id": command.intent_id.value,
+                "client_order_id": command.client_order_id.value,
+                "exposure_increasing": True,
+            },
+            lineage=LineageIds(
+                intent_id=command.intent_id.value,
+                execution_plan_id=command.plan_id.value,
+                order_id=order_id.value,
+            ),
+            strategy_id=command.strategy_id.value,
+        )
+        if not self.reporter.persist_critical(pre):
+            self._reject_before_transport(
+                order_id=order_id,
+                command=command,
+                when=when,
+                track=track,
+                reason_code="PRE_MUTATION_PERSISTENCE_FAILED",
+            )
+            return False
+        return True
+
+    def _report_venue_submit_result(
+        self,
+        *,
+        order_id: OrderId,
+        command: SubmitOrderCommand,
+        result_ok: bool,
+        uncertain: bool,
+        venue_order_id: str | None,
+        error: str | None,
+        exposure_increasing: bool,
+    ) -> None:
+        if self.reporter is None:
+            return
+        payload = {
+            "order_id": order_id.value,
+            "side": command.side.value,
+            "ok": result_ok,
+            "uncertain": uncertain,
+            "venue_order_id": venue_order_id,
+            "error": error,
+            "exposure_increasing": exposure_increasing,
+        }
+        try:
+            self.reporter.emit_dict(
+                event_family="order",
+                event_type="mutation.venue_submit_result",
+                payload=payload,
+                producer="live_oms",
+                force_critical=True,
+                lineage=LineageIds(
+                    intent_id=command.intent_id.value,
+                    execution_plan_id=command.plan_id.value,
+                    order_id=order_id.value,
+                ),
+            )
+            # If critical persistence already flipped health, keep fail-closed.
+            if (
+                exposure_increasing
+                and self.reporter.health.value == "CRITICAL_AUDIT_FAILURE"
+            ):
+                return
+        except Exception as exc:  # noqa: BLE001 — reporting failure must not hide venue result
+            self.reporter.mark_critical_audit_failure(
+                reason=f"post_mutation_report_exception:{type(exc).__name__}"
+            )

@@ -86,30 +86,78 @@ def run_n7_preflight(
         skip_auth=False,
     )
 
-    def _classify(payload: dict[str, Any], ok: bool) -> dict[str, Any]:
+    def _classify(payload: dict[str, Any]) -> dict[str, Any]:
         recon = dict(payload.get("reconciliation") or {})
+        # UNKNOWN only when reconciliation actually ran and account evidence was unreachable.
+        # Do not invent UNKNOWN from an earlier public-time / transport probe failure.
+        recon_ran = payload.get("reconciliation") is not None
+        unknown = bool(recon_ran and recon.get("unreachable_account"))
         return classify_account(
             open_orders=[],
             positions=[],
             selected_market_token_ids=set(),
             acknowledged=DEFAULT_ACKNOWLEDGED,
-            unknown=not ok,
+            unknown=unknown,
         ).to_dict() | {
             "open_order_count": int(recon.get("open_order_count") or 0),
             "position_row_count": int(recon.get("position_row_count") or 0),
             "observation_only_local_empty": recon.get("observation_only_local_empty"),
+            "reconciliation_ran": recon_ran,
+            "unreachable_account": bool(recon.get("unreachable_account")),
         }
 
-    c1 = _classify(dict(first.payload), first.ok)
-    c2 = _classify(dict(second.payload), second.ok)
+    def _public_transport_failure(payload: dict[str, Any]) -> bool:
+        public_clob = dict(payload.get("public_clob") or {})
+        if public_clob.get("failure_kind") == "transport":
+            return True
+        if payload.get("blocker") == "public_clob_unreachable":
+            return True
+        if payload.get("cloudflare_blocked"):
+            return True
+        return False
 
-    if not first.ok or not second.ok:
+    def _public_time_invalid(payload: dict[str, Any]) -> bool:
+        if payload.get("blocker") == "public_time_invalid":
+            return True
+        public_clob = dict(payload.get("public_clob") or {})
+        kind = public_clob.get("failure_kind")
+        return kind in {
+            "invalid_time_response",
+            "http_client_error",
+            "http_server_error",
+        }
+
+    c1 = _classify(dict(first.payload))
+    c2 = _classify(dict(second.payload))
+
+    transport_fail = _public_transport_failure(dict(first.payload)) or _public_transport_failure(
+        dict(second.payload)
+    )
+    time_invalid = _public_time_invalid(dict(first.payload)) or _public_time_invalid(
+        dict(second.payload)
+    )
+
+    if transport_fail:
         aborts.append(N7AbortCode.CONNECTIVITY_UNAVAILABLE.value)
-        # VPN hint — not a code defect by default
+        # VPN/DNS hint only after genuine transport-level connectivity failure.
         aborts.append("hint_check_vpn_or_dns")
+    elif time_invalid:
+        aborts.append(N7AbortCode.PUBLIC_TIME_INVALID.value)
+    elif not first.ok or not second.ok:
+        # Auth / recon / stream failures — not a DNS/VPN diagnosis by default.
+        aborts.append(N7AbortCode.CONNECTIVITY_UNAVAILABLE.value)
+
     if c1.get("open_order_count", 0) > 0 or c2.get("open_order_count", 0) > 0:
         aborts.append(N7AbortCode.UNEXPECTED_OPEN_ORDER.value)
-    if "UNKNOWN" in (c1.get("classifications") or []):
+
+    # Reconciliation disagreement only when both runs compared reachable account state.
+    recon_comparable = (
+        c1.get("reconciliation_ran")
+        and c2.get("reconciliation_ran")
+        and not c1.get("unreachable_account")
+        and not c2.get("unreachable_account")
+    )
+    if recon_comparable and c1.get("classifications") != c2.get("classifications"):
         aborts.append(N7AbortCode.PREFLIGHT_RECON_DISAGREEMENT.value)
 
     id_map = dict(first.payload.get("identity_mapping") or {})
@@ -122,7 +170,19 @@ def run_n7_preflight(
     bal = dict(first.payload.get("balance_evidence") or {})
     us = dict(first.payload.get("user_stream") or {})
     if us.get("attempted") and not us.get("authenticated"):
-        aborts.append(N7AbortCode.CONNECTIVITY_UNAVAILABLE.value)
+        kind = str(us.get("failure_kind") or "")
+        if kind in {"adapter_init", "adapter_contract"}:
+            aborts.append(N7AbortCode.USER_STREAM_INIT_FAILED.value)
+        elif kind == "auth":
+            aborts.append(N7AbortCode.USER_STREAM_AUTH_FAILED.value)
+        elif kind == "transport":
+            # Genuine user-stream network failure — connectivity, not VPN/DNS by default.
+            aborts.append(N7AbortCode.CONNECTIVITY_UNAVAILABLE.value)
+        elif kind in {"protocol", "rejected", "cancelled"}:
+            aborts.append(N7AbortCode.USER_STREAM_PROTOCOL_FAILED.value)
+        else:
+            # Unknown stream failure: fail closed with precise stream code, not VPN.
+            aborts.append(N7AbortCode.USER_STREAM_PROTOCOL_FAILED.value)
 
     go = "GO" if not aborts else "NO_GO"
     payload = {

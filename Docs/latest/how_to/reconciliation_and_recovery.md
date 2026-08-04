@@ -81,7 +81,7 @@ Stop automated action if: unknown submission, tradable residual after attempt ca
 
 - [ ] Capture stdout  
 - [ ] Preserve `report_*.json` + `facts_*.jsonl`  
-- [ ] Preserve `var/state/r7/lifecycle_residuals.json` + ack artifact  
+- [ ] Preserve `var/runtime_state/r7/lifecycle_residuals.json` + ack artifact  
 - [ ] Note commit SHA + worktree cleanliness  
 - [ ] Redact secrets/addresses  
 - [ ] Separate inventory state from lifecycle outcome  

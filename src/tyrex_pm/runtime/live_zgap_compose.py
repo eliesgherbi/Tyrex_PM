@@ -24,7 +24,6 @@ from tyrex_pm.adapters.polymarket.ssr_ptb_attestation import (
     DisabledSsrAttestationProvider,
     SsrDisplayedPtbAttestationProvider,
 )
-from tyrex_pm.adapters.polymarket.ws_adapter import PolymarketMarketWsAdapter
 from tyrex_pm.core.book_events import BookDeltaReceived, BookSnapshotReceived
 from tyrex_pm.core.clock import SystemClock
 from tyrex_pm.core.events import ReferencePriceUpdated, SettlementReferenceUpdated
@@ -35,7 +34,17 @@ from tyrex_pm.domain.polymarket.discovery_binding import DiscoverySessionRole
 from tyrex_pm.domain.polymarket.ptb_attestation import AttestationResult
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.indicators.causal_pairing import PriceTickView, TradingReferenceIdentity
-from tyrex_pm.runtime.n4_observe_runtime import N4ObserveRuntime, SessionSlot
+from tyrex_pm.market_data.binding_record import (
+    BindingLifecycleRole,
+    binding_record_from_discovery,
+)
+from tyrex_pm.market_data.book_feed import BookFeedSupervisor
+from tyrex_pm.market_data.book_store import MarketStateStore
+from tyrex_pm.runtime.n4_observe_runtime import (
+    N4ObserveRuntime,
+    SessionSlot,
+    project_session_quotes_from_view,
+)
 from tyrex_pm.strategies.z_gap.config import ZGapConfig, ZGapPtbTimeQualityConfig
 
 # SSR openPrice often lags the EXACT Chainlink tick by a few seconds.
@@ -277,10 +286,25 @@ async def run_live_zgap_compose(
     )
 
     disp = EventDispatcher()
+    book_store = MarketStateStore()
+    book_store.attach(disp)
+    runtime.book_store = book_store
+    feed_supervisor = BookFeedSupervisor(
+        store=book_store, dispatcher=disp, out_dir=out_dir
+    )
     counts = {"chainlink": 0, "binance": 0, "clob": 0}
     sealed_windows: set[str] = set()
     seal_fail_logged: set[str] = set()
     last_eval_mono: float = 0.0
+
+    def _project_active_quotes() -> None:
+        view = feed_supervisor.active_view()
+        if view is None or runtime.active is None:
+            return
+        project_session_quotes_from_view(runtime.active, view)
+        runtime.active_binding_record = (
+            None if feed_supervisor.active is None else feed_supervisor.active.binding
+        )
 
     def _try_seal(window_id: str) -> None:
         if window_id in sealed_windows:
@@ -476,26 +500,15 @@ async def run_live_zgap_compose(
             summary.shadow_records.extend(n5_evaluate())
 
     def on_book_snap(e: BookSnapshotReceived) -> None:
+        # Store owns mutation via MarketStateStore.attach; this is accounting only.
         counts["clob"] += 1
-        _apply_book(e.book)
+        _project_active_quotes()
+        if on_book is not None:
+            on_book(e.book)
 
     def on_book_delta(e: BookDeltaReceived) -> None:
-        # Deltas confirm CLOB liveness; quote tops come from snapshots.
-        _ = e
         counts["clob"] += 1
-
-    def _apply_book(book: BookSnapshot) -> None:
-        active = runtime.active
-        if active is None:
-            return
-        ask = book.asks[0].price if book.asks else None
-        bid = book.bids[0].price if book.bids else None
-        if book.instrument_id == active.market.yes.instrument_id:
-            active.up_ask, active.up_bid = ask, bid
-        elif book.instrument_id == active.market.no.instrument_id:
-            active.down_ask, active.down_bid = ask, bid
-        if on_book is not None:
-            on_book(book)
+        _project_active_quotes()
 
     disp.subscribe(SettlementReferenceUpdated, on_cl)
     disp.subscribe(ReferencePriceUpdated, on_bn)
@@ -504,12 +517,23 @@ async def run_live_zgap_compose(
 
     cl = RtdsChainlinkAdapter(time_authority=auth, heartbeat_timeout_s=25)
     bn = BinanceTradeWsAdapter(symbol="BTCUSDT", time_authority=auth)
-    clob = PolymarketMarketWsAdapter.from_binding(active_binding)
+    # Binding-scoped feeds own WS + REST bootstrap (not session quote mutation).
+    active_rec = binding_record_from_discovery(
+        active_binding, role=BindingLifecycleRole.ACTIVE, role_epoch=0
+    )
+    prepared_rec = binding_record_from_discovery(
+        prepared, role=BindingLifecycleRole.PREPARED_NEXT, role_epoch=0
+    )
+    await feed_supervisor.set_active(active_rec)
+    await feed_supervisor.set_prepared(prepared_rec)
+    runtime.active_binding_record = active_rec
+    summary.gate_notes.append(
+        "book_path=MarketStateStore→BookView; binding_feeds=ACTIVE+PREPARED_NEXT"
+    )
     tasks = [
         asyncio.create_task(clock_loop.run(), name="clock"),
         asyncio.create_task(cl.run(disp), name="cl"),
         asyncio.create_task(bn.run(disp), name="bn"),
-        asyncio.create_task(clob.run(disp), name="clob"),
     ]
 
     started = datetime.now(timezone.utc)
@@ -536,16 +560,17 @@ async def run_live_zgap_compose(
                     )
                 try:
                     promoted = runtime.promote_prepared_next(at=now)
+                    # Promote warm prepared feed without invalidating its books.
+                    await feed_supervisor.promote_prepared()
+                    runtime.active_binding_record = (
+                        None
+                        if feed_supervisor.active is None
+                        else feed_supervisor.active.binding
+                    )
+                    _project_active_quotes()
                     if on_active_session is not None:
                         on_active_session(promoted)
-                    # Refresh CLOB subscription for new active — recreate adapter
-                    await clob.stop()
-                    if runtime.active and runtime.active.binding is not None:
-                        clob = PolymarketMarketWsAdapter.from_binding(
-                            runtime.active.binding
-                        )
-                        tasks.append(asyncio.create_task(clob.run(disp), name="clob2"))
-                    # Open next prepared
+                    # Open / warm next prepared binding (new feed).
                     try:
                         nxt = await discovery.prepare_next_btc_5m()
                         if (
@@ -559,6 +584,12 @@ async def run_live_zgap_compose(
                                 binding=nxt,
                                 publish_as_active=False,
                             )
+                            nxt_rec = binding_record_from_discovery(
+                                nxt,
+                                role=BindingLifecycleRole.PREPARED_NEXT,
+                                role_epoch=feed_supervisor.role_epoch_counter,
+                            )
+                            await feed_supervisor.set_prepared(nxt_rec)
                     except Exception as exc:
                         summary.errors.append(
                             f"prepare_next:{type(exc).__name__}:{exc}"
@@ -583,7 +614,7 @@ async def run_live_zgap_compose(
         await clock_loop.stop()
         await cl.stop()
         await bn.stop()
-        await clob.stop()
+        await feed_supervisor.stop()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -596,11 +627,28 @@ async def run_live_zgap_compose(
             "snapshot_age_ms": view.snapshot_age_ms,
         }
 
+    active_feed = feed_supervisor.active
+    prepared_feed = feed_supervisor.prepared
+    book_metrics = book_store.metrics.to_dict() if hasattr(book_store.metrics, "to_dict") else {}
     summary.feeds = {
         "chainlink_ticks": counts["chainlink"],
         "binance_ticks": counts["binance"],
         "clob_book_events": counts["clob"],
-        "clob_ready": clob.ready,
+        "clob_ready": bool(
+            active_feed is not None and active_feed.phase.value == "READY"
+        ),
+        "book_path": "MarketStateStore",
+        "active_binding_id": None
+        if active_feed is None
+        else active_feed.binding.binding_id,
+        "prepared_binding_id": None
+        if prepared_feed is None
+        else prepared_feed.binding.binding_id,
+        "active_feed_phase": None if active_feed is None else active_feed.phase.value,
+        "prepared_feed_phase": None
+        if prepared_feed is None
+        else prepared_feed.phase.value,
+        "book_metrics": book_metrics,
         "shutdown": "graceful",
     }
     summary.oms_touched = runtime.oms_touched

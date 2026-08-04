@@ -51,7 +51,9 @@ async def _try_live_discovery() -> tuple[object | None, str]:
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--duration-s", type=float, default=25.0)
-    ap.add_argument("--out", type=Path, default=Path("var/reporting/n2/smoke_summary.json"))
+    run_id = datetime.now(timezone.utc).strftime("n2_%Y%m%dT%H%M%SZ")
+    default_out = Path("var/runs/_ops/n2_smoke") / run_id / "smoke_summary.json"
+    ap.add_argument("--out", type=Path, default=default_out)
     args = ap.parse_args()
 
     summary: dict = {

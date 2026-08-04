@@ -189,7 +189,20 @@ def value_entry_leg(
         )
 
     if not book.ready or book.ask is None:
-        reasons.append(ZGapReason.BOOK_NOT_READY.value)
+        detail = book.reason_code or ZGapReason.BOOK_NOT_READY.value
+        # Prefer specific readiness codes; keep BOOK_NOT_READY as generic fallback.
+        reasons.append(detail)
+        if detail not in {
+            ZGapReason.BOOK_UNAVAILABLE.value,
+            ZGapReason.BOOK_SYNCING.value,
+            ZGapReason.BOOK_STALE.value,
+            ZGapReason.BOOK_DESYNCED.value,
+            ZGapReason.VENUE_ASK_EXPLICITLY_EMPTY.value,
+            ZGapReason.VENUE_BID_EXPLICITLY_EMPTY.value,
+            ZGapReason.INSUFFICIENT_DEPTH.value,
+            ZGapReason.BOOK_NOT_READY.value,
+        }:
+            reasons.append(ZGapReason.BOOK_NOT_READY.value)
         return EntryLegValuation(
             epoch=epoch,
             leg=leg,
@@ -204,7 +217,7 @@ def value_entry_leg(
             f_exit_estimated=None,
             max_economic_price=None,
             ready=False,
-            reason_codes=tuple(reasons or (book.reason_code or ZGapReason.BOOK_NOT_READY.value,)),
+            reason_codes=tuple(dict.fromkeys(reasons)),
         )
 
     ask = require_polymarket_price(as_decimal(book.ask, field_name="ask"))

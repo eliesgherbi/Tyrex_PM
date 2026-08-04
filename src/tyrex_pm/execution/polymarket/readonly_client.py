@@ -1,18 +1,14 @@
-"""R6B authenticated read-only client — never submits or cancels."""
+"""R6B authenticated read-only client — never submits or cancels.
+
+Delegates to official ``polymarket-client`` SecureClient via SdkReadonlyTransport.
+"""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from decimal import Decimal
-from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from dataclasses import dataclass, field
 
-from tyrex_pm.execution.polymarket.auth import L2Credentials, positions_wallet_address, redact_text
-from tyrex_pm.execution.polymarket.l2_hmac import build_l2_headers
-from tyrex_pm.execution.polymarket.normalize import venue_order_from_rest, venue_trade_from_rest
+from tyrex_pm.execution.polymarket.auth import L2Credentials
+from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
 from tyrex_pm.execution.polymarket.transport import (
     CancelOrderResult,
     SubmitOrderRequest,
@@ -22,9 +18,6 @@ from tyrex_pm.execution.polymarket.transport import (
     VenuePositionSnapshot,
     VenueTradeSnapshot,
 )
-
-CLOB_BASE = "https://clob.polymarket.com"
-DATA_API_BASE = "https://data-api.polymarket.com"
 
 
 class MutationAttemptError(RuntimeError):
@@ -36,8 +29,20 @@ class ReadOnlyClobClient:
     """L2-authenticated reads only. ``submit_order`` / ``cancel_order`` always fail."""
 
     creds: L2Credentials
-    base_url: str = CLOB_BASE
+    base_url: str = "https://clob.polymarket.com"
     timeout_s: float = 15.0
+    _transport: SdkReadonlyTransport | None = field(default=None, repr=False)
+
+    def _ro(self) -> SdkReadonlyTransport:
+        if self._transport is None:
+            self._transport = SdkReadonlyTransport.from_env()
+            # Prefer injected creds when from_env was not used with matching env.
+            self._transport.creds = self.creds
+        return self._transport
+
+    @classmethod
+    def from_creds(cls, creds: L2Credentials, *, transport: SdkReadonlyTransport | None = None):
+        return cls(creds=creds, _transport=transport)
 
     def submit_order(self, request: SubmitOrderRequest) -> SubmitOrderResult:
         raise MutationAttemptError("R6B read-only client forbids submit_order")
@@ -45,107 +50,26 @@ class ReadOnlyClobClient:
     def cancel_order(self, venue_order_id: str) -> CancelOrderResult:
         raise MutationAttemptError("R6B read-only client forbids cancel_order")
 
-    def _l2_headers(self, method: str, path: str, body: str = "") -> dict[str, str]:
-        headers, _report = build_l2_headers(
-            self.creds,
-            method=method,
-            request_path=path,
-            body=body or None,
-        )
-        return headers
-
-    def _get_json(self, path: str, *, params: dict[str, str] | None = None) -> Any:
-        qs = f"?{urlencode(params)}" if params else ""
-        url_path = path + qs
-        headers = self._l2_headers("GET", path)
-        req = Request(self.base_url + url_path, headers=headers, method="GET")
-        try:
-            with urlopen(req, timeout=self.timeout_s) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            safe = redact_text(body, self.creds)
-            raise RuntimeError(f"HTTP {exc.code} on {path}: {safe[:200]}") from None
-        except URLError as exc:
-            raise RuntimeError(f"network error on {path}: {type(exc.reason).__name__}") from None
-
     def get_open_orders(self, *, market_id: str | None = None) -> list[VenueOrderSnapshot]:
-        params = {} if market_id is None else {"market": market_id}
-        raw = self._get_json("/data/orders", params=params or None)
-        rows = raw.get("data") if isinstance(raw, dict) else raw
-        if not isinstance(rows, list):
-            return []
-        return [venue_order_from_rest(r) for r in rows if isinstance(r, dict)]
+        return self._ro().get_open_orders(market_id=market_id)
 
     def get_order(self, venue_order_id: str) -> VenueOrderSnapshot | None:
-        raw = self._get_json("/data/orders", params={"id": venue_order_id})
-        rows = raw.get("data") if isinstance(raw, dict) else raw
-        if not isinstance(rows, list) or not rows:
-            return None
-        return venue_order_from_rest(rows[0])
+        return self._ro().get_order(venue_order_id)
 
     def get_trades(
         self, *, market_id: str | None = None, after: str | None = None
     ) -> list[VenueTradeSnapshot]:
-        params: dict[str, str] = {}
-        if market_id:
-            params["market"] = market_id
-        if after:
-            params["after"] = after
-        raw = self._get_json("/data/trades", params=params or None)
-        rows = raw.get("data") if isinstance(raw, dict) else raw
-        if not isinstance(rows, list):
-            return []
-        return [venue_trade_from_rest(r) for r in rows if isinstance(r, dict)]
+        return self._ro().get_trades(market_id=market_id, after=after)
 
     def get_positions(self) -> list[VenuePositionSnapshot]:
-        # Public data-api by address — no L2 mutation surface.
-        url = (
-            f"{DATA_API_BASE}/positions?"
-            f"{urlencode({'user': positions_wallet_address(self.creds)})}"
-        )
-        req = Request(url, method="GET")
-        with urlopen(req, timeout=self.timeout_s) as resp:
-            rows = json.loads(resp.read().decode("utf-8"))
-        out: list[VenuePositionSnapshot] = []
-        if not isinstance(rows, list):
-            return out
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            asset = str(r.get("asset") or r.get("token_id") or "")
-            if not asset:
-                continue
-            out.append(
-                VenuePositionSnapshot(
-                    instrument_token_id=asset,
-                    size=Decimal(str(r.get("size") or "0")),
-                    avg_price=(
-                        None
-                        if r.get("avgPrice") is None
-                        else Decimal(str(r.get("avgPrice")))
-                    ),
-                    market_id=None if r.get("conditionId") is None else str(r.get("conditionId")),
-                )
-            )
-        return out
+        return self._ro().get_positions()
 
     def get_balance(self) -> VenueBalanceSnapshot:
-        raw = self._get_json(
-            "/balance-allowance",
-            params={"asset_type": "COLLATERAL"},
-        )
-        if not isinstance(raw, dict):
-            return VenueBalanceSnapshot(collateral_balance=Decimal("0"), allowance=None)
-        return VenueBalanceSnapshot(
-            collateral_balance=Decimal(str(raw.get("balance") or "0")),
-            allowance=(
-                None if raw.get("allowance") is None else Decimal(str(raw.get("allowance")))
-            ),
-        )
+        return self._ro().get_balance()
 
-    def subscribe_user_events(self, handler) -> None:  # noqa: ANN001
-        raise MutationAttemptError("R6B does not open user-stream in automated mode")
+    def get_server_time(self) -> int | None:
+        return self._ro().get_server_time()
 
     def stop(self) -> None:
-        return
+        if self._transport is not None:
+            self._transport.stop()

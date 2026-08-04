@@ -1,9 +1,14 @@
 # N7 — Tiny operator-controlled live
 
-**Status:** Simplified operator one-shot — **no authorization ceremony**.  
-Operator runs `python tools/n7_live/run_n7_live_oneshot.py --live` (invocation = authorization).  
-Fee-inclusive entry debit ≤ $5.00. Scope A only.  
-**Document:** `Docs/implementation/z_gap_production_readiness/n7_tiny_operator_live.md`  
+**Status:** SUPERSEDED for operator procedure by
+[`n7_simplified_operator_live.md`](n7_simplified_operator_live.md)
+(ceremony removed; SSR match optional/disabled; evergreen surface in `Docs/latest/`).
+
+Historical planning text below may still mention phrase/envelope gates — those are
+**removed**. Current operator command:
+
+`python tools/n7_live/run_n7_live_oneshot.py --live` (invocation = authorization).  
+Fee-inclusive entry debit ≤ $5.00. Scope A only. `require_ssr_price_match: false`.  
 **Depends on:** N1–N6 accepted evidence  
 **Unblocks:** Operator-executed tiny live one-shot / later continuous (separate)
 

@@ -23,7 +23,7 @@ src/tyrex_pm/
 ├── lifecycle/       host TradeLifecycle (shadow path)
 ├── persistence/     snapshots
 ├── reporting/       facts JSONL
-├── runtime/         hosts + R7 phase-specific gates/one-shot
+├── runtime/         hosts + R7 gates + N7 Z-Gap one-shot/preflight/PTB policy
 └── operations/      small ops helpers
 ```
 
@@ -54,11 +54,10 @@ Do not read the runtime flowchart as an import graph.
 
 Phase-specific (active, validated, not the forever public API):
 
-- `runtime/r7b_live_once.py`, `r7_lifecycle_policy.py`, ack/residual modules  
-- `config/r7/`, `var/state/r7/`  
-- CLI: `r7b-live-once`, `r7c-recon`, `r7-ack-regenerate`  
+- R7: `runtime/r7b_live_once.py`, `r7_lifecycle_policy.py`, ack/residual modules; `config/r7/`, `var/runtime_state/r7/`; CLI `r7b-live-once`, `r7c-recon`, `r7-ack-regenerate`
+- N7: `runtime/n7_*.py`, `config/n7_tiny_live.json`, `tools/n7_live/`; CLI `n7-status`, `n7-preflight`, `n7-live`
 
-Generic targets for future strategies: `Strategy` protocol, `RiskEngine`, `OMS`, stores, planners — without importing R7 packages. Z-Gap must not import `runtime/r7*`.
+Generic targets for future strategies: `Strategy` protocol, `RiskEngine`, `OMS`, stores, planners — without importing R7 packages. **Z-Gap must not import `runtime/r7*`.**
 
 ## Tests (architecture gates)
 

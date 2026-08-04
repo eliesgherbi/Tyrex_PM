@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from tyrex_pm.core.ids import CorrelationId, EventId
 from tyrex_pm.core.snapshots import BookSnapshot, ReferencePriceSnapshot
 from tyrex_pm.domain.polymarket.market import BinaryMarket
 from tyrex_pm.market_data.executable import ExecutableQuote
 from tyrex_pm.market_data.freshness import FreshnessAssessment
+
+if TYPE_CHECKING:
+    from tyrex_pm.market_data.book_view import BookView
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -26,3 +30,5 @@ class DecisionSnapshot:
     observed_at: datetime
     correlation_id: CorrelationId
     causation_id: EventId | None = None
+    # Authoritative reconstructed books when host uses MarketStateStore → BookView.
+    book_view: "BookView | None" = None

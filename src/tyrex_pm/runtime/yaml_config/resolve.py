@@ -234,7 +234,7 @@ def _default_execution_dict() -> dict[str, Any]:
             "max_hold_s": 600.0,
             "flatten_before_close_s": 20.0,
             "exit_on_flat": True,
-            "persistence_path": "var/state/z_gap_shadow_snapshot.json",
+            "persistence_path": "var/runtime_state/shadow/z_gap_shadow_snapshot.json",
             "cancel_unfilled_residual": False,
             "fee_rate": "0",
             "fee_model_id": "shadow_zero_fee_v1",

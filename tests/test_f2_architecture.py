@@ -57,6 +57,9 @@ def test_z_gap_has_no_forbidden_imports() -> None:
         imports = _imports_of(path)
         for mod in imports:
             assert not (mod == "old" or mod.startswith("old.")), path
+            # Strategy-owned reporting.py may import reporting contracts only.
+            if path.name == "reporting.py" and mod.startswith("tyrex_pm.reporting"):
+                continue
             for prefix in forbidden_prefixes:
                 if prefix == "old":
                     continue

@@ -5,7 +5,7 @@ resolved position on the account.
 
 Policy source (exact four identities):
   1. ``config/r7/acknowledgment_policy.json`` (committed source of truth)
-  2. ``var/state/r7/acknowledgment_policy.json`` (durable mirror)
+  2. ``var/runtime_state/r7/acknowledgment_policy.json`` (durable mirror)
 
 After the acknowledgment artifact is deleted, regenerate reloads that sealed
 policy and matches inventory rows by identity. Extra resolved positions are
@@ -19,8 +19,6 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from tyrex_pm.runtime.r7_ack_gate import enforce_acknowledgment_gate
 from tyrex_pm.runtime.r7_ack_policy import (
@@ -70,19 +68,10 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 
 
 def fetch_positions_readonly(repo_root: Path) -> list[dict[str, Any]]:
-    from tyrex_pm.execution.polymarket.auth import (
-        load_l2_credentials,
-        positions_wallet_address,
-    )
+    from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
 
     env = _load_dotenv(repo_root / ".env")
-    creds = load_l2_credentials(env)
-    user = positions_wallet_address(creds)
-    url = f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
-    req = Request(url, headers={"User-Agent": "tyrex-pm-r7d2-ack/1.0"}, method="GET")
-    with urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    return SdkReadonlyTransport.from_env(env).get_positions_raw()
 
 
 def _resolve_policy(
@@ -103,7 +92,7 @@ def _resolve_policy(
             return sealed
         raise AckError(
             "ACK_POLICY_MISSING — sealed policy required at "
-            "config/r7/acknowledgment_policy.json (or var/state mirror). "
+            "config/r7/acknowledgment_policy.json (or var/runtime_state mirror). "
             "Regenerate will not invent identities from all account positions."
         )
 
@@ -179,7 +168,7 @@ def regenerate_acknowledgment(
         "policy_source": pol.source,
         "policy_paths": [
             "config/r7/acknowledgment_policy.json",
-            "var/state/r7/acknowledgment_policy.json",
+            "var/runtime_state/r7/acknowledgment_policy.json",
         ],
         "policy_identity_keys": sorted(pol.content_keys()),
         "commit_identity": commit,

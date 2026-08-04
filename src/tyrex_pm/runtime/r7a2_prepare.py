@@ -8,8 +8,6 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from tyrex_pm.runtime.r7_position_ack import (
     ACKNOWLEDGMENT_TEXT,
@@ -47,24 +45,12 @@ def _load_dotenv_map(path: Path) -> dict[str, str]:
     return out
 
 
-def _get_json(url: str) -> Any:
-    req = Request(url, headers={"User-Agent": "tyrex-pm-r7a2/1.0"}, method="GET")
-    with urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
 def _fetch_positions(repo_root: Path) -> list[dict[str, Any]]:
-    from tyrex_pm.execution.polymarket.auth import (
-        load_l2_credentials,
-        positions_wallet_address,
-    )
+    from tyrex_pm.execution.polymarket.sdk_readonly import SdkReadonlyTransport
 
     env = _load_dotenv_map(repo_root / ".env")
-    creds = load_l2_credentials(env)
-    user = positions_wallet_address(creds)
-    url = f"https://data-api.polymarket.com/positions?{urlencode({'user': user})}"
-    data = _get_json(url)
-    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    ro = SdkReadonlyTransport.from_env(env)
+    return ro.get_positions_raw()
 
 
 def prepare_r7a2(
