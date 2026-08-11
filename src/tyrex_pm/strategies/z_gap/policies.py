@@ -49,6 +49,7 @@ class ReadinessResult:
     action: StrategyAction
     reason_code: ZGapReason
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    blockers: tuple[ZGapReason, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -101,88 +102,107 @@ def evaluate_readiness(
     basis: BasisResult | None,
     time_ready: bool,
     config: ZGapConfig,
+    time_evidence: Mapping[str, Any] | None = None,
 ) -> ReadinessResult:
+    # Trading still uses a deterministic primary blocker, but diagnostics must
+    # retain every independently observable failure.  Returning at the first
+    # failed gate made live reports hide the next problem (for example a late
+    # PTB behind an uncertain clock), forcing one-live-run-at-a-time debugging.
+    failures: list[tuple[ZGapReason, StrategyAction, dict[str, Any]]] = []
     if not time_ready:
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.WAIT,
-            reason_code=ZGapReason.TIME_NOT_READY,
+        failures.append(
+            (
+                ZGapReason.TIME_NOT_READY,
+                StrategyAction.WAIT,
+                {"time": dict(time_evidence or {})},
+            )
         )
+
+    ptb_evidence = {
+        "quality": None if ptb is None else ptb.quality.value,
+        "boundary_lag_ms": None if ptb is None else ptb.boundary_lag_ms,
+        "maximum_boundary_lag_ms": config.ptb_time_quality.max_ptb_lag_ms,
+        "readiness_reasons": [] if ptb is None else list(ptb.readiness_reasons),
+    }
     if ptb is None or not ptb.usable_for_entry:
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.WAIT,
-            reason_code=ZGapReason.PTB_NOT_USABLE,
-            evidence={"ptb_quality": None if ptb is None else ptb.quality.value},
+        failures.append(
+            (ZGapReason.PTB_NOT_USABLE, StrategyAction.WAIT, {"ptb": ptb_evidence})
         )
-    if ptb.boundary_lag_ms is not None and ptb.boundary_lag_ms > config.ptb_time_quality.max_ptb_lag_ms:
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.SKIP,
-            reason_code=ZGapReason.PTB_NOT_USABLE,
-            evidence={"boundary_lag_ms": ptb.boundary_lag_ms},
+    elif (
+        ptb.boundary_lag_ms is not None
+        and ptb.boundary_lag_ms > config.ptb_time_quality.max_ptb_lag_ms
+    ):
+        failures.append(
+            (ZGapReason.PTB_NOT_USABLE, StrategyAction.SKIP, {"ptb": ptb_evidence})
         )
+
     if model.jump_guard_tripped:
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.WAIT,
-            reason_code=ZGapReason.JUMP_GUARD,
+        failures.append((ZGapReason.JUMP_GUARD, StrategyAction.WAIT, {}))
+    if not model.ready or model.tau_s is None:
+        failures.append(
+            (
+                ZGapReason.MODEL_NOT_READY,
+                StrategyAction.WAIT,
+                {"model_reject_reasons": list(model.reject_reasons)},
+            )
         )
-    if not model.ready:
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.WAIT,
-            reason_code=ZGapReason.MODEL_NOT_READY,
-            evidence={"reject_reasons": list(model.reject_reasons)},
-        )
+
     if basis is not None:
         if basis.validity is not BasisValidity.VALID or basis.basis_bps is None:
-            return ReadinessResult(
-                ready=False,
-                action=StrategyAction.WAIT,
-                reason_code=ZGapReason.BASIS_REJECT,
-                evidence={"basis_validity": basis.validity.value},
+            failures.append(
+                (
+                    ZGapReason.BASIS_REJECT,
+                    StrategyAction.WAIT,
+                    {"basis_validity": basis.validity.value},
+                )
             )
-        if abs(basis.basis_bps) > config.ptb_time_quality.basis_max_bps:
-            return ReadinessResult(
-                ready=False,
-                action=StrategyAction.SKIP,
-                reason_code=ZGapReason.BASIS_REJECT,
-                evidence={"basis_bps": str(basis.basis_bps)},
+        elif abs(basis.basis_bps) > config.ptb_time_quality.basis_max_bps:
+            failures.append(
+                (
+                    ZGapReason.BASIS_REJECT,
+                    StrategyAction.SKIP,
+                    {"basis_bps": str(basis.basis_bps)},
+                )
             )
-    if model.tau_s is None:
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.WAIT,
-            reason_code=ZGapReason.MODEL_NOT_READY,
-        )
-    if not (config.entry.tau_min_s <= model.tau_s <= config.entry.tau_max_s):
-        return ReadinessResult(
-            ready=False,
-            action=StrategyAction.SKIP,
-            reason_code=ZGapReason.TAU_OUT_OF_BAND,
-            evidence={"tau_s": model.tau_s},
+
+    if model.tau_s is not None and not (
+        config.entry.tau_min_s <= model.tau_s <= config.entry.tau_max_s
+    ):
+        failures.append(
+            (ZGapReason.TAU_OUT_OF_BAND, StrategyAction.SKIP, {"tau_s": model.tau_s})
         )
     if model.z is not None:
         abs_z = abs(model.z)
         if abs_z >= float(config.entry.block_abs_z):
-            return ReadinessResult(
-                ready=False,
-                action=StrategyAction.SKIP,
-                reason_code=ZGapReason.ABS_Z_BLOCK,
-                evidence={"z": model.z},
-            )
-        if not (float(config.entry.z_min) <= abs_z <= float(config.entry.z_max)):
-            return ReadinessResult(
-                ready=False,
-                action=StrategyAction.SKIP,
-                reason_code=ZGapReason.Z_OUT_OF_BAND,
-                evidence={"z": model.z},
-            )
+            failures.append((ZGapReason.ABS_Z_BLOCK, StrategyAction.SKIP, {"z": model.z}))
+        elif not (float(config.entry.z_min) <= abs_z <= float(config.entry.z_max)):
+            failures.append((ZGapReason.Z_OUT_OF_BAND, StrategyAction.SKIP, {"z": model.z}))
+
+    if failures:
+        primary_reason, primary_action, _ = failures[0]
+        merged: dict[str, Any] = {
+            "strategy_inputs_eligible": False,
+            "blockers": [reason.value for reason, _, _ in failures],
+        }
+        for _, _, item in failures:
+            merged.update(item)
+        return ReadinessResult(
+            ready=False,
+            action=primary_action,
+            reason_code=primary_reason,
+            evidence=merged,
+            blockers=tuple(reason for reason, _, _ in failures),
+        )
     return ReadinessResult(
         ready=True,
         action=StrategyAction.ENTER,  # candidate path; selection may still skip
         reason_code=ZGapReason.MODEL_READY,
+        evidence={
+            "strategy_inputs_eligible": True,
+            "blockers": [],
+            "time": dict(time_evidence or {}),
+            "ptb": ptb_evidence,
+        },
     )
 
 
@@ -193,11 +213,7 @@ def select_leg(
     config: ZGapConfig,
 ) -> LegSelectionResult:
     """argmax valid positive economic edge; no sign(z) restriction."""
-    threshold = (
-        config.entry.theta_take
-        if config.entry.require_repricing_edge
-        else Decimal("0")
-    )
+    threshold = config.entry.theta_take if config.entry.require_repricing_edge else Decimal("0")
     eps = config.entry.tie_epsilon
 
     def _edge(v: EntryLegValuation) -> Decimal | None:
@@ -222,11 +238,7 @@ def select_leg(
 
     if len(valid) == 0:
         # Distinguish no positive edge vs below threshold
-        positives = [
-            e
-            for e in (e_up, e_down)
-            if e is not None and e > 0
-        ]
+        positives = [e for e in (e_up, e_down) if e is not None and e > 0]
         if positives:
             return LegSelectionResult(
                 selected=None,

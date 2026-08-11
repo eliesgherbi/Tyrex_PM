@@ -145,9 +145,7 @@ def bootstrap_token_into_store(
     request_start = store.get(InstrumentId(token_id)).book_version
     payload = fetcher(token_id)
     if payload.token_id != str(token_id):
-        raise RuntimeError(
-            f"rest_token_mismatch:expected={token_id}:got={payload.token_id}"
-        )
+        raise RuntimeError(f"rest_token_mismatch:expected={token_id}:got={payload.token_id}")
     ok = store.apply_rest_snapshot(
         payload.book,
         ts_received=datetime.now(timezone.utc),

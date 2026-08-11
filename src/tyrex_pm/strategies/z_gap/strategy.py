@@ -17,9 +17,11 @@ from tyrex_pm.core.intents import (
     HoldToResolutionIntent,
     new_intent_id,
 )
-from tyrex_pm.core.modes import RuntimeMode
-from tyrex_pm.lifecycle.trade_lifecycle import LifecycleState
-from tyrex_pm.strategies.context import DecisionContext, StrategyContext
+from tyrex_pm.strategies.context import (
+    DecisionContext,
+    StrategyContext,
+    StrategyPositionPhase,
+)
 from tyrex_pm.strategies.decisions import IntentLike, StrategyAction, StrategyDecision
 from tyrex_pm.strategies.z_gap.config import ZGapConfig
 from tyrex_pm.strategies.z_gap.decision_input import ZGapDecisionSnapshot
@@ -44,11 +46,9 @@ from tyrex_pm.strategies.z_gap.valuations import (
 
 _EXIT_BUSY = frozenset(
     {
-        LifecycleState.EXIT_REQUESTED,
-        LifecycleState.EXIT_PENDING,
-        LifecycleState.EXIT_RETRY_WAIT,
-        LifecycleState.MANUAL_INTERVENTION,
-        LifecycleState.RESOLUTION_CONFIRMED,
+        StrategyPositionPhase.EXIT_REQUESTED,
+        StrategyPositionPhase.EXIT_PENDING,
+        StrategyPositionPhase.MANUAL_INTERVENTION,
     }
 )
 
@@ -153,14 +153,10 @@ class ZGapStrategy:
         self._last_epoch_id = decision_input.epoch.epoch_id
 
         # After resolution commitment, kill must not fabricate a sell.
-        committed = bool(
-            context.lifecycle is not None and context.lifecycle.resolution_committed
-        )
+        committed = bool(context.lifecycle is not None and context.lifecycle.resolution_committed)
         kill_as_emergency = context.kill_switch_active and not committed
         flags = NormalizedRiskFlags(
-            unknown_inventory=bool(
-                decision_input.capabilities.get("unknown_inventory", False)
-            )
+            unknown_inventory=bool(decision_input.capabilities.get("unknown_inventory", False))
             or bool(context.unknown_inventory),
             emergency=bool(decision_input.capabilities.get("emergency", False)),
             kill_switch=kill_as_emergency,
@@ -198,14 +194,33 @@ class ZGapStrategy:
             basis=basis,
             time_ready=decision_input.time.ready,
             config=self.config,
+            time_evidence={
+                "ready": decision_input.time.ready,
+                "reason_code": decision_input.time.reason_code,
+                "sync_status": decision_input.time.sync_status.value,
+                "uncertainty_ms": decision_input.time.uncertainty_ms,
+                "maximum_uncertainty_ms": (
+                    self.config.ptb_time_quality.max_clock_uncertainty_ms
+                ),
+                "estimated_offset_ms": decision_input.time.estimated_offset_ms,
+                "snapshot_age_ms": decision_input.time.snapshot_age_ms,
+                "clock_snapshot_id": decision_input.time.clock_snapshot_id,
+            },
         )
 
         if not decision_input.fee_resolved:
+            blockers = [reason.value for reason in ready.blockers]
+            blockers.append(ZGapReason.FEE_NOT_READY.value)
             decision = self._decision(
                 action=StrategyAction.WAIT,
                 reason=ZGapReason.FEE_NOT_READY,
                 decision_input=decision_input,
-                evidence={"fee_resolved": False},
+                evidence={
+                    "fee_resolved": False,
+                    "strategy_inputs_eligible": False,
+                    "blockers": list(dict.fromkeys(blockers)),
+                    "readiness": dict(ready.evidence),
+                },
             )
             return decision, []
 
@@ -222,7 +237,10 @@ class ZGapStrategy:
             return decision, []
 
         # Lifecycle may already own an entry attempt — do not emit a new lineage.
-        if context.lifecycle is not None and context.lifecycle.state is LifecycleState.ENTRY_PENDING:
+        if (
+            context.lifecycle is not None
+            and context.lifecycle.phase is StrategyPositionPhase.ENTRY_PENDING
+        ):
             decision = self._decision(
                 action=StrategyAction.HOLD,
                 reason=ZGapReason.SKIP,
@@ -285,6 +303,9 @@ class ZGapStrategy:
 
         evidence: dict[str, Any] = {
             **dict(decision_input.evidence),
+            "strategy_inputs_eligible": True,
+            "blockers": [],
+            "readiness": dict(ready.evidence),
             "trigger": decision_input.trigger,
             "epoch_id": decision_input.epoch.epoch_id,
             "up_valuation": _valuation_evidence(up_val),
@@ -310,10 +331,6 @@ class ZGapStrategy:
             self._entry_lineage_consumed = True
             self._window_closed_to_reentry = True
             evidence["intent_id"] = intent.intent_id.value
-            if context.mode is RuntimeMode.OBSERVE:
-                evidence["counterfactual_note"] = (
-                    "OBSERVE records would-enter intent only; no fill/portfolio"
-                )
 
         decision = self._decision(
             action=policy.action,
@@ -330,14 +347,10 @@ class ZGapStrategy:
         flags: NormalizedRiskFlags,
     ) -> tuple[StrategyDecision, list[IntentLike]]:
         assert decision_input.position is not None
-        committed = bool(
-            context.lifecycle is not None and context.lifecycle.resolution_committed
-        )
+        committed = bool(context.lifecycle is not None and context.lifecycle.resolution_committed)
         kill_as_emergency = context.kill_switch_active and not committed
         held = decision_input.position.held_leg
-        book = (
-            decision_input.up_book if held is ZGapLeg.UP else decision_input.down_book
-        )
+        book = decision_input.up_book if held is ZGapLeg.UP else decision_input.down_book
         pos_val = value_position(
             model=decision_input.model,
             position=decision_input.position,
@@ -423,9 +436,9 @@ class ZGapStrategy:
                 "pnl_liquidation_estimated": None
                 if pos_val.pnl_liquidation is None
                 else str(pos_val.pnl_liquidation),
-                "label": "shadow_position" if context.mode is RuntimeMode.SHADOW else "hypothetical",
+                "label": "confirmed_position",
                 "economics_label": "estimated",
-                "pnl_label": "estimated_shadow_pnl",
+                "pnl_label": "estimated_liquidation_pnl",
             },
             "thesis": thesis.reason_code.value,
             "thesis_confirming": thesis.confirming,
@@ -435,7 +448,7 @@ class ZGapStrategy:
             "resolution_committed": committed,
             "ponr_reached": context.ponr_reached,
             "exit_outstanding": bool(
-                context.lifecycle is not None and context.lifecycle.state in _EXIT_BUSY
+                context.lifecycle is not None and context.lifecycle.phase in _EXIT_BUSY
             ),
             "sell_vs_resolve": {
                 "v_sell": None if pos_val.v_sell is None else str(pos_val.v_sell),
@@ -450,12 +463,8 @@ class ZGapStrategy:
         intents: list[IntentLike] = []
         emit_exits = self._may_emit_exit_intents(decision_input, context)
         life = context.lifecycle
-        resolution_pending = (
-            life is not None and life.state is LifecycleState.RESOLUTION_PENDING
-        )
-        resolution_confirmed = (
-            life is not None and life.state is LifecycleState.RESOLUTION_CONFIRMED
-        )
+        resolution_pending = False
+        resolution_confirmed = False
 
         if (
             policy_action is StrategyAction.HOLD
@@ -470,10 +479,11 @@ class ZGapStrategy:
             intents.append(intent)
             evidence["intent_id"] = intent.intent_id.value
             evidence["intent_kind"] = "HOLD_TO_RESOLUTION"
-        elif (
-            resolution_confirmed
-            and policy_action in {StrategyAction.EXIT, StrategyAction.FLATTEN, StrategyAction.HOLD}
-        ):
+        elif resolution_confirmed and policy_action in {
+            StrategyAction.EXIT,
+            StrategyAction.FLATTEN,
+            StrategyAction.HOLD,
+        }:
             # Evidence accepted; settlement in progress — never fabricate a sell.
             evidence["exit_suppressed"] = "RESOLUTION_CONFIRMED"
             policy_action = StrategyAction.HOLD
@@ -490,12 +500,12 @@ class ZGapStrategy:
                 policy_action = StrategyAction.HOLD
                 policy_reason = ZGapReason.RESOLUTION_PREFERENCE
             else:
-                exit_busy = life is not None and life.state in _EXIT_BUSY
+                exit_busy = life is not None and life.phase in _EXIT_BUSY
                 # RESOLUTION_PENDING counts as busy but pre-PONR sell is allowed.
                 if (
                     exit_busy
                     and life is not None
-                    and life.state is not LifecycleState.RESOLUTION_PENDING
+                    and life.phase is not StrategyPositionPhase.ACTIVE
                     and not escalate
                     and not context.exit_escalate
                 ):
@@ -524,9 +534,8 @@ class ZGapStrategy:
     def _may_emit_exit_intents(
         self, decision_input: ZGapDecisionSnapshot, context: DecisionContext
     ) -> bool:
-        if bool(decision_input.capabilities.get("emit_exit_intents", False)):
-            return True
-        return context.mode is RuntimeMode.SHADOW
+        del context
+        return bool(decision_input.capabilities.get("emit_exit_intents", False))
 
     def _make_hold_to_resolution_intent(
         self,
@@ -620,21 +629,12 @@ class ZGapStrategy:
             evidence={
                 "selected_leg": leg.value,
                 "epoch_id": decision_input.epoch.epoch_id,
-                "e_settlement": None
-                if val.e_settlement is None
-                else str(val.e_settlement),
+                "e_settlement": None if val.e_settlement is None else str(val.e_settlement),
                 "e_repricing": None if val.e_repricing is None else str(val.e_repricing),
-                "executable_ask": None
-                if val.executable_ask is None
-                else str(val.executable_ask),
+                "executable_ask": None if val.executable_ask is None else str(val.executable_ask),
                 "c_entry_unit": None if val.c_entry_unit is None else str(val.c_entry_unit),
                 "economics_label": "estimated",
-                "valuation_label": "counterfactual"
-                if context.mode is RuntimeMode.OBSERVE
-                else "planned",
-                "observe_semantics": "would_enter_not_filled"
-                if context.mode is RuntimeMode.OBSERVE
-                else "shadow_entry_request",
+                "valuation_label": "planned",
             },
             target_notional=decision_input.target_notional,
             outcome=outcome,

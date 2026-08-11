@@ -23,9 +23,7 @@ from tyrex_pm.core.intents import (
 IntentLike = EnterIntent | ExitIntent | FlattenIntent | HoldToResolutionIntent
 
 # F1 generic economic effects — do not add STOP or HOLD_TO_RESOLUTION as actions.
-_F1_ACTIONS = frozenset(
-    {"WAIT", "SKIP", "ENTER", "HOLD", "EXIT", "FLATTEN", "BLOCKED"}
-)
+_F1_ACTIONS = frozenset({"WAIT", "SKIP", "ENTER", "HOLD", "EXIT", "FLATTEN", "BLOCKED"})
 
 
 class StrategyAction(str, Enum):

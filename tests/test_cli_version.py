@@ -1,4 +1,4 @@
-"""CLI smoke tests for the R1 skeleton."""
+"""CLI smoke tests for the supported operator surface."""
 
 from __future__ import annotations
 

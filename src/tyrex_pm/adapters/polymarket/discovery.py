@@ -160,9 +160,7 @@ def market_from_fixture_dict(data: MappingLike) -> BinaryMarket:
     market_id = MarketId(str(market.get("market_id") or condition_id))
     yes_token = TokenId(str(market["yes_token_id"]))
     no_token = TokenId(str(market["no_token_id"]))
-    yes, no = make_binary_instruments(
-        market_id=market_id, yes_token=yes_token, no_token=no_token
-    )
+    yes, no = make_binary_instruments(market_id=market_id, yes_token=yes_token, no_token=no_token)
     tick = market.get("tick_size")
     min_size = market.get("min_order_size")
     return BinaryMarket(
@@ -194,9 +192,7 @@ def slug_from_request(request: MarketRequest) -> str | None:
     return None
 
 
-def _select_market(
-    event: MappingLike, *, condition_id: str | None = None
-) -> MappingLike:
+def _select_market(event: MappingLike, *, condition_id: str | None = None) -> MappingLike:
     markets = event.get("markets") or []
     if not markets:
         raise ValueError("gamma event has no markets")
@@ -233,8 +229,19 @@ def _binary_market_from_selected(
         yes_token=up_token,
         no_token=down_token,
     )
-    tick = selected.get("orderPriceMinTickSize") or selected.get("minimum_tick_size")
-    min_size = selected.get("orderMinSize") or selected.get("minimum_order_size")
+    tick = (
+        selected.get("orderPriceMinTickSize")
+        or selected.get("minimum_tick_size")
+        or selected.get("tick_size")
+        or (selected.get("trading") or {}).get("minimum_tick_size")
+        or (selected.get("trading") or {}).get("orderPriceMinTickSize")
+    )
+    min_size = (
+        selected.get("orderMinSize")
+        or selected.get("minimum_order_size")
+        or selected.get("min_order_size")
+        or (selected.get("trading") or {}).get("minimum_order_size")
+    )
     return BinaryMarket(
         market_id=market_id,
         condition_id=cid,
@@ -250,9 +257,7 @@ def _binary_market_from_selected(
     )
 
 
-def market_from_gamma_event(
-    event: MappingLike, *, condition_id: str | None = None
-) -> BinaryMarket:
+def market_from_gamma_event(event: MappingLike, *, condition_id: str | None = None) -> BinaryMarket:
     """Legacy path: map Up/Down or Yes/No by label into BinaryMarket yes/no slots."""
     selected = _select_market(event, condition_id=condition_id)
     outcomes = selected.get("outcomes")
@@ -265,20 +270,15 @@ def market_from_gamma_event(
         if "up" in lowered and "down" in lowered:
             om = map_up_down_outcomes(outcomes, token_ids)
             up_t, down_t = om.as_up_down()
-            return _binary_market_from_selected(
-                event, selected, up_token=up_t, down_token=down_t
-            )
+            return _binary_market_from_selected(event, selected, up_token=up_t, down_token=down_t)
         if "yes" in lowered and "no" in lowered:
             om = map_yes_no_outcomes(outcomes, token_ids)
             yes_t, no_t = om.as_yes_no()
-            return _binary_market_from_selected(
-                event, selected, up_token=yes_t, down_token=no_t
-            )
+            return _binary_market_from_selected(event, selected, up_token=yes_t, down_token=no_t)
     except OutcomeMapError as exc:
         raise ValueError(str(exc)) from exc
     raise ValueError(
-        "outcome_map_rejected: positional mapping forbidden; "
-        "need label-based Up/Down or Yes/No"
+        "outcome_map_rejected: positional mapping forbidden; need label-based Up/Down or Yes/No"
     )
 
 
@@ -309,13 +309,10 @@ def bind_btc_5m_gamma_event(
         )
     if expected_slug and slug != expected_slug:
         raise ValueError(
-            f"wrong_window:MARKET_SLUG_MISMATCH: returned slug={slug!r} "
-            f"expected={expected_slug!r}"
+            f"wrong_window:MARKET_SLUG_MISMATCH: returned slug={slug!r} expected={expected_slug!r}"
         )
     if not _BTC_5M_SLUG.match(slug):
-        raise ValueError(
-            f"wrong_window:MARKET_SLUG_MALFORMED: not a btc-updown-5m slug: {slug!r}"
-        )
+        raise ValueError(f"wrong_window:MARKET_SLUG_MALFORMED: not a btc-updown-5m slug: {slug!r}")
 
     try:
         slug_epoch = parse_slug_epoch(slug)
@@ -340,9 +337,7 @@ def bind_btc_5m_gamma_event(
     outcomes = selected.get("outcomes")
     token_ids = selected.get("clobTokenIds") or selected.get("clob_token_ids")
     if outcomes is None or token_ids is None:
-        raise ValueError(
-            "MARKET_IDENTIFIERS_MISSING: missing outcomes or clobTokenIds"
-        )
+        raise ValueError("MARKET_IDENTIFIERS_MISSING: missing outcomes or clobTokenIds")
     try:
         om = map_up_down_outcomes(outcomes, token_ids)
     except OutcomeMapError as exc:
@@ -351,9 +346,7 @@ def bind_btc_5m_gamma_event(
     up_t, down_t = om.as_up_down()
     if not up_t.value or not down_t.value:
         raise ValueError("MARKET_IDENTIFIERS_MISSING: empty Up/Down token id")
-    market = _binary_market_from_selected(
-        event, selected, up_token=up_t, down_token=down_t
-    )
+    market = _binary_market_from_selected(event, selected, up_token=up_t, down_token=down_t)
 
     # Authoritative schedule window start (SDK schedule.start_time), when present.
     schedule_start = _parse_dt(event.get("startTime"))
@@ -401,9 +394,7 @@ def bind_btc_5m_gamma_event(
             or "btc" not in (resolution_source + description).lower()
         ):
             rule_ok = False
-            raise ValueError(
-                f"market_rule_source_mismatch: resolutionSource={resolution_source!r}"
-            )
+            raise ValueError(f"market_rule_source_mismatch: resolutionSource={resolution_source!r}")
         if "chainlink" not in description.lower() and CHAINLINK_BTC_USD_STREAM not in description:
             # Soft: Gamma description usually cites Chainlink; if absent but
             # resolutionSource is exact, still accept.
@@ -468,9 +459,7 @@ def book_asks_via_sdk(token_id: str) -> list[dict[str, str]]:
     from tyrex_pm.adapters.polymarket.rest_book import fetch_clob_book
 
     payload = fetch_clob_book(token_id)
-    return [
-        {"price": str(lv.price), "size": str(lv.quantity)} for lv in payload.book.asks
-    ]
+    return [{"price": str(lv.price), "size": str(lv.quantity)} for lv in payload.book.asks]
 
 
 class GammaMarketDiscovery:
@@ -491,9 +480,7 @@ class GammaMarketDiscovery:
         self._event_fetcher = event_fetcher
 
     async def resolve_market(self, request: MarketRequest) -> BinaryMarket:
-        binding = await self.resolve_binding(
-            request, session_role=DiscoverySessionRole.ACTIVE
-        )
+        binding = await self.resolve_binding(request, session_role=DiscoverySessionRole.ACTIVE)
         return binding.market
 
     async def resolve_binding(
@@ -549,9 +536,7 @@ class GammaMarketDiscovery:
             tokens = selected.get("clobTokenIds") or selected.get("clob_token_ids")
             lowered = [
                 str(o).lower()
-                for o in (
-                    outcomes if not isinstance(outcomes, str) else json.loads(outcomes)
-                )
+                for o in (outcomes if not isinstance(outcomes, str) else json.loads(outcomes))
             ]
             if "up" in lowered:
                 om = map_up_down_outcomes(outcomes, tokens)
@@ -641,10 +626,8 @@ class GammaMarketDiscovery:
             require_btc_5m_rules=True,
         )
 
-    async def prepare_next_btc_5m(
-        self, *, now: datetime | None = None
-    ) -> DiscoveredMarketBinding:
-        """Discover the next window without activating it (N4 will promote)."""
+    async def prepare_next_btc_5m(self, *, now: datetime | None = None) -> DiscoveredMarketBinding:
+        """Discover the next window without activating it."""
         slug = next_btc_updown_slug(now)
         return await self.resolve_btc_5m_window(
             slug=slug, session_role=DiscoverySessionRole.PREPARED_NEXT

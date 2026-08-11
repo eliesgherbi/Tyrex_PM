@@ -252,7 +252,9 @@ class SnapshotTimeAuthority:
                 snapshot_age_ms=None,
                 clock_snapshot_id=None,
             )
-        age_ms = int((now_wall - snap.measured_at_wall_utc).total_seconds() * 1000.0)
+        # Snapshot freshness is a duration and must use the monotonic clock.
+        # Wall time may jump or be corrected by several seconds during a run.
+        age_ms = max(0, int((mono - snap.measured_at_monotonic_ns) / 1_000_000))
         status = snap.sync_status
         uncertainty = snap.uncertainty_ms
         if self.max_snapshot_age_ms is not None and age_ms > self.max_snapshot_age_ms:

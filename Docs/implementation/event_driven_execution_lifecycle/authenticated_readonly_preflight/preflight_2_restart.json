@@ -1,0 +1,177 @@
+{
+  "ts": "2026-08-07T14:26:26.098057+00:00",
+  "environment": "local_preflight",
+  "mutations_attempted": false,
+  "heartbeat_called": false,
+  "heartbeat_endpoint": {
+    "host": "clob.polymarket.com",
+    "path": "/heartbeats",
+    "method": "POST",
+    "status": "not_called_r6c_policy",
+    "note": "POST /heartbeats can arm a dead-man's switch that cancels all open orders if heartbeats stop (~10s + buffer). Unresolved for R6C."
+  },
+  "credential_env_present": {
+    "POLYMARKET_API_KEY": true,
+    "POLYMARKET_API_SECRET": true,
+    "POLYMARKET_PASSPHRASE": true,
+    "POLYMARKET_API_PASSPHRASE": false,
+    "POLYMARKET_FUNDER": false,
+    "POLYMARKET_ADDRESS": false,
+    "POLYMARKET_PK": false,
+    "TYREX_PRIVATE_KEY": true,
+    "TYREX_FUNDER": true,
+    "POLYMARKET_SIGNATURE_TYPE": false,
+    "TYREX_SIGNATURE_TYPE": true
+  },
+  "credentials_present": true,
+  "identity_mapping": {
+    "private_key_derives_valid_signer": true,
+    "configured_poly_address_matches_signer": false,
+    "configured_poly_address_matches_funder": true,
+    "signer_equals_funder": false,
+    "funder_present": true,
+    "signature_type_present": true,
+    "historical_and_current_identity_mapping_match": true,
+    "poly_address_role": "signer",
+    "pre_r6d_would_use_funder_as_poly_address": true
+  },
+  "transport_choice": "official_polymarket_client_readonly",
+  "probes": [
+    {
+      "host": "clob.polymarket.com",
+      "path": "/time",
+      "method": "GET",
+      "category": "public_market_data",
+      "status": 200,
+      "cloudflare_error": null,
+      "app_auth_validation_reached": false,
+      "ok": true,
+      "detail": "clob_server_time_adapter"
+    }
+  ],
+  "reconciliation": {
+    "missing_evidence": false,
+    "counts": {
+      "POSITION_MISMATCH": 4
+    },
+    "blocks_entry": true,
+    "requires_manual": true,
+    "open_order_count": 0,
+    "trade_count": 767,
+    "position_row_count": 4,
+    "nonzero_position_count": 4,
+    "clean_empty_account": false,
+    "unreachable_account": false,
+    "observation_only_local_empty": true,
+    "blocks_entry_if_trading": true
+  },
+  "user_stream": {
+    "attempted": true,
+    "url_host": "ws-subscriptions-clob.polymarket.com",
+    "path": "/ws/user",
+    "connected": false,
+    "authenticated": false,
+    "auth_message_sent": false,
+    "auth_error": false,
+    "pong_seen": false,
+    "events_received": 0,
+    "disconnect_detected": false,
+    "reconnected": false,
+    "orders_created": false,
+    "idle_account_ok": false,
+    "observe_s": 2.0,
+    "transport": "polymarket-client",
+    "stage": "CLOSE",
+    "failure_kind": "transport",
+    "error_class": "TransportError",
+    "detail": "timed out during opening handshake"
+  },
+  "readiness": {
+    "ready": false,
+    "mutations_enabled": false,
+    "reasons": [
+      "MUTATIONS_DISABLED",
+      "USER_STREAM_UNREADY"
+    ]
+  },
+  "readiness_reasons_expected_when_clean": [
+    "MUTATIONS_DISABLED",
+    "R7_AUTHORIZATION_ABSENT"
+  ],
+  "r6d_root_cause_hypothesis": "pre-R6D POLY_ADDRESS used funder; official/historical require signer EOA",
+  "public_clob": {
+    "transport_reachable": true,
+    "venue_time_valid": true,
+    "venue_time_unix_s": 1786112781,
+    "failure_kind": null,
+    "http_status": 200,
+    "detail": null
+  },
+  "venue_time_unix_s": 1786112781,
+  "balance_evidence": {
+    "retrieved": true,
+    "has_allowance_field": true,
+    "collateral_nonzero": true
+  },
+  "authenticated_ops": [
+    {
+      "op": "get_open_orders",
+      "ok": true,
+      "error_class": null
+    },
+    {
+      "op": "get_trades",
+      "ok": true,
+      "error_class": null
+    },
+    {
+      "op": "get_balance",
+      "ok": true,
+      "error_class": null
+    },
+    {
+      "op": "get_positions",
+      "ok": true,
+      "error_class": null
+    }
+  ],
+  "sdk_network_spy": [
+    {
+      "method": "GET",
+      "path": "/data/orders"
+    },
+    {
+      "method": "GET",
+      "path": "/data/trades"
+    },
+    {
+      "method": "GET",
+      "path": "/balance-allowance"
+    },
+    {
+      "method": "GET",
+      "path": "/positions"
+    }
+  ],
+  "pagination_stats": {
+    "open_orders": {
+      "page_count": 1,
+      "record_count": 0
+    },
+    "trades": {
+      "page_count": 39,
+      "record_count": 767
+    },
+    "positions": {
+      "page_count": 1,
+      "record_count": 4
+    }
+  },
+  "auth_app_validation_reached": true,
+  "cloudflare_blocked": false,
+  "balance_ok": true,
+  "r7_authorization_present": false,
+  "credential_create_or_derive_called": false,
+  "r7_authorization_absent": true,
+  "artifact_sha256": "8a0720d7b6299122eef4bb09af4f8c4a71fca1a409ea51be021b7d83bf11173f"
+}

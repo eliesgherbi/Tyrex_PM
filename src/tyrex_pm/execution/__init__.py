@@ -1,1 +1,1 @@
-"""Execution boundary: OMS protocol, ShadowOMS, order/fill stores."""
+"""Typed orders, durable evidence, reconciliation and execution coordination."""

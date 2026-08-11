@@ -42,9 +42,7 @@ class SettlementReferenceStore:
     def mark_not_ready(self, symbol: str = "btc/usd") -> None:
         state = self._by_symbol.get(symbol.lower())
         if state is None:
-            self._by_symbol[symbol.lower()] = SettlementState(
-                readiness=FeedReadiness.NOT_READY
-            )
+            self._by_symbol[symbol.lower()] = SettlementState(readiness=FeedReadiness.NOT_READY)
         else:
             state.readiness = FeedReadiness.NOT_READY
             state.initialized = False

@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from tyrex_pm.domain.polymarket.fees import FeeCurveParams, PROVISIONAL_SAMPLE_FEE
 from tyrex_pm.core.numerics import as_decimal
+from tyrex_pm.domain.polymarket.fees import PROVISIONAL_SAMPLE_FEE, FeeCurveParams
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -20,6 +20,8 @@ class ZGapVolatilityConfig:
     jump_threshold_sigma: float = 4.0  # provisional
     sample_interval_s: float = 1.0  # provisional
     tau_floor_s: float = 1.0  # provisional
+    # Per √second floor; prevents micro-σ jump lockouts on quiet warmup.
+    sigma_floor: float = 1e-4  # provisional
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -124,3 +126,9 @@ def validate_zgap_config(cfg: ZGapConfig) -> None:
     v = cfg.volatility
     if v.half_life_s <= 0 or v.sample_interval_s <= 0 or v.tau_floor_s <= 0:
         raise ValueError("volatility timing parameters must be positive")
+    if v.jump_threshold_sigma <= 0:
+        raise ValueError("jump_threshold_sigma must be positive")
+    if v.min_samples_s < 0:
+        raise ValueError("min_samples_s must be >= 0")
+    if v.sigma_floor < 0:
+        raise ValueError("sigma_floor must be >= 0")

@@ -93,8 +93,7 @@ def assemble_zgap_decision_snapshot(
     )
 
     ref_fresh = (
-        market_snapshot.reference is not None
-        and market_snapshot.reference_freshness.is_fresh
+        market_snapshot.reference is not None and market_snapshot.reference_freshness.is_fresh
     )
     # When no distinct settlement reference is supplied (F3 fixtures), basis is
     # identically zero from S=S and must not be gated by dual-feed freshness.

@@ -1,3 +1,9 @@
-from tyrex_pm.persistence.snapshot import PersistenceError, StateSnapshotStore
+"""Durable execution evidence persistence."""
 
-__all__ = ["PersistenceError", "StateSnapshotStore"]
+from tyrex_pm.persistence.execution_journal import SqliteExecutionJournal
+from tyrex_pm.persistence.run_evidence_journal import (
+    RunEvidenceRecorder,
+    SqliteRunEvidenceJournal,
+)
+
+__all__ = ["RunEvidenceRecorder", "SqliteExecutionJournal", "SqliteRunEvidenceJournal"]

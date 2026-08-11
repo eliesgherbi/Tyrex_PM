@@ -52,9 +52,7 @@ def compute_log_basis(
             chainlink=Decimal("0")
             if chainlink is None
             else as_decimal(chainlink, field_name="chainlink"),
-            binance=Decimal("0")
-            if binance is None
-            else as_decimal(binance, field_name="binance"),
+            binance=Decimal("0") if binance is None else as_decimal(binance, field_name="binance"),
             basis_ln=None,
             basis_ln_x_1e4=None,
             validity=BasisValidity.MISSING,
@@ -222,12 +220,8 @@ class AcceptedBasisEstimate:
         binance_value: Decimal,
         source_skew_ms: int | None,
     ) -> None:
-        chainlink_source_ts = require_utc(
-            chainlink_source_ts, field_name="chainlink_source_ts"
-        )
-        binance_source_ts = require_utc(
-            binance_source_ts, field_name="binance_source_ts"
-        )
+        chainlink_source_ts = require_utc(chainlink_source_ts, field_name="chainlink_source_ts")
+        binance_source_ts = require_utc(binance_source_ts, field_name="binance_source_ts")
         if (
             self.as_of_chainlink_source_ts is not None
             and chainlink_source_ts < self.as_of_chainlink_source_ts
@@ -351,9 +345,7 @@ def evaluate_dynamic_alignment(
     skew = pairing_source_skew_ms if pairing_source_skew_ms is not None else accepted.source_skew_ms
 
     if current_chainlink is not None and chainlink_source_ts is not None:
-        chainlink_source_ts = require_utc(
-            chainlink_source_ts, field_name="chainlink_source_ts"
-        )
+        chainlink_source_ts = require_utc(chainlink_source_ts, field_name="chainlink_source_ts")
         # Causal guard: Binance used for this pair must not be after Chainlink.
         if binance_source_ts > chainlink_source_ts:
             blockers.append("no_causal_binance_pair")
@@ -377,8 +369,7 @@ def evaluate_dynamic_alignment(
                         chainlink_value=log.chainlink,
                         binance_value=log.binance,
                         source_skew_ms=int(
-                            (chainlink_source_ts - binance_source_ts).total_seconds()
-                            * 1000.0
+                            (chainlink_source_ts - binance_source_ts).total_seconds() * 1000.0
                         ),
                     )
                     estimate_as_of = chainlink_source_ts

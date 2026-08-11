@@ -1,6 +1,5 @@
 """Core contracts: identifiers, time, events, snapshots, envelopes."""
 
-from tyrex_pm.core.clock import Clock, FakeClock, SystemClock, require_utc
 from tyrex_pm.core.book_events import (
     BookDeltaReceived,
     BookLevelDelta,
@@ -8,6 +7,7 @@ from tyrex_pm.core.book_events import (
     BookSnapshotReceived,
     TickSizeChanged,
 )
+from tyrex_pm.core.clock import Clock, FakeClock, SystemClock, require_utc
 from tyrex_pm.core.events import (
     BookUpdated,
     Event,

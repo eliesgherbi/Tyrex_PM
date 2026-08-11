@@ -233,19 +233,13 @@ def sdk_market_event_to_tyrex(
     if etype_s == "tick_size_change":
         payload = getattr(event, "payload", event)
         token_id = str(
-            getattr(payload, "token_id", None)
-            or getattr(payload, "asset_id", None)
-            or ""
+            getattr(payload, "token_id", None) or getattr(payload, "asset_id", None) or ""
         )
         if not token_id:
             raise ValueError("sdk_tick_size_change_missing_token_id")
         ts_event = _ms_to_utc(getattr(payload, "timestamp", None))
-        old_tick = getattr(payload, "old_tick_size", None) or getattr(
-            payload, "oldTickSize", "0"
-        )
-        new_tick = getattr(payload, "new_tick_size", None) or getattr(
-            payload, "newTickSize", None
-        )
+        old_tick = getattr(payload, "old_tick_size", None) or getattr(payload, "oldTickSize", "0")
+        new_tick = getattr(payload, "new_tick_size", None) or getattr(payload, "newTickSize", None)
         if new_tick is None:
             raise ValueError("sdk_tick_size_change_missing_new_tick")
         return TickSizeChanged(

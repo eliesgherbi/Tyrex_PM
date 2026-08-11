@@ -29,9 +29,7 @@ class NumericError(ValueError):
 
 def as_decimal(value: DecimalLike, *, field_name: str) -> Decimal:
     if isinstance(value, float):
-        raise NumericError(
-            f"{field_name} must not use binary float; pass Decimal or str"
-        )
+        raise NumericError(f"{field_name} must not use binary float; pass Decimal or str")
     try:
         if isinstance(value, Decimal):
             result = value

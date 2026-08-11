@@ -1,0 +1,20 @@
+{
+  "level": 2,
+  "terminal_outcome": "FLAT_CONFIRMED",
+  "can_pass": true,
+  "entry_qty": "9.660000",
+  "entry_venue_order_id": "0xorder0001",
+  "exit_venue_order_id": "0xorder0002",
+  "real_venue_mutations": 0,
+  "transport": "FakeTransport",
+  "portfolio_injection": false,
+  "operator_live_armed": false,
+  "wiring": [
+    "try_enter",
+    "apply_response_match",
+    "apply_settlement_update",
+    "run_bounded_exit_ladder",
+    "run_baseline_reconciliation",
+    "classify_n7_terminal"
+  ]
+}

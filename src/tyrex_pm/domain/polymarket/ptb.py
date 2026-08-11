@@ -61,9 +61,7 @@ class PtbSnapshot:
         object.__setattr__(
             self, "event_start", require_utc(self.event_start, field_name="event_start")
         )
-        object.__setattr__(
-            self, "event_end", require_utc(self.event_end, field_name="event_end")
-        )
+        object.__setattr__(self, "event_end", require_utc(self.event_end, field_name="event_end"))
         object.__setattr__(
             self, "receive_ts", require_utc(self.receive_ts, field_name="receive_ts")
         )

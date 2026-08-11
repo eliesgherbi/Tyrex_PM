@@ -7,14 +7,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
-
 from decimal import Decimal
+from enum import Enum
 
 from tyrex_pm.core.clock import require_utc
 from tyrex_pm.core.ids import CorrelationId, EventId
 from tyrex_pm.core.ingress import IngressMeta
-from tyrex_pm.core.snapshots import BookSnapshot, ReferencePriceSnapshot, SettlementReferenceSnapshot
+from tyrex_pm.core.snapshots import (
+    BookSnapshot,
+    ReferencePriceSnapshot,
+    SettlementReferenceSnapshot,
+)
 
 
 class EventSource(str, Enum):

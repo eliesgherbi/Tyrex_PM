@@ -69,22 +69,16 @@ class PtbAttestationRecord:
                 self, "exact_diff", as_decimal(self.exact_diff, field_name="exact_diff")
             )
         if self.bps_diff is not None:
-            object.__setattr__(
-                self, "bps_diff", as_decimal(self.bps_diff, field_name="bps_diff")
-            )
+            object.__setattr__(self, "bps_diff", as_decimal(self.bps_diff, field_name="bps_diff"))
         if self.available_at is not None:
             object.__setattr__(
                 self,
                 "available_at",
                 require_utc(self.available_at, field_name="available_at"),
             )
-        object.__setattr__(
-            self, "attestation_provenance", dict(self.attestation_provenance)
-        )
+        object.__setattr__(self, "attestation_provenance", dict(self.attestation_provenance))
         if self.mismatch_tolerance_bps is not None:
-            raise ValueError(
-                "mismatch_tolerance_bps must remain unset (OPEN) in N3A"
-            )
+            raise ValueError("mismatch_tolerance_bps must remain unset (OPEN) in N3A")
 
 
 def compare_attestation(

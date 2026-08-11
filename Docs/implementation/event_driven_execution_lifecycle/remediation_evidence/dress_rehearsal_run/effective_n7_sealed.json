@@ -1,0 +1,128 @@
+{
+  "live": {
+    "enabled": false,
+    "mutations_enabled": false,
+    "scope": "A",
+    "live_scope": "A",
+    "ack_timeout_ms": 15000,
+    "max_order_notional": "5.00",
+    "order_style": "marketable_limit",
+    "hard_collateral_cap": "5.00",
+    "fingerprint": "a3453dbe246cc5503550391ae3dfaa9250d06301cfe70fd5c922eb38f2ecebc9",
+    "scope_b_available": false,
+    "hold_to_resolution_available": false,
+    "redeem_available": false
+  },
+  "timing": {
+    "last_allowed_entry_before_end_s": 180.0,
+    "discretionary_exit_cutoff_before_end_s": 120.0,
+    "mandatory_flatten_start_before_end_s": 90.0,
+    "residual_operator_deadline_before_end_s": 45.0,
+    "event_end_safety_buffer_s": 30.0,
+    "acknowledgment_timeout_s": 15.0,
+    "cancel_recon_budget_s": 10.0,
+    "exit_retry_max_attempts": 3,
+    "exit_retry_time_budget_ms": 60000,
+    "ack_timeout_ms": 15000,
+    "submission_ack_timeout_ms": 15000,
+    "match_evidence_deadline_ms": 60000,
+    "user_stream_reconnect_deadline_ms": 30000,
+    "rest_recovery_deadline_ms": 30000,
+    "exit_ack_timeout_ms": 15000,
+    "settlement_max_wait_s": 45.0,
+    "settlement_initial_backoff_s": 0.25,
+    "settlement_max_backoff_s": 4.0,
+    "manual_intervention_deadline_before_end_s": 45.0,
+    "status": "FROZEN_FOR_N7"
+  },
+  "max_buy_collateral": "5.00",
+  "max_daily_notional": "5.00",
+  "max_daily_loss": "5.00",
+  "max_positions_per_window": 1,
+  "max_entry_lineages": 1,
+  "skip_if_min_exceeds_cap": true,
+  "order_style": "marketable_limit",
+  "resolution_capability": false,
+  "market_family": "btc_updown_5m",
+  "one_shot": true,
+  "require_ssr_price_match": false,
+  "ssr_match_required": false,
+  "lifecycle_safety_invariants_present": true,
+  "tiny_live_admitted": false,
+  "ptb_authority": "chainlink_sealed_k",
+  "fingerprint": "fb03c16c087968e253dd601d11f8985c0577029b3577fef21f01e174155c89f7",
+  "scope_b_available": false,
+  "hold_to_resolution_available": false,
+  "redeem_available": false,
+  "mutations_default": false,
+  "mode": "n7_oneshot",
+  "allow_same_window_reentry": false,
+  "allow_same_window_reversal": false,
+  "z_gap": {
+    "resolution_capability": false,
+    "target_notional": "5",
+    "fee_rate": "0.07",
+    "fee_exponent": "1",
+    "parameters": {
+      "volatility": {
+        "half_life_s": 30.0,
+        "min_samples_s": 20.0,
+        "jump_threshold_sigma": 4.0,
+        "sample_interval_s": 1.0,
+        "tau_floor_s": 1.0
+      },
+      "entry": {
+        "theta_take": "0.05",
+        "theta_fill_floor": "0.03",
+        "z_min": "0.8",
+        "z_max": "2.2",
+        "block_abs_z": "20",
+        "tau_min_s": 60.0,
+        "tau_max_s": 290.0,
+        "expected_slippage_buy": "0.01",
+        "exit_friction_reserve": "0.0",
+        "require_repricing_edge": true,
+        "tie_epsilon": "0.001",
+        "reject_both_legs_edge": true
+      },
+      "realization": {
+        "theta_rich": "0.02",
+        "min_exit_depth": "0",
+        "expected_slippage_sell": "0.01",
+        "slippage_included_in_executable_bid": true
+      },
+      "thesis": {
+        "p_stop": "0.4013",
+        "stop_confirm_s": 1.0,
+        "reset_on_stale_model": true
+      },
+      "time_resolution": {
+        "flatten_before_event_end_s": 20.0,
+        "sell_vs_resolve_margin": "0.0",
+        "resolution_capability_default": false,
+        "ponr_before_event_end_s": 5.0
+      },
+      "ptb_time_quality": {
+        "basis_max_bps": "3",
+        "max_ptb_lag_ms": 5000,
+        "max_clock_uncertainty_ms": 250
+      },
+      "friction": {
+        "fee_curve": {
+          "fee_rate": "0.07",
+          "exponent": "1"
+        },
+        "provisional_resolve_penalty_per_share": "0.0"
+      }
+    }
+  },
+  "yaml_run": {
+    "requested_mode": "live",
+    "effective_mode": "live",
+    "data_source": "live",
+    "strategy_path": "config/strategies/z_gap.yaml",
+    "risk_path": "config/risk/tiny_live_5usd.yaml",
+    "execution_path": "config/execution/polymarket_live.yaml",
+    "runtime_path": "config/runtime/live_btc_5m.yaml"
+  }
+}

@@ -53,7 +53,9 @@ def compute_basis_bps(
             validity=BasisValidity.MISSING,
             ready=False,
             reason_code="missing_reference",
-            trading_ref=None if trading_ref is None else as_decimal(trading_ref, field_name="trading_ref"),
+            trading_ref=None
+            if trading_ref is None
+            else as_decimal(trading_ref, field_name="trading_ref"),
             settlement_ref=(
                 None
                 if settlement_ref is None

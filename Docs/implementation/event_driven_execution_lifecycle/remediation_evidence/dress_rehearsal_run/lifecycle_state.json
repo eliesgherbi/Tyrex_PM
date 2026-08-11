@@ -1,0 +1,46 @@
+{
+  "blocks_entry": false,
+  "extra": {
+    "baseline": {
+      "acknowledged_positions": [],
+      "captured_at": "2026-08-07T18:30:50.345709+00:00",
+      "condition_id": "cond-dress-rehearsal",
+      "identity_fingerprint": "8c10c2415b34f0fa93b07a28cd2ef2a2",
+      "market_id": "cond-dress-rehearsal",
+      "owned_open_orders": [],
+      "recent_trades_bound": {
+        "after": null,
+        "captured_at": "2026-08-07T18:30:50.345709+00:00",
+        "market_id": "cond-dress-rehearsal",
+        "trade_count": 0,
+        "trade_ids_sample": []
+      },
+      "schema_version": 1,
+      "sealed": true,
+      "source_health": {
+        "balances_ok": true,
+        "errors": [],
+        "orders_ok": true,
+        "positions_ok": true,
+        "trades_ok": true
+      },
+      "token_balances": {
+        "tok-no-dress": "0",
+        "tok-yes-dress": "0"
+      },
+      "token_ids": [
+        "tok-yes-dress",
+        "tok-no-dress"
+      ],
+      "unexpected_open_orders": [],
+      "window_id": "cond-dress-rehearsal"
+    }
+  },
+  "has_blocking_obligations": false,
+  "has_unknown_obligations": false,
+  "order_obligations": [],
+  "run_id": "n7_dress_20260807T183050Z",
+  "schema_version": 2,
+  "session_obligation": null,
+  "updated_at": "2026-08-07T18:30:50.345709+00:00"
+}

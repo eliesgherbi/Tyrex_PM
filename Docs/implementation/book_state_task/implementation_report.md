@@ -1,8 +1,8 @@
 # Book-state implementation report
 
-**Status:** COMPLETE_WITH_ENVIRONMENT_BLOCKER (official SDK cutover landed; full two-rollover OBSERVE pending operator host)  
-**Plan:** `Docs/Implementation/book_state_task/impelmentation_plan.md`  
-**Branch:** `rest_project`  
+**Status:** COMPLETE_WITH_ENVIRONMENT_BLOCKER (official SDK cutover landed; full two-rollover OBSERVE pending operator host)
+**Plan:** `Docs/implementation/book_state_task/impelmentation_plan.md`
+**Branch:** `rest_project`
 **HEAD (pre-implementation / inspected):** `18235c84c99bb0066bcc5271bd761fb191b0548c`
 
 ## Baseline
@@ -210,9 +210,9 @@ On an operator host with working Polymarket public TLS: run a read-only OBSERVE 
 
 ## Official SDK cutover (2026-07-30)
 
-**Status:** COMPLETE_WITH_ENVIRONMENT_BLOCKER (read-only OBSERVE not re-run in this session; deterministic suite green for migration)  
-**Stable SDK selected:** `polymarket-client==0.2.0`  
-**Why:** latest stable PyPI release at implementation time; `0.3.0b1` rejected as pre-release.  
+**Status:** COMPLETE_WITH_ENVIRONMENT_BLOCKER (read-only OBSERVE not re-run in this session; deterministic suite green for migration)
+**Stable SDK selected:** `polymarket-client==0.2.0`
+**Why:** latest stable PyPI release at implementation time; `0.3.0b1` rejected as pre-release.
 **SDK guidance verified:** YES — `PublicClient` / `AsyncPublicClient` / `SecureClient` / `AsyncSecureClient` APIs inspected from installed package + live public `get_order_book` / `get_event` probes.
 
 ### Transports removed
@@ -294,7 +294,7 @@ Not re-executed as a full two-rollover OBSERVE in this implementation session. P
 
 ## Server-time preflight repair (Candidate D)
 
-**Status:** COMPLETE (deterministic + public read-only validation; LIVE not authorized)  
+**Status:** COMPLETE (deterministic + public read-only validation; LIVE not authorized)
 **HEAD before repair:** `18235c84c99bb0066bcc5271bd761fb191b0548c` (working tree; no commit)
 
 ### Proven root cause
@@ -389,7 +389,7 @@ REAL_VENUE_MUTATIONS = 0
 
 ## SDK pagination + async-client adapter repair
 
-**Status:** COMPLETE (deterministic + mutation-disabled read-only validation; LIVE not authorized)  
+**Status:** COMPLETE (deterministic + mutation-disabled read-only validation; LIVE not authorized)
 **Depends on:** Server-time preflight repair above (unchanged / still current)
 
 ### False open-order causal chain (historical)
@@ -463,7 +463,7 @@ python -m pytest -q
 
 ### Read-only evidence
 
-Same-day prior probe (before transient TLS outage) proved empty `Page(items=())` → 0 open-order records after correct interpretation.  
+Same-day prior probe (before transient TLS outage) proved empty `Page(items=())` → 0 open-order records after correct interpretation.
 Current agent host RO re-run hit:
 
 ```text
@@ -482,7 +482,7 @@ No venue mutations attempted. Re-run RO preflight on a venue-reachable operator 
 
 ## BTC 5m market-window identity repair
 
-**Status:** COMPLETE_WITH_BLOCKERS (deterministic + mutation-disabled discovery RO; N7 compose/PTB seal path not safely reachable without `--live`)  
+**Status:** COMPLETE_WITH_BLOCKERS (deterministic + mutation-disabled discovery RO; N7 compose/PTB seal path not safely reachable without `--live`)
 **Depends on:** SDK pagination + async-client repairs above (preserved / still current)
 
 ### Prior operator validation of SDK repairs (unchanged)

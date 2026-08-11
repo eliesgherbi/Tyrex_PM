@@ -83,12 +83,65 @@ class MarketStateStore:
         self._allowed_tokens: set[str] | None = None
         self._min_connection_epoch: int = 0
         self._stale_after_ms: int = 30_000
+        self._last_desync_log_mono_ns: dict[str, int] = {}
 
     def attach(self, dispatcher: EventDispatcher) -> None:
         self._dispatcher = dispatcher
         dispatcher.subscribe(BookSnapshotReceived, self.on_snapshot)
         dispatcher.subscribe(BookDeltaReceived, self.on_delta)
         dispatcher.subscribe(TickSizeChanged, self.on_tick_size)
+
+    def tokens_needing_resync(self) -> list[str]:
+        with self._lock:
+            out: list[str] = []
+            for iid, state in self._books.items():
+                if state.sync_health is SyncHealth.DESYNCED or state.recovery_required:
+                    out.append(iid.value)
+            return out
+
+    def apply_authoritative_snapshot(
+        self,
+        book: BookSnapshot,
+        *,
+        ts_received: datetime | None = None,
+        venue_hash: str | None = None,
+        tick_size: Decimal | None = None,
+        min_order_size: Decimal | None = None,
+        connection_epoch: int = 0,
+        binding_id: str | None = None,
+    ) -> bool:
+        """Atomically replace a token book from an authoritative REST/WS snapshot.
+
+        Validates the snapshot (including non-crossed top) before restoring READY.
+        """
+        received = ts_received or datetime.now(timezone.utc)
+        try:
+            # Re-construct to enforce BookSnapshot invariants (crossed book raises).
+            validated = BookSnapshot(
+                instrument_id=book.instrument_id,
+                ts_event=book.ts_event,
+                bids=book.bids,
+                asks=book.asks,
+            )
+        except ValueError:
+            with self._lock:
+                prev = self._books.get(book.instrument_id, BookState())
+                prev.sync_health = SyncHealth.DESYNCED
+                prev.recovery_required = True
+                prev.derive_legacy_flags()
+                self._books[book.instrument_id] = prev
+            return False
+        return self.apply_rest_snapshot(
+            validated,
+            ts_received=received,
+            venue_hash=venue_hash,
+            tick_size=tick_size,
+            min_order_size=min_order_size,
+            mark_ready=True,
+            connection_epoch=connection_epoch,
+            binding_id=binding_id,
+            source="REST_RESYNC",
+        )
 
     def set_allowed_tokens(self, token_ids: set[str] | None) -> None:
         with self._lock:
@@ -121,6 +174,60 @@ class MarketStateStore:
                 binding_id=state.binding_id,
                 source=state.source,
             )
+
+    def seed_trading_parameters(
+        self,
+        token_id: str,
+        *,
+        tick_size: Decimal | None = None,
+        min_order_size: Decimal | None = None,
+        binding_id: str | None = None,
+    ) -> bool:
+        """Fill missing venue trading params without touching book levels or sync.
+
+        Discovery / binding metadata is the fast path for order preparation.
+        Live REST ticks and ``tick_size_change`` remain authoritative once set.
+        Returns True when any missing field was filled.
+        """
+        if tick_size is None and min_order_size is None and binding_id is None:
+            return False
+        if tick_size is not None and tick_size <= 0:
+            raise ValueError("tick_size must be > 0")
+        if min_order_size is not None and min_order_size < 0:
+            raise ValueError("min_order_size must be >= 0")
+        instrument_id = InstrumentId(token_id)
+        with self._lock:
+            prev = self._books.get(instrument_id, BookState())
+            new_tick = prev.tick_size if prev.tick_size is not None else tick_size
+            new_min = prev.min_order_size if prev.min_order_size is not None else min_order_size
+            new_binding = prev.binding_id or binding_id
+            changed = (
+                new_tick != prev.tick_size
+                or new_min != prev.min_order_size
+                or new_binding != prev.binding_id
+            )
+            if not changed:
+                return False
+            state = BookState(
+                book=prev.book,
+                initialized=prev.initialized,
+                last_ts_event=prev.last_ts_event,
+                last_ts_received=prev.last_ts_received,
+                last_apply_ts=prev.last_apply_ts,
+                last_apply_mono_ns=prev.last_apply_mono_ns,
+                tick_size=new_tick,
+                min_order_size=new_min,
+                recovery_required=prev.recovery_required,
+                book_version=prev.book_version,
+                venue_hash=prev.venue_hash,
+                sync_health=prev.sync_health,
+                connection_epoch=prev.connection_epoch,
+                binding_id=new_binding,
+                source=prev.source,
+            )
+            state.derive_legacy_flags()
+            self._books[instrument_id] = state
+            return True
 
     def on_snapshot(self, event: BookSnapshotReceived) -> None:
         token = event.book.instrument_id.value
@@ -279,11 +386,26 @@ class MarketStateStore:
                     counters.deltas_application_rejected += 1
                     continue
                 # Meaningful change detection for version bump / noop.
-                before = {
-                    ("BID", lv.price): lv.quantity for lv in state.book.bids
-                }
+                before = {("BID", lv.price): lv.quantity for lv in state.book.bids}
                 before.update({("ASK", lv.price): lv.quantity for lv in state.book.asks})
-                book = self._apply_deltas(state.book, changes, ts_event=event.ts_event)
+                try:
+                    book = self._apply_deltas(state.book, changes, ts_event=event.ts_event)
+                except ValueError as exc:
+                    # Crossed/invalid reconstruction: mark token DESYNCED, keep prior book,
+                    # do not raise (BindingFeed must not reconnect for local inconsistency).
+                    state.sync_health = SyncHealth.DESYNCED
+                    state.recovery_required = True
+                    state.derive_legacy_flags()
+                    self._books[instrument_id] = state
+                    counters.deltas_application_rejected += 1
+                    counters.desync_count = getattr(counters, "desync_count", 0) + 1
+                    now_mono = time.monotonic_ns()
+                    last_log = self._last_desync_log_mono_ns.get(token, 0)
+                    if now_mono - last_log >= 10_000_000_000:
+                        self._last_desync_log_mono_ns[token] = now_mono
+                        logger = __import__("logging").getLogger(__name__)
+                        logger.warning("book DESYNC token=%s reason=%s", token, exc)
+                    continue
                 after = {("BID", lv.price): lv.quantity for lv in book.bids}
                 after.update({("ASK", lv.price): lv.quantity for lv in book.asks})
                 if before == after:

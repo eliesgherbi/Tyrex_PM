@@ -58,7 +58,9 @@ class ShortHorizonMomentum:
         ts = require_utc(snapshot.ts_event, field_name="ts_event")
         if self._samples and ts < self._samples[-1].ts_event:
             # Ignore out-of-order
-            return self._result(ts, None, ready=False, source_event_id=source_event_id, reason="OUT_OF_ORDER")
+            return self._result(
+                ts, None, ready=False, source_event_id=source_event_id, reason="OUT_OF_ORDER"
+            )
         if self._samples and ts == self._samples[-1].ts_event:
             self._samples[-1] = _Sample(ts_event=ts, price=snapshot.price)
         else:
@@ -68,7 +70,13 @@ class ShortHorizonMomentum:
         self._samples = [s for s in self._samples if s.ts_event >= cutoff]
 
         if len(self._samples) < self._cfg.min_samples:
-            return self._result(ts, None, ready=False, source_event_id=source_event_id, reason="INSUFFICIENT_SAMPLES")
+            return self._result(
+                ts,
+                None,
+                ready=False,
+                source_event_id=source_event_id,
+                reason="INSUFFICIENT_SAMPLES",
+            )
 
         target = ts - self._cfg.lookback
         baseline = None
@@ -77,9 +85,17 @@ class ShortHorizonMomentum:
                 baseline = sample
                 break
         if baseline is None:
-            return self._result(ts, None, ready=False, source_event_id=source_event_id, reason="INSUFFICIENT_HISTORY")
+            return self._result(
+                ts,
+                None,
+                ready=False,
+                source_event_id=source_event_id,
+                reason="INSUFFICIENT_HISTORY",
+            )
         if baseline.price == 0:
-            return self._result(ts, None, ready=False, source_event_id=source_event_id, reason="ZERO_BASELINE")
+            return self._result(
+                ts, None, ready=False, source_event_id=source_event_id, reason="ZERO_BASELINE"
+            )
         momentum = snapshot.price / baseline.price - Decimal("1")
         return self._result(ts, momentum, ready=True, source_event_id=source_event_id, reason="OK")
 

@@ -1,4 +1,4 @@
-"""Atomic Z-Gap decision input for F3 OBSERVE (immutable)."""
+"""Atomic immutable Z-Gap decision input."""
 
 from __future__ import annotations
 

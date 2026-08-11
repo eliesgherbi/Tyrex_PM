@@ -1,0 +1,47 @@
+{
+  "level": 4,
+  "credentials_required": false,
+  "mutations": 0,
+  "observe": {
+    "fixture": "tests/fixtures/config/observe_z_gap_fixture_f3.json",
+    "actions": [
+      "WAIT",
+      "WAIT",
+      "WAIT",
+      "ENTER",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP"
+    ],
+    "enter_count": 1,
+    "intent_count": 1
+  },
+  "shadow": {
+    "fixture": "tests/fixtures/config/observe_shadow_z_gap_f4.json",
+    "actions": [
+      "WAIT",
+      "WAIT",
+      "WAIT",
+      "ENTER",
+      "HOLD",
+      "HOLD",
+      "HOLD",
+      "EXIT",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP",
+      "SKIP"
+    ],
+    "enter_count": 1,
+    "exit_or_flatten": true
+  },
+  "pytest_suite": "tests/test_f3_z_gap_observe.py tests/test_f4_z_gap_shadow.py tests/test_f5_z_gap_resolution.py tests/test_yaml_run_config.py",
+  "pytest_result": "60 passed",
+  "z_gap_decisions_unchanged": true
+}

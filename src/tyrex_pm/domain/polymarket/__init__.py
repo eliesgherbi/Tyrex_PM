@@ -1,7 +1,7 @@
 from tyrex_pm.domain.polymarket.fees import (
+    PROVISIONAL_SAMPLE_FEE,
     FeeCurveParams,
     FeeEstimateKind,
-    PROVISIONAL_SAMPLE_FEE,
     phi_taker_fee_per_share,
 )
 from tyrex_pm.domain.polymarket.market import BinaryMarket, MarketRequest, MarketStatus

@@ -1,8 +1,4 @@
-"""Immutable trading intents.
-
-R4: EnterIntent.
-R5: ExitIntent, CancelIntent, FlattenIntent (consumers exist).
-"""
+"""Immutable strategy-to-execution intent contracts."""
 
 from __future__ import annotations
 
@@ -66,7 +62,9 @@ class EnterIntent:
     kind: IntentKind = IntentKind.ENTER
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        object.__setattr__(
+            self, "created_at", require_utc(self.created_at, field_name="created_at")
+        )
         notional = require_non_negative(
             as_decimal(self.target_notional, field_name="target_notional"),
             field_name="target_notional",
@@ -107,7 +105,7 @@ class EnterIntent:
 
 @dataclass(frozen=True, kw_only=True)
 class ExitIntent:
-    """Request to flatten the active position (target-flat for R5 validation)."""
+    """Request to flatten the active position."""
 
     intent_id: IntentId
     strategy_id: StrategyId
@@ -123,15 +121,19 @@ class ExitIntent:
     kind: IntentKind = IntentKind.EXIT
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        object.__setattr__(
+            self, "created_at", require_utc(self.created_at, field_name="created_at")
+        )
         if self.kind is not IntentKind.EXIT:
             raise ValueError("ExitIntent.kind must be EXIT")
         if not self.target_flat:
-            raise ValueError("R5 ExitIntent supports target_flat=True only")
+            raise ValueError("ExitIntent supports target_flat=True only")
         if not self.reason_code.strip():
             raise ValueError("reason_code must be non-empty")
         if self.min_price is not None:
-            object.__setattr__(self, "min_price", as_decimal(self.min_price, field_name="min_price"))
+            object.__setattr__(
+                self, "min_price", as_decimal(self.min_price, field_name="min_price")
+            )
         object.__setattr__(self, "evidence", dict(self.evidence))
 
     def semantic_key(self) -> str:
@@ -161,7 +163,9 @@ class CancelIntent:
     kind: IntentKind = IntentKind.CANCEL
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        object.__setattr__(
+            self, "created_at", require_utc(self.created_at, field_name="created_at")
+        )
         if self.kind is not IntentKind.CANCEL:
             raise ValueError("CancelIntent.kind must be CANCEL")
         if not self.reason_code.strip():
@@ -189,7 +193,9 @@ class FlattenIntent:
     kind: IntentKind = IntentKind.FLATTEN
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        object.__setattr__(
+            self, "created_at", require_utc(self.created_at, field_name="created_at")
+        )
         if self.kind is not IntentKind.FLATTEN:
             raise ValueError("FlattenIntent.kind must be FLATTEN")
         if not self.reason_code.strip():
@@ -230,7 +236,9 @@ class HoldToResolutionIntent:
     kind: IntentKind = IntentKind.HOLD_TO_RESOLUTION
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "created_at", require_utc(self.created_at, field_name="created_at"))
+        object.__setattr__(
+            self, "created_at", require_utc(self.created_at, field_name="created_at")
+        )
         if self.kind is not IntentKind.HOLD_TO_RESOLUTION:
             raise ValueError("HoldToResolutionIntent.kind must be HOLD_TO_RESOLUTION")
         if not self.reason_code.strip():

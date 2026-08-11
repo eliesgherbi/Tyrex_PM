@@ -105,12 +105,8 @@ class BookSnapshot:
         bids: list[tuple[DecimalLike, DecimalLike]] | None = None,
         asks: list[tuple[DecimalLike, DecimalLike]] | None = None,
     ) -> BookSnapshot:
-        bid_levels = tuple(
-            BookLevel(price=p, quantity=q) for p, q in (bids or [])
-        )
-        ask_levels = tuple(
-            BookLevel(price=p, quantity=q) for p, q in (asks or [])
-        )
+        bid_levels = tuple(BookLevel(price=p, quantity=q) for p, q in (bids or []))
+        ask_levels = tuple(BookLevel(price=p, quantity=q) for p, q in (asks or []))
         return cls(
             instrument_id=instrument_id,
             ts_event=ts_event,

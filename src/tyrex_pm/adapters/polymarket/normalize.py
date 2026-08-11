@@ -22,7 +22,13 @@ from tyrex_pm.core.book_events import (
     TickSizeChanged,
 )
 from tyrex_pm.core.events import EventSource
-from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, new_correlation_id, new_event_id
+from tyrex_pm.core.ids import (
+    CorrelationId,
+    InstrumentId,
+    MarketId,
+    new_correlation_id,
+    new_event_id,
+)
 from tyrex_pm.core.snapshots import BookLevel, BookSnapshot
 
 

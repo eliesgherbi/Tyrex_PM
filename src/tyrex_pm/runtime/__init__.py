@@ -1,1 +1,1 @@
-"""Application composition / observe host."""
+"""Application composition for the unified trading runtime."""

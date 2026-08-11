@@ -15,7 +15,7 @@ from typing import Any, Callable
 from tyrex_pm.adapters.binance.normalize import normalize_trade_message
 from tyrex_pm.core.ids import CorrelationId, new_correlation_id
 from tyrex_pm.core.ingress import ConnectionGeneration, IngressSequencer
-from tyrex_pm.engine.dispatcher import EventDispatcher
+from tyrex_pm.engine.dispatcher import DispatchError, EventDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -152,4 +152,16 @@ class BinanceTradeWsAdapter:
         trade_id = payload.get("data", payload).get("t") if isinstance(payload, dict) else None
         if trade_id is not None:
             self._last_trade_id = int(trade_id)
-        dispatcher.publish(event)
+        try:
+            dispatcher.publish(event)
+        except DispatchError as exc:
+            # A downstream consumer failure is not a WebSocket failure. Keep
+            # the healthy socket alive and expose separate handler health.
+            self._health(
+                "handler_error",
+                error=type(exc.cause).__name__,
+                message="event_dispatch_handler_failed",
+                event_id=exc.event_id.value,
+                generation=generation,
+            )
+            logger.exception("Binance event handler failed; socket remains connected")

@@ -20,8 +20,12 @@ def build_calibration_row(
     """Structured calibration record — reporting stores it; does not recompute math."""
     model = decision_input.model
     selected = decision.evidence.get("selected_leg")
-    row_kind = "actionable" if actionable else (
-        "rejected" if decision.action.value in {"WAIT", "SKIP", "BLOCKED"} else "counterfactual"
+    row_kind = (
+        "actionable"
+        if actionable
+        else (
+            "rejected" if decision.action.value in {"WAIT", "SKIP", "BLOCKED"} else "counterfactual"
+        )
     )
     return {
         "schema": "z_gap_calibration_v1",

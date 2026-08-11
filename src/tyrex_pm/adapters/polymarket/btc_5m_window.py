@@ -1,4 +1,4 @@
-"""Authoritative BTC 5-minute market window resolution (R7A.1).
+"""Authoritative BTC 5-minute market-window resolution.
 
 Slug epoch is the trading-window start. Gamma ``startDate`` / ``createdAt`` are
 listing/creation metadata and must not be used as ``market_start``.
@@ -176,12 +176,8 @@ def parse_title_window_utc(
     month = _MONTHS[m.group("month").lower()]
     day = int(m.group("day"))
     y = year or datetime.now(timezone.utc).year
-    start = _et_wall_to_utc(
-        y, month, day, int(m.group("sh")), int(m.group("sm")), m.group("sap")
-    )
-    end = _et_wall_to_utc(
-        y, month, day, int(m.group("eh")), int(m.group("em")), m.group("eap")
-    )
+    start = _et_wall_to_utc(y, month, day, int(m.group("sh")), int(m.group("sm")), m.group("sap"))
+    end = _et_wall_to_utc(y, month, day, int(m.group("eh")), int(m.group("em")), m.group("eap"))
     if end <= start:
         end = end + timedelta(days=1)
     return start, end
@@ -214,17 +210,12 @@ def resolve_btc_5m_window(
     title = str(mkt.get("question") or ev.get("title") or "") or None
     created_at = _parse_dt(ev.get("createdAt") or mkt.get("createdAt"))
     listed_at = _parse_dt(
-        ev.get("listedAt")
-        or mkt.get("listedAt")
-        or ev.get("startDate")
-        or mkt.get("startDate")
+        ev.get("listedAt") or mkt.get("listedAt") or ev.get("startDate") or mkt.get("startDate")
     )
     # schedule.start_time / event.startTime — recurring window when present.
     schedule_window_start = _parse_dt(ev.get("startTime"))
     # Legacy / ambiguous field — never authoritative for BTC 5m window identity.
-    event_start_time = _parse_dt(
-        mkt.get("eventStartTime") or ev.get("eventStartTime")
-    )
+    event_start_time = _parse_dt(mkt.get("eventStartTime") or ev.get("eventStartTime"))
     gamma_end = _parse_dt(mkt.get("endDate") or ev.get("endDate"))
     accepting = mkt.get("acceptingOrders")
     if accepting is None:
@@ -292,13 +283,13 @@ def compute_lifecycle_deadlines(
     flatten_deadline = window.market_end - timedelta(seconds=flatten_before_close_s)
     entry_deadline = flatten_deadline - timedelta(seconds=entry_safety_buffer_s)
     approval_expiration = entry_deadline - timedelta(seconds=approval_skew_s)
-    hold = max_hold_s if max_hold_s is not None else max(
-        30.0, (flatten_deadline - now).total_seconds()
+    hold = (
+        max_hold_s
+        if max_hold_s is not None
+        else max(30.0, (flatten_deadline - now).total_seconds())
     )
 
-    if not (
-        approval_expiration <= entry_deadline < flatten_deadline < window.market_end
-    ):
+    if not (approval_expiration <= entry_deadline < flatten_deadline < window.market_end):
         raise MarketWindowError("ENTRY_DEADLINE_AFTER_FLATTEN")
 
     if now >= entry_deadline:

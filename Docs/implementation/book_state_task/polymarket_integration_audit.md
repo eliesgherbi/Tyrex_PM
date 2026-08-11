@@ -10,8 +10,8 @@
 - `var/runs/z_gap/yaml_live_20260730T062958Z/`
 - `var/runs/z_gap/yaml_live_20260730T082212Z/`
 
-**Prior task report:** `Docs/Implementation/book_state_task/implementation_report.md`  
-**Prior plan:** `Docs/Implementation/book_state_task/impelmentation_plan.md`
+**Prior task report:** `Docs/implementation/book_state_task/implementation_report.md`
+**Prior plan:** `Docs/implementation/book_state_task/impelmentation_plan.md`
 
 ---
 

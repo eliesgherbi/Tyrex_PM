@@ -8,6 +8,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, AsyncIterator, Callable, Deque, Sequence
 
 from tyrex_pm.adapters.polymarket.rest_book import bootstrap_token_into_store, fetch_clob_book
@@ -104,6 +105,7 @@ class BindingFeed:
     first_eligible_eval_mono_ns: int | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _task: asyncio.Task | None = None
+    _resync_task: asyncio.Task | None = None
     _stream: Any = None
     _rest_failures: dict[str, str] = field(default_factory=dict)
 
@@ -164,15 +166,25 @@ class BindingFeed:
             except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
+        if self._resync_task is not None:
+            self._resync_task.cancel()
+            await asyncio.gather(self._resync_task, return_exceptions=True)
+            self._resync_task = None
 
     async def bootstrap_rest(self, *, mark_ready: bool = False) -> bool:
         """REST-seed tokens independently. Returns True iff all tokens seeded."""
         self.phase = FeedSyncPhase.SNAPSHOT_ACQUIRING
         self._rest_failures.clear()
-        ok_all = True
-        for token in self.binding.asset_ids:
+        # Discovery tick/min-size must be present before REST so WS snapshots that
+        # omit tick_size still leave the store preparation-ready.
+        self.seed_binding_trading_parameters()
+
+        async def fetch_one(token: str) -> tuple[str, BaseException | None]:
             try:
-                bootstrap_token_into_store(
+                # The public SDK path is synchronous. Keep it off the asyncio
+                # loop so slow Wi-Fi cannot pause market/user streams.
+                await asyncio.to_thread(
+                    bootstrap_token_into_store,
                     self.store,
                     token,
                     binding_id=self.binding.binding_id,
@@ -180,13 +192,22 @@ class BindingFeed:
                     mark_ready=mark_ready,
                     fetcher=self.rest_fetcher,
                 )
-            except Exception as exc:
+                return token, None
+            except Exception as exc:  # noqa: BLE001 - classified below
+                return token, exc
+
+        results = await asyncio.gather(*(fetch_one(token) for token in self.binding.asset_ids))
+        ok_all = True
+        for token, exc in results:
+            if exc is not None:
                 ok_all = False
                 self._rest_failures[token] = f"{type(exc).__name__}:{exc}"
                 self.last_error = f"rest:{token}:{type(exc).__name__}:{exc}"
                 logger.warning("REST bootstrap failed for %s: %s", token, exc)
                 # Fail-soft: continue sibling token.
                 continue
+        # REST payloads often omit tick_size; re-apply discovery fill-if-missing.
+        self.seed_binding_trading_parameters()
         if ok_all:
             self.phase = (
                 FeedSyncPhase.RECONCILING if mark_ready else FeedSyncPhase.SNAPSHOT_ACQUIRING
@@ -206,8 +227,71 @@ class BindingFeed:
         return ok_all
 
     def _all_books_present(self) -> bool:
-        return all(
-            self.store.get(InstrumentId(t)).book is not None for t in self.binding.asset_ids
+        return all(self.store.get(InstrumentId(t)).book is not None for t in self.binding.asset_ids)
+
+    def seed_binding_trading_parameters(self) -> None:
+        """Seed missing tick/min-size from discovery binding onto both tokens."""
+        if self.binding.tick_size is None and self.binding.min_order_size is None:
+            return
+        for token in self.binding.asset_ids:
+            self.store.seed_trading_parameters(
+                token,
+                tick_size=self.binding.tick_size,
+                min_order_size=self.binding.min_order_size,
+                binding_id=self.binding.binding_id,
+            )
+
+    def resolve_tick_size(self, token_id: str) -> Decimal | None:
+        """Fast local tick resolution for one owned token (no network)."""
+        if not self.binding.owns_token(token_id):
+            return None
+        state = self.store.get(InstrumentId(token_id))
+        if state.tick_size is not None:
+            return state.tick_size
+        return self.binding.tick_size
+
+    async def _resync_desynced_tokens(self, *, connection_epoch: int) -> None:
+        """Replace DESYNCED token books via bounded REST snapshot (no WS reconnect)."""
+        needing = [t for t in self.store.tokens_needing_resync() if t in self.binding.asset_ids]
+        if not needing:
+            return
+        for token in needing:
+            try:
+                await asyncio.to_thread(
+                    bootstrap_token_into_store,
+                    self.store,
+                    token,
+                    binding_id=self.binding.binding_id,
+                    connection_epoch=connection_epoch,
+                    mark_ready=True,
+                    fetcher=self.rest_fetcher,
+                )
+                # Clear recovery flag if store now READY.
+                st = self.store.get(InstrumentId(token))
+                if st.sync_health is SyncHealth.READY:
+                    self._rest_failures.pop(token, None)
+            except Exception as exc:  # noqa: BLE001
+                self._rest_failures[token] = f"{type(exc).__name__}:{exc}"
+                self.last_error = f"resync:{token}:{type(exc).__name__}:{exc}"
+                logger.warning(
+                    "BindingFeed %s token resync failed for %s: %s",
+                    self.binding.binding_id,
+                    token,
+                    exc,
+                )
+        self.seed_binding_trading_parameters()
+
+    def _schedule_desync_recovery(self, *, connection_epoch: int) -> None:
+        """Coalesce token recovery while the WebSocket reader keeps draining."""
+        if not any(
+            token in self.binding.asset_ids for token in self.store.tokens_needing_resync()
+        ):
+            return
+        if self._resync_task is not None and not self._resync_task.done():
+            return
+        self._resync_task = asyncio.create_task(
+            self._resync_desynced_tokens(connection_epoch=connection_epoch),
+            name=f"book-resync-{self.binding.binding_id[:16]}",
         )
 
     async def _run(self) -> None:
@@ -244,6 +328,8 @@ class BindingFeed:
                     if self._stop.is_set():
                         break
                     await self._handle_sdk_event(sdk_event, connection_epoch=epoch)
+                    # Token-scoped DESYNC recovery without reconnecting the feed.
+                    self._schedule_desync_recovery(connection_epoch=epoch)
                     # Bounded REST retry while DESYNCED.
                     if self.phase is FeedSyncPhase.DESYNCED and not self._all_books_present():
                         delay = REST_RETRY_BACKOFF_S[
@@ -359,9 +445,7 @@ class BindingFeed:
                     if self.phase is not FeedSyncPhase.DESYNCED and self._all_books_present():
                         self._promote_ready(connection_epoch)
                 else:
-                    self.recovery_reason = (
-                        f"partial_ws_snapshot:{event.book.instrument_id.value}"
-                    )
+                    self.recovery_reason = f"partial_ws_snapshot:{event.book.instrument_id.value}"
                 return
             # Deltas: buffer only; never apply onto an unknown book while DESYNCED.
             token = self._event_token(event)
@@ -494,9 +578,7 @@ class BookFeedSupervisor:
         return feed
 
     async def set_prepared(self, binding: MarketBindingRecord) -> BindingFeed:
-        rec = binding.with_role(
-            BindingLifecycleRole.PREPARED_NEXT, role_epoch=binding.role_epoch
-        )
+        rec = binding.with_role(BindingLifecycleRole.PREPARED_NEXT, role_epoch=binding.role_epoch)
         feed = self._make_feed(rec)
         if self.prepared is not None:
             await self.prepared.stop()
@@ -533,6 +615,16 @@ class BookFeedSupervisor:
         if self.active is None:
             return None
         return self.active.capture_view()
+
+    def resolve_tick_size(self, token_id: str) -> Decimal | None:
+        """Resolve tick from active then prepared feed without network I/O."""
+        for feed in (self.active, self.prepared):
+            if feed is None:
+                continue
+            tick = feed.resolve_tick_size(token_id)
+            if tick is not None:
+                return tick
+        return None
 
     def _all_tokens(self) -> set[str]:
         out: set[str] = set()

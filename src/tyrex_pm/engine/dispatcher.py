@@ -98,9 +98,7 @@ class EventDispatcher:
         entries = self._handlers[event_type]
         for entry in entries:
             if entry.handler is handler:
-                raise ValueError(
-                    f"duplicate subscription of {handler!r} for {event_type.__name__}"
-                )
+                raise ValueError(f"duplicate subscription of {handler!r} for {event_type.__name__}")
 
         self._order_counter += 1
         sub_id = str(uuid4())
@@ -124,9 +122,7 @@ class EventDispatcher:
         if not entries:
             return
         self._handlers[subscription.event_type] = [
-            entry
-            for entry in entries
-            if entry.subscription_id != subscription.subscription_id
+            entry for entry in entries if entry.subscription_id != subscription.subscription_id
         ]
         if not self._handlers[subscription.event_type]:
             del self._handlers[subscription.event_type]

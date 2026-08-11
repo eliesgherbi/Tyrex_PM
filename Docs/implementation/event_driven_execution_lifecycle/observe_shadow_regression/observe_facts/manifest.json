@@ -1,0 +1,30 @@
+{
+  "artifacts": {
+    "analytics_events": "analytics_events.jsonl",
+    "audit_events": "audit_events.jsonl",
+    "run_summary": "run_summary.json"
+  },
+  "attachments": [],
+  "configuration": {
+    "config_fingerprint": "6adf3b9636ffdf7f8d37e4e05f76255f2e09e7b1fc5f26706020a47edd60e704",
+    "run_name": null,
+    "strategy_kind": "z_gap"
+  },
+  "fake_transport": false,
+  "git_head": null,
+  "last_checkpoint_at": "2026-08-07T14:27:55.410209Z",
+  "last_durable_sequence": 70,
+  "lifecycle": "COMPLETE",
+  "mode": "observe",
+  "partial": false,
+  "performance_label": "observed_only",
+  "reporting_health": "HEALTHY",
+  "reporting_profile": "full",
+  "run_id": "phase9-observe",
+  "run_kind": "strategy",
+  "schema_version": "1.0",
+  "started_at": "2026-08-07T14:27:55.130772Z",
+  "strategy_id": "z_gap",
+  "strategy_version": "1.0.0",
+  "updated_at": "2026-08-07T14:27:55.492190Z"
+}

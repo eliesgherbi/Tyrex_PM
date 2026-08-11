@@ -37,7 +37,7 @@ class BookLegIdentity:
 class DiscoveredMarketBinding:
     """Discovery result with label-mapped outcomes and provenance metadata.
 
-    N4 may hold a ``PREPARED_NEXT`` binding without publishing it as active.
+    The market runtime may hold a ``PREPARED_NEXT`` binding before promotion.
     """
 
     market: BinaryMarket
@@ -54,9 +54,7 @@ class DiscoveredMarketBinding:
             object.__setattr__(
                 self,
                 "requested_window_start",
-                require_utc(
-                    self.requested_window_start, field_name="requested_window_start"
-                ),
+                require_utc(self.requested_window_start, field_name="requested_window_start"),
             )
 
     @property
@@ -91,9 +89,7 @@ class DiscoveredMarketBinding:
     @property
     def book_legs(self) -> tuple[BookLegIdentity, ...]:
         return tuple(
-            BookLegIdentity(
-                leg=b.leg, venue_label=b.venue_label, token_id=b.token_id
-            )
+            BookLegIdentity(leg=b.leg, venue_label=b.venue_label, token_id=b.token_id)
             for b in self.outcomes.legs
         )
 

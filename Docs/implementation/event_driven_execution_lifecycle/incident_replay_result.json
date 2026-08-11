@@ -1,0 +1,33 @@
+{
+  "source_run": "yaml_live_20260731T143127Z",
+  "historical_run_present": false,
+  "historical_run_unchanged": true,
+  "old_lifecycle": {
+    "outcome": "PASS_N7_ONE_SHOT_FLAT",
+    "can_pass": true,
+    "reason": "legacy_portfolio_is_flat"
+  },
+  "new_lifecycle": {
+    "terminal_outcome": "MANUAL_INTERVENTION_REQUIRED",
+    "display_outcome": "MANUAL_INTERVENTION_REQUIRED",
+    "reason": "recon_resolved_but_obligation_open",
+    "can_pass": false,
+    "proof": {
+      "entry_order_venue_terminal": false,
+      "venue_cumulative_matched_zero": true,
+      "no_correlated_trade": true,
+      "selected_token_balance_equals_baseline": true,
+      "no_owned_open_order": false,
+      "all_obligations_resolved": false,
+      "reconciliation_no_disagreement": true,
+      "positive_no_fill_evidence": false,
+      "positive_flat_baseline_evidence": false,
+      "positive_flat_with_dust_evidence": false,
+      "dust_approved": false
+    }
+  },
+  "matched_exposure_once": "9.660000",
+  "supervisor_woken": true,
+  "unresolved_recon_cannot_pass": true,
+  "real_venue_mutations": 0
+}

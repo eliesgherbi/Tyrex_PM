@@ -1,0 +1,90 @@
+schema_version: 1
+run_name: z_gap_tiny_live
+
+strategy:
+  kind: z_gap
+  parameters:
+    volatility:
+      half_life_s: 30.0
+      min_samples_s: 20.0
+      jump_threshold_sigma: 4.0
+      sample_interval_s: 1.0
+      tau_floor_s: 1.0
+      # Per √second floor so quiet warmup cannot create a micro-σ jump lockout.
+      sigma_floor: 0.0001
+    entry:
+      theta_take: "0.05"
+      theta_fill_floor: "0.03"
+      z_min: "0.05"
+      z_max: "2.2"
+      block_abs_z: "20"
+      tau_min_s: 10.0
+      tau_max_s: 290.0
+      expected_slippage_buy: "0.01"
+      exit_friction_reserve: "0"
+      require_repricing_edge: true
+      tie_epsilon: "0.001"
+      reject_both_legs_edge: true
+    realization:
+      theta_rich: "0.02"
+      min_exit_depth: "0"
+      expected_slippage_sell: "0.01"
+      slippage_included_in_executable_bid: true
+    thesis:
+      p_stop: "0.4013"
+      stop_confirm_s: 1.0
+      reset_on_stale_model: true
+    time_resolution:
+      flatten_before_event_end_s: 20.0
+      sell_vs_resolve_margin: "0"
+      resolution_capability_default: false
+      ponr_before_event_end_s: 5.0
+    ptb_time_quality:
+      basis_max_bps: "3"
+      # The PTB must still be the immutable EXACT_AT_START Chainlink value.
+      # Arrival is allowed up to 30s so ordinary RTDS/Wi-Fi jitter delays
+      # eligibility instead of invalidating the static five-minute reference.
+      max_ptb_lag_ms: 30000
+      # This is an Internet-path quality bound, not execution latency. The
+      # rolling clock sampler normally selects a much tighter observation.
+      max_clock_uncertainty_ms: 750
+    friction:
+      fee_curve:
+        fee_rate: "0.07"
+        exponent: "1"
+      provisional_resolve_penalty_per_share: "0"
+
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+  preparation_lead_s: 45
+  maximum_duration_s: 300
+  evaluation_interval_s: 1
+  maximum_book_age_ms: 2000
+  maximum_candidate_age_ms: 5000
+
+account:
+  refresh_interval_s: 5
+  snapshot_max_age_s: 15
+  read_timeout_s: 4
+  retry_attempts: 3
+  retry_base_delay_s: 0.25
+
+risk:
+  target_notional: "5"
+  maximum_total_debit: "5"
+  fee_reserve_rate: "0.02"
+  kill_switch_active: false
+
+lifecycle:
+  mandatory_exit_before_end_s: 90
+  manual_deadline_before_end_s: 45
+  evidence_timeout_s: 15
+  reconciliation_interval_s: 0.25
+  exit_retry_limit: 3
+  exit_retry_budget_s: 30
+  minimum_exit_price: "0.01"
+
+state_directory: var/runtime_state/execution
+report_directory: var/runs/z_gap

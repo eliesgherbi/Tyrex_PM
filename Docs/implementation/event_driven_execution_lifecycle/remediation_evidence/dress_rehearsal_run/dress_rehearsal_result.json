@@ -1,0 +1,261 @@
+{
+  "mode": "n7_dress_rehearsal",
+  "outcome": "ABORTED_BEFORE_MUTATION",
+  "abort_reason": "tiny_live_not_admitted",
+  "arm_error": "authorization_mismatch",
+  "admission_refused": true,
+  "admission_missing_ok": false,
+  "admission_false_artifact_ok": false,
+  "tiny_live_admitted": false,
+  "config_path": "Docs\\implementation\\event_driven_execution_lifecycle\\remediation_evidence\\dress_rehearsal_run\\effective_n7_sealed.json",
+  "config_fingerprint": "fb03c16c087968e253dd601d11f8985c0577029b3577fef21f01e174155c89f7",
+  "selected_market": {
+    "market_id": "cond-dress-rehearsal",
+    "side": "YES",
+    "token_id": "tok-yes-dress"
+  },
+  "book_view": {
+    "best_bid": "0.48",
+    "best_ask": "0.50",
+    "source": "dress_rehearsal_fixture_BookSnapshot"
+  },
+  "baseline_sealed": true,
+  "balance_allowance": {
+    "collateral_balance": "1000",
+    "allowance": "1000",
+    "yes_conditional": "0",
+    "no_conditional": "0"
+  },
+  "sizing": {
+    "worst_price": "0.50",
+    "share_notional": "4.830000",
+    "quantity": "9.66",
+    "conservative_entry_fee": "0.16905",
+    "max_fee_inclusive_debit": "4.999050",
+    "collateral_cap": "5.00"
+  },
+  "fak_entry_request": {
+    "token_id": "tok-yes-dress",
+    "side": "BUY",
+    "price": "0.50",
+    "size": "9.66",
+    "order_type": "FAK",
+    "amount": "4.999050",
+    "amount_unit": "USDC",
+    "sent": false
+  },
+  "fak_exit_request": {
+    "token_id": "tok-yes-dress",
+    "side": "SELL",
+    "price": "0.48",
+    "size": "9.66",
+    "order_type": "FAK",
+    "amount": "9.66",
+    "amount_unit": "shares",
+    "sent": false
+  },
+  "exit_plan": {
+    "style": "inventory_bounded_FAK_SELL",
+    "quantity": "9.66",
+    "limit_price": "0.48",
+    "order_type": "FAK",
+    "amount_unit": "shares",
+    "submitted": false
+  },
+  "persistence_path": "Docs\\implementation\\event_driven_execution_lifecycle\\remediation_evidence\\dress_rehearsal_run\\lifecycle_state.json",
+  "runtime_state_path": "Docs\\implementation\\event_driven_execution_lifecycle\\remediation_evidence\\dress_rehearsal_run\\runtime_state.json",
+  "reporting": {
+    "out_dir": "Docs\\implementation\\event_driven_execution_lifecycle\\remediation_evidence\\dress_rehearsal_run",
+    "run_id": "n7_dress_20260807T183050Z",
+    "note": "dress rehearsal writes evidence JSON only; no live reporter mutations"
+  },
+  "handoff": {
+    "kind": "n7_operator_handoff_v1",
+    "reason": "dress_rehearsal_admission_false",
+    "stop_condition": "operator_requested",
+    "stop_condition_recognized": true,
+    "mutations_disabled": false,
+    "known_owned_quantity": "0",
+    "matched_qty": "0",
+    "confirmed_qty": "0",
+    "sellable_qty": "0",
+    "remaining_qty": "0",
+    "open_order_ids": [],
+    "open_owned_orders": [],
+    "venue_evidence": {
+      "obligations": {
+        "order_obligations": [],
+        "session_obligation": null,
+        "open_count": 0,
+        "has_blocking_obligations": false,
+        "has_unknown_obligations": false
+      },
+      "reconciliation": null,
+      "stream_health": {
+        "present": false,
+        "ready": false,
+        "running": false,
+        "gap": false,
+        "stopped": true,
+        "healthy": false
+      },
+      "real_venue_mutation_count": 0
+    },
+    "lifecycle_phase": "MUTATIONS_DISABLED",
+    "exit_supervisor": {
+      "state": {
+        "phase": "IDLE",
+        "woken": false,
+        "exit_need_pending": false,
+        "kill_active": false,
+        "matched_qty": "0",
+        "requested_qty": "0",
+        "entry_remainder_qty": "0",
+        "confirmed_qty": "0",
+        "sellable_qty": "0",
+        "exit_requested_qty": "0",
+        "exit_submitted_qty": "0",
+        "exit_matched_qty": "0",
+        "exit_remaining_qty": "0",
+        "exit_attempts": 0,
+        "max_exit_attempts": 3,
+        "exit_retry_budget_ms": 60000,
+        "match_evidence_deadline_ms": 60000,
+        "exit_started_at": null,
+        "last_intent_kind": null,
+        "last_deadline": null,
+        "escalate_reason": null,
+        "recon_resolved": false,
+        "recon_flat_confirmed": false,
+        "lineage_key": null,
+        "diagnostics": []
+      },
+      "decision": {
+        "action": "WAIT_MATCH",
+        "phase": "WATCHING_ENTRY",
+        "reason": "awaiting_matched_exposure",
+        "matched_qty": "0",
+        "sellable_qty": "0",
+        "exit_remaining_qty": "0",
+        "entry_remainder_qty": "0",
+        "can_pass": false,
+        "escalate": false
+      }
+    },
+    "admission": {
+      "lifecycle_safety_invariants_present": true,
+      "tiny_live_admitted": false,
+      "allows_real_live_arm": false,
+      "control_plane": {
+        "capability": "lifecycle_safety_invariants_present",
+        "admission": "tiny_live_admitted",
+        "env_forbid": "TYREX_N7_FORBID_LIVE / CI / pytest"
+      }
+    },
+    "sealed_fingerprint": "fb03c16c087968e253dd601d11f8985c0577029b3577fef21f01e174155c89f7",
+    "next_safe_operator_action": "Complete Phase 9 Level 5 evidence, review admission artifact, then operator-authorize --live. Do not submit from dress rehearsal.",
+    "do_not": [
+      "guess_inventory",
+      "submit_unbounded_emergency_order",
+      "re_arm_mutations_without_fresh_authorization"
+    ],
+    "monitor": {
+      "lifecycle_phase": "MUTATIONS_DISABLED",
+      "obligations": {
+        "order_obligations": [],
+        "session_obligation": null,
+        "open_count": 0,
+        "has_blocking_obligations": false,
+        "has_unknown_obligations": false
+      },
+      "matched_qty": "0",
+      "confirmed_qty": "0",
+      "sellable_qty": "0",
+      "remaining_qty": "0",
+      "open_owned_orders": [],
+      "stream_health": {
+        "present": false,
+        "ready": false,
+        "running": false,
+        "gap": false,
+        "stopped": true,
+        "healthy": false
+      },
+      "exit_supervisor": {
+        "state": {
+          "phase": "IDLE",
+          "woken": false,
+          "exit_need_pending": false,
+          "kill_active": false,
+          "matched_qty": "0",
+          "requested_qty": "0",
+          "entry_remainder_qty": "0",
+          "confirmed_qty": "0",
+          "sellable_qty": "0",
+          "exit_requested_qty": "0",
+          "exit_submitted_qty": "0",
+          "exit_matched_qty": "0",
+          "exit_remaining_qty": "0",
+          "exit_attempts": 0,
+          "max_exit_attempts": 3,
+          "exit_retry_budget_ms": 60000,
+          "match_evidence_deadline_ms": 60000,
+          "exit_started_at": null,
+          "last_intent_kind": null,
+          "last_deadline": null,
+          "escalate_reason": null,
+          "recon_resolved": false,
+          "recon_flat_confirmed": false,
+          "lineage_key": null,
+          "diagnostics": []
+        },
+        "decision": {
+          "action": "WAIT_MATCH",
+          "phase": "WATCHING_ENTRY",
+          "reason": "awaiting_matched_exposure",
+          "matched_qty": "0",
+          "sellable_qty": "0",
+          "exit_remaining_qty": "0",
+          "entry_remainder_qty": "0",
+          "can_pass": false,
+          "escalate": false
+        }
+      },
+      "reconciliation": null,
+      "reporting_health": {
+        "present": false,
+        "critical_lane_ok": null,
+        "note": "no_reporter_attached"
+      },
+      "real_venue_mutation_count": 0,
+      "mutations_force_off": false,
+      "mutations_ready": false,
+      "admission": {
+        "lifecycle_safety_invariants_present": true,
+        "tiny_live_admitted": false,
+        "allows_real_live_arm": false,
+        "control_plane": {
+          "capability": "lifecycle_safety_invariants_present",
+          "admission": "tiny_live_admitted",
+          "env_forbid": "TYREX_N7_FORBID_LIVE / CI / pytest"
+        }
+      },
+      "sealed_fingerprint": "fb03c16c087968e253dd601d11f8985c0577029b3577fef21f01e174155c89f7",
+      "terminated": false,
+      "captured_at": "2026-08-07T18:30:50.369659Z",
+      "read_only": true
+    },
+    "captured_at": "2026-08-07T18:30:50.369659Z",
+    "read_only": true
+  },
+  "credentials_probe": {
+    "attempted": false,
+    "skipped": true
+  },
+  "transport": "FakeTransport",
+  "transport_submit_count": 0,
+  "real_venue_mutations": 0,
+  "mutations_disabled": true,
+  "stopped_before_submit": true,
+  "ts": "2026-08-07T18:30:50.380190+00:00"
+}

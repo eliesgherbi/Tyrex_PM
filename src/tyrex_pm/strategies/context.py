@@ -5,23 +5,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from enum import Enum
 
-from tyrex_pm.core.ids import RunId, StrategyId
-from tyrex_pm.core.modes import RuntimeMode
+from tyrex_pm.core.ids import InstrumentId, RunId, StrategyId
 from tyrex_pm.domain.polymarket.market import BinaryMarket
 from tyrex_pm.domain.polymarket.resolution_capability import (
     DISABLED_RESOLUTION,
     ResolutionCapability,
 )
-from tyrex_pm.lifecycle.trade_lifecycle import LifecycleSnapshot
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
+
+
+class StrategyPositionPhase(str, Enum):
+    FLAT = "FLAT"
+    ENTRY_PENDING = "ENTRY_PENDING"
+    ACTIVE = "ACTIVE"
+    EXIT_REQUESTED = "EXIT_REQUESTED"
+    EXIT_PENDING = "EXIT_PENDING"
+    MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
+
+
+@dataclass(frozen=True)
+class StrategyLifecycleSnapshot:
+    phase: StrategyPositionPhase
+    instrument_id: InstrumentId | None
+    resolution_committed: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
 class StrategyContext:
     run_id: RunId
     strategy_id: StrategyId
-    mode: RuntimeMode
     market: BinaryMarket
 
 
@@ -30,11 +44,10 @@ class DecisionContext:
     """Immutable context for on_signal — no mutable stores."""
 
     run_id: RunId
-    mode: RuntimeMode
     snapshot: DecisionSnapshot
     target_notional: Decimal
     max_price: Decimal | None = None
-    lifecycle: LifecycleSnapshot | None = None
+    lifecycle: StrategyLifecycleSnapshot | None = None
     position_quantity: Decimal = Decimal("0")
     now: datetime | None = None
     max_hold: timedelta | None = None
@@ -48,7 +61,7 @@ class DecisionContext:
     exit_block_reason: str | None = None
     exit_escalate: bool = False
     exit_urgency: str = "NORMAL"
-    # Confirmed internal cost basis (SHADOW Portfolio); zero when flat/unavailable.
+    # Confirmed execution-session cost basis; zero when flat or unavailable.
     position_cost_total: Decimal = Decimal("0")
     # Host-normalized inventory integrity flag (never guessed by strategy).
     unknown_inventory: bool = False

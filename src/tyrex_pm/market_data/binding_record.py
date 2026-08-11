@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,10 @@ class MarketBindingRecord:
     role_epoch: int
     outcome_semantics: str
     resolved_at: datetime
+    # Market-level CLOB grid; applies to both outcome tokens unless a live
+    # tick_size_change later overrides the store for one token.
+    tick_size: Decimal | None = None
+    min_order_size: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.binding_id.strip() == "":
@@ -77,6 +82,10 @@ class MarketBindingRecord:
                 "event_end",
                 require_utc(self.event_end, field_name="event_end"),
             )
+        if self.tick_size is not None and self.tick_size <= 0:
+            raise ValueError("tick_size must be > 0 when provided")
+        if self.min_order_size is not None and self.min_order_size < 0:
+            raise ValueError("min_order_size must be >= 0 when provided")
 
     @property
     def up_instrument_id(self) -> InstrumentId:
@@ -107,6 +116,8 @@ class MarketBindingRecord:
             role_epoch=self.role_epoch if role_epoch is None else role_epoch,
             outcome_semantics=self.outcome_semantics,
             resolved_at=self.resolved_at,
+            tick_size=self.tick_size,
+            min_order_size=self.min_order_size,
         )
 
     def owns_token(self, token_id: str | TokenId | InstrumentId) -> bool:
@@ -119,6 +130,9 @@ class MarketBindingRecord:
         for key in ("event_start", "event_end", "resolved_at"):
             ts = getattr(self, key)
             raw[key] = None if ts is None else ts.isoformat()
+        for key in ("tick_size", "min_order_size"):
+            value = getattr(self, key)
+            raw[key] = None if value is None else str(value)
         return raw
 
     @classmethod
@@ -128,6 +142,11 @@ class MarketBindingRecord:
                 return None
             text = str(value).replace("Z", "+00:00")
             return datetime.fromisoformat(text)
+
+        def _dec(value: Any) -> Decimal | None:
+            if value is None or value == "":
+                return None
+            return Decimal(str(value))
 
         return cls(
             binding_id=str(raw["binding_id"]),
@@ -142,6 +161,8 @@ class MarketBindingRecord:
             role_epoch=int(raw["role_epoch"]),
             outcome_semantics=str(raw.get("outcome_semantics") or "UNKNOWN"),
             resolved_at=_ts(raw["resolved_at"]) or datetime.now(timezone.utc),
+            tick_size=_dec(raw.get("tick_size")),
+            min_order_size=_dec(raw.get("min_order_size")),
         )
 
 
@@ -164,9 +185,7 @@ def binding_record_from_discovery(
         else:
             role = BindingLifecycleRole.PREPARED_NEXT
     return MarketBindingRecord(
-        binding_id=make_binding_id(
-            window_slug=binding.window_slug, condition_id=condition
-        ),
+        binding_id=make_binding_id(window_slug=binding.window_slug, condition_id=condition),
         window_slug=binding.window_slug,
         condition_id=condition,
         market_id=str(market.market_id.value),
@@ -178,6 +197,8 @@ def binding_record_from_discovery(
         role_epoch=role_epoch,
         outcome_semantics=binding.outcome_semantics,
         resolved_at=resolved_at or datetime.now(timezone.utc),
+        tick_size=market.tick_size,
+        min_order_size=market.min_order_size,
     )
 
 

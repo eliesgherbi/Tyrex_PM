@@ -1,0 +1,250 @@
+{
+  "mode": "n7_readonly_preflight",
+  "not_live_trading": true,
+  "mutations_enabled": false,
+  "real_venue_mutations": 0,
+  "go_no_go": "GO",
+  "abort_codes": [],
+  "git": {
+    "head": "28c4d804f0c2927579c35743bfcedb807330d768",
+    "worktree_clean": false
+  },
+  "config_fingerprint": "fb03c16c087968e253dd601d11f8985c0577029b3577fef21f01e174155c89f7",
+  "config_path": "Docs\\implementation\\event_driven_execution_lifecycle\\authenticated_readonly_preflight\\effective_n7_sealed.json",
+  "production_timing_status": "FROZEN_FOR_N7",
+  "sealed": {
+    "live": {
+      "enabled": false,
+      "mutations_enabled": false,
+      "scope": "A",
+      "live_scope": "A",
+      "ack_timeout_ms": 15000,
+      "max_order_notional": "5.00",
+      "order_style": "marketable_limit",
+      "hard_collateral_cap": "5.00",
+      "fingerprint": "a3453dbe246cc5503550391ae3dfaa9250d06301cfe70fd5c922eb38f2ecebc9",
+      "scope_b_available": false,
+      "hold_to_resolution_available": false,
+      "redeem_available": false
+    },
+    "timing": {
+      "last_allowed_entry_before_end_s": 180.0,
+      "discretionary_exit_cutoff_before_end_s": 120.0,
+      "mandatory_flatten_start_before_end_s": 90.0,
+      "residual_operator_deadline_before_end_s": 45.0,
+      "event_end_safety_buffer_s": 30.0,
+      "acknowledgment_timeout_s": 15.0,
+      "cancel_recon_budget_s": 10.0,
+      "exit_retry_max_attempts": 3,
+      "exit_retry_time_budget_ms": 60000,
+      "ack_timeout_ms": 15000,
+      "submission_ack_timeout_ms": 15000,
+      "match_evidence_deadline_ms": 60000,
+      "user_stream_reconnect_deadline_ms": 30000,
+      "rest_recovery_deadline_ms": 30000,
+      "exit_ack_timeout_ms": 15000,
+      "settlement_max_wait_s": 45.0,
+      "settlement_initial_backoff_s": 0.25,
+      "settlement_max_backoff_s": 4.0,
+      "manual_intervention_deadline_before_end_s": 45.0,
+      "status": "FROZEN_FOR_N7"
+    },
+    "max_buy_collateral": "5.00",
+    "max_daily_notional": "5.00",
+    "max_daily_loss": "5.00",
+    "max_positions_per_window": 1,
+    "max_entry_lineages": 1,
+    "skip_if_min_exceeds_cap": true,
+    "order_style": "marketable_limit",
+    "resolution_capability": false,
+    "market_family": "btc_updown_5m",
+    "one_shot": true,
+    "require_ssr_price_match": false,
+    "ssr_match_required": false,
+    "lifecycle_safety_invariants_present": true,
+    "tiny_live_admitted": false,
+    "ptb_authority": "chainlink_sealed_k",
+    "fingerprint": "fb03c16c087968e253dd601d11f8985c0577029b3577fef21f01e174155c89f7",
+    "scope_b_available": false,
+    "hold_to_resolution_available": false,
+    "redeem_available": false,
+    "mutations_default": false
+  },
+  "first_ok": true,
+  "restart_ok": true,
+  "classification_first": {
+    "classifications": [
+      "KNOWN_FLAT_SELECTED_MARKET",
+      "KNOWN_ACKNOWLEDGED_EXTERNAL_POSITIONS"
+    ],
+    "selected_market_flat": true,
+    "globally_flat": false,
+    "open_order_count": 0,
+    "acknowledged_external": [
+      {
+        "label": "historical_lol",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      },
+      {
+        "label": "historical_btc_5m_1",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      },
+      {
+        "label": "historical_btc_5m_2",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      },
+      {
+        "label": "historical_btc_5m_3",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      }
+    ],
+    "evidence": {
+      "selected_abs_qty": 0.0,
+      "other_abs_qty": 0.0,
+      "ack_keys": []
+    },
+    "ready_for_n7_mutations": false,
+    "mutations_enabled": false,
+    "position_row_count": 4,
+    "observation_only_local_empty": true,
+    "reconciliation_ran": true,
+    "unreachable_account": false
+  },
+  "classification_restart": {
+    "classifications": [
+      "KNOWN_FLAT_SELECTED_MARKET",
+      "KNOWN_ACKNOWLEDGED_EXTERNAL_POSITIONS"
+    ],
+    "selected_market_flat": true,
+    "globally_flat": false,
+    "open_order_count": 0,
+    "acknowledged_external": [
+      {
+        "label": "historical_lol",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      },
+      {
+        "label": "historical_btc_5m_1",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      },
+      {
+        "label": "historical_btc_5m_2",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      },
+      {
+        "label": "historical_btc_5m_3",
+        "token_id": null,
+        "condition_id": null,
+        "status": "RESOLVED_REDEEMABLE",
+        "notes": "N7 must not redeem or alter",
+        "untouched": true,
+        "not_strategy_inventory": true
+      }
+    ],
+    "evidence": {
+      "selected_abs_qty": 0.0,
+      "other_abs_qty": 0.0,
+      "ack_keys": []
+    },
+    "ready_for_n7_mutations": false,
+    "mutations_enabled": false,
+    "position_row_count": 4,
+    "observation_only_local_empty": true,
+    "reconciliation_ran": true,
+    "unreachable_account": false
+  },
+  "classification_stable": true,
+  "acknowledged_external_count": 4,
+  "balance_evidence": {
+    "retrieved": true,
+    "has_allowance_field": true,
+    "collateral_nonzero": true
+  },
+  "user_stream": {
+    "attempted": true,
+    "url_host": "ws-subscriptions-clob.polymarket.com",
+    "path": "/ws/user",
+    "connected": true,
+    "authenticated": true,
+    "auth_message_sent": true,
+    "auth_error": false,
+    "pong_seen": true,
+    "events_received": 0,
+    "disconnect_detected": true,
+    "reconnected": true,
+    "orders_created": false,
+    "idle_account_ok": true,
+    "observe_s": 2.0,
+    "transport": "polymarket-client",
+    "stage": "CLOSE",
+    "failure_kind": null,
+    "error_class": null,
+    "detail": null
+  },
+  "identity_mapping": {
+    "private_key_derives_valid_signer": true,
+    "signer_equals_funder": false,
+    "funder_present": true,
+    "signature_type_present": true,
+    "historical_and_current_identity_mapping_match": true
+  },
+  "baseline_seed": {
+    "identity_fingerprint": "a83ff7f6e538940b0fea9067acf0728f",
+    "captured_at": "2026-08-07T14:27:14.125750+00:00",
+    "source": "n7_preflight",
+    "reconciliation": {
+      "open_order_count": 0,
+      "trade_count": 767,
+      "position_row_count": 4,
+      "unreachable_account": false,
+      "clean_empty_account": false
+    },
+    "acknowledged_external": [
+      "historical_lol",
+      "historical_btc_5m_1",
+      "historical_btc_5m_2",
+      "historical_btc_5m_3"
+    ],
+    "sealed_for_session": false,
+    "note": "selected-market baseline is sealed in-session before mutation arm"
+  },
+  "authorization_ceremony": "removed",
+  "operator_live_command": "python tools/n7_live/run_n7_live_oneshot.py --live",
+  "kill_state_clear": true,
+  "ts": "2026-08-07T14:27:14.125750+00:00"
+}

@@ -1,0 +1,306 @@
+﻿
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+E   AssertionError: assert ['config/obse...adow_r4.json'] == []
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\tests\test_docs_consistency.py:36: AssertionError: assert 
+['config/obse...adow_r4.json'] == []
+E   AssertionError: ['Docs\\implementation\\book_state_task\\implementation_report.md', 
+'Docs\\implementation\\book_state_task\\polymarket_integration_audit.md']
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\tests\test_docs_links.py:39: AssertionError: 
+['Docs\\implementation\\book_state_task\\implementation_report.md', 
+'Docs\\implementation\\book_state_task\\polymarket_integration_audit.md']
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f5.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5a.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_f4.json'
+E   AssertionError: assert False
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\tests\test_n5b_live_guards.py:17: AssertionError: assert False
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5b_live.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_shadow_z_gap_n5b_live.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\n7_tiny_live.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\n7_tiny_live.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\n7_tiny_live.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\n7_tiny_live.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\n7_tiny_live.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\n7_tiny_live.json'
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+E   AssertionError: assert 'E3B0C44298FC...5991B7852B855' == '27210C97AE37...5CF178B91F772'
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\tests\test_r6_auth_redaction.py:24: AssertionError: assert 
+'E3B0C44298FC...5991B7852B855' == '27210C97AE37...5CF178B91F772'
+E   AssertionError: assert 'E3B0C44298FC...5991B7852B855' == '27210C97AE37...5CF178B91F772'
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\tests\test_r6d_auth_identity.py:42: AssertionError: assert 
+'E3B0C44298FC...5991B7852B855' == '27210C97AE37...5CF178B91F772'
+E   AssertionError: assert 'E3B0C44298FC...5991B7852B855' == '27210C97AE37...5CF178B91F772'
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\tests\test_r7a_architecture.py:35: AssertionError: assert 
+'E3B0C44298FC...5991B7852B855' == '27210C97AE37...5CF178B91F772'
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+C:\Users\elies.gherbi\Desktop\work\pm\Tyrex_PM\.venv\Lib\site-packages\_pytest\python.py:157: Failed: async def 
+functions are not natively supported.
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+E   FileNotFoundError: [Errno 2] No such file or directory: 
+'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+C:\Users\elies.gherbi\AppData\Local\Programs\Python\Python311\Lib\pathlib.py:1044: FileNotFoundError: [Errno 2] No 
+such file or directory: 'C:\\Users\\elies.gherbi\\Desktop\\work\\pm\\Tyrex_PM\\config\\observe_z_gap_fixture_f3.json'
+FAILED tests/test_book_state_bs5_through_bs9.py::test_rollover_promote_preserves_warm_books_and_cold_gap_budget
+FAILED tests/test_book_state_rest_and_feed.py::test_supervisor_promote_preserves_binding_id_and_books
+FAILED tests/test_docs_consistency.py::test_documented_config_files_exist - A...
+FAILED tests/test_docs_links.py::test_no_obsolete_docs_implementation_capital_i
+FAILED tests/test_f3_z_gap_observe.py::test_fixture_observe_zgap_deterministic_timeline
+FAILED tests/test_f4_z_gap_shadow.py::test_binding_uniform_evaluate_interface
+FAILED tests/test_f4_z_gap_shadow.py::test_scenario_market_rich_entry_exit_flat
+FAILED tests/test_f4_z_gap_shadow.py::test_scenario_thesis_invalidation - Fil...
+FAILED tests/test_f4_z_gap_shadow.py::test_scenario_time_exit - FileNotFoundE...
+FAILED tests/test_f4_z_gap_shadow.py::test_scenario_risk_flatten - FileNotFou...
+FAILED tests/test_f4_z_gap_shadow.py::test_unknown_inventory_no_blind_sell - ...
+FAILED tests/test_f4_z_gap_shadow.py::test_observe_no_oms_portfolio - FileNot...
+FAILED tests/test_f4_z_gap_shadow.py::test_persistence_active_restart - FileN...
+FAILED tests/test_f5_z_gap_resolution.py::test_scenario_rich_sell_beats_resolution
+FAILED tests/test_f5_z_gap_resolution.py::test_scenario_resolution_win - File...
+FAILED tests/test_f5_z_gap_resolution.py::test_scenario_resolution_lose - Fil...
+FAILED tests/test_f5_z_gap_resolution.py::test_scenario_capability_disabled_time_exit
+FAILED tests/test_f5_z_gap_resolution.py::test_scenario_missing_evidence_stays_pending
+FAILED tests/test_f5_z_gap_resolution.py::test_scenario_mismatched_evidence_rejected
+FAILED tests/test_f5_z_gap_resolution.py::test_restart_pending_no_duplicate_commitment_or_payout
+FAILED tests/test_f5_z_gap_resolution.py::test_replay_settlement_idempotent
+FAILED tests/test_f5_z_gap_resolution.py::test_kill_before_commitment_flattens
+FAILED tests/test_f5_z_gap_resolution.py::test_kill_after_commitment_no_fabricated_sell
+FAILED tests/test_f5_z_gap_resolution.py::test_f1_f4_regression_actions_and_rich
+FAILED tests/test_n2_real_data_adapters.py::test_rtds_chainlink_connect_subscribe_publish_shutdown
+FAILED tests/test_n2_real_data_adapters.py::test_rtds_binance_auto_falls_back_unfiltered
+FAILED tests/test_n2_real_data_adapters.py::test_rtds_heartbeat_timeout_increments_generation
+FAILED tests/test_n2_real_data_adapters.py::test_feed_supervisor_graceful_shutdown
+FAILED tests/test_n2_real_data_adapters.py::test_clock_sync_snapshot_ready_degraded_unsync
+FAILED tests/test_n2_real_data_adapters.py::test_os_monitor_binance_offset_is_ready_not_disagreement
+FAILED tests/test_n2_real_data_adapters.py::test_os_monitor_failed_cross_check_degraded
+FAILED tests/test_n5_shadow_runtime.py::test_observe_shadow_parity_follows_c_hat_not_raw_b
+FAILED tests/test_n5_shadow_runtime.py::test_no_raw_binance_fallback_when_alignment_unavailable
+FAILED tests/test_n5_shadow_runtime.py::test_economic_labels_and_fill_model
+FAILED tests/test_n5_shadow_runtime.py::test_promote_requires_flat - FileNotF...
+FAILED tests/test_n5_shadow_runtime.py::test_unknown_inventory_blocks_sell - ...
+FAILED tests/test_n5_shadow_runtime.py::test_flat_vs_active_degradation - Fil...
+FAILED tests/test_n5_shadow_runtime.py::test_persistence_roundtrip - FileNotF...
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_rich_entry_exit_flat_depth_walk
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_thesis_exit_depth_walk
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_time_exit_depth_walk
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_kill_flatten_depth_walk
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_entry_nofill_no_false_active
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_partial_entry_confirmed_qty_only
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_restart_after_active_no_duplicate_entry
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_unknown_blocks_sell_while_active
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_exit_nofill_keeps_explicit_exposure
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_active_degradation_does_not_abandon_exposure
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_restart_with_exit_residual_no_duplicate
+FAILED tests/test_n5a_depth_walk_lifecycle.py::test_e2e_replay_same_evidence_idempotent
+FAILED tests/test_n5b_live_guards.py::test_n5b_live_config_exists - Assertion...
+FAILED tests/test_n5b_live_guards.py::test_n5b_config_is_shadow_depth_walk - ...
+FAILED tests/test_n7_config_auth.py::test_sealed_config_file_loads - FileNotF...
+FAILED tests/test_n7_ssr_optional.py::test_active_n7_config_disables_ssr_match
+FAILED tests/test_n7_ssr_optional.py::test_fake_oneshot_lifecycle_without_ssr
+FAILED tests/test_polymarket_sdk_adapters.py::test_desynced_recovers_from_ws_full_book_when_rest_fails
+FAILED tests/test_polymarket_sdk_adapters.py::test_desynced_buffers_without_publishing_unsafe_deltas
+FAILED tests/test_polymarket_sdk_adapters.py::test_buffer_overflow_marks_desynced
+FAILED tests/test_r6_auth_redaction.py::test_env_unchanged - AssertionError: ...
+FAILED tests/test_r6d_auth_identity.py::test_env_unchanged - AssertionError: ...
+FAILED tests/test_r7a_architecture.py::test_env_hash_unchanged - AssertionErr...
+FAILED tests/test_sdk_pagination_and_async.py::test_async_secure_client_create_awaited_once
+FAILED tests/test_sdk_pagination_and_async.py::test_subscribe_only_after_init
+FAILED tests/test_sdk_pagination_and_async.py::test_init_failure_prevents_subscribe
+FAILED tests/test_sdk_pagination_and_async.py::test_transport_failure_distinct
+FAILED tests/test_sdk_pagination_and_async.py::test_cleanup_on_success_and_cancel
+FAILED tests/test_yaml_run_config.py::test_btc_window_preserves_strategy_kind
+FAILED tests/test_yaml_run_config.py::test_legacy_json_z_gap_still_loads - Fi...
+68 failed, 766 passed, 1 skipped, 17 warnings in 76.89s (0:01:16)
+
+

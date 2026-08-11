@@ -1,0 +1,104 @@
+{
+  "artifacts": {
+    "analytics_events": "analytics_events.jsonl",
+    "attachments": [],
+    "audit_events": "audit_events.jsonl",
+    "manifest": "manifest.json",
+    "run_summary": "run_summary.json"
+  },
+  "closest_candidates": {
+    "candidates_by_reason": {},
+    "no_comparable_candidate": true,
+    "rule": "executable_net_edge_margin"
+  },
+  "configuration": {
+    "config_fingerprint": "6adf3b9636ffdf7f8d37e4e05f76255f2e09e7b1fc5f26706020a47edd60e704",
+    "run_name": null,
+    "strategy_kind": "z_gap"
+  },
+  "data_health": {
+    "data_quality_failures": 0,
+    "evaluations_skipped": 0
+  },
+  "decisions_and_gates": {
+    "action_counts": {
+      "ENTER": 2,
+      "SKIP": 16,
+      "WAIT": 6
+    },
+    "all_failed_gates": {
+      "MODEL_READY": 6
+    },
+    "gates_not_evaluated": {
+      "ABS_Z_BLOCK": 6,
+      "BASIS": 6,
+      "BOOK_FEE_READY": 22,
+      "EDGE_VS_THETA": 22,
+      "TAU_IN_BAND": 6,
+      "Z_IN_BAND": 6
+    },
+    "primary_reason_distribution": {
+      "ENTRY_CANDIDATE": 2,
+      "MODEL_NOT_READY": 6,
+      "SKIP": 16
+    }
+  },
+  "execution": {
+    "cancels": 0,
+    "fills": 0,
+    "orders": 0
+  },
+  "identity": {
+    "ended_at": "2026-08-07T14:27:55.468351Z",
+    "fake_transport": false,
+    "git_head": null,
+    "market_id": "zgap-f3-cond-1",
+    "mode": "observe",
+    "run_id": "phase9-observe",
+    "started_at": "2026-08-07T14:27:55.130772Z",
+    "strategy_id": "z_gap",
+    "strategy_version": "1.0.0",
+    "window_id": "zgap-f3-w1"
+  },
+  "intent_and_risk": {
+    "intents": 2,
+    "plans_created": 0,
+    "plans_rejected": 0,
+    "risk_approved": 0,
+    "risk_denied": 0,
+    "risk_reasons": {}
+  },
+  "performance": {
+    "label": "observed_only",
+    "simulation_assumptions": {}
+  },
+  "positions_and_exits": {
+    "exits": 0,
+    "flattens": 0,
+    "holds": 0,
+    "positions": 0
+  },
+  "reporting_health": {
+    "last_durable_sequence": 70,
+    "latest_checkpoint": "2026-08-07T14:27:55.410209Z",
+    "records_created": 70,
+    "records_sampled_dropped": 0,
+    "records_written_analytics": 59,
+    "records_written_critical": 11,
+    "state": "HEALTHY",
+    "transitions": []
+  },
+  "status": {
+    "clean_shutdown": true,
+    "lifecycle": "COMPLETE",
+    "terminal_reason": "clean_shutdown",
+    "terminal_status": "COMPLETE"
+  },
+  "strategy_evaluations": {
+    "attempted": 12,
+    "completed": 24,
+    "detailed_persisted": 23,
+    "detailed_sampled_dropped": 0,
+    "skipped": 0
+  }
+}

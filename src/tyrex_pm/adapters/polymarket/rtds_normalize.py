@@ -62,7 +62,9 @@ def _ms_to_utc(value: Any) -> datetime:
     return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
 
 
-def parse_rtds_price_payload(msg: Mapping[str, Any]) -> tuple[str, str, Decimal, datetime, Any] | None:
+def parse_rtds_price_payload(
+    msg: Mapping[str, Any],
+) -> tuple[str, str, Decimal, datetime, Any] | None:
     """Return (topic, symbol, value, source_ts, provider_seq) or None if not a price tick."""
     topic = str(msg.get("topic") or "")
     if topic not in (TOPIC_CHAINLINK, TOPIC_BINANCE):

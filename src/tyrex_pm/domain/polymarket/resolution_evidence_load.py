@@ -44,9 +44,7 @@ def resolution_evidence_from_mapping(data: dict[str, Any]) -> ResolutionEvidence
         window_id=str(data["window_id"]),
         boundary_k=Decimal(str(data["boundary_k"])),
         settlement_price=(
-            None
-            if data.get("settlement_price") is None
-            else Decimal(str(data["settlement_price"]))
+            None if data.get("settlement_price") is None else Decimal(str(data["settlement_price"]))
         ),
         resolved_side=_parse_side(data.get("resolved_side")),
         observed_at=_parse_ts(data["observed_at"]),

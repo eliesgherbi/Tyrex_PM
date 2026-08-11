@@ -24,12 +24,12 @@ from typing import Any, Sequence
 from tyrex_pm.core.clock import require_utc
 from tyrex_pm.core.ids import MarketId
 from tyrex_pm.domain.polymarket.boundary_candidates import (
+    PROVISIONAL_PREFERRED_CLASSIFICATION,
+    PROVISIONAL_PREFERRED_RULE,
     BoundaryCandidate,
     BoundaryCandidateSet,
     BoundaryRuleId,
     BoundaryTickView,
-    PROVISIONAL_PREFERRED_CLASSIFICATION,
-    PROVISIONAL_PREFERRED_RULE,
     evaluate_boundary_candidates,
 )
 from tyrex_pm.domain.polymarket.ptb import (
@@ -110,9 +110,7 @@ class PtbCaptureEngine:
     lock_store: PtbLockStore = field(default_factory=PtbLockStore)
     attestation_port: PtbAttestationPort | None = None
     ewma: BasisEwmaState = field(default_factory=lambda: BasisEwmaState(half_life_s=None))
-    primary_trading_identity: TradingReferenceIdentity = (
-        TradingReferenceIdentity.BINANCE_SPOT
-    )
+    primary_trading_identity: TradingReferenceIdentity = TradingReferenceIdentity.BINANCE_SPOT
     max_skew_ms: int | None = None  # OPEN when None
     _windows: dict[tuple[str, str], WindowPtbState] = field(default_factory=dict)
     _evidence_seq: int = 0
@@ -122,10 +120,13 @@ class PtbCaptureEngine:
     def _key(self, market_id: MarketId, window_id: str) -> tuple[str, str]:
         return (market_id.value, window_id)
 
-    def get_window(
-        self, market_id: MarketId, window_id: str
-    ) -> WindowPtbState | None:
+    def get_window(self, market_id: MarketId, window_id: str) -> WindowPtbState | None:
         return self._windows.get(self._key(market_id, window_id))
+
+    @property
+    def binance_history(self) -> tuple[PriceTickView, ...]:
+        """Immutable chronological history shared with newly opened windows."""
+        return tuple(self._binance_history)
 
     def open_window(
         self,
@@ -213,10 +214,7 @@ class PtbCaptureEngine:
             state.evidence.append(row)
             state.blockers.append(ReferenceBlockerReason.LATE_EVENT_AFTER_SEAL.value)
             # Conflict if exact boundary tick disagrees with sealed K
-            if (
-                tick.source_ts == state.event_start
-                and tick.value != state.sealed.ptb_k
-            ):
+            if tick.source_ts == state.event_start and tick.value != state.sealed.ptb_k:
                 state.conflict_evidence.append(
                     {
                         "kind": "late_conflict_after_seal",
@@ -225,9 +223,7 @@ class PtbCaptureEngine:
                         "source_ts": tick.source_ts.isoformat(),
                     }
                 )
-                state.blockers.append(
-                    ReferenceBlockerReason.CONFLICTING_DUPLICATE.value
-                )
+                state.blockers.append(ReferenceBlockerReason.CONFLICTING_DUPLICATE.value)
                 state.phase = PtbLifecyclePhase.DEGRADED
             return state
 
@@ -379,17 +375,13 @@ class PtbCaptureEngine:
             # Do not invent a nonzero tolerance. Sealing K for audit remains
             # allowed; readiness_ready stays false via attestation result.
             while ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value in state.blockers:
-                state.blockers.remove(
-                    ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value
-                )
+                state.blockers.remove(ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value)
             if ReferenceBlockerReason.ATTESTATION_MISMATCH.value not in state.blockers:
                 state.blockers.append(ReferenceBlockerReason.ATTESTATION_MISMATCH.value)
             state.phase = PtbLifecyclePhase.DEGRADED
         else:
             while ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value in state.blockers:
-                state.blockers.remove(
-                    ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value
-                )
+                state.blockers.remove(ReferenceBlockerReason.ATTESTATION_UNAVAILABLE.value)
             while ReferenceBlockerReason.ATTESTATION_MISMATCH.value in state.blockers:
                 state.blockers.remove(ReferenceBlockerReason.ATTESTATION_MISMATCH.value)
             if state.phase is PtbLifecyclePhase.CANDIDATE_CAPTURED:
@@ -419,10 +411,7 @@ class PtbCaptureEngine:
         if require_attestation_match:
             if state.attestation is None:
                 self.attest(market_id=market_id, window_id=window_id)
-            if (
-                state.attestation is None
-                or state.attestation.result is not AttestationResult.MATCH
-            ):
+            if state.attestation is None or state.attestation.result is not AttestationResult.MATCH:
                 raise ValueError("cannot seal without attestation MATCH")
 
         cand = state.selected_candidate
@@ -470,17 +459,12 @@ class PtbCaptureEngine:
                     state.blockers.append(b)
 
         att = state.attestation
-        att_result = (
-            AttestationResult.INCOMPLETE if att is None else att.result
-        )
-        att_class = (
-            AttestationClassification.OPEN if att is None else att.classification
-        )
+        att_result = AttestationResult.INCOMPLETE if att is None else att.result
+        att_class = AttestationClassification.OPEN if att is None else att.classification
 
         readiness_ready = (
             cand.rule_id is BoundaryRuleId.EXACT_AT_START
-            and state.phase
-            not in {PtbLifecyclePhase.FAILED, PtbLifecyclePhase.DEGRADED}
+            and state.phase not in {PtbLifecyclePhase.FAILED, PtbLifecyclePhase.DEGRADED}
             and ReferenceBlockerReason.ATTESTATION_MISMATCH.value not in state.blockers
         )
         if cand.clock_status in {"UNSYNCHRONIZED", "DEGRADED"}:
@@ -489,8 +473,7 @@ class PtbCaptureEngine:
             readiness_ready = False
 
         evidence_ids = [
-            e.tick.event_id or e.tick.raw_fingerprint or f"seq:{e.sequence}"
-            for e in state.evidence
+            e.tick.event_id or e.tick.raw_fingerprint or f"seq:{e.sequence}" for e in state.evidence
         ]
 
         sealed = SealedWindowPtb(
@@ -505,6 +488,7 @@ class PtbCaptureEngine:
             ptb_attestation_classification=att_class,
             chainlink_boundary_source_ts=cand.chainlink_source_ts,
             chainlink_boundary_value=cand.value,
+            boundary_lag_ms=cand.receive_delay_ms,
             clock_status=cand.clock_status,
             clock_uncertainty_ms=cand.clock_uncertainty_ms,
             clock_snapshot_id=cand.clock_snapshot_id,
@@ -572,9 +556,7 @@ class PtbCaptureEngine:
             pairing_policy_id=PAIRING_POLICY_ID,
             source_skew_ms=pair.source_skew_ms,
             trading_identity=pair.binance.identity.value,
-            clock_status=None
-            if chainlink.ingress is None
-            else chainlink.ingress.clock_status,
+            clock_status=None if chainlink.ingress is None else chainlink.ingress.clock_status,
             ewma=self.ewma,
             source_ts=chainlink.source_ts,
             extra_blockers=tuple(pair.blocker_reasons),

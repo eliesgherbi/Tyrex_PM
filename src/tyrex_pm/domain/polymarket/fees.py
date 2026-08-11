@@ -30,12 +30,8 @@ class FeeCurveParams:
     exponent: Decimal
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "fee_rate", as_decimal(self.fee_rate, field_name="fee_rate")
-        )
-        object.__setattr__(
-            self, "exponent", as_decimal(self.exponent, field_name="exponent")
-        )
+        object.__setattr__(self, "fee_rate", as_decimal(self.fee_rate, field_name="fee_rate"))
+        object.__setattr__(self, "exponent", as_decimal(self.exponent, field_name="exponent"))
         if self.fee_rate < 0 or self.exponent < 0:
             raise ValueError("fee_rate and exponent must be >= 0")
 

@@ -1,4 +1,4 @@
-"""Sealed per-window PTB versus dynamic aligned-reference snapshots (N3/N4).
+"""Sealed per-window PTB versus dynamic aligned-reference snapshots.
 
 ``SealedWindowPtb`` is immutable for the window once sealed (K never changes).
 ``DynamicAlignedReference`` is rebuilt on every evaluation from current Binance
@@ -42,6 +42,7 @@ class SealedWindowPtb:
     ptb_attestation_classification: AttestationClassification
     chainlink_boundary_source_ts: datetime
     chainlink_boundary_value: Decimal
+    boundary_lag_ms: int | None
     clock_status: str | None
     clock_uncertainty_ms: int | None
     clock_snapshot_id: str | None
@@ -55,12 +56,8 @@ class SealedWindowPtb:
         object.__setattr__(
             self, "event_start", require_utc(self.event_start, field_name="event_start")
         )
-        object.__setattr__(
-            self, "event_end", require_utc(self.event_end, field_name="event_end")
-        )
-        object.__setattr__(
-            self, "sealed_at", require_utc(self.sealed_at, field_name="sealed_at")
-        )
+        object.__setattr__(self, "event_end", require_utc(self.event_end, field_name="event_end"))
+        object.__setattr__(self, "sealed_at", require_utc(self.sealed_at, field_name="sealed_at"))
         object.__setattr__(
             self,
             "chainlink_boundary_source_ts",
@@ -129,9 +126,7 @@ class DynamicAlignedReference:
             object.__setattr__(
                 self,
                 "basis_estimate_as_of_ts",
-                require_utc(
-                    self.basis_estimate_as_of_ts, field_name="basis_estimate_as_of_ts"
-                ),
+                require_utc(self.basis_estimate_as_of_ts, field_name="basis_estimate_as_of_ts"),
             )
         if self.evaluated_at is not None:
             object.__setattr__(

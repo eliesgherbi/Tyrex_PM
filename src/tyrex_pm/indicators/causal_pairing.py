@@ -44,9 +44,7 @@ class PriceTickView:
     late_or_out_of_order: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "source_ts", require_utc(self.source_ts, field_name="source_ts")
-        )
+        object.__setattr__(self, "source_ts", require_utc(self.source_ts, field_name="source_ts"))
         object.__setattr__(
             self,
             "receive_wall_raw_utc",
@@ -93,11 +91,7 @@ def select_latest_binance_at_or_before(
     but the numeric pair is still returned for audit; readiness uses blockers.
     """
     cl_ts = require_utc(chainlink.source_ts, field_name="chainlink.source_ts")
-    eligible = [
-        t
-        for t in binance_ticks
-        if t.identity is primary_identity and t.source_ts <= cl_ts
-    ]
+    eligible = [t for t in binance_ticks if t.identity is primary_identity and t.source_ts <= cl_ts]
     blockers: list[str] = []
     notes: dict[str, Any] = {
         "policy_id": PAIRING_POLICY_ID,
@@ -107,11 +101,7 @@ def select_latest_binance_at_or_before(
     }
 
     # Prove look-ahead rejection: nearest future tick is never chosen.
-    future = [
-        t
-        for t in binance_ticks
-        if t.identity is primary_identity and t.source_ts > cl_ts
-    ]
+    future = [t for t in binance_ticks if t.identity is primary_identity and t.source_ts > cl_ts]
     if future:
         nearest_future = min(future, key=lambda t: t.source_ts)
         notes["rejected_future_binance_source_ts"] = nearest_future.source_ts.isoformat()
@@ -137,9 +127,7 @@ def select_latest_binance_at_or_before(
     elif max_skew_ms is None:
         notes["skew_gate"] = "OPEN_not_applied"
 
-    if chosen.late_or_out_of_order or (
-        chosen.ingress and chosen.ingress.late_or_out_of_order
-    ):
+    if chosen.late_or_out_of_order or (chosen.ingress and chosen.ingress.late_or_out_of_order):
         blockers.append("binance_late_or_out_of_order")
     if chainlink.late_or_out_of_order or (
         chainlink.ingress and chainlink.ingress.late_or_out_of_order

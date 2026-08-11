@@ -1,55 +1,38 @@
 # Tyrex_PM
 
-Polymarket-first **event-driven** trading framework (active tree on `rest_project`).
+Tyrex_PM is an event-driven Polymarket trading framework. The production path is intentionally singular: market data and account readiness feed a strategy driver; typed intents enter one execution lifecycle; one async gateway owns all authenticated venue I/O; and a durable reducer decides whether the session is flat, no-fill, exposed, or requires manual intervention.
 
-Strategies emit intents; shared modules own market state, risk, execution, portfolio, lifecycle, persistence, and facts. Binance is **reference data only**.
+Z-Gap is the first strategy implementation and the reference integration for future strategies.
 
-## Status
-
-| Item | State |
-|------|-------|
-| Accepted checkpoint | `fb9d0d8` — **R8 PASS** (framework validation complete) |
-| Engine | Minimal in-process Tyrex dispatcher |
-| NautilusTrader | **Not a dependency** |
-| Z-Gap | **Not implemented** (future design) |
-| Legacy code | Isolated under `old/` — never imported |
-
-Three tiny-live validations completed (operator-run); third run automatic BUY+SELL success. Generic long-running live trading is **not** productized.
-
-## Install and test
+## Install
 
 ```bash
+python -m venv .venv
+source .venv/Scripts/activate
 pip install -e ".[dev]"
-tyrex-pm version
-pytest
 ```
 
-Python ≥ 3.11. Secrets: copy [`.env.example`](.env.example) → `.env` (never commit `.env`).
-
-## Safe quickstart
+## Validate
 
 ```bash
-tyrex-pm observe --config config/observe_fixture_r3.json
+python -m tyrex_pm.application.cli run \
+  --config config/runs/z_gap_tiny_live.yaml \
+  --validate-config
+
+pytest -q
 ```
 
-Shadow (paper OMS, no real orders):
+## Run live
+
+This can submit real orders. Review the single run config and account allowances first.
 
 ```bash
-tyrex-pm shadow --config config/observe_shadow_r5.json --btc-window next
+python -m tyrex_pm.application.cli run \
+  --config config/runs/z_gap_tiny_live.yaml \
+  --dotenv .env \
+  --live
 ```
 
-## Architecture (high level)
+`--live` is the explicit process-level mutation authorization. Without it, the runtime refuses to start. Every run writes `run_summary.json`; execution authority is persisted in SQLite under the configured state directory.
 
-```text
-Adapters → Events → State → Indicators → Signals → Strategy
-  → Intents → Risk → Execution plan → OMS
-  → Execution events → Orders/Fills/Portfolio → Facts
-```
-
-## Documentation
-
-Start at **[`Docs/README.md`](Docs/README.md)**.
-
-- Current guides: [`Docs/latest/`](Docs/latest/README.md)
-- Specifications: [`Docs/specifications/`](Docs/specifications/)
-- Implementation evidence: [`Docs/implementation/`](Docs/implementation/)
+See [current documentation](Docs/latest/README.md).

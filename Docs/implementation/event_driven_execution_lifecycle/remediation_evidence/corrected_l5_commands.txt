@@ -1,0 +1,11 @@
+# Corrected Phase 9 Level 5 operator commands (mutation-disabled)
+# Do NOT pass --live. Do NOT arm mutations. tiny_live_admitted remains false.
+
+# Continuous SHADOW — capture >=2 consecutive BTC 5m rollovers (~10+ minutes)
+python -m tyrex_pm.application.cli run --mode shadow --strategy config/strategies/z_gap.yaml --risk config/risk/tiny_live_5usd.yaml --execution config/execution/shadow_live_5usd.yaml --runtime config/runtime/shadow_btc_5m_continuous.yaml --run-name shadow_validation
+
+# Offline validate-config (no network)
+python -m tyrex_pm.application.cli run --mode shadow --strategy config/strategies/z_gap.yaml --risk config/risk/tiny_live_5usd.yaml --execution config/execution/shadow_live_5usd.yaml --runtime config/runtime/shadow_btc_5m_continuous.yaml --run-name shadow_validation --validate-config
+
+# Export evidence into:
+#   Docs/implementation/event_driven_execution_lifecycle/two_rollover_market_data/

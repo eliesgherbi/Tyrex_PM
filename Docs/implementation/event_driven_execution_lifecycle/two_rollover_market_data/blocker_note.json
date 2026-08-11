@@ -1,0 +1,26 @@
+{
+  "level": 5,
+  "attempted": true,
+  "venue_mutations": 0,
+  "live_admission_disabled": true,
+  "probes": [
+    {
+      "url": "https://clob.polymarket.com/time",
+      "status": 200,
+      "sample": "1786112724"
+    },
+    {
+      "url": "https://gamma-api.polymarket.com/markets?limit=1&active=true",
+      "status": 200,
+      "sample": "[{\"id\":\"559651\",\"question\":\"Xi Jinping out before 2027?\",\"conditionId\":\"0xa467b1"
+    }
+  ],
+  "network_ok": true,
+  "two_rollover_executed": false,
+  "blocker": "duration_gate_not_run_in_phase9_agent",
+  "blocker_detail": "Public venue read probes succeeded, but Level 5 requires >=2 consecutive BTC 5-minute rollovers (~10+ minutes) of mutation-disabled continuous SHADOW on an operator host. The continuous SHADOW workflow is implemented (config + CLI routing); the long-lived live market-data session itself was not executed in the agent run. Live admission remains disabled; tiny_live_admitted remains false.",
+  "operator_command_shadow": "python -m tyrex_pm.application.cli run --mode shadow --strategy config/strategies/z_gap.yaml --risk config/risk/tiny_live_5usd.yaml --execution config/execution/shadow_live_5usd.yaml --runtime config/runtime/shadow_btc_5m_continuous.yaml --run-name shadow_validation",
+  "validate_config_command": "python -m tyrex_pm.application.cli run --mode shadow --strategy config/strategies/z_gap.yaml --risk config/risk/tiny_live_5usd.yaml --execution config/execution/shadow_live_5usd.yaml --runtime config/runtime/shadow_btc_5m_continuous.yaml --run-name shadow_validation --validate-config",
+  "phase_9_current_status": "BLOCKED",
+  "see_also": "Docs/implementation/event_driven_execution_lifecycle/PHASE_9_CURRENT_STATUS.md"
+}

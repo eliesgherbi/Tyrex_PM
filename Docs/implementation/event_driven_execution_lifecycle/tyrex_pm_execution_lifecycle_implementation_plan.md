@@ -1,733 +1,1347 @@
-# Tyrex_PM Event-Driven Execution Lifecycle — Implementation Plan (Phases 1–6)
+# Tyrex_PM event-driven execution lifecycle — implementation plan
 
-**Status:** PLANNING ONLY — no runtime code changes authorized by this document  
-**Date:** 2026-08-03  
-**Scope:** Complete Strategy → Intent → Risk → Planner → OMS → Portfolio → Exit → Reconciliation for Polymarket LIVE  
-**Prior incident:** `yaml_live_20260731T143127Z` (manual liquidation complete; defect remains)  
-**Branch context at planning:** `rest_project` / HEAD `18235c84…` (verify before implement)
+**Status:** Phase 9 **BLOCKED** (Level 5 duration gate not executed) — see `PHASE_9_CURRENT_STATUS.md`. Historical outcome labels in FINAL_IMPLEMENTATION_REPORT.md are superseded for current status; `tiny_live_admitted` remains false.
+
+**Plan version:** 2.0 — ten-phase executable plan
+
+**Rebaseline date:** 2026-08-06
+
+**Implementation completion date:** 2026-08-07
+
+**Branch:** `rest_project`
+
+**Rebaseline HEAD:** `28c4d804f0c2927579c35743bfcedb807330d768`
+
+**Final suite (deterministic, post-remediation):** 1014 passed — see `REMEDIATION_IMPLEMENTATION_REPORT.md` and `remediation_evidence/full_suite_remediation.txt`. Real venue mutations = 0; tiny-live experiment not executed; `tiny_live_admitted` remains false. Phase 9 overall remains **BLOCKED** (Level 5).
+
+**Prior incident:** `yaml_live_20260731T143127Z` — operator liquidation completed; software defect addressed by Phases 2–8 (pending Level 5 operator evidence before Phase 10 admission)
+
+**Scope:** Complete Strategy → Intent → Risk → Planner → OMS → execution evidence → exposure → settlement → exit → reconciliation for the N7 Polymarket one-shot lifecycle
 
 ---
 
-## A. Executive implementation verdict
+## 1. Purpose and how to use this plan
+
+This is the primary implementation plan for repairing the N7 live execution lifecycle. It is written so that a developer can implement it sequentially without inventing architecture, weakening safety gates, or changing Z-Gap strategy economics.
+
+The ten phases are mandatory and ordered:
+
+```text
+Foundation
+  1. Repository consistency
+
+Terminal safety
+  2. Execution obligations
+  3. Complete submission evidence
+
+Live event wiring
+  4. Continuous authenticated user stream
+  5. Exposure-driven exit supervisor
+  6. Shared settlement and sellability
+
+Freshness and authority
+  7. Continuous feeds and pre-submit revalidation
+  8. Baseline-aware terminal reconciliation
+
+Acceptance
+  9. Non-live validation ladder
+ 10. One monitored tiny-live experiment
+```
+
+### 1.1 Execution rules for developers
+
+1. Implement phases in order. Do not begin a phase until the prior phase gate is recorded as PASS.
+2. Keep every commit testable and keep real venue mutation disabled through Phase 9.
+3. Do not change Z-Gap thresholds, model formulas, risk caps, or strategy decisions while repairing lifecycle wiring.
+4. Reuse existing owners before creating new ones. New components are allowed only where the current architecture has no owner.
+5. Never use `Portfolio.is_flat()` as authoritative terminal evidence after a mutation attempt.
+6. Do not enable an operator live path through a configuration toggle. Phase 10 admission requires the Phase 9 evidence package and an explicit operator action.
+7. If venue or SDK semantics are uncertain, stop that slice, preserve the uncertainty in a test/fixture, and resolve it before continuing.
+8. After each phase, update this document or a companion completion report with commit, tests, evidence, deviations, and unresolved risks.
+
+### 1.2 Required phase completion record
+
+Every phase completion report must contain:
+
+```text
+phase:
+starting_head:
+ending_head:
+files_changed:
+contracts_added_or_changed:
+tests_added:
+targeted_test_result:
+full_suite_result:
+venue_mutations_attempted: 0   # Phases 1–9
+evidence_artifacts:
+deviations_from_plan:
+remaining_blockers:
+gate: PASS | FAIL
+```
+
+No phase is complete when its full-suite result is unknown, its required evidence is missing, or its gate is FAIL.
+
+---
+
+## 2. Executive verdict
 
 ```text
 REUSE_FIRST                         = YES
-REWRITE_REQUIRED                    = NO
+FRAMEWORK_REWRITE_REQUIRED          = NO
 N7_BYPASSES_EXISTING_LIFECYCLE      = YES (PROVEN)
 R7_SETTLEMENT_MODEL_REUSABLE        = YES
-FALSE_PASS_POSSIBLE_TODAY           = YES (PROVEN)
-NEXT_TINY_LIVE_SAFE_TODAY           = NO
-FIRST_CODE_SLICE                    = Phase 1 terminal-safety (no new mutations enabled)
-LIVE_REMAIN_BLOCKED_UNTIL           = Phase 6 admission gate
-MANUAL_LIQUIDATION_PREREQUISITE     = DONE (operator; not an implementation task)
+FALSE_PASS_POSSIBLE_AT CURRENT HEAD = YES (PROVEN)
+NEXT_TINY_LIVE_SAFE AT CURRENT HEAD = NO
+FIRST IMPLEMENTATION PHASE          = Repository consistency
+FIRST LIFECYCLE PHASE               = Execution obligations
+LIVE REMAINS BLOCKED UNTIL           = Phase 10 admission
 ```
 
-**One-sentence plan:** Wire Polymarket submission evidence + authenticated user stream into the existing single-writer OMS (`LiveOMS` / `OrderStore` / `FillLedger` / `Portfolio`), reuse R7 settlement/sellability (`settlement.py` / `MutationPhase`), replace N7’s `sleep(3)+is_flat` orchestration with exposure-driven exit supervision, and forbid PASS unless flatness is baseline-aware and authoritative.
+The implementation objective is:
 
-**First awareness of MATCHED (target):** `LiveOMS` (or a thin helper it calls) when processing `SubmitOrderResult` / user-stream size_matched / trade events — **not** the strategy, **not** the portfolio alone.
+> Preserve complete Polymarket submission evidence, feed HTTP and authenticated user-stream execution observations into one idempotent OMS path, supervise exposure from first match awareness, wait for confirmed and sellable inventory before SELL, keep market feeds alive through dispatch, and forbid terminal success unless authenticated reconciliation proves return to the pre-run baseline.
 
----
-
-## B. Verified current architecture
-
-### B.1 Finding verification (re-checked against code)
-
-| # | Finding | Verdict | Evidence |
-|---|---------|---------|----------|
-| 1 | User stream only in preflight | **PROVEN** | `n7_preflight.py` → `observe_user_stream_readonly`; `n7_live_session.py` has zero user-stream wiring; live transport = `SdkMutationTransport` |
-| 2 | Submit adapter drops/ignores match evidence | **PROVEN** | `_submit_result_from_sdk` (`mutation_transport.py:78-118`) omits `trade_ids`; `LiveOMS.submit` (`live_oms.py:241-273`) uses `ok`/`venue_order_id`/`uncertain`/`error` only |
-| 3 | N7 uses sleep(3) + local portfolio check | **PROVEN** | `n7_live_session.py:358-369` |
-| 4 | Empty portfolio ⇒ `is_flat()==True` | **PROVEN** | `portfolio.py:75-76` (`all([])` is True) |
-| 5 | Exit depends on local non-flat portfolio | **PROVEN** | session gate + `N6LiveHost.try_exit` `no_confirmed_inventory` (`n6_live_host.py:603-605`) |
-| 6 | Fill/settlement components exist but N7 unwired | **PROVEN** | `ingest_confirmed_trade` only via test helpers; `wait_for_entry_settlement` only in `r7b_live_once.py` |
-| 7 | Compose teardown before submit (stale path) | **PROVEN (pattern)**; **~14s duration STRONGLY INFERRED** from run evidence, not a code constant | `stop_requested` (`n7_live_session.py:130-132`) → compose `finally` stops feeds (`live_zgap_compose.py:613-617`) → then `try_enter` |
-| 8 | PASS ignores UNRESOLVED recon | **PROVEN** | outcome from `econ["flat"]` only (`n7_live_session.py:371-381`); `recon_blocks_entry` stored but unused |
-| — | Changed since audit | **RULED OUT** | All eight defects still present |
-
-### B.2 Actual N7 call chain (current)
-
-```text
-cli run --mode live --live
-→ n7_operator_run.run_n7_operator
-→ n7_preflight.run_n7_preflight          # RO user stream ~2s
-→ n7_live_session.run_live_oneshot_session
-→ live_zgap_compose.run_live_zgap_compose
-→ _capture_intents → EnterIntent + stop_requested
-→ compose teardown (feeds stop)
-→ N7OneShotHost + SdkMutationTransport
-→ arm_operator_live → try_enter → LiveOMS.submit → OrderAccepted
-→ sleep(3) → if not Portfolio.is_flat(): exit ladder
-→ economics_report → post_trade_reconcile
-→ PASS_N7_ONE_SHOT_FLAT if local flat
-```
-
-### B.3 LIVE authorization today (keep during all phases)
-
-| Gate | Location |
-|------|----------|
-| CLI `--live` | `application/cli.py`, `n7_operator_run` |
-| YAML `live.enabled` / `mutations_enabled` fail-closed false | `yaml_config/resolve.py`, `config/execution/polymarket_live.yaml` |
-| CI / pytest / `TYREX_N7_FORBID_LIVE=1` | `n7_oneshot_host._ci_forbids_live` |
-| OMS `mutations_enabled` only after arm | `N7OneShotHost.arm_operator_live` |
-
-**Rule for this plan:** no slice may weaken these gates. Add an additional hard gate: `execution_lifecycle_ready` / terminal-safety flag that remains false until Phase 6 admission.
+This plan repairs execution reachability and authority. It does not change the Z-Gap hypothesis or attempt to prove profitability.
 
 ---
 
-## C. Confirmed reusable components
+## 3. Scope boundaries
 
-| Component | Path / symbol | Reuse role |
-|-----------|---------------|------------|
-| `EnterIntent` / `FlattenIntent` | `core/intents.py` | Unchanged strategy boundary |
-| `RiskEngine` | risk package via `N6LiveHost.try_enter` | Unchanged policy |
-| `ExecutionPlanner` | `planning/planner.py` | Unchanged |
-| `SubmissionLineage` / `LineageRegistry` | `execution/lineage.py` | Ownership spine |
-| `LiveOMS` | `execution/polymarket/live_oms.py` | Single-writer command gateway — **first MATCHED awareness** |
-| `OrderStore` / `OrderStatus` | `execution/order_store.py` | Order aggregate |
-| `FillLedger` | `execution/fill_ledger.py` | Fill ledger |
-| `Portfolio` | `portfolio/portfolio.py` | Projection (not flatness oracle) |
-| `TradeLifecycle` | `lifecycle/trade_lifecycle.py` | FLAT→ENTRY_PENDING→ACTIVE |
-| `EventDispatcher` | `engine/dispatcher.py` | In-process bus |
-| `fill_events_from_trade` | `execution/polymarket/normalize.py` | Fill event factory |
-| `N6LiveHost.ingest_confirmed_trade` | `runtime/n6_live_host.py:551` | Apply venue trade as fill truth |
-| `ReconciliationService` | `execution/polymarket/reconciliation.py` | Recovery + terminal authority |
-| `TradeSettlementStatus` / `SettlementPhase` / `wait_for_entry_settlement` | `execution/polymarket/settlement.py` | MATCHED≠CONFIRMED; sellability |
-| `MutationPhase` / `MutationLifecycle` | `execution/polymarket/mutation_lifecycle.py` | Rich phase vocabulary (R7) — adopt for N7 terminality |
-| `SdkReadonlyTransport` | `execution/polymarket/sdk_readonly.py` | REST recovery reads |
-| `observe_user_stream_readonly` / `AsyncSecureClient` | `user_stream_readonly.py`, `sdk_secure.py` | Basis for live user-stream loop |
-| `FakeTransport.add_fill` / `emit_user_event` | `fake_transport.py` | Deterministic tests |
-| `tests/helpers_n6.py` / `helpers_n7.py` `fill_order` | tests | Pattern to replace with production path tests |
-| R7B settlement orchestration | `runtime/r7b_live_once.py` | Reference sequence (do not duplicate wholesale) |
-| N7 host shell | `n7_oneshot_host.py`, `n7_live_session.py` | Rewire, do not rewrite |
+### 3.1 In scope
 
----
+- YAML/configuration, test, CLI, and documentation consistency required for a clean baseline
+- Complete submission result normalization
+- Per-order and per-session execution obligations
+- Long-running authenticated Polymarket user stream for a live session
+- HTTP/WebSocket ordering and idempotency
+- Matched, confirmed, and sellable quantity projections
+- Exposure-driven exit supervision
+- R7 settlement/sellability reuse
+- Continuous market feeds through submit and exit
+- Immediate pre-submit revalidation
+- Read-only recovery and baseline-aware reconciliation
+- Restart reconstruction and non-PASS uncertainty
+- Deterministic, fixture, shadow, read-only, and one monitored tiny-live acceptance
 
-## D. Gaps requiring implementation
+### 3.2 Explicitly out of scope
 
-| Gap | Class | Primary home |
-|-----|-------|--------------|
-| False PASS on vacuous flat + UNRESOLVED | semantic / orchestration | `n7_live_session.py`, new terminal classifier |
-| No execution obligation after ACK | missing state | new small module or `LiveOMS` tracking |
-| `trade_ids` / match amounts discarded | contract | `transport.SubmitOrderResult`, `_submit_result_from_sdk` |
-| LiveOMS ignores response status/match | wiring | `LiveOMS.submit` |
-| No live authenticated user stream | missing orchestration | new `user_stream_live.py` + N6/N7 host attach |
-| No matched_exposure projection | missing projection | extend Portfolio or add `MatchedExposureStore` |
-| Exit wake = sleep + is_flat | unsafe orchestration | replace in `n7_live_session` |
-| Settlement wait unused by N7 | unwired reuse | call `wait_for_entry_settlement` / sellability helpers |
-| `SdkMutationTransport` lacks account reads | missing recovery | compose readonly client into recon path |
-| `FILL_MISSING_LOCAL` not auto-applied | missing recovery | `ReconciliationService` + host |
-| Compose teardown before submit | latency / orchestration | Phase 5 redesign of `run_live_oneshot_session` |
-| No LIVE lifecycle readiness gate | safety | config + host arm check |
-| Tests inject fills via helpers only | test gap | Phase 2–6 suites |
+- Changing Z-Gap `theta`, `z`, `tau`, thesis, time-exit, or fee-model parameters
+- Increasing the fee-inclusive `$5.00` entry cap
+- Multiple simultaneous entry lineages
+- Same-window re-entry or reversal
+- Continuous multi-window autonomous live trading
+- Scope B or hold-to-resolution live execution
+- On-chain redeem, transfer, allowance mutation, or cleanup automation
+- Strategy profitability claims or calibration approval
+- Distributed event buses or multi-process architecture
+- Rewriting the R7 path as a prerequisite for N7 admission
 
 ---
 
-## E. Target lifecycle and source-of-truth model
+## 4. Verified current defects at the rebaseline
 
-### E.1 Target lifecycle
+The following findings were rechecked against current source and remain the reason live is blocked:
+
+| Finding | Current evidence | Required phase |
+|---|---|---:|
+| N7 stops compose/feeds after capturing an entry candidate | `runtime/n7_live_session.py` sets `stop_requested`; compose exits before submission | 7 |
+| N7 uses fixed `asyncio.sleep(3.0)` as execution control | `runtime/n7_live_session.py` | 5 |
+| Empty local portfolio can be considered flat | `Portfolio.is_flat()` uses `all([]) == True` | 2, 8 |
+| N7 terminal PASS ignores unresolved reconciliation | outcome is selected from local economics/flatness while `recon_blocks_entry` is only reported | 2, 8 |
+| Submission result drops important SDK evidence | normalized result does not retain all trade IDs/amounts | 3 |
+| Authenticated user stream is a preflight probe, not a live supervisor | `user_stream_readonly.py` is not wired through the mutation session | 4 |
+| Existing confirmed-trade ingestion is not driven by production N7 events | `N6LiveHost.ingest_confirmed_trade` is mostly reached by tests/R7 patterns | 3, 4, 6 |
+| R7 settlement wait exists but is not used by N7 | `wait_for_entry_settlement` is wired in R7, not the N7 session | 6 |
+| N7 recovery transport is incomplete for authoritative reconstruction | mutation and read-only responsibilities are not composed for the session | 8 |
+| Repository baseline is inconsistent | deleted JSON configs remain referenced by CLI/docs/tests; latest recorded full suite has 48 failures | 1 |
+
+No phase may treat these findings as already solved without new tests and evidence.
+
+---
+
+## 5. Target architecture and authority model
+
+### 5.1 Target runtime flow
 
 ```text
 EnterIntent
-→ RiskEngine + ExecutionPlanner + SubmissionLineage
-→ LiveOMS.submit (local order CREATED/SUBMITTED)
-→ SdkMutationTransport → AcceptedOrder (full preserve)
-→ LiveOMS applies response match evidence (idempotent)
-→ UserStreamLive (account-wide) → order/trade events
-→ OrderStore + FillLedger (exactly-once deltas)
-→ matched_exposure projection + Portfolio projection
-→ ExitSupervisor wake (exposure > 0)
-→ settlement/sellability (reuse settlement.py)
-→ FlattenIntent / exit ladder for actionable qty
-→ cancel/track remainder per order policy
-→ ReconciliationService (+ REST readonly)
-→ NO_FILL_CONFIRMED | FLAT_CONFIRMED | non-PASS uncertainty
+→ RiskEngine
+→ ExecutionPlanner
+→ pre-submit revalidation
+→ SubmissionLineage
+→ LiveOMS.submit
+→ submission obligation persisted
+→ SdkMutationTransport
+→ complete SubmitOrderResult
+→ LiveOMS applies order/match evidence
+↔ UserStreamLive applies authenticated order/trade evidence
+→ OrderStore + matched-exposure projection
+→ ExitSupervisor wakes when matched exposure > 0
+→ settlement projection waits for CONFIRMED
+→ sellability projection checks conditional balance
+→ FlattenIntent / exit planner / LiveOMS
+→ read-only reconciliation
+→ NO_FILL_CONFIRMED | FLAT_CONFIRMED | explicit non-PASS
 ```
 
-### E.2 Source-of-truth hierarchy
+### 5.2 Quantity model — do not conflate these axes
 
-| Rank | Source | Authority |
-|------|--------|-----------|
-| 1 | Submission response | Immediate identifiers + insert status (`live`/`matched`/`delayed`) + trade_ids/amounts |
-| 2 | Authenticated account-wide user stream | Primary low-latency `size_matched` / trade status updates |
-| 3 | Single-writer OMS + FillLedger | Idempotent local execution truth |
-| 4 | matched_exposure / Portfolio projections | Derived from accepted deltas only |
-| 5 | Settlement/inventory projection | CONFIRMED ∩ sellable balance (R7 rules) |
-| 6 | REST orders/trades | Recovery + reconciliation (not normal fast path) |
-| 7 | Venue positions/balances | Inventory + final flatness cross-check; **not** sole fill trigger |
+| Quantity | Meaning | Owner | Effect |
+|---|---|---|---|
+| Requested quantity | Quantity in the submitted plan | Plan/order record | No exposure; never sellable |
+| Matched quantity | Venue reports economic execution/match | `OrderStore` high-water mark + matched-exposure projection | Starts protection and exit supervision |
+| Confirmed quantity | Trade reached required settlement status | settlement projection / confirmed fill application | May update confirmed portfolio inventory |
+| Sellable quantity | Confirmed inventory supported by funder conditional balance | sellability projection | Maximum quantity allowed in a SELL |
+| Exited quantity | Confirmed exit execution | fills/portfolio/reconciliation | Reduces strategy-owned exposure |
 
-### E.3 Conflict resolution
-
-| Conflict | Resolution |
-|----------|------------|
-| Response `matched`, WS delayed | Apply response trade_ids/amounts as provisional match; WS confirms via trade_id / size_matched HWM |
-| WS before HTTP | Stage/apply by `client_order_id` or late-bind when `venue_order_id` arrives; one OMS row |
-| Local filled ≠ venue `size_matched` | Prefer venue cumulative HWM; emit `ORDER_STATUS_MISMATCH`; repair toward venue |
-| Exposure > 0, position API lag | Keep exposure; SELL waits on sellability; never clear from API lag alone |
-| Position > 0, no local trade | `FILL_MISSING_LOCAL` / `POSITION_MISMATCH` → REST trades repair or `MANUAL_INTERVENTION_REQUIRED` |
-| Settlement FAILED | Non-PASS; do not invent flat |
-| UNRESOLVED / unknown obligation | Non-PASS always |
-
-### E.3 diagrams
-
-#### Current broken lifecycle
-
-```mermaid
-sequenceDiagram
-  participant Z as ZGap
-  participant C as live_zgap_compose
-  participant H as N7OneShotHost
-  participant OMS as LiveOMS
-  participant T as SdkMutationTransport
-  participant V as Polymarket
-  participant P as Portfolio
-
-  Z->>C: ENTRY_CANDIDATE + EnterIntent
-  C->>C: stop_requested; stop feeds
-  C->>H: try_enter (stale book)
-  H->>OMS: SubmitOrderCommand
-  OMS->>T: submit_order
-  T->>V: place_limit_order
-  V-->>T: AcceptedOrder full
-  T-->>OMS: ok + venue_order_id only
-  OMS->>OMS: OrderAccepted
-  H->>H: sleep 3s
-  H->>P: is_flat?
-  P-->>H: true empty
-  Note over H: exit skipped; PASS_N7_ONE_SHOT_FLAT
-```
-
-#### Target fast path
-
-```mermaid
-flowchart TD
-  A[EnterIntent] --> B[N6LiveHost.try_enter]
-  B --> C[LiveOMS.submit]
-  C --> D[SdkMutationTransport]
-  D --> E[SubmitOrderResult full]
-  E --> F[LiveOMS apply match evidence]
-  G[UserStreamLive AsyncSecureClient] --> H[normalize user order/trade]
-  H --> F
-  F --> I[OrderStore + FillLedger]
-  I --> J[matched_exposure + Portfolio]
-  J --> K[ExitSupervisor.notify]
-  K --> L{settlement sellable?}
-  L -->|no| M[EXIT_PENDING]
-  L -->|yes| N[FlattenIntent / exit ladder]
-  M --> L
-```
-
-#### Recovery path
-
-```mermaid
-flowchart TD
-  W[Watchdog / disconnect / restart] --> B[Block new entry]
-  B --> R[SdkReadonlyTransport]
-  R --> O[open orders + recent trades + positions]
-  O --> X[ReconciliationService]
-  X --> Y{consistent?}
-  Y -->|yes repair| Z[ingest_confirmed_trade idempotent]
-  Z --> S[Resume exit supervision]
-  Y -->|no| M[UNKNOWN_RECONCILING / MANUAL_INTERVENTION_REQUIRED]
-```
-
----
-
-## F. Phase 1 plan — Safety invariants and authoritative contracts
-
-**Goal:** Make false-PASS / false-flat impossible even before fill wiring is complete.  
-**LIVE mutations:** remain blocked for product use; tests use FakeTransport only.
-
-### F.1 Work items
-
-| ID | Phase | Dependency | Existing file/symbol | Change type | Exact implementation | Contracts/state affected | Tests | Acceptance evidence | Risk |
-|----|-------|------------|----------------------|-------------|----------------------|--------------------------|-------|---------------------|------|
-| P1-01 | 1 | — | new `execution/polymarket/execution_obligation.py` | add state/event | `ExecutionObligation` dataclass: lineage ids, venue_order_id, state∈{OPEN,RESOLVED_NO_FILL,RESOLVED_FILLED,UNKNOWN,FAILED}; registry on host | new | unit: create on ACK; cannot PASS while OPEN | report field `obligations` | low |
-| P1-02 | 1 | P1-01 | `LiveOMS.submit` / `N6LiveHost.try_enter` | extend existing | On VENUE_ACCEPTED create obligation OPEN; on REJECTED resolve FAILED | SubmissionAttemptState + obligation | unit | audit `execution_obligation_opened` | low |
-| P1-03 | 1 | — | `transport.SubmitOrderResult` | add contract | Add `trade_ids: tuple[str,...]`, `making_amount`, `taking_amount` (optional Decimal/str); keep `raw` complete | SubmitOrderResult producers: `_submit_result_from_sdk`, Fake/Spy | contract tests | raw includes trade_ids | med — update all constructors |
-| P1-04 | 1 | P1-03 | `_submit_result_from_sdk` | extend existing | Map SDK `AcceptedOrder.trade_ids`, amounts, status; never drop | SubmitOrderResult | unit with mock AcceptedOrder | fixture dump | low |
-| P1-05 | 1 | — | new `runtime/n7_terminal.py` (or `n7_ptb_policy.py` neighbor) | add contract | `classify_n7_terminal(econ, recon, obligations, lifecycle) -> outcome`; PASS flat only if checklist | outcome strings | unit matrix false-flat | contradiction table in report | low |
-| P1-06 | 1 | P1-05 | `n7_live_session.run_live_oneshot_session` | rewire orchestration | Replace `elif flat: PASS_N7_ONE_SHOT_FLAT` with classifier; map to `FLAT_CONFIRMED` / `UNKNOWN_RECONCILING` / `MANUAL_INTERVENTION_REQUIRED` / `NO_FILL_CONFIRMED` | outcomes | test_n7_oneshot updates | never PASS+UNRESOLVED | **high** if tests expect old PASS |
-| P1-07 | 1 | P1-06 | `n7_live_session` exit gate | deprecate unsafe path | If obligation OPEN and portfolio flat → do **not** treat as success; enter wait/reconciling (temporary: non-PASS) until Phase 2/3 | outcomes | unit | sleep path cannot PASS | med |
-| P1-08 | 1 | — | `n7_preflight` / `live_preflight` | extend existing | Persist RO baseline snapshot: open_orders count, position rows for selected market tokens, obligation empty | preflight payload | test_preflight | `account_baseline` artifact | low |
-| P1-09 | 1 | P1-08 | reporting | reporting correction | Emit contradiction event if `flat and (recon_blocks_entry or obligations_open)` | analytics/audit | unit | visible in summary | low |
-| P1-10 | 1 | — | `n7_oneshot_host.arm_operator_live` | add safety gate | Refuse arm unless `lifecycle_safety_invariants_enabled` config true (default true) and Phase-1 classifier present; keep CI forbid | arm path | unit | cannot arm without safety module | low |
-| P1-11 | 1 | — | docs + `TYREX_N7_FORBID_LIVE` | test/evidence only | Document LIVE still forbidden; historical run preserved | — | — | plan linked from n7 docs | none |
-
-**Why new `execution_obligation.py`:** no existing type represents “submission unresolved until venue truth.” `SubmissionAttemptState.ACKNOWLEDGED` currently means HTTP ack, not obligation closed. Keep lineage; add obligation beside it.
-
-**Why new `n7_terminal.py`:** terminal classification is currently inline string soup in `n7_live_session`; needs a testable pure function reused by fake/live.
-
-### F.2 Phase 1 invariants (must test)
-
-1. ACK ≠ fill.  
-2. Real submission ⇒ obligation OPEN.  
-3. `PASS_*FLAT` impossible if obligation OPEN, `recon_blocks_entry`, `requires_manual`, `UNRESOLVED`, or lifecycle `ENTRY_PENDING` with venue_order_id and zero local fill evidence.  
-4. Empty portfolio after mutation ≠ flatness evidence.  
-5. OBSERVE/SHADOW unchanged (no mutation path).  
-
-### F.3 Phase 1 gate
+Mandatory invariant:
 
 ```text
-No real submission can terminate as PASS while venue outcome, fills,
-trades, open-order state, obligations, or inventory remain unknown.
-Deterministic tests prove false-flat prevention.
-LIVE product path remains non-admitted.
+requested_qty is not inventory
+matched_qty starts supervision but is not automatically sellable
+confirmed_qty may still exceed sellable_qty temporarily
+SELL qty <= min(confirmed_qty, conditional_balance, remaining_owned_qty)
 ```
 
-### F.4 Slices / commits
+A MATCHED HTTP or stream observation must not be passed through a helper that silently treats it as CONFIRMED portfolio inventory.
 
-1. **Slice 1.A** — `SubmitOrderResult` + mapper + tests (no behavior change in OMS).  
-2. **Slice 1.B** — `ExecutionObligation` + open on ACK.  
-3. **Slice 1.C** — `classify_n7_terminal` + wire session + update N7 tests.  
-4. **Slice 1.D** — preflight baseline + contradiction reporting.  
+### 5.3 Source-of-truth hierarchy
 
-After each slice: full targeted N7/N6 tests green; LIVE still requires `--live` and remains operationally forbidden.
+The hierarchy depends on the question being answered:
 
----
+| Question | Primary source | Recovery/cross-check |
+|---|---|---|
+| Was the request accepted? | HTTP submission result | REST order lookup |
+| Has quantity matched? | authenticated user stream cumulative match/trades | HTTP response evidence + REST orders/trades |
+| Was an execution applied locally? | single-writer OMS + `FillLedger` idempotency | reconciliation |
+| What economic exposure requires supervision? | matched-exposure projection bound to lineage | venue cumulative matched quantity |
+| What inventory is confirmed? | confirmed trade settlement evidence | REST trades |
+| What quantity is sellable? | funder conditional-token balance intersected with confirmed owned quantity | repeated authenticated balance read |
+| Is the session terminal? | baseline-aware reconciliation: orders + trades + balances + obligations | local stores must agree; disagreement is non-PASS |
 
-## G. Phase 2 plan — Real-time order/trade/fill/matched-exposure
+Venue positions/balances are not the sole trigger for applying fills, but they are mandatory evidence for terminal inventory classification.
 
-**Goal:** One match ⇒ one strategy-owned exposure delta.  
-**Depends on:** Phase 1 gate.
-
-### G.1 Work items
-
-| ID | Phase | Dependency | Existing file/symbol | Change type | Exact implementation | Contracts/state affected | Tests | Acceptance evidence | Risk |
-|----|-------|------------|----------------------|-------------|----------------------|--------------------------|-------|---------------------|------|
-| P2-01 | 2 | P1-03 | `LiveOMS.submit` | extend existing | If `result.status=="matched"` or trade_ids/nonzero amounts: build `VenueTradeSnapshot`(s) and publish fill events via same path as `ingest_confirmed_trade` (extract shared helper) | OrderStatus PARTIALLY_FILLED/FILLED | FakeTransport matched response | filled_quantity>0 | med — amount unit semantics |
-| P2-02 | 2 | P2-01 | new helper in `normalize.py` | extend existing | `fill_events_from_accepted_order(result, order_rec)`; document BUY taking/making mapping from SDK | normalize | unit table | — | med |
-| P2-03 | 2 | — | new `execution/polymarket/user_stream_live.py` | add recovery/orchestration | Long-lived `AsyncSecureClient.subscribe(UserSpec(markets=None))`; dispatch normalized events; reconnect with backoff; no discard | user events | fake async stream tests | stream_alive fact | med |
-| P2-04 | 2 | P2-03 | `N6LiveHost` / `N7OneShotHost` | rewire | Start user stream **before** `arm_operator_live` mutations; stop on terminate | readiness `mark_user_stream` | integration fake | preflight+live stream | med |
-| P2-05 | 2 | P2-03 | `normalize.py` + new parsers | extend | Parse user order (`size_matched`) and trade (`MATCHED/MINED/CONFIRMED…`) into domain events | TradeSettlementStatus | schema fixtures | — | med |
-| P2-06 | 2 | P2-05 | `OrderStore` / `LiveOMS` | extend | Apply size_matched HWM; never decrease; map to partial/full | OrderStatus | out-of-order tests | HWM monotonic | med |
-| P2-07 | 2 | P2-01,P2-06 | `N6LiveHost.ingest_confirmed_trade` | reuse + rewire | Production callers: response path + stream path + recon repair | FillLedger, Portfolio | duplicate trade_id | exactly-once | low |
-| P2-08 | 2 | P2-07 | new `portfolio/matched_exposure.py` **or** fields on Portfolio | add projection | `matched_qty` / `matched_notional` per instrument+lineage; updated only by fill deltas | exposure API for exit | unit | exposure>0 on match | low |
-| P2-09 | 2 | P2-04 | `SdkMutationTransport` vs readonly | extend | Host holds both mutation transport and `SdkReadonlyTransport` (or widen protocol) | PolymarketTransport Protocol optional methods | — | recon can query | med |
-| P2-10 | 2 | P2-08 | lineage | extend | Bind exposure to `SubmissionLineage` ids; forbid orphan exposure | lineage | unit | — | low |
-| P2-11 | 2 | P2-01 | audit reporting | reporting | Log status, trade_ids, amounts on `mutation.venue_submit_result` | audit payload | — | compare to incident gap | low |
-
-**Why `user_stream_live.py` (new):** `user_stream_readonly.py` is a timed probe that discards events. Extending it into a dual-purpose module risks breaking preflight contracts; keep probe, add live supervisor.
-
-**First MATCHED awareness:** `LiveOMS` after submit result and/or stream handler calling into OMS/host ingest — **single writer**.
-
-### G.2 HTTP/WS ordering
-
-| Order | Behavior |
-|-------|----------|
-| HTTP first | Apply response; WS confirms idempotently by trade_id / HWM |
-| WS first | Buffer by `client_order_id` if known, else by `venue_order_id` when present; HTTP correlates and does not double-apply |
-
-### G.3 Phase 2 gate
+### 5.4 Target lifecycle
 
 ```text
-Match via response OR user stream ⇒ exactly one strategy-owned exposure delta.
-Duplicate/out-of-order events do not double-count.
-User stream running before mutation arm in N7 host tests.
+PREPARED
+→ ENTRY_SUBMITTING
+→ ENTRY_ACCEPTED
+→ ENTRY_MATCHED
+→ ENTRY_SETTLING
+→ ENTRY_CONFIRMED
+→ POSITION_ACTIVE
+→ EXIT_REQUESTED
+→ EXIT_SUBMITTING
+→ EXIT_MATCHED
+→ EXIT_SETTLING
+→ FLAT_CONFIRMED
+
+Alternative terminals:
+NO_FILL_CONFIRMED
+FLAT_WITH_DUST
+RESIDUAL_EXPOSURE
+UNKNOWN_RECONCILING
+MANUAL_INTERVENTION_REQUIRED
+FAILED
 ```
 
-### G.4 Slices
+`PASS_N7_ONE_SHOT_FLAT` may remain as a backward-compatible display alias only when the underlying terminal state is `FLAT_CONFIRMED`.
 
-1. **2.A** Response-match → fills (FakeTransport).  
-2. **2.B** User stream live supervisor + normalize.  
-3. **2.C** Wire host start/stop; mark_user_stream.  
-4. **2.D** Matched exposure projection + lineage.  
-5. **2.E** Dual-transport host (mutation + readonly).  
+### 5.5 Correlation spine
 
----
-
-## H. Phase 3 plan — Exposure, settlement, inventory, exit activation
-
-**Goal:** Matched quantity immediately supervised; exits remain actionable until resolved.  
-**Do not change** Z-Gap theta/z/tau/thesis/time-flatten **policy numbers** — only reachability.
-
-### H.1 Work items
-
-| ID | Phase | Dependency | Existing file/symbol | Change type | Exact implementation | Contracts/state affected | Tests | Acceptance evidence | Risk |
-|----|-------|------------|----------------------|-------------|----------------------|--------------------------|-------|---------------------|------|
-| P3-01 | 3 | P2-08 | new `runtime/exit_supervisor.py` | add orchestration | Subscribe to exposure changes; wake exit coroutine; replace sleep(3) control | N7 session | unit wake tests | no sleep control | med |
-| P3-02 | 3 | P3-01 | `n7_live_session` | rewire | Remove lifecycle `asyncio.sleep(3.0)` as control; wait on supervisor events with recovery deadline | session | integration | — | med |
-| P3-03 | 3 | P2 | `settlement.wait_for_entry_settlement` / `evaluate_sell_readiness` | reuse | After ENTRY_MATCHED, run settlement wait (bounded); set sellable qty | SettlementPhase, MutationPhase | reuse R7 tests patterns | phase facts | med |
-| P3-04 | 3 | P3-03 | `N7OneShotHost.run_bounded_exit_ladder` | extend | Allow `EXIT_PENDING` when matched>0 but sellable==0; retry on `InventorySellable` | exit report | pending→exit | — | med |
-| P3-05 | 3 | P3-01 | `MutationLifecycle` | reuse | Drive N7 phases: ENTRY_ACCEPTED→ENTRY_MATCHED→ENTRY_SETTLING→ENTRY_CONFIRMED→POSITION_ACTIVE→EXIT_*→FLAT_CONFIRMED | MutationPhase | unit transitions | — | low |
-| P3-06 | 3 | P2 | `LiveOMS.cancel` | reuse | Cancel GTC remainder when policy requires after partial; track CANCEL_PENDING | OrderStatus | partial+cancel | — | med |
-| P3-07 | 3 | P3-04 | kill / thesis / time-flatten | rewire only | Ensure existing strategy exit intents route through supervisor when exposure>0 (no math change) | intents | shadow/live fake | — | low |
-| P3-08 | 3 | P3-03 | settlement FAILED | add behavior | Map to MANUAL_INTERVENTION_REQUIRED; keep provisional exposure until recon | outcomes | unit | — | low |
-| P3-09 | 3 | P3-02 | obligation resolve | extend | Resolve obligation only when entry terminal + (no fill ∥ exit terminal ∥ explicit NO_FILL) | ExecutionObligation | unit | — | low |
-
-**Polymarket invariant correction:** Immediate SELL on MATCHED may be invalid until CONFIRMED/sellable balance — **already encoded in `settlement.py`**. Plan keeps: **risk/supervision at MATCHED**; **SELL submit at sellable**.
-
-### H.2 Phase 3 gate
+Every event and artifact must retain enough identifiers to follow one lifecycle:
 
 ```text
-Every matched entry qty is supervised immediately.
-Exit requests remain actionable across non-sellable gaps.
-sleep(3) is not the lifecycle controller.
+run_id
+→ window_id + market_id + token_id
+→ strategy_id + intent_id
+→ plan_id + request_fingerprint
+→ submission_attempt_id + lineage_id
+→ local_order_id + client_order_id + venue_order_id
+→ trade_id / execution_id
 ```
+
+An event that cannot be correlated must be staged for recovery or classified as unexpected. It must not silently mutate strategy-owned state.
 
 ---
 
-## I. Phase 4 plan — Recovery, reconnect, restart, reconciliation
+## 6. Global safety decisions
 
-**Goal:** Disconnect/timeout/restart ⇒ reconstruct or block with non-PASS.  
-**REST is recovery, not fast path.**
+These decisions apply to all phases.
 
-### I.1 Work items
+### 6.1 Configuration authority
 
-| ID | Phase | Dependency | Existing file/symbol | Change type | Exact implementation | Contracts/state affected | Tests | Acceptance evidence | Risk |
-|----|-------|------------|----------------------|-------------|----------------------|--------------------------|-------|---------------------|------|
-| P4-01 | 4 | P2-09 | `ReconciliationService.reconcile_from_transport` | extend | Ensure N7 host always passes transport with get_open_orders/get_trades/get_positions | ReconcileClass | unit missing methods impossible | — | low |
-| P4-02 | 4 | P4-01 | recon `FILL_MISSING_LOCAL` | add recovery | Safe auto-repair: call `ingest_confirmed_trade` when trade correlates to owned venue_order_id | repaired_fill_ids | unit | — | med |
-| P4-03 | 4 | P2-03 | `user_stream_live` | add recovery | On disconnect: set stream gap → `mark_user_stream(False)` → block entry → REST backfill window | readiness | disconnect test | — | med |
-| P4-04 | 4 | P1-01 | watchdog | add behavior | Configurable `match_evidence_deadline_ms` (default e.g. 1500–3000): if obligation OPEN and no size_matched/trades → REST get_order | config | timeout+exists | no blind sleep success | low |
-| P4-05 | 4 | P4-04 | unknown submission | extend | Keep `UNKNOWN_SUBMISSION` / obligation UNKNOWN until REST resolves | LiveOMS.resolve paths | existing + new | — | low |
-| P4-06 | 4 | P1-08 | baseline-aware recon | extend | Compare positions to pre-run baseline; only strategy tokens/lineage count for flatness; historical externals stay acknowledged | FlatClassification | baseline test | — | med |
-| P4-07 | 4 | P4-03 | restart | add behavior | On host start: load `runtime_state.json`, REST rebuild open orders/fills before arming entry | persistence | restart fixture | block entry until rebuilt | med |
-| P4-08 | 4 | P4-02 | terminal classifier | extend | UNRESOLVED/requires_manual → MANUAL_INTERVENTION_REQUIRED or UNKNOWN_RECONCILING (never PASS) | n7_terminal | matrix | — | low |
+- Layered YAML is the canonical operator/developer configuration surface.
+- The canonical live composition is strategy + risk + execution + runtime YAML resolved into one typed `ResolvedRunConfig` and one generated sealed execution artifact.
+- Deleted historical JSON files must not be restored as production configuration authority.
+- Legacy CLI aliases may remain only if they delegate to the same YAML resolver and N7 host. They must not maintain a second live configuration model.
 
-### I.2 Phase 4 gate
+### 6.2 Admission controls
+
+Use two distinct concepts:
+
+1. `lifecycle_safety_invariants_present` — code capability; mandatory, not operator-disableable for live.
+2. `tiny_live_admitted` — release/admission state; defaults false and remains false until Phase 9 passes.
+
+Do not use one user-editable boolean to represent both. `TYREX_N7_FORBID_LIVE=1` and CI/pytest mutation blocks remain effective in every phase.
+
+### 6.3 Order policy for the admission experiment
+
+- Entry and exit use marketable limit pricing.
+- For the Phase 10 one-shot experiment, use FAK semantics so unfilled remainder does not rest unexpectedly.
+- Exit pricing continues to use the existing fresh bid-side depth walk and absolute floor policy.
+- If the installed SDK cannot represent the required FAK semantics unambiguously, stop before implementation of the submission slice and record a blocking decision. Do not silently substitute GTC.
+
+### 6.4 Persistence policy
+
+Execution safety state is stored under `var/runtime_state/`, not disposable reports.
+
+Durable state must be versioned and atomically replaced. At minimum it includes:
+
+- account baseline fingerprint and selected-market rows
+- order and session obligations
+- correlation/lineage mapping
+- venue order IDs
+- cumulative matched high-water marks
+- applied trade/execution IDs
+- lifecycle phase
+- confirmed and sellable quantity snapshots
+- pending exit request and attempts
+- last reconciliation result and recovery-required flag
+
+Reports under `var/runs/` are evidence, not the authority required to resume safely.
+
+### 6.5 Deadline policy
+
+All production deadlines must be explicit fields in the sealed execution configuration. No developer may introduce an unreported sleep as lifecycle control.
+
+Required fields:
+
+- `submission_ack_timeout_ms`
+- `match_evidence_deadline_ms`
+- `user_stream_reconnect_deadline_ms`
+- `rest_recovery_deadline_ms`
+- settlement poll/backoff/deadline settings
+- `exit_ack_timeout_ms`
+- `exit_retry_time_budget_ms`
+- residual/manual-intervention deadline
+
+Phase 2 defines and validates the schema. Exact production values must be frozen before Phase 9 operational acceptance.
+
+### 6.6 Decision register
+
+The following decisions are part of this plan. A developer must not reopen or silently change a locked decision. A blocking decision must be resolved in the named phase before its gate can pass.
+
+| ID | Decision | Status | Resolution/gate |
+|---|---|---|---|
+| D-01 | Layered YAML is the production configuration authority | LOCKED | Phase 1 removes competing active defaults |
+| D-02 | `LiveOMS` remains the single execution-state writer | LOCKED | Phases 3–4 route every source through it/shared applier |
+| D-03 | Matched, confirmed, and sellable quantities are separate | LOCKED | Phases 3 and 6 tests enforce it |
+| D-04 | Use marketable-limit FAK semantics for the one-shot admission experiment | LOCKED_WITH_SDK_CHECK | Phase 3 proves SDK mapping; otherwise STOP |
+| D-05 | Keep feeds in the active compose/session and stop evaluation only | LOCKED | Phase 7; do not introduce a second live engine |
+| D-06 | Latency budget misses are warnings; stale/economic revalidation failures block | LOCKED | Phase 7 reporting/revalidation |
+| D-07 | Historical account positions remain visible but are not automatically strategy-owned | LOCKED | Phase 8 baseline/reconciliation |
+| D-08 | Exact production deadlines | OPEN_BLOCKING_PHASE_9 | Define schema in Phase 2; freeze reviewed values before Phase 9 PASS |
+| D-09 | Durable lifecycle-state schema/version | OPEN_BLOCKING_PHASE_2 | Phase 2 completion report records the final schema |
+| D-10 | One human-authorized experiment only; no automatic retry/repeat | LOCKED | Phase 10 |
+
+If a locked decision becomes technically impossible, stop the phase and write a decision amendment with evidence and safety impact before changing implementation direction.
+
+---
+
+# Foundation
+
+## Phase 1 — Repository consistency
+
+### Objective
+
+Produce a clean, reproducible baseline so lifecycle regressions can be distinguished from configuration or documentation failures.
+
+### Preconditions
+
+- Work on `rest_project` from a clean worktree.
+- Record starting HEAD and existing full-suite result.
+- No live flags or venue mutation commands.
+
+### Work packages
+
+| ID | Work | Primary files | Required result |
+|---|---|---|---|
+| FND-01 | Inventory every active reference to deleted configuration files | `README.md`, `Docs/latest/**`, `src/**`, `tools/**`, `tests/**` | Machine-readable list in completion report |
+| FND-02 | Declare YAML profiles canonical and document the composition order | `Docs/latest/how_to/configuration.md`, `Docs/latest/how_to/run_modes.md` | One documented configuration model |
+| FND-03 | Migrate tests that require production-like configuration to YAML resolution | `tests/test_yaml_*`, affected R/N tests | No test depends on deleted production JSON |
+| FND-04 | Move truly fixture-specific configuration into `tests/fixtures/config/` if JSON is useful for historical host tests | affected tests/fixtures | Fixture purpose explicit; not operator config |
+| FND-05 | Make `n7-preflight` and `n7-live` delegate to the canonical YAML resolver or require explicit existing inputs | `application/cli.py`, `runtime/yaml_config/**` | No default path points to a missing file; no second engine |
+| FND-06 | Update/remove stale observe and shadow commands | `README.md`, `Docs/latest/**`, CLI help | Every documented command resolves existing files |
+| FND-07 | Validate install metadata and dependency set | `pyproject.toml` | Editable install supports CLI/tests with documented extras |
+| FND-08 | Run link/config consistency checks, targeted CLI tests, then the full suite | tests/docs/CLI | Zero unexpected failures |
+
+### Required tests
+
+- Every documented active config path exists.
+- `run --mode observe --validate-config` succeeds with canonical fixture profiles.
+- `run --mode shadow --validate-config` succeeds.
+- `run --mode live --validate-config` succeeds without arming mutations.
+- Legacy aliases, if retained, resolve through the same typed YAML configuration.
+- Unknown YAML keys and unsafe combinations fail closed.
+- Full `pytest` suite passes.
+
+### Evidence
+
+- Baseline report with before/after failing-test counts
+- Updated CLI help capture
+- Canonical configuration map
+- `git diff --check` and static/lint result for changed files
+
+### Exit gate
 
 ```text
-After disconnect, timeout, or restart: consistent reconstruction OR
-explicit non-PASS block. New entries blocked until recovery completes.
+PASS when:
+- full suite is green,
+- no active documentation/CLI path references a deleted config,
+- YAML is the single production configuration authority,
+- real venue mutations attempted = 0.
 ```
+
+Do not begin lifecycle contract changes until this gate passes.
 
 ---
 
-## J. Phase 5 plan — Low-latency continuous LIVE orchestration
+# Terminal safety
 
-**Goal:** Remove compose-teardown-before-submit; authoritative termination; measured latency.
+## Phase 2 — Execution obligations
 
-### J.1 Work items
+### Objective
 
-| ID | Phase | Dependency | Existing file/symbol | Change type | Exact implementation | Contracts/state affected | Tests | Acceptance evidence | Risk |
-|----|-------|------------|----------------------|-------------|----------------------|--------------------------|-------|---------------------|------|
-| P5-01 | 5 | P3 | `n7_live_session.run_live_oneshot_session` | rewire orchestration | **Do not** stop market/user feeds before submit. Options (pick one in impl): (A) promote compose to hold feeds and call host.try_enter inside loop; (B) start host+stream earlier, compose only signals intent over queue. Prefer (A) minimal: `stop_requested` stops *evaluation* but not feeds until session end | session architecture | latency test with fake clocks | feeds_alive_at_submit | **high** |
-| P5-02 | 5 | P5-01 | `_capture_intents` / try_enter | extend | Immediate pre-submit revalidation: refresh book from `MarketStateStore`, re-check edge/gates (reuse strategy gate functions; **no threshold changes**) | decision evidence | stale-book reject test | `presubmit_revalidation` fact | med |
-| P5-03 | 5 | P5-01 | reporting | add | Monotonic timestamps: market_event → eval → intent → risk → plan → revalidate → sign → http_start → http_end → first_match → exposure → exit_wake | analytics | histogram in summary | — | low |
-| P5-04 | 5 | P3-01 | deadlines | extend | Event-driven wait: `exposure_wait_deadline_ms`, `settlement_wait` (existing config), `exit_ack_timeout`; no fixed 3s success path | config sealed N7 | — | — | low |
-| P5-05 | 5 | P1-05 | terminal state machine | extend | Explicit outcomes (prefer extending names): `NO_FILL_CONFIRMED`, `ENTRY_MATCHED`, `PARTIAL_ENTRY`, `EXIT_PENDING`, `FLAT_CONFIRMED`, `UNKNOWN_RECONCILING`, `MANUAL_INTERVENTION_REQUIRED`, `FAILED`; map legacy `PASS_N7_ONE_SHOT_FLAT` → only when `FLAT_CONFIRMED` | MutationPhase alignment | matrix | — | med |
-| P5-06 | 5 | P5-05 | baseline flatness | extend | Success ⇒ venue position for strategy tokens == baseline (0 delta) + no open owned orders + obligations resolved | economics_report | — | — | med |
-| P5-07 | 5 | P5-03 | latency budget | config | Soft budget metric (e.g. candidate→dispatch p95 target); fail closed only if revalidation fails, not if budget missed (report WARN) — decide in R1 | config | — | — | low |
+Make false flatness and false PASS impossible immediately after any real submission attempt, even before complete fill wiring exists.
 
-### J.2 Phase 5 gate
+### Design
+
+Use two related obligation types:
+
+#### OrderExecutionObligation
+
+One obligation per entry or exit submission.
+
+Required fields:
 
 ```text
-Candidate-to-dispatch on continuous feeds with presubmit revalidation.
-One-shot success requires authoritative terminal evidence (FLAT_CONFIRMED / NO_FILL_CONFIRMED).
+obligation_id
+run_id, lineage_id, intent_id, plan_id
+submission_attempt_id
+side, market_id, token_id, requested_qty
+local_order_id, client_order_id, venue_order_id?
+state
+created_at, updated_at, deadline_at
+resolution_reason?
 ```
 
----
-
-## K. Phase 6 plan — Deterministic validation, shadow, tiny-LIVE admission
-
-**Goal:** Prohibit next tiny-LIVE until mandatory tests pass.
-
-### K.1 Deterministic scenario matrix (minimum)
-
-| # | Scenario | Phase coverage | Primary test module (planned) |
-|---|----------|----------------|-------------------------------|
-| 1 | Response immediate match | 2 | `tests/test_exec_lifecycle_response_match.py` |
-| 2 | HTTP before WS | 2 | same |
-| 3 | WS before HTTP | 2 | same |
-| 4 | Resting unfilled live | 2 | same |
-| 5 | Zero-fill FAK / unmatched reject | 2 | `tests/test_exec_lifecycle_order_types.py` |
-| 6 | Partial entry | 2–3 | `tests/test_exec_lifecycle_partial.py` |
-| 7 | Full entry | 2–3 | same |
-| 8 | Match after old 3s boundary | 3 | `tests/test_exec_lifecycle_exit_wake.py` |
-| 9 | Duplicate trade | 2 | dedupe tests |
-| 10 | Repeated size_matched | 2 | HWM tests |
-| 11 | Out-of-order events | 2 | same |
-| 12 | Submit timeout + venue order exists | 4 | `tests/test_exec_lifecycle_recovery.py` |
-| 13 | Stream disconnect during fill | 4 | same |
-| 14 | Reconnect missed trade | 4 | same |
-| 15 | Restart open order | 4 | same |
-| 16 | Venue inventory w/o local fill | 4 | recon repair |
-| 17 | Settlement confirmation | 3 | settlement tests |
-| 18 | Settlement retry | 3 | same |
-| 19 | Settlement failure | 3 | same |
-| 20 | Exit before sellable | 3 | exit pending |
-| 21 | Exit partial | 3 | same |
-| 22 | Duplicate exit execution | 3 | idempotent exit |
-| 23 | Unresolved recon | 1+4 | terminal classifier |
-| 24 | False-flat prevention | 1 | terminal classifier |
-| 25 | Confirmed no-fill | 2+5 | NO_FILL_CONFIRMED |
-| 26 | Authoritative flatness | 5 | FLAT_CONFIRMED |
-| 27 | No mutation in unit/contract tests | all | assert FakeTransport / arm denied |
-
-### K.2 Gates
-
-1. **Unit** — obligations, classifier, HWM, normalize.  
-2. **Contract** — SubmitOrderResult, user event schemas, MutationPhase.  
-3. **Integration** — N7 host + FakeTransport full entry→exit.  
-4. **Replay** — sanitize captured `yaml_live_20260731T143127Z` audit into fixture; prove classifier would non-PASS; prove fill path would create exposure if response/stream present.  
-5. **OBSERVE** — unchanged behavior smoke.  
-6. **SHADOW** — same OMS lifecycle with ShadowOMS / no real mutations.  
-7. **RO LIVE preflight** — baseline healthy, stream auth, no unexpected selected-market exposure.  
-8. **Tiny-LIVE admission** — Section S checklist signed off.  
-9. **Post-run review** — contradiction-free summary.  
-10. **Rollback/kill** — `TYREX_N7_FORBID_LIVE=1`; disable arm; operator flatten runbook.
-
-### K.3 Phase 6 gate
+States:
 
 ```text
-Next tiny-LIVE prohibited until all mandatory lifecycle, recovery,
-false-flat, and terminal-classification tests pass.
+PREPARED
+SUBMITTING
+VENUE_ACCEPTED
+RESOLVING
+RESOLVED_NO_FILL
+RESOLVED_FILLED
+RESOLVED_CANCELED
+UNKNOWN
+FAILED
 ```
 
----
+The obligation is persisted as `SUBMITTING` immediately before the network mutation. A timeout after dispatch becomes `UNKNOWN`, not `FAILED` and not flat.
 
-## L. Cross-phase dependency graph
+#### SessionExposureObligation
+
+One obligation for the complete one-shot session. It opens when the first network submission may have changed venue state and closes only after `NO_FILL_CONFIRMED` or authoritative return to baseline.
+
+### Work packages
+
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| TSO-01 | Add obligation contracts and registry | new `execution/polymarket/execution_obligation.py` | state-transition unit tests |
+| TSO-02 | Add atomic persistence and schema version | `persistence/`, `runtime_state` paths | crash/reload and incompatible-version tests |
+| TSO-03 | Open order obligation before transport dispatch | `LiveOMS.submit`, reporting pre-mutation barrier | transport exception/timeout tests |
+| TSO-04 | Open session obligation on first possible venue mutation | `N7OneShotHost` | one per session/lineage test |
+| TSO-05 | Resolve rejected-before-mutation distinctly from uncertain-after-dispatch | `LiveOMS` result handling | rejected vs timeout matrix |
+| TSO-06 | Add conservative terminal blocker | new `runtime/n7_terminal.py`, `n7_live_session.py` | open/unknown obligation can never PASS |
+| TSO-07 | Add obligation state to reporting summaries without making reports authoritative | reporting adapters/contracts | contradiction event tests |
+| TSO-08 | Add immutable live safety/admission gates | N7 arm path + config resolution | arm refused when capability/admission absent |
+| TSO-09 | Add required deadline fields to typed configuration, with live admission still false | YAML schema / sealed config | missing/invalid deadline fails config |
+
+### Terminal rules introduced in this phase
+
+- ACK is not a fill.
+- `SUBMITTING`, `VENUE_ACCEPTED`, `RESOLVING`, or `UNKNOWN` obligations block PASS.
+- Empty local portfolio after submission is not terminal evidence.
+- Reconciliation unavailable or unresolved is non-PASS.
+- Reports must emit a critical contradiction if any old path attempts to claim flat while an obligation is open.
+
+### Required tests
+
+- Crash/exception before transport call: no venue mutation; obligation safely failed/canceled.
+- Timeout after transport call: obligation `UNKNOWN`; session non-PASS.
+- Accepted order with zero local fills: obligation open; session non-PASS.
+- Empty portfolio plus open obligation: never flat.
+- Exit submission creates its own obligation.
+- Restart reloads obligations and blocks new entry.
+- OBSERVE and SHADOW behavior remains unchanged.
+
+### Exit gate
 
 ```text
-P1 safety/contracts
-  → P2 response+stream fills+exposure
-    → P3 settlement+exit supervisor
-      → P4 recovery/recon repair
-        → P5 continuous orchestration+latency
-          → P6 validation+admission
+PASS when no execution path can produce PASS after a possible venue mutation
+unless all order/session obligations are resolved by positive evidence.
+Real venue mutations remain disabled.
 ```
 
-Hard blockers:
-
-- P2 cannot enable PASS-on-flat shortcuts removed in P1.  
-- P3 must not SELL before sellability (R7).  
-- P5 must not run before P3 wake path exists (else continuous path still blind).  
-- P6 admission is the only unlock for operator `--live`.
-
 ---
 
-## M. File and symbol change matrix
+## Phase 3 — Complete submission evidence
 
-| File | Symbols | Phases | Notes |
-|------|---------|--------|-------|
-| `execution/polymarket/transport.py` | `SubmitOrderResult` | 1–2 | extend fields |
-| `execution/polymarket/mutation_transport.py` | `_submit_result_from_sdk`, `SdkMutationTransport` | 1–2 | preserve trade_ids |
-| `execution/polymarket/live_oms.py` | `submit`, tracking | 1–2 | match apply; obligation hook |
-| `execution/polymarket/normalize.py` | `fill_events_from_*` | 2 | response+stream |
-| `execution/polymarket/reconciliation.py` | `ReconciliationService` | 4 | auto-repair |
-| `execution/polymarket/settlement.py` | `wait_for_entry_settlement` | 3 | reuse from N7 |
-| `execution/polymarket/mutation_lifecycle.py` | `MutationPhase` | 3–5 | drive from N7 |
-| `execution/polymarket/user_stream_readonly.py` | observe probe | 1–2 | keep; don’t overload |
-| `execution/polymarket/user_stream_live.py` | **NEW** | 2–4 | live supervisor |
-| `execution/polymarket/execution_obligation.py` | **NEW** | 1–5 | obligation registry |
-| `execution/polymarket/sdk_readonly.py` | readonly transport | 2–4 | attach to N7 |
-| `execution/order_store.py` | `OrderStatus` apply | 2 | HWM |
-| `execution/fill_ledger.py` | `FillLedger` | 2 | reuse |
-| `execution/lineage.py` | `SubmissionLineage` | 1–2 | ownership |
-| `portfolio/portfolio.py` | `is_flat` docs + maybe helpers | 1–3 | not oracle |
-| `portfolio/matched_exposure.py` | **NEW** (or Portfolio fields) | 2–3 | exposure |
-| `runtime/n7_live_session.py` | `run_live_oneshot_session`, `_capture_intents` | 1,3,5 | core rewire |
-| `runtime/n7_oneshot_host.py` | `try_enter`, `arm_*`, `economics_report` | 1–5 | stream+classifier |
-| `runtime/n7_terminal.py` | **NEW** | 1–5 | pure classifier |
-| `runtime/exit_supervisor.py` | **NEW** | 3–5 | wake path |
-| `runtime/n6_live_host.py` | `ingest_confirmed_trade`, `post_trade_reconcile`, `try_exit` | 2–4 | wire production |
-| `runtime/live_zgap_compose.py` | feed teardown / should_stop | 5 | keep feeds |
-| `runtime/n7_preflight.py` / `live_preflight.py` | baseline | 1,6 | RO baseline |
-| `runtime/n7_sealed.py` / YAML execution config | deadlines, flags | 1–5 | config |
-| `fake_transport.py` | matched response helpers | 2–6 | tests |
-| `tests/test_n7_oneshot.py` et al. | update expectations | 1–6 | no false PASS |
-| Docs under this folder | reports | 6 | evidence |
+### Objective
 
----
+Preserve and normalize enough submission evidence for the OMS to detect immediate matches, correlate later events, and apply execution information exactly once.
 
-## N. State, command and event contracts
+### Contract changes
 
-### N.1 Commands (prefer existing)
-
-| Command | Existing? | Producer | Consumer |
-|---------|-----------|----------|----------|
-| `SubmitOrderCommand` | yes | N6 try_enter | LiveOMS |
-| `CancelOrderCommand` | yes | exit/remainder | LiveOMS |
-| `EnterIntent` / `FlattenIntent` | yes | strategy / supervisor | host |
-| `ReconcileExecution` | **add as host method** | watchdog/terminate | ReconciliationService |
-| `RecoverSession` | **add as host method** | startup/disconnect | readonly+OMS |
-
-### N.2 Events (map to existing where possible)
-
-| Event (logical) | Existing mapping | Producer | Consumer | Idempotency key |
-|-----------------|------------------|----------|----------|-----------------|
-| OrderSubmissionAccepted | `OrderAccepted` | LiveOMS | OrderStore, lineage, obligation | `local_order_id` |
-| OrderLive | status=`live` fact / optional new | LiveOMS | obligation | `venue_order_id` |
-| OrderMatchObserved | fill events / new fact | LiveOMS/stream | exposure | `(venue_order_id, trade_id)` or size_matched HWM |
-| FillDeltaApplied | `OrderPartiallyFilled`/`OrderFilled` | dispatcher | FillLedger, Portfolio | `execution_id` / trade_id |
-| MatchedExposureChanged | **new** or fact | exposure store | ExitSupervisor | `(lineage, instrument, seq)` |
-| SettlementChanged | settlement facts / MutationPhase | settlement wait | ExitSupervisor | trade_id+status |
-| InventorySellable | sellability result | settlement | ExitSupervisor | instrument+qty |
-| ExitRequested | FlattenIntent | supervisor/strategy | try_exit | intent_id |
-| ExitOrderSubmitted | OrderAccepted (sell) | LiveOMS | obligation exit | order_id |
-| FlatnessConfirmed | terminal + MutationPhase.FLAT_CONFIRMED | classifier | reporting | run_id |
-| ExecutionBecameUnknown | obligation UNKNOWN | watchdog/OMS | classifier | order_id |
-
-### N.3 Order / trade / exposure states
-
-- **Order:** reuse `OrderStatus`; interpret insert `delayed` as ACCEPTED + obligation UNKNOWN/RECONCILING until clarified.  
-- **Trade settlement:** reuse `TradeSettlementStatus`.  
-- **Session mutation:** reuse `MutationPhase`.  
-- **Exposure:** `matched_qty`, `confirmed_qty`, `sellable_qty`, `exit_requested_qty`, `exit_filled_qty`.  
-
-### N.4 Correlation keys
+Extend `SubmitOrderResult` with typed fields equivalent to:
 
 ```text
-intent_id → plan_id → request_fingerprint → submission_attempt_id
-→ local_order_id → client_order_id → venue_order_id → trade_id
-+ market_id + token_id + window_id
+ok
+venue_order_id
+client_order_id?
+status
+trade_ids: tuple[str, ...]
+making_amount?
+taking_amount?
+cumulative_matched_qty?
+remaining_qty?
+uncertain
+error?
+raw_redacted
 ```
 
----
+The adapter owns SDK interpretation. No runtime host may inspect SDK-native response objects.
 
-## O. Test and evidence matrix
+### Work packages
 
-| Phase | Mandatory tests | Evidence artifact |
-|-------|-----------------|-------------------|
-| 1 | false-flat matrix; obligation OPEN blocks PASS; SubmitOrderResult fields | `tests/test_n7_terminal_safety.py` |
-| 2 | response match; WS/HTTP order; dedupe; HWM; stream before arm | `tests/test_exec_lifecycle_*.py` |
-| 3 | exit wake on exposure; pending until sellable; partials | `tests/test_exec_lifecycle_exit_wake.py` |
-| 4 | disconnect; timeout; restart; repair; baseline | `tests/test_exec_lifecycle_recovery.py` |
-| 5 | feeds alive at submit; presubmit revalidation; latency facts | `tests/test_n7_continuous_submit.py` |
-| 6 | full matrix §K.1; replay incident; OBSERVE/SHADOW smoke | admission checklist doc |
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| EVD-01 | Capture sanitized real SDK response shapes as fixtures without secrets | test fixtures / implementation evidence | accepted, matched, delayed, rejected examples |
+| EVD-02 | Resolve BUY/SELL making/taking amount semantics from SDK fixtures/documentation | adapter contract note | table-driven unit tests |
+| EVD-03 | Extend `SubmitOrderResult` atomically across every producer | `transport.py`, fake/spy transports, constructors | contract suite |
+| EVD-04 | Preserve fields in `_submit_result_from_sdk` | `mutation_transport.py` | mapper tests |
+| EVD-05 | Add normalized response-match event creation | `normalize.py`, `LiveOMS` | immediate-match test |
+| EVD-06 | Add cumulative matched high-water mark to `OrderStore` | `order_store.py` | repeated/decreasing/out-of-order tests |
+| EVD-07 | Add matched-exposure projection bound to lineage | new `portfolio/matched_exposure.py` or explicit projection module | orphan and dedupe tests |
+| EVD-08 | Keep MATCHED separate from CONFIRMED inventory | OMS/fill application boundary | test that MATCHED wakes exposure but does not create sellable inventory |
+| EVD-09 | Record complete redacted submit evidence in critical audit lane | reporting adapter | audit schema test |
 
-All deterministic tests: **zero venue mutations** (FakeTransport / spies only).
+### HTTP/WebSocket idempotency contract
 
----
+| Arrival order | Required behavior |
+|---|---|
+| HTTP response first | Apply identifiers/status/match HWM; later stream confirms without duplication |
+| WebSocket first with known client ID | Stage/correlate, then bind to local order when HTTP returns |
+| WebSocket first with venue ID only | Stage by venue ID; never mutate unrelated strategy state |
+| Duplicate trade ID | Apply once |
+| Repeated cumulative `size_matched` | Apply only positive delta above HWM |
+| Lower/out-of-order cumulative value | Ignore for quantity; emit diagnostic |
 
-## P. Migration and backward compatibility
+### Required tests
 
-| Mode | Impact |
-|------|--------|
-| OBSERVE | No mutation; classifier unused; feeds unchanged until Phase 5 optional |
-| SHADOW | Prefer same OMS lifecycle with non-network transport; update tests that assumed helper fills only |
-| N7 LIVE | Outcomes rename/extend — update operator docs; treat legacy `PASS_N7_ONE_SHOT_FLAT` as alias of `FLAT_CONFIRMED` only when checklist passes |
-| R7B path | Keep; optionally later converge on shared ExitSupervisor (not required for N7 admission) |
-| Incident artifacts | Preserve `var/runs/z_gap/yaml_live_20260731T143127Z` untouched |
+- Immediate full match response
+- Immediate partial match response
+- Accepted/resting response
+- Delayed/uncertain response
+- Rejected response
+- Duplicate trade IDs
+- Repeated and decreasing cumulative matched values
+- BUY and SELL amount mapping
+- Redaction/no-secret assertion
+- MATCHED exposure exists while confirmed and sellable quantities remain zero
 
-Atomic contract changes: any `SubmitOrderResult` field add must update FakeTransport, SpyMutationTransport, and all test constructors in the same commit (Slice 1.A).
-
----
-
-## Q. Commit sequence
-
-Recommended commit boundaries (each keeps tests green; LIVE still non-admitted):
-
-1. `feat(exec): extend SubmitOrderResult with trade_ids and amounts`  
-2. `feat(exec): add ExecutionObligation registry`  
-3. `fix(n7): forbid PASS when obligation open or recon unresolved`  
-4. `feat(n7): record preflight account baseline for selected market`  
-5. `feat(oms): apply AcceptedOrder match evidence into fill path`  
-6. `feat(exec): add UserStreamLive supervisor`  
-7. `feat(n7): start user stream before mutation arm`  
-8. `feat(portfolio): matched exposure projection`  
-9. `feat(n7): ExitSupervisor replaces sleep-based exit control`  
-10. `feat(n7): wire settlement sellability before exit submit`  
-11. `feat(recon): readonly transport + FILL_MISSING_LOCAL repair`  
-12. `feat(n7): recovery watchdog and restart reconstruction`  
-13. `feat(n7): continuous feeds through submit + presubmit revalidation`  
-14. `test(exec): full lifecycle matrix + incident replay classifier`  
-15. `docs(n7): tiny-LIVE admission gate signed checklist`  
-
-No commit enables operator LIVE admission until #15 + Section S.
-
----
-
-## R. Risks, unknowns and decisions required
-
-| ID | Item | Type | Decision needed |
-|----|------|------|-----------------|
-| R1 | BUY `making_amount`/`taking_amount` → share qty mapping | UNKNOWN until SDK fixture verified | Spike in Slice 2.A with installed `AcceptedOrder` samples / official docs |
-| R2 | GTC `marketable_limit` vs FAK for tiny-LIVE | policy (not Z-Gap math) | Confirm order_type for next LIVE (recommend FAK for oneshot to avoid resting remainder) |
-| R3 | Phase 5 structural option A vs B | architecture | Prefer A (keep feeds, submit inside session) unless proven intractable |
-| R4 | Whether matched tokens can SELL before CONFIRMED | PROVEN in-repo: no (R7) | Keep supervision≠sell |
-| R5 | Latency budget hard vs soft fail | product | Default soft WARN + hard fail only on revalidation |
-| R6 | Unrelated account positions | PROVEN preflight acknowledges externals | Baseline-aware flatness only |
-| R7 | Shadow host parity effort | schedule | Minimum: FakeTransport N7 path; full shadow OMS optional |
-
----
-
-## S. Tiny-LIVE admission gate
-
-All must be **YES** before operator `--live`:
+### Exit gate
 
 ```text
-[ ] false PASS impossible (Phase 1 tests)
-[ ] complete submission evidence retained (status, trade_ids, amounts, raw)
-[ ] authenticated user stream active before submission
-[ ] HTTP/WS event-order independence tested
-[ ] matched exposure derived exactly once
-[ ] strategy lineage preserved intent→exit
-[ ] exit supervisor activated by exposure events (no sleep controller)
-[ ] settlement/sellability tracked (R7 rules)
-[ ] read-only recovery operational on N7 host
-[ ] reconnect/restart reconstruction tested
-[ ] partial/duplicate/delayed-fill tests passing
-[ ] candidate-to-submit stale teardown removed
-[ ] current book/edge revalidated before dispatch
-[ ] final flatness baseline-aware and authoritative
-[ ] reporting contradiction-free
-[ ] RO preflight healthy: no unexpected selected-market exposure; open orders 0
-[ ] TYREX_N7_FORBID_LIVE unset only on operator host intentionally
-[ ] budget: one account, one 5m market, one lineage, ~$5 fee-inclusive, no re-entry
+PASS when complete submission evidence reaches LiveOMS without SDK leakage,
+one match produces one matched-exposure delta, and MATCHED is not treated as
+confirmed/sellable inventory.
 ```
 
-**Success demonstration for admission run:**
+---
+
+# Live event wiring
+
+## Phase 4 — Continuous authenticated user stream
+
+### Objective
+
+Run an authenticated account-wide Polymarket stream from before mutation arm until terminal classification, feeding the same single-writer execution path used by submission responses.
+
+### Work packages
+
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| STR-01 | Add a live supervisor separate from the timed read-only probe | new `execution/polymarket/user_stream_live.py` | lifecycle unit tests |
+| STR-02 | Subscribe account-wide and normalize order/trade messages | `sdk_secure.py`, `normalize.py` | sanitized message fixtures |
+| STR-03 | Start stream and prove readiness before mutation arm | `N7OneShotHost`, `n7_live_session.py` | ordering assertion |
+| STR-04 | Route normalized messages to LiveOMS/host ingestion | `LiveOMS`, `N6LiveHost.ingest_confirmed_trade` or extracted shared applier | end-to-end fake stream |
+| STR-05 | Stage early/unbound events and correlate later | stream supervisor / OMS correlation registry | WS-before-HTTP tests |
+| STR-06 | Implement reconnect with bounded backoff and gap marker | stream supervisor | disconnect tests |
+| STR-07 | On disconnect, mark readiness false and block new exposure | execution readiness | gate tests |
+| STR-08 | Trigger read-only recovery after a stream gap | hook for Phase 8 reconciliation | recovery-request event |
+| STR-09 | Stop stream only after terminal classification or explicit operator handoff | N7 termination | teardown ordering test |
+
+### Single-writer rule
+
+HTTP response, user stream, and later REST repair must not update Portfolio independently. They all normalize evidence and pass it through the same idempotent order/execution application boundary.
+
+### Required tests
+
+- Stream is healthy before `arm_operator_live` can succeed.
+- Immediate stream event during HTTP submit is retained.
+- HTTP-first and stream-first yield identical stores and exposure.
+- Disconnect blocks new entry.
+- Reconnect backfills the gap before readiness returns.
+- Duplicate messages do not duplicate fills/exposure.
+- Account-wide unexpected events remain visible but do not become strategy-owned without correlation.
+- Termination does not close the stream before final reconciliation.
+
+### Exit gate
 
 ```text
-decision → dispatch → match awareness → strategy-owned exposure
-→ settlement/sellability → exit activation → exit execution → exit fill
-→ authoritative return to pre-run baseline
+PASS when a continuously running authenticated stream feeds the single writer,
+is active before mutation arm, and any gap forces recovery/non-readiness.
+All tests use fakes; real venue mutations = 0.
 ```
 
-Uncertainty ⇒ automatic non-PASS (`UNKNOWN_RECONCILING` / `MANUAL_INTERVENTION_REQUIRED`).
+---
+
+## Phase 5 — Exposure-driven exit supervisor
+
+### Objective
+
+Replace fixed sleeps and local-portfolio polling with an event-driven supervisor that reacts immediately to matched strategy-owned exposure and keeps exit work pending until terminal resolution.
+
+### Component contract
+
+Add `runtime/exit_supervisor.py` with inputs such as:
+
+```text
+MatchedExposureChanged
+SettlementChanged
+InventorySellable
+BookViewChanged
+ExitIntent / FlattenIntent
+TimerDeadline
+KillSwitchActivated
+ReconciliationResult
+```
+
+The supervisor owns orchestration, not pricing, fills, portfolio truth, or strategy economics.
+
+### Work packages
+
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| SUP-01 | Add supervisor state and event interface | new `runtime/exit_supervisor.py` | state-machine unit tests |
+| SUP-02 | Wake on first positive matched-exposure delta | matched exposure → supervisor | delayed-match test |
+| SUP-03 | Record exit need even when inventory is not sellable | supervisor pending state | MATCHED/no-balance test |
+| SUP-04 | Route strategy exit, kill, thesis, and time-exit requests through one supervisor | strategy/host intent routing | precedence tests |
+| SUP-05 | Replace `sleep(3)+is_flat` control in N7 | `n7_live_session.py`, `n7_oneshot_host.py` | no fixed-sleep lifecycle test |
+| SUP-06 | Track partial entry and unfilled remainder separately | supervisor + order state | partial-fill matrix |
+| SUP-07 | Track exit requested, submitted, matched, remaining, and retry budget | supervisor state | partial-exit/retry tests |
+| SUP-08 | Escalate deadlines to recovery/manual intervention, never false success | supervisor + terminal blocker | timeout tests |
+| SUP-09 | Persist supervisor state required for restart | runtime state | crash/reload test |
+
+### Required behavior
+
+- Matched exposure activates supervision immediately.
+- An exit request survives a temporary non-sellable interval.
+- Only owned matched/confirmed quantity participates.
+- Partial entry supervises only actual matched exposure.
+- Entry remainder is canceled or explicitly tracked according to FAK terminal evidence.
+- Exit retry is bounded by attempts and time budget.
+- Kill switch accelerates safe reduction but never guesses quantity.
+
+### Exit gate
+
+```text
+PASS when every matched strategy-owned exposure wakes the supervisor,
+no fixed sleep controls exit reachability, and unresolved exposure always
+remains pending or non-PASS.
+```
 
 ---
 
-## T. Final implementation recommendation
+## Phase 6 — Shared settlement and sellability
 
-1. **Do not rewrite** Strategy/Risk/Planner/OMS — **complete the wiring**.  
-2. **Phase 1 first** — terminal safety + obligations + full `SubmitOrderResult` (manual position already cleared; still RO-preflight before any future LIVE).  
-3. **Phase 2** — `LiveOMS` becomes first MATCHED consumer; `UserStreamLive` feeds the same single writer.  
-4. **Phase 3** — reuse `settlement.py`; `ExitSupervisor` replaces `sleep(3)+is_flat`.  
-5. **Phase 4** — readonly recon + repair + restart.  
-6. **Phase 5** — continuous feeds + presubmit revalidation + latency metrics.  
-7. **Phase 6** — prove matrix; only then admit one monitored tiny-LIVE.  
+### Objective
 
-### Execution backlog (strict order for a coding agent)
+Reuse the proven R7 settlement model so N7 supervises at MATCHED but submits SELL only for confirmed, sellable, strategy-owned quantity.
 
-1. Extend `SubmitOrderResult` + `_submit_result_from_sdk` + FakeTransport constructors; add unit tests.  
-2. Add `ExecutionObligation` registry; open on VENUE_ACCEPTED.  
-3. Implement `classify_n7_terminal`; wire `n7_live_session`; update N7 tests so UNRESOLVED/empty-portfolio-after-ACK cannot PASS.  
-4. Add preflight `account_baseline` for selected market; report contradictions.  
-5. Implement response-match → shared fill apply helper → `OrderStore`/`Portfolio` update (FakeTransport).  
-6. Add `UserStreamLive`; normalize user order/trade; wire start-before-arm / stop-on-terminate.  
-7. Add matched-exposure projection bound to lineage.  
-8. Attach `SdkReadonlyTransport` alongside mutation transport on N7 host.  
-9. Implement `ExitSupervisor`; remove sleep-based exit control; pending-until-sellable via `settlement.py`.  
-10. Drive `MutationPhase` transitions from host.  
-11. Recon auto-repair for owned `FILL_MISSING_LOCAL`; watchdog deadline; restart rebuild.  
-12. Rework session so feeds remain alive through submit; add presubmit book/edge revalidation.  
-13. Latency monotonic facts; terminal outcome vocabulary aligned with `FLAT_CONFIRMED` / `NO_FILL_CONFIRMED`.  
-14. Full deterministic matrix + incident replay classifier test.  
-15. OBSERVE/SHADOW smoke; RO preflight; complete Section S checklist; **then** operator may run one tiny-LIVE.
+### Reuse targets
+
+- `execution/polymarket/settlement.py`
+- `TradeSettlementStatus`
+- `wait_for_entry_settlement`
+- `evaluate_sell_readiness`
+- `classify_flatness`
+- `execution/polymarket/mutation_lifecycle.py`
+- existing R7 tests and incident-derived patterns
+
+N7 must reuse shared contracts, not import R7 one-shot orchestration wholesale.
+
+### Work packages
+
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| STL-01 | Introduce/confirm separate matched, confirmed, sellable projections | settlement/exposure/portfolio boundaries | three-axis unit tests |
+| STL-02 | Feed stream/REST settlement statuses into the shared settlement evaluator | stream normalize + settlement | MATCHED→MINED→CONFIRMED tests |
+| STL-03 | Drive N7 `MutationPhase` transitions | N7 host/session | transition matrix |
+| STL-04 | Notify supervisor when inventory becomes sellable | settlement → supervisor | pending→actionable test |
+| STL-05 | Compute safe SELL quantity from confirmed, balance, and remaining owned qty | sellability helper | quantity-bound tests |
+| STL-06 | Route safe quantity through existing exit planner and LiveOMS | `N7OneShotHost.run_bounded_exit_ladder` | fake full lifecycle |
+| STL-07 | Handle settlement retry/failure without clearing exposure | terminal/recovery path | retry/failure tests |
+| STL-08 | Resolve entry/exit obligations only from settlement/order terminal evidence | obligations registry | premature-resolution tests |
+| STL-09 | Apply confirmed fills idempotently to FillLedger/Portfolio | shared execution applier | duplicate/restart tests |
+
+### Mandatory quantity formula
+
+```text
+sell_qty = min(
+    confirmed_strategy_owned_qty,
+    funder_conditional_balance,
+    remaining_unexited_qty
+)
+```
+
+Planned quantity and insert acknowledgement never participate in this minimum.
+
+### Required tests
+
+- MATCHED but not CONFIRMED: supervisor active, SELL blocked.
+- MINED but not CONFIRMED: SELL blocked.
+- CONFIRMED but balance zero/lagging: exit remains pending.
+- Confirmed quantity greater than balance: SELL capped to balance.
+- Partial confirmed inventory: only confirmed portion is actionable.
+- Settlement failure: non-PASS/manual intervention.
+- Duplicate settlement/trade evidence: exactly-once portfolio application.
+- Partial exit and dust classification.
+
+### Exit gate
+
+```text
+PASS when supervision begins at MATCHED, confirmed accounting changes only
+from confirmed evidence, and SELL cannot exceed authenticated sellable inventory.
+```
 
 ---
 
-## Appendix — Required invariants checklist (enforce in tests)
+# Freshness and authority
 
-1. ACK is never a fill.  
-2. Real submission creates unresolved execution obligation.  
-3. Every execution delta applied exactly once.  
-4. Cumulative matched quantity cannot double-count exposure.  
-5. Matched exposure activates protection/exit supervision immediately.  
-6. Strategy ownership from immutable order lineage only.  
-7. Partial fills expose only executed quantity.  
-8. Unfilled remainder canceled or tracked per order policy.  
-9. Local flatness after mutation is not authoritative.  
-10. Reconciliation failure/uncertainty never returns PASS.  
-11. Exit requests survive temporary non-sellable inventory.  
-12. Reconnect/restart blocks entry until recovery completes.  
-13. Older/duplicate events cannot move state backward.  
-14. HTTP vs WS order cannot change final OMS result.  
-15. Venue inventory cannot silently become strategy-owned without recon evidence.  
-16. Successful flatness requires positive, baseline-aware venue evidence.  
-17. OBSERVE/SHADOW/LIVE share lifecycle contracts (only LIVE mutates).  
-18. Reporting must expose contradictions.
+## Phase 7 — Continuous feeds and pre-submit revalidation
 
-**Polymarket-specific refinement:** supervision at MATCHED is required; **sellable inventory may lag CONFIRMED** — already the R7 model; do not “fix” this by selling on insert match alone.
+### Objective
+
+Keep market/reference/user feeds alive from candidate creation through terminal state and refuse stale or materially changed entry plans immediately before submission.
+
+### Target orchestration
+
+Preferred design:
+
+```text
+compose owns active feeds and stores
+→ strategy emits one candidate
+→ stop further entry evaluation, not the feeds
+→ risk + tentative plan
+→ immediate revalidation from current MarketStateStore/BookView
+→ submit within the same live session
+→ feeds continue for settlement, exit, and reconciliation
+```
+
+Do not build a second live engine or a second quote path.
+
+### Work packages
+
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| FRH-01 | Refactor `stop_requested` so it stops entry evaluation only | `live_zgap_compose.py`, `n7_live_session.py` | feeds-alive assertion |
+| FRH-02 | Submit from inside the active composed session | compose/session/host integration | no teardown-before-submit test |
+| FRH-03 | Reuse `MarketStateStore → BookView` as the only live quote source | market data and plan wiring | architecture/import test |
+| FRH-04 | Add immediate pre-submit book/window/binding revalidation | `planning/book_revalidation.py`, host | stale/version-change tests |
+| FRH-05 | Re-evaluate strategy/risk hard gates without changing thresholds | strategy binding/risk context | edge/spread/cutoff tests |
+| FRH-06 | Recheck fee-inclusive budget and order minimum | planner/live sizing | cap tests |
+| FRH-07 | Record immutable book fingerprint, versions, candidate age, and revalidation result | reporting | audit schema test |
+| FRH-08 | Add monotonic latency timestamps | market→eval→intent→risk→plan→revalidate→HTTP→match→exit wake | summary/ordering tests |
+| FRH-09 | Keep exit bid-side books fresh through supervisor retries | exit planner/book feed | moving-book tests |
+
+### Hard revalidation failures
+
+Submission must be refused before mutation when any of these changes:
+
+- selected market/window/token binding
+- entry cutoff or window phase
+- book synchronization/readiness
+- book freshness
+- required side/depth
+- spread/risk gate
+- economic edge below the existing threshold
+- fee-inclusive debit above `$5.00`
+- reporting critical-audit health
+- user-stream readiness
+- account/recovery readiness
+- kill switch or open prior session obligation
+
+Latency budget misses are warnings unless a freshness/revalidation rule fails. Do not invent a performance failure that bypasses economic revalidation.
+
+### Exit gate
+
+```text
+PASS when feeds remain active at submit and through exit, every submission has
+a fresh revalidation artifact, and a stale candidate cannot reach transport.
+```
+
+---
+
+## Phase 8 — Baseline-aware terminal reconciliation
+
+### Objective
+
+Make read-only venue evidence the authority for final session classification, recovery, restart, and proof of no-fill/flatness relative to the pre-run account baseline.
+
+### Baseline artifact
+
+Capture and persist before mutation arm:
+
+```text
+account/funder/proxy identity fingerprint
+selected market, condition, token IDs, window
+selected-token conditional balances
+owned and unexpected open orders
+recent relevant trades / pagination cursor or bounded time range
+acknowledged historical positions
+capture timestamp and source health
+```
+
+The baseline is immutable for a session and stored in durable runtime state plus a report attachment.
+
+### Work packages
+
+| ID | Work | Primary files/symbols | Tests/evidence |
+|---|---|---|---|
+| AUT-01 | Attach read-only transport to the N7 host beside mutation transport | `sdk_readonly.py`, N7/N6 host | capability test |
+| AUT-02 | Capture and seal selected-market baseline during preflight | `n7_preflight.py`, `live_preflight.py` | baseline fixture |
+| AUT-03 | Add watchdog for accepted/unknown obligations with no match evidence | runtime watchdog | timeout→REST test |
+| AUT-04 | Reconcile open orders, trades, positions/balances, local stores, and obligations | `ReconciliationService` | matrix tests |
+| AUT-05 | Auto-repair `FILL_MISSING_LOCAL` only for correlated owned trades | reconciliation + shared fill applier | owned/unowned repair tests |
+| AUT-06 | Block and expose unexpected/unowned venue evidence | reconciliation/readiness | unexpected exposure tests |
+| AUT-07 | Rebuild after disconnect/restart before allowing new entry | runtime state + REST reconstruction | restart fixtures |
+| AUT-08 | Implement final pure terminal classifier | `runtime/n7_terminal.py` | exhaustive outcome matrix |
+| AUT-09 | Make reporting reject/flag contradictions | reporting summary | contradiction tests |
+| AUT-10 | Persist final reconciliation and obligation resolution atomically | runtime state | crash-at-terminal test |
+
+### Exact `NO_FILL_CONFIRMED` proof
+
+All conditions are required:
+
+1. Entry order is definitively rejected before mutation, canceled, expired, or otherwise venue-terminal.
+2. Venue cumulative matched quantity is zero.
+3. No correlated trade exists in the bounded/full required trade query.
+4. Selected-token balance equals baseline.
+5. No owned open order remains.
+6. All order/session obligations are resolved.
+7. Reconciliation completed without disagreement.
+
+Timeout, missing data, or empty local portfolio is never `NO_FILL_CONFIRMED`.
+
+### Exact `FLAT_CONFIRMED` proof
+
+All conditions are required:
+
+1. Every owned entry and exit submission has a resolved obligation.
+2. No owned open order remains.
+3. All correlated trades were applied exactly once locally.
+4. Selected-token balance returned to baseline, subject only to the explicit dust threshold.
+5. Local order/fill/portfolio/lifecycle state agrees with venue evidence.
+6. Reconciliation has no unresolved or manual-intervention classification.
+
+### Terminal result precedence
+
+```text
+unexpected/unowned or irreconcilable evidence
+  → MANUAL_INTERVENTION_REQUIRED
+
+missing/temporarily unavailable evidence or unknown obligation
+  → UNKNOWN_RECONCILING
+
+known remaining balance/open owned order
+  → RESIDUAL_EXPOSURE or EXIT_PENDING
+
+all no-fill conditions true
+  → NO_FILL_CONFIRMED
+
+all return-to-baseline conditions true
+  → FLAT_CONFIRMED or FLAT_WITH_DUST
+
+otherwise
+  → FAILED (only for definitive non-exposure operational failure)
+```
+
+### Exit gate
+
+```text
+PASS when disconnect, timeout, restart, missing local fill, and final-state
+classification all produce either consistent reconstruction or explicit non-PASS;
+success requires positive baseline-aware venue evidence.
+```
+
+---
+
+# Acceptance
+
+## Phase 9 — Non-live validation ladder
+
+### Objective
+
+Prove the full lifecycle without real venue mutation and produce the signed evidence required to admit exactly one Phase 10 experiment.
+
+### Level 1 — Unit and contract tests
+
+Mandatory scenarios:
+
+| # | Scenario | Primary phase |
+|---:|---|---:|
+| 1 | Submit rejected before mutation | 2–3 |
+| 2 | Submit timeout; venue order absent | 2, 8 |
+| 3 | Submit timeout; venue order exists | 2, 8 |
+| 4 | HTTP immediate full match | 3 |
+| 5 | HTTP immediate partial match | 3 |
+| 6 | HTTP before WebSocket | 3–4 |
+| 7 | WebSocket before HTTP | 3–4 |
+| 8 | Duplicate trade event | 3–4 |
+| 9 | Repeated/decreasing matched HWM | 3–4 |
+| 10 | Match after the historical three-second boundary | 5 |
+| 11 | Partial entry with remainder terminal/canceled | 5–6 |
+| 12 | MATCHED not yet sellable | 5–6 |
+| 13 | MATCHED→MINED→CONFIRMED | 6 |
+| 14 | Settlement retry | 6 |
+| 15 | Settlement failure | 6, 8 |
+| 16 | Confirmed inventory with lagging balance | 6 |
+| 17 | Partial exit | 5–6 |
+| 18 | Duplicate exit execution | 3–6 |
+| 19 | Book changes before submission | 7 |
+| 20 | Window changes before submission | 7 |
+| 21 | User-stream disconnect during fill | 4, 8 |
+| 22 | Reconnect misses trade and REST repairs | 4, 8 |
+| 23 | Restart with open order/obligation | 2, 8 |
+| 24 | Venue inventory without local fill | 8 |
+| 25 | Unexpected account exposure | 8 |
+| 26 | Confirmed no-fill | 8 |
+| 27 | Authoritative flat | 8 |
+| 28 | False-flat incident replay | 2, 8 |
+| 29 | Reporting contradiction | 2, 8 |
+| 30 | No real mutation in tests | all |
+
+Planned test modules:
+
+```text
+tests/test_n7_terminal_safety.py
+tests/test_exec_lifecycle_obligations.py
+tests/test_exec_lifecycle_response_match.py
+tests/test_exec_lifecycle_user_stream.py
+tests/test_exec_lifecycle_ordering.py
+tests/test_exec_lifecycle_exit_wake.py
+tests/test_exec_lifecycle_settlement.py
+tests/test_exec_lifecycle_recovery.py
+tests/test_n7_continuous_submit.py
+tests/test_n7_lifecycle_acceptance.py
+```
+
+Existing tests may be extended where ownership already matches, but the completion report must map every scenario above to an exact test name.
+
+### Level 2 — Integrated FakeTransport lifecycle
+
+Exercise the production N7 orchestration with fake venue and stream adapters:
+
+```text
+strategy intent
+→ risk
+→ plan
+→ revalidation
+→ submit
+→ HTTP/stream execution evidence
+→ matched exposure
+→ settlement
+→ sellability
+→ exit supervisor
+→ exit
+→ baseline reconciliation
+→ FLAT_CONFIRMED
+```
+
+Tests must not bypass production wiring by directly inserting a fill into Portfolio.
+
+### Level 3 — Incident replay
+
+Sanitize the evidence from `yaml_live_20260731T143127Z` into a deterministic fixture.
+
+Prove:
+
+- the old lifecycle could produce a false flat;
+- the new Phase 2 blocker returns non-PASS;
+- response/stream evidence creates matched exposure exactly once;
+- the supervisor requests exit;
+- unresolved reconciliation cannot produce PASS.
+
+Preserve the historical run directory unchanged.
+
+### Level 4 — OBSERVE and SHADOW regression
+
+- Run canonical fixture OBSERVE.
+- Run canonical fixture SHADOW entry→exit.
+- Run resolution-aware SHADOW scenarios.
+- Confirm Z-Gap decisions and thresholds are unchanged.
+- Confirm no live credentials or mutation transports are required.
+
+### Level 5 — Operational market-data acceptance
+
+On a venue-reachable operator host, run mutation-disabled OBSERVE/SHADOW across at least two consecutive BTC five-minute rollovers.
+
+Required evidence:
+
+- active and prepared window bindings are correct;
+- promotion preserves correct market/token identity;
+- PTB K is sealed against the canonical boundary;
+- books become READY through REST/WS rules;
+- fresh real bids/asks reach Z-Gap evaluation;
+- cold-gap threshold is respected or explicitly blocks readiness;
+- reconnect/recovery behavior is recorded;
+- venue mutations attempted = 0.
+
+### Level 6 — Authenticated read-only preflight
+
+Required checks:
+
+- identities and signer/funder roles match sealed configuration;
+- public server time and feeds are healthy;
+- authenticated user stream connects;
+- open orders are fully paginated and classified;
+- selected-market baseline is captured;
+- historical positions are acknowledged but not silently owned by N7;
+- unexpected exposure blocks admission;
+- mutation transport remains unarmed;
+- `real_venue_mutations = 0`.
+
+### Required Phase 9 evidence package
+
+```text
+phase_9_acceptance_report.md
+full_test_result.txt or captured command/result
+incident_replay_result.json
+fake_lifecycle_run/
+observe_shadow_regression/
+two_rollover_market_data/
+authenticated_readonly_preflight/
+sealed_config_fingerprint.txt
+tiny_live_admission_checklist.md
+```
+
+### Phase 9 admission checklist
+
+Every item must be YES:
+
+- false PASS is impossible;
+- complete submission evidence is retained;
+- authenticated stream starts before arm;
+- HTTP/stream ordering is idempotent;
+- matched/confirmed/sellable quantities remain distinct;
+- every matched exposure activates supervision;
+- settlement and sellability reuse R7 rules;
+- exit requests survive non-sellable intervals;
+- read-only recovery and restart reconstruction pass;
+- feeds remain alive through dispatch;
+- pre-submit revalidation blocks stale candidates;
+- no-fill and flatness require baseline-aware venue proof;
+- reporting is contradiction-free;
+- full repository suite is green;
+- two-rollover operational acceptance passes;
+- authenticated preflight is healthy;
+- sealed timeouts and FAK order policy are reviewed;
+- one account, one market, one lineage, fee-inclusive debit ≤ `$5.00`;
+- live admission is still disabled pending operator review.
+
+### Exit gate
+
+```text
+PASS only when all six non-live levels and every admission item pass.
+Phase 9 PASS may set the reviewed release artifact that allows Phase 10,
+but it must not itself submit an order.
+```
+
+---
+
+## Phase 10 — One monitored tiny-live experiment
+
+### Objective
+
+Perform exactly one operator-authorized, fee-inclusive `$5.00` maximum, single-window N7 lifecycle to validate the repaired execution wiring. This is an acceptance experiment, not routine trading.
+
+### Authorization boundary
+
+- Only the human operator may invoke the real mutation flag.
+- An agent/developer performing Phases 1–9 must not run this phase automatically.
+- Phase 9 PASS evidence must be reviewed before authorization.
+- The worktree and sealed configuration fingerprint must match the reviewed candidate.
+- `TYREX_N7_FORBID_LIVE` is unset only intentionally on the operator host for this experiment.
+
+### Pre-run checklist
+
+1. Clean committed HEAD matches the accepted Phase 9 report.
+2. Full suite and required targeted suites are green at that HEAD.
+3. Sealed config fingerprint matches the reviewed artifact.
+4. `tiny_live_admitted` is enabled only by the reviewed release/admission mechanism.
+5. Credentials, signer, funder, proxy, and network identity pass.
+6. User stream is connected and healthy.
+7. Public/reference/market feeds are healthy.
+8. Selected-market baseline is sealed.
+9. Open orders are zero or explicitly expected/owned.
+10. Unexpected selected-market exposure is zero.
+11. All previous obligations are resolved.
+12. Reporting critical audit lane is healthy.
+13. Fee-inclusive entry cap is exactly `$5.00` or lower.
+14. FAK behavior, exit floor, deadlines, and manual handoff procedure are visible to the operator.
+
+Any failed item aborts before mutation.
+
+### Expected success sequence
+
+```text
+sealed PTB and live Z-Gap decision
+→ EnterIntent
+→ risk approval
+→ fresh pre-submit revalidation
+→ persisted submission obligation
+→ venue submission
+→ HTTP/user-stream match awareness
+→ matched exposure supervision
+→ confirmed settlement
+→ sellable inventory
+→ exit request and fresh exit plan
+→ exit submission/fill
+→ authenticated reconciliation
+→ return to baseline
+→ FLAT_CONFIRMED or approved FLAT_WITH_DUST
+→ mutations disabled
+```
+
+### Live monitoring requirements
+
+The operator must be able to observe:
+
+- user-stream health;
+- current lifecycle phase;
+- entry and exit obligation states;
+- matched, confirmed, sellable, and remaining quantities;
+- open owned orders;
+- exit supervisor state/deadline;
+- reconciliation state;
+- reporting health;
+- real venue mutation count.
+
+### Stop/handoff conditions
+
+Immediately disable new mutations and enter recovery/manual handoff for:
+
+- user-stream gap that cannot be recovered within deadline;
+- unknown submission;
+- unexpected order/trade/position;
+- settlement failure;
+- exit deadline exceeded;
+- reconciliation disagreement;
+- reporting critical-audit failure after mutation;
+- operator interrupt;
+- residual exposure at the manual-intervention deadline.
+
+Do not guess inventory or submit an unbounded emergency order. The handoff report must contain the known owned quantity, open order IDs, venue evidence, and next safe operator action.
+
+### Required post-run evidence
+
+- manifest and sealed configuration fingerprint
+- complete critical audit stream
+- candidate and pre-submit revalidation evidence
+- HTTP submission results and user-stream correlations
+- obligation state history
+- matched/confirmed/sellable quantity history
+- lifecycle and supervisor transitions
+- entry/exit order and trade IDs
+- final open-order/trade/balance reconciliation
+- baseline delta
+- terminal classifier inputs and result
+- mutation count
+- operator incident/handoff record if not flat
+
+### Phase 10 success criteria
+
+Success requires all of:
+
+- one permitted entry lineage only;
+- fee-inclusive BUY debit ≤ `$5.00`;
+- every execution applied exactly once;
+- no unowned execution attributed to the strategy;
+- no owned open order remains;
+- selected-market balance returned to baseline or approved dust;
+- obligations resolved;
+- reconciliation clean;
+- terminal state `FLAT_CONFIRMED` or policy-valid `FLAT_WITH_DUST`;
+- reports contain no contradictions;
+- mutations are forced off at termination.
+
+`NO_FILL_CONFIRMED` is a safe experiment outcome but does not validate the full entry→exit path. It may justify a separately reviewed repeat only after the evidence is examined. One successful run does not authorize continuous operation or a higher capital limit.
+
+### Exit gate
+
+```text
+PASS when the operator-reviewed evidence proves the complete lifecycle and
+authoritative return to baseline. Stop after this one experiment for review.
+No automatic second live run is authorized by Phase 10 PASS.
+```
+
+---
+
+## 7. Cross-phase dependency graph
+
+```text
+Phase 1 repository consistency
+  → Phase 2 obligations and conservative terminal block
+    → Phase 3 complete response evidence and matched exposure
+      → Phase 4 authenticated live stream
+        → Phase 5 exposure-driven supervisor
+          → Phase 6 settlement/sellability and safe exit
+            → Phase 7 continuous feeds/revalidation
+              → Phase 8 recovery and authoritative terminal proof
+                → Phase 9 non-live acceptance
+                  → Phase 10 one operator experiment
+```
+
+Hard dependency rules:
+
+- Phase 2 must precede any new event wiring so incomplete later phases fail safely.
+- Phase 3 must not convert MATCHED directly into confirmed/sellable inventory.
+- Phase 4 must feed the same single-writer path as Phase 3.
+- Phase 5 cannot submit SELL merely because matched exposure exists.
+- Phase 6 owns the sellability permission.
+- Phase 7 cannot introduce a second strategy, quote, risk, or OMS path.
+- Phase 8 is the only authority for final PASS classification.
+- Phase 9 is the only gate that may admit Phase 10.
+
+---
+
+## 8. File and ownership map
+
+| Area/file | Planned responsibility | Phase |
+|---|---|---:|
+| `application/cli.py` | canonical YAML delegation; no missing defaults | 1 |
+| `runtime/yaml_config/**` | single typed configuration authority | 1–2 |
+| `execution/polymarket/execution_obligation.py` | per-order/session obligations | 2 |
+| `persistence/**`, `runtime/r7_paths.py` or generic successor | atomic lifecycle runtime state | 2, 5, 8 |
+| `runtime/n7_terminal.py` | pure conservative/final terminal classifier | 2, 8 |
+| `execution/polymarket/transport.py` | complete `SubmitOrderResult` | 3 |
+| `execution/polymarket/mutation_transport.py` | SDK response mapping | 3 |
+| `execution/polymarket/normalize.py` | response/stream/REST evidence normalization | 3–4, 8 |
+| `execution/polymarket/live_oms.py` | single-writer order/execution application | 2–4, 6 |
+| `execution/order_store.py` | cumulative matched HWM and order status | 3–4 |
+| `execution/fill_ledger.py` | exactly-once confirmed execution ledger | 3–6, 8 |
+| `portfolio/matched_exposure.py` | strategy-owned matched exposure projection | 3–6 |
+| `portfolio/portfolio.py` | confirmed internal accounting; not terminal oracle | 3–8 |
+| `execution/polymarket/user_stream_live.py` | continuous authenticated session stream | 4 |
+| `runtime/exit_supervisor.py` | exposure-driven exit orchestration | 5–7 |
+| `execution/polymarket/settlement.py` | settlement and sellability rules | 6 |
+| `execution/polymarket/mutation_lifecycle.py` | lifecycle phase vocabulary | 6, 8 |
+| `runtime/live_zgap_compose.py` | keep feeds active through execution | 7 |
+| `planning/book_revalidation.py` | immediate pre-submit validation | 7 |
+| `execution/polymarket/sdk_readonly.py` | REST recovery/reconciliation reads | 8 |
+| `execution/polymarket/reconciliation.py` | baseline comparison and safe repair | 8 |
+| `runtime/n7_preflight.py`, `runtime/live_preflight.py` | baseline capture/readiness | 8–9 |
+| `reporting/**` | audit/evidence/contradiction visibility, never runtime authority | all |
+| `fake_transport.py`, tests | zero-mutation deterministic proof | 2–9 |
+
+If implementation shows that one of these owners is incorrect, document the deviation before moving responsibility. Do not create a duplicate authority silently.
+
+---
+
+## 9. Recommended commit sequence
+
+Each numbered item is intended to be reviewable and keep the suite green:
+
+1. `chore(config): establish canonical YAML baseline and repair stale paths`
+2. `feat(exec): add durable order and session execution obligations`
+3. `fix(n7): block false PASS while obligations or recon are unresolved`
+4. `feat(exec): preserve complete SubmitOrderResult evidence`
+5. `feat(oms): apply response match evidence to matched-exposure HWM`
+6. `feat(exec): add continuous authenticated UserStreamLive`
+7. `feat(n7): start stream before mutation arm and recover gaps`
+8. `feat(n7): add exposure-driven ExitSupervisor`
+9. `feat(n7): reuse settlement and sellability for safe exit quantity`
+10. `feat(n7): keep feeds alive and revalidate immediately before submit`
+11. `feat(recon): add baseline-aware recovery, restart, and terminal proof`
+12. `test(exec): add full lifecycle matrix and incident replay`
+13. `test(ops): complete observe/shadow/two-rollover/read-only acceptance`
+14. `docs(n7): publish Phase 9 admission evidence and reviewed fingerprint`
+15. `ops(n7): record one operator-authorized tiny-live experiment`
+
+Commit 15 is performed only by or under direct control of the operator after commits 1–14 are reviewed. It is an evidence/operations step, not an automatic developer action.
+
+---
+
+## 10. Required invariants checklist
+
+Every invariant must have an automated test before Phase 9 passes:
+
+1. ACK is never a fill.
+2. A mutation attempt creates a durable unresolved obligation before transport dispatch.
+3. A timeout after dispatch is UNKNOWN, not rejected and not flat.
+4. Every venue execution delta is applied exactly once.
+5. Cumulative matched quantity never moves backward or double-counts.
+6. HTTP/stream event order cannot change final state.
+7. Strategy ownership comes only from immutable lineage/correlation.
+8. Matched, confirmed, and sellable quantities remain distinct.
+9. Matched exposure activates protection immediately.
+10. SELL never exceeds confirmed, sellable, remaining owned quantity.
+11. Partial fills expose only executed quantity.
+12. Unfilled remainder is definitively terminal or explicitly tracked.
+13. Exit requests survive non-sellable settlement gaps.
+14. Fixed sleeps are not lifecycle controllers.
+15. Market and user feeds remain active through submission and exit.
+16. Every submission uses a fresh pre-submit revalidation.
+17. Stream gaps and restart block entry until recovery completes.
+18. Venue inventory cannot silently become strategy-owned without correlated evidence.
+19. Safe auto-repair applies only correlated owned trades.
+20. Local flatness after mutation is not authoritative.
+21. Reconciliation failure or uncertainty never returns PASS.
+22. `NO_FILL_CONFIRMED` requires positive venue evidence.
+23. Successful flatness requires return to the sealed account baseline.
+24. Reports expose contradictions and cannot override runtime safety state.
+25. OBSERVE, SHADOW, and LIVE retain shared contracts; only LIVE mutates the venue.
+26. No Phase 1–9 test or operational acceptance performs a real venue mutation.
+27. Phase 10 is one market, one lineage, ≤ `$5.00`, with no automatic repeat.
+
+---
+
+## 11. Final implementation instruction
+
+Implement the plan in the stated order and stop for review at every phase gate.
+
+The first delivery should contain only:
+
+```text
+Phase 1 — repository consistency
+Phase 2 — execution obligations and conservative false-PASS prevention
+Phase 3 — complete submission evidence and matched-exposure separation
+```
+
+After those phases pass, review their contracts and evidence before starting the authenticated user-stream work. Do not combine all ten phases into one large change, and do not use partial completion as authorization for a live experiment.

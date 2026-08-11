@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -11,11 +12,21 @@ class PolymarketErrorCategory(str, Enum):
     TRANSIENT = "TRANSIENT"
     RATE_LIMIT = "RATE_LIMIT"
     REJECTED = "REJECTED"
+    ENGINE_RESTART = "ENGINE_RESTART"  # HTTP 425 matching-engine restart
     AUTH = "AUTH"
     USER_INPUT = "USER_INPUT"
     TRANSPORT = "TRANSPORT"
+    UNCERTAIN_DISPATCH = "UNCERTAIN_DISPATCH"
     UNEXPECTED = "UNEXPECTED"
     UNKNOWN = "UNKNOWN"
+
+
+class PolymarketOperation(str, Enum):
+    """Operation context controls whether a transport failure is retryable."""
+
+    READ = "READ"
+    PREPARE = "PREPARE"
+    DISPATCH = "DISPATCH"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -24,12 +35,45 @@ class ClassifiedPolymarketError:
     retryable: bool
     message: str
     original_type: str
+    status: int | None = None
+    retry_after: float | None = None
 
 
-def classify_polymarket_error(exc: BaseException) -> ClassifiedPolymarketError:
-    """Map SDK / transport exceptions to stable Tyrex categories."""
+def classify_polymarket_error(
+    exc: BaseException,
+    *,
+    operation: PolymarketOperation = PolymarketOperation.READ,
+) -> ClassifiedPolymarketError:
+    """Map SDK / transport exceptions to stable Tyrex categories.
+
+    Prefer typed SDK fields (``RequestRejectedError.status``) over string parsing.
+    HTTP 425 is treated as a temporary matching-engine restart (bounded backoff).
+    Timeouts/connection loss after possible dispatch are ``UNCERTAIN_DISPATCH``
+    (reconcile before any mutation retry — never blind POST retry).
+    """
     name = type(exc).__name__
     msg = str(exc)
+    if isinstance(exc, asyncio.CancelledError) and operation is PolymarketOperation.DISPATCH:
+        return ClassifiedPolymarketError(
+            category=PolymarketErrorCategory.UNCERTAIN_DISPATCH,
+            retryable=False,
+            message=msg or "dispatch task cancelled before a response was observed",
+            original_type=name,
+        )
+    # ``asyncio.timeout`` raises the built-in TimeoutError.  Classify it even
+    # when SDK exception imports are unavailable (for example in isolated
+    # domain tests), because the operation boundary is already known here.
+    if isinstance(exc, TimeoutError):
+        return ClassifiedPolymarketError(
+            category=(
+                PolymarketErrorCategory.TRANSPORT
+                if operation is not PolymarketOperation.DISPATCH
+                else PolymarketErrorCategory.UNCERTAIN_DISPATCH
+            ),
+            retryable=operation is not PolymarketOperation.DISPATCH,
+            message=msg,
+            original_type=name,
+        )
     try:
         from polymarket import (
             RateLimitError,
@@ -51,16 +95,25 @@ def classify_polymarket_error(exc: BaseException) -> ClassifiedPolymarketError:
         )
 
     if isinstance(exc, RateLimitError):
+        retry_after = getattr(exc, "retry_after", None)
         return ClassifiedPolymarketError(
             category=PolymarketErrorCategory.RATE_LIMIT,
             retryable=True,
             message=msg,
             original_type=name,
+            retry_after=None if retry_after is None else float(retry_after),
         )
     if isinstance(exc, (PmTimeoutError, ConnectionLostError, TransportError)):
+        if operation is not PolymarketOperation.DISPATCH:
+            return ClassifiedPolymarketError(
+                category=PolymarketErrorCategory.TRANSPORT,
+                retryable=True,
+                message=msg,
+                original_type=name,
+            )
         return ClassifiedPolymarketError(
-            category=PolymarketErrorCategory.TRANSIENT,
-            retryable=True,
+            category=PolymarketErrorCategory.UNCERTAIN_DISPATCH,
+            retryable=False,  # reconcile first; do not blind-retry POST
             message=msg,
             original_type=name,
         )
@@ -72,18 +125,31 @@ def classify_polymarket_error(exc: BaseException) -> ClassifiedPolymarketError:
             original_type=name,
         )
     if isinstance(exc, RequestRejectedError):
-        code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        code_raw = getattr(exc, "status", None)
+        if code_raw is None:
+            code_raw = getattr(exc, "status_code", None)
+        code = int(code_raw) if code_raw is not None else None
+        retry_after = getattr(exc, "retry_after", None)
+        if code == 425:
+            return ClassifiedPolymarketError(
+                category=PolymarketErrorCategory.ENGINE_RESTART,
+                retryable=True,
+                message=msg,
+                original_type=name,
+                status=425,
+                retry_after=None if retry_after is None else float(retry_after),
+            )
         retryable = code in {408, 429, 500, 502, 503, 504}
         cat = (
-            PolymarketErrorCategory.AUTH
-            if code in {401, 403}
-            else PolymarketErrorCategory.REJECTED
+            PolymarketErrorCategory.AUTH if code in {401, 403} else PolymarketErrorCategory.REJECTED
         )
         return ClassifiedPolymarketError(
             category=cat,
             retryable=retryable,
             message=msg,
             original_type=name,
+            status=code,
+            retry_after=None if retry_after is None else float(retry_after),
         )
     if isinstance(exc, UnexpectedResponseError):
         return ClassifiedPolymarketError(
@@ -95,7 +161,7 @@ def classify_polymarket_error(exc: BaseException) -> ClassifiedPolymarketError:
     if isinstance(exc, PolymarketError):
         return ClassifiedPolymarketError(
             category=PolymarketErrorCategory.TRANSPORT,
-            retryable=True,
+            retryable=False,
             message=msg,
             original_type=name,
         )
@@ -104,6 +170,17 @@ def classify_polymarket_error(exc: BaseException) -> ClassifiedPolymarketError:
         retryable=False,
         message=msg,
         original_type=name,
+    )
+
+
+def is_engine_restart(exc: BaseException) -> bool:
+    return classify_polymarket_error(exc).category is PolymarketErrorCategory.ENGINE_RESTART
+
+
+def is_uncertain_dispatch(exc: BaseException) -> bool:
+    return (
+        classify_polymarket_error(exc, operation=PolymarketOperation.DISPATCH).category
+        is PolymarketErrorCategory.UNCERTAIN_DISPATCH
     )
 
 
@@ -148,13 +225,19 @@ def sdk_exception_names() -> tuple[type[BaseException], ...]:
         return ()
 
 
-def describe_error(exc: BaseException) -> dict[str, Any]:
-    c = classify_polymarket_error(exc)
+def describe_error(
+    exc: BaseException,
+    *,
+    operation: PolymarketOperation = PolymarketOperation.READ,
+) -> dict[str, Any]:
+    c = classify_polymarket_error(exc, operation=operation)
     return {
         "category": c.category.value,
         "retryable": c.retryable,
         "message": c.message,
         "original_type": c.original_type,
+        "status": c.status,
+        "retry_after": c.retry_after,
     }
 
 
@@ -163,6 +246,7 @@ _VPN_HINT_CATEGORIES = frozenset(
     {
         PolymarketErrorCategory.TRANSPORT,
         PolymarketErrorCategory.TRANSIENT,
+        PolymarketErrorCategory.UNCERTAIN_DISPATCH,
     }
 )
 

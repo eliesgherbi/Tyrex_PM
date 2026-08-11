@@ -41,7 +41,9 @@ class BinanceFixtureSource:
         corr = correlation_id or new_correlation_id()
         count = 0
         for item in self._payload.get("binance_events", []):
-            ts_received = _parse_ts(item.get("ts_received") or item.get("T") or item.get("timestamp"))
+            ts_received = _parse_ts(
+                item.get("ts_received") or item.get("T") or item.get("timestamp")
+            )
             body = item.get("payload") or item
             event = normalize_trade_message(
                 body,

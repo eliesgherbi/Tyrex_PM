@@ -18,6 +18,10 @@ from tyrex_pm.core.numerics import as_decimal
 SIGMA_UNITS_PER_SQRT_SECOND = "per_sqrt_second"
 ESTIMATOR_EWMA = "ewma"
 
+# Conservative BTC 1s bootstrap floor (~daily 3% → per √s). Prevents micro-σ
+# jump thresholds that lock the estimator for an entire window.
+DEFAULT_SIGMA_FLOOR = 1e-4
+
 
 @dataclass(frozen=True)
 class SigmaConfig:
@@ -33,6 +37,7 @@ class SigmaConfig:
     jump_threshold_sigma: float = 4.0  # provisional
     sample_interval_s: float = 1.0  # provisional default 1s resample
     tau_floor_s: float = 1.0  # provisional (used by fair-value consumers)
+    sigma_floor: float = DEFAULT_SIGMA_FLOOR  # provisional per √second
 
     def ewma_lambda(self) -> float:
         if self.half_life_s <= 0:
@@ -50,6 +55,8 @@ class SigmaConfig:
             raise ValueError("sample_interval_s must be positive")
         if self.tau_floor_s <= 0:
             raise ValueError("tau_floor_s must be positive")
+        if self.sigma_floor < 0:
+            raise ValueError("sigma_floor must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -82,9 +89,11 @@ class EwmaVolatilityEstimator:
     - Resample to ``sample_interval_s`` buckets using the latest price in each bucket.
     - ``r_t = ln(S_t / S_{t-1})`` over actual elapsed ``dt_s``.
     - ``var_t = λ · var_{t-1} + (1 − λ) · r_t²``
-    - ``σ_t = √(var_t / dt_s)`` → per √second.
-    - Jump guard: if ``|r_t| > jump_threshold_sigma · σ_{t-1}``, skip variance
-      update, trip guard, keep prior σ.
+    - ``σ_t = max(√(var_t / dt_s), sigma_floor)`` → per √second.
+    - Jump guard uses the floored σ for the threshold. A trip marks the current
+      sample not-ready but still updates variance so the estimator can recover.
+    - Near-zero returns do not install σ=0; the estimator stays warming until a
+      non-zero return establishes variance (then floored).
     """
 
     config: SigmaConfig = field(default_factory=SigmaConfig)
@@ -110,6 +119,17 @@ class EwmaVolatilityEstimator:
         if ts.tzinfo is None:
             return ts.replace(tzinfo=timezone.utc)
         return ts.astimezone(timezone.utc)
+
+    def _floored_sigma(self, sigma: float) -> float:
+        floor = self.config.sigma_floor
+        if floor <= 0:
+            return sigma
+        return max(sigma, floor)
+
+    def _jump_threshold(self) -> float | None:
+        if self._sigma is None:
+            return None
+        return self.config.jump_threshold_sigma * self._floored_sigma(self._sigma)
 
     def _snapshot(
         self,
@@ -145,6 +165,19 @@ class EwmaVolatilityEstimator:
     def snapshot(self) -> VolatilitySnapshot:
         return self._snapshot()
 
+    def _commit_variance(self, *, r_t: float, dt_s: float, ts: datetime, price: Decimal) -> None:
+        lam = self.config.ewma_lambda()
+        if self._var is None:
+            self._var = r_t * r_t
+        else:
+            self._var = lam * self._var + (1.0 - lam) * (r_t * r_t)
+        self._sigma = self._floored_sigma(math.sqrt(self._var / dt_s))
+        self._sample_count += 1
+        self._effective_samples_s += dt_s
+        self._last_update_ts = ts
+        self._last_price = price
+        self._last_sample_ts = ts
+
     def update(self, price: Decimal | str | int, ts: datetime) -> VolatilitySnapshot:
         price_d = as_decimal(price, field_name="price")
         if price_d <= 0:
@@ -178,45 +211,28 @@ class EwmaVolatilityEstimator:
         if abs(r_t) < 1e-15:
             self._last_price = new_price
             self._last_sample_ts = ts
-            if self._var is None:
-                self._var = 0.0
-                self._sigma = 0.0
-                self._sample_count += 1
-                self._effective_samples_s += dt_s
-                self._last_update_ts = ts
-            else:
-                # Stagnant price: freeze variance; do not decay on zero returns.
+            # Do not install σ=0 from stagnant prices; that made every later
+            # move look like a jump and froze readiness for the whole window.
+            if self._sigma is not None:
                 self._effective_samples_s += dt_s
             return self.snapshot()
 
-        lam = self.config.ewma_lambda()
         jump_tripped = False
+        threshold = self._jump_threshold()
+        if (
+            threshold is not None
+            and self.config.jump_guard
+            and abs(r_t) > threshold
+        ):
+            jump_tripped = True
+            self._jump_guard_tripped = True
+            # Still update variance so σ can adapt after an outlier.
+            self._commit_variance(r_t=r_t, dt_s=dt_s, ts=ts, price=new_price)
+            return self._snapshot(jump_guard_tripped=True, reject_reason="jump_guard_tripped")
 
-        if self._sigma is not None and self.config.jump_guard and self._sigma > 0:
-            threshold = self.config.jump_threshold_sigma * self._sigma
-            if abs(r_t) > threshold:
-                self._jump_guard_tripped = True
-                jump_tripped = True
-                self._last_price = new_price
-                self._last_sample_ts = ts
-                return self._snapshot(
-                    jump_guard_tripped=True, reject_reason="jump_guard_tripped"
-                )
-
-        if self._var is None:
-            self._var = r_t * r_t
-        else:
-            self._var = lam * self._var + (1.0 - lam) * (r_t * r_t)
-
-        self._sigma = math.sqrt(self._var / dt_s)
-        self._sample_count += 1
-        self._effective_samples_s += dt_s
-        self._last_update_ts = ts
-        self._last_price = new_price
-        self._last_sample_ts = ts
+        self._commit_variance(r_t=r_t, dt_s=dt_s, ts=ts, price=new_price)
         self._jump_guard_tripped = False
-
-        return self._snapshot(jump_guard_tripped=jump_tripped)
+        return self._snapshot(jump_guard_tripped=False)
 
     def seed_observations(
         self,

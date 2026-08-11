@@ -38,8 +38,6 @@ class BinaryResolutionRule:
         object.__setattr__(
             self, "event_start", require_utc(self.event_start, field_name="event_start")
         )
-        object.__setattr__(
-            self, "event_end", require_utc(self.event_end, field_name="event_end")
-        )
+        object.__setattr__(self, "event_end", require_utc(self.event_end, field_name="event_end"))
         if self.event_end <= self.event_start:
             raise ValueError("event_end must be after event_start")

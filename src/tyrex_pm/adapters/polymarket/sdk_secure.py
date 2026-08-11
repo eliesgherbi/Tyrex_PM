@@ -9,7 +9,7 @@ import os
 from decimal import Decimal
 from typing import Any, Mapping
 
-from tyrex_pm.execution.polymarket.auth import (
+from tyrex_pm.adapters.polymarket.authentication import (
     CredentialError,
     L2Credentials,
     _funder_from_env,
@@ -114,9 +114,9 @@ async def build_async_secure_client(
     return client
 
 
-def micro_to_decimal(raw: int | str | Decimal | None, *, scale: int = 6) -> Decimal:
+def micro_to_decimal(raw: int | str | Decimal, *, scale: int = 6) -> Decimal:
     if raw is None:
-        return Decimal("0")
+        raise ValueError("base-unit value is missing")
     return Decimal(str(raw)) / (Decimal(10) ** scale)
 
 
@@ -127,14 +127,20 @@ def balance_allowance_to_decimal(
 ) -> tuple[Decimal, Decimal | None]:
     """Translate SDK BalanceAllowance ints into share / USDC decimals."""
     if raw is None:
-        return Decimal("0"), None
-    bal_raw = getattr(raw, "balance", 0)
-    allowances = getattr(raw, "allowances", None) or {}
+        raise ValueError("SDK balance-allowance response is missing")
+    if not hasattr(raw, "balance") or not hasattr(raw, "allowances"):
+        raise ValueError("SDK balance-allowance response has an invalid shape")
+    bal_raw = raw.balance
+    allowances = raw.allowances
+    if not isinstance(allowances, dict):
+        raise ValueError("SDK balance-allowance allowances must be a mapping")
     # Unified SDK returns integer micro-units for both collateral and conditional.
     bal = micro_to_decimal(bal_raw)
     allowance: Decimal | None = None
-    if isinstance(allowances, dict) and allowances:
-        first = next(iter(allowances.values()))
-        allowance = micro_to_decimal(first)
+    if allowances:
+        # Every configured exchange spender may be selected by the venue.  A
+        # first-item value depends on JSON ordering and can falsely report the
+        # account ready.  The minimum is the only conservative aggregate.
+        allowance = min(micro_to_decimal(value) for value in allowances.values())
     _ = conditional  # same scale today; kept for call-site clarity
     return bal, allowance

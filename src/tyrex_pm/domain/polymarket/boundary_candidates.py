@@ -54,9 +54,7 @@ class BoundaryTickView:
     event_id: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "source_ts", require_utc(self.source_ts, field_name="source_ts")
-        )
+        object.__setattr__(self, "source_ts", require_utc(self.source_ts, field_name="source_ts"))
         object.__setattr__(
             self,
             "receive_wall_raw_utc",
@@ -106,9 +104,7 @@ class BoundaryCandidate:
         object.__setattr__(
             self, "event_start", require_utc(self.event_start, field_name="event_start")
         )
-        object.__setattr__(
-            self, "event_end", require_utc(self.event_end, field_name="event_end")
-        )
+        object.__setattr__(self, "event_end", require_utc(self.event_end, field_name="event_end"))
         object.__setattr__(
             self,
             "chainlink_source_ts",
@@ -240,9 +236,7 @@ def find_exact_at_start(
     return None
 
 
-def exact_value_conflicts(
-    ticks: Sequence[BoundaryTickView], event_start: datetime
-) -> bool:
+def exact_value_conflicts(ticks: Sequence[BoundaryTickView], event_start: datetime) -> bool:
     event_start = require_utc(event_start, field_name="event_start")
     values = {t.value for t in ticks if t.source_ts == event_start}
     return len(values) > 1
@@ -343,10 +337,7 @@ def evaluate_boundary_candidates(
         preferred_class = PROVISIONAL_PREFERRED_CLASSIFICATION
     elif first_t is not None and last_t is not None:
         # Both present without exact — do not select; report ambiguity if they diverge.
-        if (
-            first_t.source_ts != last_t.source_ts
-            or first_t.value != last_t.value
-        ):
+        if first_t.source_ts != last_t.source_ts or first_t.value != last_t.value:
             blockers.append("ambiguous_fallback_candidates")
         else:
             # Same tick under both inequalities but not labelled EXACT (should be rare

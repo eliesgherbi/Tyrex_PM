@@ -1,0 +1,10 @@
+{
+  "_historical": true,
+  "_superseded_by": "operator CLI --mode live --live (no admission artifact)",
+  "_note": "Retained as historical evidence only. Do not use to authorize live.",
+  "kind": "reviewed_tiny_live_admission",
+  "schema_version": "n7_admission_artifact_v1",
+  "lifecycle_safety_invariants_present": true,
+  "tiny_live_admitted": false,
+  "experiment_pending_operator_authorization": true
+}

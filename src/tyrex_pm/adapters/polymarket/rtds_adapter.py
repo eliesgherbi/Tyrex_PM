@@ -197,9 +197,7 @@ class RtdsChainlinkAdapter:
             return
         wall = datetime.now(timezone.utc)
         mono = time.perf_counter_ns()
-        time_view = (
-            self._time_authority.view() if self._time_authority is not None else None
-        )
+        time_view = self._time_authority.view() if self._time_authority is not None else None
         event = normalize_chainlink_tick(
             msg,
             ts_received=wall,

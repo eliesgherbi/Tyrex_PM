@@ -1,0 +1,24 @@
+{
+  "artifact_id": "",
+  "controls": {
+    "admission_flag": "tiny_live_admitted",
+    "capability_flag": "lifecycle_safety_invariants_present",
+    "env_forbid_independent": true,
+    "note": "Capability proves safety code is present; admission is a separate release gate. Do not use one boolean for both. Sealed YAML tiny_live_admitted alone does not authorize real-live arm.",
+    "single_use": true
+  },
+  "experiment_pending_operator_authorization": true,
+  "git_head": "",
+  "kind": "reviewed_tiny_live_admission",
+  "lifecycle_safety_invariants_present": true,
+  "operator_authorization": {
+    "authorization_note": "Leave tiny_live_admitted=false until Phase 9 PASS is reviewed and the sealed fingerprint matches the candidate. Artifacts are single-use: consumption is persisted in lifecycle store before enable_network; reused artifact_id is refused.",
+    "authorized_at": "",
+    "authorized_by": ""
+  },
+  "phase_9_evidence_ref": "",
+  "real_venue_mutations_by_readiness_task": 0,
+  "reviewed_config_fingerprint": "",
+  "schema_version": "n7_admission_artifact_v1",
+  "tiny_live_admitted": false
+}

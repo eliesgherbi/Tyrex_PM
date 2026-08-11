@@ -1,0 +1,153 @@
+{
+  "config_fingerprint": "181b7529fbe173c694dfee830f017fcd86229ed8f55dcd76293deac1dfc316d3",
+  "dedup_keys": [
+    {
+      "first_intent_id": "266d45c1-baec-4e32-a9c9-552d74916b8e",
+      "first_seen_at": "2026-07-20T12:01:04+00:00",
+      "semantic_key": "z_gap|zgap-f4-rich-1|zgap-f4-tok-up|ENTER|4|YES|65d106fd-db1f-4069-b1e4-0dc5825e9c3e"
+    },
+    {
+      "first_intent_id": "ec690633-be82-47a9-b041-8d52645f133a",
+      "first_seen_at": "2026-07-20T12:01:09+00:00",
+      "semantic_key": "z_gap|zgap-f4-rich-1|zgap-f4-tok-up|EXIT|FLAT|8e28ffe1-0ca1-4e5e-b679-5f0887845b49"
+    }
+  ],
+  "fills": [
+    {
+      "execution_id": "04d5ea11-64a2-4b41-9937-92e14b5f1675",
+      "fee_amount": "0.000000",
+      "fee_currency": "USD",
+      "instrument_id": "zgap-f4-tok-up",
+      "order_id": "7d74e5d9-536e-4901-8f5d-536d8ab39916",
+      "price": "0.36",
+      "quantity": "13.888888",
+      "side": "BUY",
+      "ts_event": "2026-07-20T12:01:00+00:00"
+    },
+    {
+      "execution_id": "5011824d-741c-4754-9035-ed60f2bba3cb",
+      "fee_amount": "0.000000",
+      "fee_currency": "USD",
+      "instrument_id": "zgap-f4-tok-up",
+      "order_id": "ba49ffe6-0016-4838-bc0e-1811599cc4aa",
+      "price": "0.85",
+      "quantity": "13.888888",
+      "side": "SELL",
+      "ts_event": "2026-07-20T12:01:08+00:00"
+    }
+  ],
+  "kill_switch": false,
+  "lifecycle": {
+    "activated_at": null,
+    "entry_order_id": null,
+    "exit_order_id": null,
+    "instrument_id": null,
+    "resolution_committed": false,
+    "resolution_evidence_id": null,
+    "resolution_window_id": null,
+    "settlement_applied_id": null,
+    "state": "FLAT",
+    "updated_at": "2026-07-20T12:01:08+00:00"
+  },
+  "market_id": "zgap-f4-rich-1",
+  "orders": [
+    {
+      "average_fill_price": "0.36",
+      "client_order_id": "19d06700-9cc7-49a4-bf8f-d880050056f7",
+      "correlation_id": "phase9-s",
+      "created_at": "2026-07-20T12:01:04+00:00",
+      "filled_quantity": "13.888888",
+      "instrument_id": "zgap-f4-tok-up",
+      "intent_id": "266d45c1-baec-4e32-a9c9-552d74916b8e",
+      "limit_price": "0.36",
+      "market_id": "zgap-f4-rich-1",
+      "matched_quantity_hwm": "0",
+      "order_id": "7d74e5d9-536e-4901-8f5d-536d8ab39916",
+      "plan_id": "19dc50f3-9ad1-421c-a898-4d8ffb54b00f",
+      "quantity": "13.888888",
+      "remaining_quantity": "0.000000",
+      "seen_execution_ids": [
+        "04d5ea11-64a2-4b41-9937-92e14b5f1675"
+      ],
+      "seen_match_trade_ids": [],
+      "side": "BUY",
+      "status": "FILLED",
+      "strategy_id": "z_gap",
+      "updated_at": "2026-07-20T12:01:00+00:00",
+      "venue_order_id": "shadow-7d74e5d9-536e-4901-8f5d-536d8ab39916"
+    },
+    {
+      "average_fill_price": "0.85",
+      "client_order_id": "9befc827-f0c9-4d4a-925f-c09217a089ca",
+      "correlation_id": "phase9-s",
+      "created_at": "2026-07-20T12:01:09+00:00",
+      "filled_quantity": "13.888888",
+      "instrument_id": "zgap-f4-tok-up",
+      "intent_id": "ec690633-be82-47a9-b041-8d52645f133a",
+      "limit_price": "0.85",
+      "market_id": "zgap-f4-rich-1",
+      "matched_quantity_hwm": "0",
+      "order_id": "ba49ffe6-0016-4838-bc0e-1811599cc4aa",
+      "plan_id": "26a0d240-f204-4847-b3d7-7e9f94d67e35",
+      "quantity": "13.888888",
+      "remaining_quantity": "0.000000",
+      "seen_execution_ids": [
+        "5011824d-741c-4754-9035-ed60f2bba3cb"
+      ],
+      "seen_match_trade_ids": [],
+      "side": "SELL",
+      "status": "FILLED",
+      "strategy_id": "z_gap",
+      "updated_at": "2026-07-20T12:01:08+00:00",
+      "venue_order_id": "shadow-ba49ffe6-0016-4838-bc0e-1811599cc4aa"
+    }
+  ],
+  "portfolio": {
+    "applied_execution_ids": [
+      "04d5ea11-64a2-4b41-9937-92e14b5f1675",
+      "5011824d-741c-4754-9035-ed60f2bba3cb"
+    ],
+    "market_id": "zgap-f4-rich-1",
+    "positions": [
+      {
+        "average_entry_price": null,
+        "fees": "0.000000",
+        "instrument_id": "zgap-f4-tok-up",
+        "market_id": "zgap-f4-rich-1",
+        "quantity": "0.000000",
+        "realized_pnl": "6.80555512",
+        "total_cost": "0",
+        "updated_at": "2026-07-20T12:01:08+00:00"
+      }
+    ]
+  },
+  "retry": {
+    "entry_attempts": 0,
+    "entry_episode_id": null,
+    "entry_last_fail": null,
+    "entry_phase": "ELIGIBLE",
+    "exit_attempts": 0,
+    "exit_last_fail": null,
+    "exit_phase": "IDLE",
+    "exit_position_episode_id": null,
+    "exit_urgency": "NORMAL"
+  },
+  "run_id": "phase9-shadow",
+  "runtime_mode": "SHADOW",
+  "schema_version": 1,
+  "shadow_fee_model": "shadow_zero_fee_v1",
+  "strategy_epoch": 14,
+  "strategy_last_direction": null,
+  "strategy_state": {
+    "entry_lineage_consumed": true,
+    "strategy_epoch": 14,
+    "thesis_state": {
+      "adverse_since_mono_ns": null,
+      "last_p_held": 0.6560122110198263,
+      "phase": "IDLE"
+    },
+    "window_closed_to_reentry": true,
+    "window_id": "zgap-f4-w1"
+  },
+  "updated_at": "2026-08-07T14:27:56.042075+00:00"
+}

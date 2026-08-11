@@ -11,12 +11,12 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
+from tyrex_pm.core.numerics import as_decimal, require_polymarket_price
 from tyrex_pm.domain.polymarket.fees import (
     FeeCurveParams,
     FeeEstimateKind,
     phi_taker_fee_per_share,
 )
-from tyrex_pm.core.numerics import as_decimal, require_polymarket_price
 from tyrex_pm.strategies.z_gap.config import ZGapConfig
 from tyrex_pm.strategies.z_gap.reasons import ZGapReason
 from tyrex_pm.strategies.z_gap.snapshots import (
@@ -224,9 +224,7 @@ def value_entry_leg(
     fee_buy = phi_taker_fee_per_share(ask, curve)
     # Estimated exit friction at model probability (proxy near fair value).
     fee_sell_proxy = phi_taker_fee_per_share(p, curve)
-    slip_sell = as_decimal(
-        config.realization.expected_slippage_sell, field_name="slip_sell"
-    )
+    slip_sell = as_decimal(config.realization.expected_slippage_sell, field_name="slip_sell")
     # If executable bid already includes depth-walk slip, still reserve slip_sell
     # for F_exit proxy unless configured included — use sell slip from config.
     if config.realization.slippage_included_in_executable_bid:
@@ -244,10 +242,15 @@ def value_entry_leg(
     c_entry = ask + fee_buy + slip_buy
     e_settlement = p - c_entry
     e_repricing = p - c_entry - f_exit
-    max_econ = p - fee_buy - slip_buy - (
-        as_decimal(config.entry.theta_take, field_name="theta_take")
-        if config.entry.require_repricing_edge
-        else Decimal("0")
+    max_econ = (
+        p
+        - fee_buy
+        - slip_buy
+        - (
+            as_decimal(config.entry.theta_take, field_name="theta_take")
+            if config.entry.require_repricing_edge
+            else Decimal("0")
+        )
     )
 
     return EntryLegValuation(
@@ -353,9 +356,7 @@ def value_position(
     bid = require_polymarket_price(as_decimal(book.bid, field_name="bid"))
     fee_sell = phi_taker_fee_per_share(bid, curve)
     included = config.realization.slippage_included_in_executable_bid
-    slip_cfg = as_decimal(
-        config.realization.expected_slippage_sell, field_name="slip_sell"
-    )
+    slip_cfg = as_decimal(config.realization.expected_slippage_sell, field_name="slip_sell")
     slip_applied = Decimal("0") if included else slip_cfg
     v_unit = bid - fee_sell - slip_applied
     v_sell = q * v_unit
