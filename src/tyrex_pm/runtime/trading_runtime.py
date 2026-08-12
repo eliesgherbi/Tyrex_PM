@@ -15,7 +15,27 @@ from uuid import uuid4
 
 from tyrex_pm.core.clock import SystemClock
 from tyrex_pm.core.ids import RunId
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent, new_intent_id
+from tyrex_pm.core.intents import (
+    EnterIntent,
+    ExitIntent,
+    FlattenIntent,
+    HoldToResolutionIntent,
+    LiquidityRole,
+    new_intent_id,
+)
+from tyrex_pm.protection import (
+    ArmedProtection,
+    ProtectionPhase,
+    ProtectionRegistry,
+    build_protection_intent,
+    mark_triggered,
+    observe_mark,
+)
+from tyrex_pm.runtime.run_config import (
+    TradingRunConfig,
+    entry_tau_bounds,
+    max_clock_uncertainty_ms,
+)
 from tyrex_pm.execution.account_state import (
     AccountSnapshotStatus,
     AccountStateAuthority,
@@ -53,13 +73,17 @@ from tyrex_pm.reporting.run_report import (
 )
 from tyrex_pm.runtime.capabilities import CapabilityController
 from tyrex_pm.runtime.market_data_runtime import MarketDataSummary, run_market_data_runtime
-from tyrex_pm.runtime.market_runtime import ZGapMarketRuntime
-from tyrex_pm.runtime.run_config import TradingRunConfig
+from tyrex_pm.runtime.market_runtime import MarketSessionRuntime, ZGapMarketRuntime
 from tyrex_pm.strategies.context import (
     DecisionContext,
     StrategyLifecycleSnapshot,
     StrategyPositionPhase,
 )
+
+# Soft rewarm before official SDK AsyncOrderMetadataCache TTL (10 minutes).
+_ORDER_METADATA_WARM_TTL_S = 8 * 60
+_ORDER_METADATA_WARM_MAX_PRICE = Decimal("0.99")
+_ORDER_METADATA_WARM_AMOUNT = Decimal("1")
 
 
 def load_dotenv_values(path: Path | None) -> dict[str, str]:
@@ -136,12 +160,18 @@ class TradingRuntime:
     selected_instrument: Any | None = None
     selected_token_id: str | None = None
     intent_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
+    intent_wake: asyncio.Event = field(default_factory=asyncio.Event)
     seen_intents: set[str] = field(default_factory=set)
     intent_candidate_monotonic_ns: dict[str, int] = field(default_factory=dict)
     stop_requested: bool = False
     restored_sessions: list[ExecutionSessionState] = field(default_factory=list)
     execution_timeline: list[dict[str, Any]] = field(default_factory=list)
     _last_readiness_key: tuple[Any, ...] | None = None
+    protection_registry: ProtectionRegistry = field(default_factory=ProtectionRegistry)
+    _order_metadata_warmed_at: dict[str, float] = field(default_factory=dict)
+    _order_metadata_warm_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    _intent_dispatcher_task: asyncio.Task[None] | None = None
+    _intent_dispatcher_stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     @classmethod
     async def create(
@@ -304,6 +334,7 @@ class TradingRuntime:
         self.pending_market = market_session
         market = market_session.market
         self._prepare_account_state(market_session, active=True)
+        self._schedule_order_metadata_warm(market_session)
         self.run_recorder.record(
             "MARKET_ACTIVATION_REQUESTED",
             {
@@ -319,6 +350,7 @@ class TradingRuntime:
     def on_prepared_market(self, market_session: Any) -> None:
         """Prewarm next-market account state before its promotion boundary."""
         self._prepare_account_state(market_session, active=False)
+        self._schedule_order_metadata_warm(market_session)
         market = market_session.market
         self.run_recorder.record(
             "PREPARED_MARKET_ACCOUNT_REGISTERED",
@@ -336,6 +368,94 @@ class TradingRuntime:
             token_ids=(market.yes.token_id.value, market.no.token_id.value),
             required_collateral=self.config.risk.maximum_total_debit,
             active=active,
+        )
+
+    def _market_token_ids(self, market_session: Any) -> tuple[str, ...]:
+        market = market_session.market
+        return (market.yes.token_id.value, market.no.token_id.value)
+
+    def _token_metadata_is_warm(self, token_id: str, *, now: float | None = None) -> bool:
+        warmed_at = self._order_metadata_warmed_at.get(token_id)
+        if warmed_at is None:
+            return False
+        clock = time.monotonic() if now is None else now
+        return (clock - warmed_at) <= _ORDER_METADATA_WARM_TTL_S
+
+    def _refresh_order_metadata_capability(self) -> None:
+        if self.active_market is None:
+            self.capabilities.order_metadata_ready = False
+            self._record_readiness_if_changed()
+            return
+        now = time.monotonic()
+        ready = all(
+            self._token_metadata_is_warm(token_id, now=now)
+            for token_id in self._market_token_ids(self.active_market)
+        )
+        self.capabilities.order_metadata_ready = ready
+        self._record_readiness_if_changed()
+
+    def _schedule_order_metadata_warm(self, market_session: Any) -> None:
+        token_ids = self._market_token_ids(market_session)
+        now = time.monotonic()
+        pending = tuple(
+            token_id for token_id in token_ids if not self._token_metadata_is_warm(token_id, now=now)
+        )
+        self._refresh_order_metadata_capability()
+        if not pending:
+            return
+
+        async def _run() -> None:
+            try:
+                await self._warm_order_metadata(pending)
+            except Exception as exc:  # noqa: BLE001 - readiness owns failure
+                self._record_runtime_error("order_metadata_warm", exc)
+                self._refresh_order_metadata_capability()
+
+        task = asyncio.create_task(_run(), name="order-metadata-warm")
+        self._order_metadata_warm_tasks.add(task)
+        task.add_done_callback(self._order_metadata_warm_tasks.discard)
+
+    async def _warm_order_metadata(self, token_ids: tuple[str, ...]) -> None:
+        self.run_recorder.record(
+            "ORDER_METADATA_WARM_STARTED",
+            {"token_ids": list(token_ids)},
+        )
+        result = await self.gateway.warm_order_metadata(
+            token_ids,
+            max_price=_ORDER_METADATA_WARM_MAX_PRICE,
+            max_spend=self.config.risk.maximum_total_debit,
+            amount=min(_ORDER_METADATA_WARM_AMOUNT, self.config.risk.maximum_total_debit),
+        )
+        now = time.monotonic()
+        for item in result.tokens:
+            payload = {
+                "token_id": item.token_id,
+                "ok": item.ok,
+                "elapsed_ms": item.elapsed_ms,
+                "error": item.error,
+            }
+            if item.ok:
+                self._order_metadata_warmed_at[item.token_id] = now
+                self.run_recorder.record("ORDER_METADATA_WARM_OK", payload)
+            else:
+                self._order_metadata_warmed_at.pop(item.token_id, None)
+                self.run_recorder.record("ORDER_METADATA_WARM_FAILED", payload)
+        self._refresh_order_metadata_capability()
+        self.run_recorder.record(
+            "ORDER_METADATA_WARM_FINISHED",
+            {
+                "ok": result.ok,
+                "warmed_token_ids": list(result.warmed_token_ids),
+                "token_results": [
+                    {
+                        "token_id": item.token_id,
+                        "ok": item.ok,
+                        "elapsed_ms": item.elapsed_ms,
+                        "error": item.error,
+                    }
+                    for item in result.tokens
+                ],
+            },
         )
 
     def can_promote(self) -> bool:
@@ -473,6 +593,7 @@ class TradingRuntime:
         self.capabilities.prior_scope_clear = False
         self.capabilities.entry_allowance_ready = False
         self.capabilities.collateral_ready = False
+        self.capabilities.order_metadata_ready = False
         await self.gateway.stop_user_stream()
         market = session.market
         market_id = market.condition_id or market.market_id.value
@@ -481,6 +602,9 @@ class TradingRuntime:
         self.active_market = session
         self.capabilities.active_market_ready = True
         self._apply_account_snapshot(account_state)
+        self._refresh_order_metadata_capability()
+        if not self.capabilities.order_metadata_ready:
+            self._schedule_order_metadata_warm(session)
         matching_restored = [
             restored
             for restored in self.restored_sessions
@@ -496,8 +620,12 @@ class TradingRuntime:
                 "UNRESOLVED_PRIOR_MARKET_SESSION",
                 ",".join(str(restored.session_id) for restored in foreign_restored),
             )
+        else:
+            self.capabilities.clear_blocker("UNRESOLVED_PRIOR_MARKET_SESSION")
         if len(matching_restored) > 1:
             self.capabilities.set_blocker("MULTIPLE_RESTORED_SESSIONS")
+        else:
+            self.capabilities.clear_blocker("MULTIPLE_RESTORED_SESSIONS")
         restored = matching_restored[0] if len(matching_restored) == 1 else None
         self.stream_session_id = (
             str(restored.session_id)
@@ -618,24 +746,10 @@ class TradingRuntime:
                 ready.dyn is not None and ready.dyn.chainlink_raw is not None
             ),
         )
-        decision_input = result.reporting_context.get("decision_input")
-        self.capabilities.model_ready = bool(
-            decision_input is not None and decision_input.model.ready
-        )
+        self.capabilities.model_ready = result.eligibility.model_ready
         decision_evidence = dict(result.decision.evidence)
-        readiness_evidence = decision_evidence.get("readiness")
-        if not isinstance(readiness_evidence, dict):
-            readiness_evidence = {}
-        raw_blockers = decision_evidence.get("blockers", ())
-        if not isinstance(raw_blockers, (list, tuple)):
-            raw_blockers = ()
-        strategy_blockers = tuple(str(value) for value in raw_blockers)
-        strategy_inputs_eligible = bool(
-            decision_evidence.get(
-                "strategy_inputs_eligible",
-                readiness_evidence.get("strategy_inputs_eligible", False),
-            )
-        )
+        strategy_blockers = result.eligibility.blockers
+        strategy_inputs_eligible = result.eligibility.strategy_inputs_eligible
         decision_record = {
             "decided_at": result.decision.decided_at.isoformat(),
             "action": result.decision.action.value,
@@ -682,6 +796,139 @@ class TradingRuntime:
     def _enqueue_intent(self, intent: Any) -> None:
         self.intent_candidate_monotonic_ns[intent.intent_id.value] = time.monotonic_ns()
         self.intent_queue.put_nowait(intent)
+        self.intent_wake.set()
+
+    def _start_intent_dispatcher(self) -> None:
+        if self._intent_dispatcher_task is not None and not self._intent_dispatcher_task.done():
+            return
+        self._intent_dispatcher_stop.clear()
+        self._intent_dispatcher_task = asyncio.create_task(
+            self._intent_dispatcher_loop(),
+            name="intent-dispatcher",
+        )
+
+    async def _stop_intent_dispatcher(self) -> None:
+        self._intent_dispatcher_stop.set()
+        self.intent_wake.set()
+        task = self._intent_dispatcher_task
+        self._intent_dispatcher_task = None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _intent_dispatcher_loop(self) -> None:
+        while not self._intent_dispatcher_stop.is_set():
+            await self.intent_wake.wait()
+            self.intent_wake.clear()
+            while not self.intent_queue.empty() and not self._intent_dispatcher_stop.is_set():
+                await self._consume_intent()
+
+    def on_public_fact(self, fact: str, market_runtime: MarketSessionRuntime) -> None:
+        del fact
+        self._maybe_arm_protection(market_runtime)
+        self._maybe_emit_protection_exit(market_runtime)
+
+    def _held_best_bid(self, market_runtime: MarketSessionRuntime) -> Decimal | None:
+        del market_runtime
+        if self.selected_instrument is None or self.feed_supervisor is None:
+            return None
+        view = self.feed_supervisor.active_view()
+        if view is None:
+            return None
+        token = self.selected_token_id
+        for leg in (view.up, view.down):
+            if leg.token_id == token:
+                return leg.quote.best_bid
+        return None
+
+    def _maybe_arm_protection(self, market_runtime: ZGapMarketRuntime) -> None:
+        spec = self.config.protection
+        state = self.lifecycle.state
+        if (
+            spec is None
+            or state is None
+            or not state.has_exposure
+            or state.identity is None
+            or self.selected_instrument is None
+            or self.active_market is None
+        ):
+            return
+        existing = self.protection_registry.get(state.session_id)
+        if existing is not None and existing.phase in {
+            ProtectionPhase.ARMED,
+            ProtectionPhase.TRIGGERED,
+        }:
+            return
+        shares = state.confirmed_position_shares
+        cost = self._position_cost(state)
+        if shares <= 0 or cost <= 0:
+            return
+        entry_price = cost / shares
+        mark = self._held_best_bid(market_runtime)
+        initial_mark = mark if mark is not None else entry_price
+        armed = ArmedProtection.arm(
+            session_id=state.session_id,
+            strategy_id=ready_binding_strategy_id_from_session(state),
+            market_id=self.active_market.market.market_id,
+            instrument_id=self.selected_instrument.instrument_id,
+            spec=spec,
+            entry_price=entry_price,
+            confirmed_quantity=shares,
+            armed_at=datetime.now(timezone.utc),
+            initial_mark=initial_mark,
+        )
+        self.protection_registry.put(armed)
+        self.run_recorder.record(
+            "PROTECTION_ARMED",
+            {
+                "session_id": state.session_id,
+                "entry_price": str(entry_price),
+                "confirmed_quantity": str(shares),
+                "thresholds": dict(armed.thresholds.evidence),
+            },
+        )
+
+    def _maybe_emit_protection_exit(self, market_runtime: ZGapMarketRuntime) -> None:
+        state = self.lifecycle.state
+        if state is None or not state.has_exposure:
+            if state is not None:
+                self.protection_registry.disarm(state.session_id)
+            return
+        armed = self.protection_registry.get(state.session_id)
+        if armed is None or armed.phase is not ProtectionPhase.ARMED:
+            return
+        if state.exit_requested_reason:
+            return
+        mark = self._held_best_bid(market_runtime)
+        if mark is None:
+            return
+        decision = observe_mark(armed, mark=mark)
+        if not decision.fired or decision.reason is None:
+            return
+        mark_triggered(armed, decision)
+        intent = build_protection_intent(
+            armed,
+            reason=decision.reason,
+            created_at=datetime.now(timezone.utc),
+            correlation_id=ready_fallback_correlation(),
+            causation_id=None,
+            evidence=dict(decision.evidence),
+        )
+        key = intent.semantic_key()
+        if key in self.seen_intents:
+            return
+        self.seen_intents.add(key)
+        self._enqueue_intent(intent)
+        self.run_recorder.record(
+            "PROTECTION_TRIGGERED",
+            {
+                "session_id": state.session_id,
+                "reason_code": decision.reason.value,
+                "mark": str(mark),
+                "evidence": dict(decision.evidence),
+            },
+        )
 
     async def _consume_intent(self) -> None:
         if self.intent_queue.empty():
@@ -729,11 +976,33 @@ class TradingRuntime:
                     baseline_open_order_ids=account_state.open_order_ids,
                 )
                 try:
-                    state = await self.lifecycle.submit_entry(
-                        intent,
-                        token_id=token_id,
-                        candidate_monotonic_ns=candidate_monotonic_ns,
-                    )
+                    if intent.liquidity_role is LiquidityRole.MAKER:
+                        spec = self.lifecycle.planner.entry(
+                            intent,
+                            token_id=token_id,
+                            candidate_monotonic_ns=candidate_monotonic_ns,
+                        )
+                        self.run_recorder.record(
+                            "MAKER_LIMIT_PLANNED",
+                            {
+                                "intent_id": intent.intent_id.value,
+                                "order_kind": spec.kind.value,
+                                "time_in_force": spec.time_in_force.value,
+                                "token_id": token_id,
+                            },
+                        )
+                        return
+                    async with self.account_state_authority.hold_ready_snapshot(market_id):
+                        # Re-apply held READY snapshot so final-gate capabilities
+                        # stay entry_executable for the full prepare window.
+                        self._apply_account_snapshot(
+                            self.account_state_authority.current(market_id)
+                        )
+                        state = await self.lifecycle.submit_entry(
+                            intent,
+                            token_id=token_id,
+                            candidate_monotonic_ns=candidate_monotonic_ns,
+                        )
                 except DispatchBlocked as exc:
                     self.run_recorder.record(
                         "DISPATCH_BLOCKED",
@@ -751,15 +1020,35 @@ class TradingRuntime:
             elif isinstance(intent, (ExitIntent, FlattenIntent)):
                 if self.selected_token_id is None:
                     raise RuntimeError("exit intent has no selected token")
-                state = await self.lifecycle.submit_exit(
-                    intent,
-                    token_id=self.selected_token_id,
-                    protective=isinstance(intent, FlattenIntent),
-                    candidate_monotonic_ns=candidate_monotonic_ns,
-                )
+                market_id = None
+                if self.active_market is not None:
+                    market = self.active_market.market
+                    market_id = market.condition_id or market.market_id.value
+                async with self.account_state_authority.hold_ready_snapshot(market_id or ""):
+                    if market_id is not None:
+                        self._apply_account_snapshot(
+                            self.account_state_authority.current(market_id)
+                        )
+                    state = await self.lifecycle.submit_exit(
+                        intent,
+                        token_id=self.selected_token_id,
+                        protective=isinstance(intent, FlattenIntent),
+                        candidate_monotonic_ns=candidate_monotonic_ns,
+                    )
                 self.capabilities.selected_token_sellable = state.sellable_shares > 0
                 if state.terminal:
                     self.stop_requested = True
+            elif isinstance(intent, HoldToResolutionIntent):
+                self.run_recorder.record(
+                    "HOLD_TO_RESOLUTION",
+                    {
+                        "intent_id": intent.intent_id.value,
+                        "reason_code": intent.reason_code,
+                        "market_id": intent.market_id.value,
+                        "instrument_id": intent.instrument_id.value,
+                        "window_id": intent.window_id,
+                    },
+                )
             else:
                 raise TypeError(f"unsupported strategy intent: {type(intent).__name__}")
         except Exception as exc:  # noqa: BLE001 - persisted report owns run failure
@@ -774,17 +1063,15 @@ class TradingRuntime:
             market = self.active_market.market
             market_id = market.condition_id or market.market_id.value
             self._apply_account_snapshot(self.account_state_authority.current(market_id))
-        ready = self._market_data_ready()
+        self._market_data_ready()
         if self.active_market is not None and self.active_market.market.event_end is not None:
             tau = (
                 self.active_market.market.event_end
                 - market_runtime.zgap.time_authority.now_corrected_utc()
             ).total_seconds()
+            tau_min_s, tau_max_s = entry_tau_bounds(self.config)
             self.capabilities.entry_window_open = (
-                self.active_market.entry_enabled
-                and self.config.strategy.entry.tau_min_s
-                <= tau
-                <= self.config.strategy.entry.tau_max_s
+                self.active_market.entry_enabled and tau_min_s <= tau <= tau_max_s
             )
             state = self.lifecycle.state
             if (
@@ -816,12 +1103,13 @@ class TradingRuntime:
                         reason_code="MANDATORY_FLATTEN",
                     )
                 )
-        # Entry intents are only produced by a ready evaluation. Exit and crash-
-        # recovery intents must still run while public data is temporarily
-        # degraded; their final gate captures and validates a fresh BookView on
-        # every submission retry.
-        if ready or not self.intent_queue.empty():
-            await self._consume_intent()
+            self._maybe_arm_protection(market_runtime)
+            if tau > self.config.lifecycle.mandatory_exit_before_end_s:
+                self._maybe_emit_protection_exit(market_runtime)
+        # Intent drain is owned by the event-woken intent dispatcher so entry
+        # does not wait for the 1 Hz market-data tick. Tick still refreshes
+        # readiness and reconciles open exposure.
+        self._refresh_order_metadata_capability()
         state = self.lifecycle.state
         if state is not None and state.has_exposure:
             reconciled = await self.lifecycle.reconcile()
@@ -837,9 +1125,10 @@ class TradingRuntime:
         }
 
     async def run(self) -> TradingRunResult:
-        runtime = ZGapMarketRuntime.create(
+        runtime = MarketSessionRuntime.create(
             clock=SystemClock(),
-            zgap_config=self.config.strategy,
+            strategy_kind=self.config.strategy_kind,
+            strategy_config=self.config.strategy,
             require_ssr_price_match=self.config.market.require_ssr_price_match,
             target_notional=self.config.risk.target_notional,
         )
@@ -847,6 +1136,7 @@ class TradingRuntime:
         fatal_error: dict[str, Any] | None = None
         reporting_failures: list[str] = []
         run_evidence: tuple[RunEvidenceRecord, ...] = ()
+        self._start_intent_dispatcher()
         try:
             self.market_summary = await run_market_data_runtime(
                 out_dir=self.output_directory,
@@ -865,7 +1155,6 @@ class TradingRuntime:
                 stop_when_seals_met=False,
                 runtime=runtime,
                 require_ssr_price_match=self.config.market.require_ssr_price_match,
-                zgap_config=self.config.strategy,
                 target_notional=self.config.risk.target_notional,
                 before_promote=self.can_promote,
                 on_feed_supervisor=self.on_feed_supervisor,
@@ -873,9 +1162,9 @@ class TradingRuntime:
                 evaluation_ready=self._entry_evaluation_ready,
                 readiness_diagnostics=self.readiness_dict,
                 on_runtime_error=self._record_runtime_error,
-                max_clock_uncertainty_ms=(
-                    self.config.strategy.ptb_time_quality.max_clock_uncertainty_ms
-                ),
+                max_clock_uncertainty_ms=int(max_clock_uncertainty_ms(self.config)),
+                market_family=self.config.market.family,
+                on_public_fact=self.on_public_fact,
             )
         except BaseException as exc:  # always project a report before propagating interrupts
             fatal_exception = exc
@@ -885,6 +1174,14 @@ class TradingRuntime:
                 "message": str(exc),
             }
             self._record_runtime_error("market_data_runtime", exc)
+        finally:
+            await self._stop_intent_dispatcher()
+            warm_tasks = tuple(self._order_metadata_warm_tasks)
+            for task in warm_tasks:
+                task.cancel()
+            if warm_tasks:
+                await asyncio.gather(*warm_tasks, return_exceptions=True)
+            self._order_metadata_warm_tasks.clear()
 
         state = self.lifecycle.state
         try:

@@ -336,5 +336,48 @@ async def test_prepare_fails_closed_when_tick_still_unavailable() -> None:
         await gateway.prepare_order(spec)
 
 
+@pytest.mark.asyncio
+async def test_warm_order_metadata_signs_without_posting() -> None:
+    client = _AsyncClient()
+    gateway = PolymarketAsyncGateway(client=client)
+    result = await gateway.warm_order_metadata(
+        ("token-a", "token-b", "token-a"),
+        max_price=Decimal("0.99"),
+        max_spend=Decimal("5"),
+    )
+    assert result.ok
+    assert result.warmed_token_ids == ("token-a", "token-b")
+    assert len(client.created) == 2
+    assert client.posted == []
+    assert all(item["side"] == "BUY" for item in client.created)
+    assert all(item["max_spend"] == Decimal("5") for item in client.created)
+    assert all(item["max_price"] == Decimal("0.99") for item in client.created)
+    assert gateway._prepared_specs == {}
+
+
+@pytest.mark.asyncio
+async def test_warm_order_metadata_reports_partial_failure() -> None:
+    class _FailingClient(_AsyncClient):
+        async def create_market_order(self, **kwargs):  # noqa: ANN003
+            if kwargs["token_id"] == "bad":
+                raise RuntimeError("metadata boom")
+            return await super().create_market_order(**kwargs)
+
+    client = _FailingClient()
+    gateway = PolymarketAsyncGateway(client=client)
+    result = await gateway.warm_order_metadata(
+        ("good", "bad"),
+        max_price=Decimal("0.99"),
+        max_spend=Decimal("5"),
+    )
+    assert not result.ok
+    assert result.warmed_token_ids == ("good",)
+    by_token = {item.token_id: item for item in result.tokens}
+    assert by_token["good"].ok
+    assert not by_token["bad"].ok
+    assert "RuntimeError" in str(by_token["bad"].error)
+    assert client.posted == []
+
+
 async def _resolved(value):  # noqa: ANN001
     return value

@@ -1,6 +1,8 @@
 # 03 — Module contracts
 
-**Phase:** R8 (R7 live closed; see `Docs/implementation/r8_framework_acceptance.md`)
+> **Historical (R8).** Current module ownership: [`../latest/architecture.md`](../latest/architecture.md). `ShadowOMS` / `OMS` protocol below is not the supported live path.
+
+**Phase:** R8 (R7 live closed)
 
 ## Strategy / risk / planner
 

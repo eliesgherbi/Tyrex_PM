@@ -56,6 +56,7 @@ def _capabilities() -> CapabilityController:
         user_stream_ready=True,
         collateral_ready=True,
         entry_allowance_ready=True,
+        order_metadata_ready=True,
         prior_scope_clear=True,
         entry_window_open=True,
     )

@@ -18,10 +18,7 @@ from typing import Any, Literal
 
 from tyrex_pm.adapters.binance.ws_adapter import BinanceTradeWsAdapter
 from tyrex_pm.adapters.clock_sync import ClockSyncLoop, OsMonitorClockSyncProvider
-from tyrex_pm.adapters.polymarket.discovery import (
-    GammaMarketDiscovery,
-    current_btc_updown_slug,
-)
+from tyrex_pm.adapters.polymarket.discovery import GammaMarketDiscovery
 from tyrex_pm.adapters.polymarket.rtds_adapter import RtdsChainlinkAdapter
 from tyrex_pm.adapters.polymarket.ssr_ptb_attestation import (
     DisabledSsrAttestationProvider,
@@ -33,7 +30,6 @@ from tyrex_pm.core.events import ReferencePriceUpdated, SettlementReferenceUpdat
 from tyrex_pm.core.snapshots import BookSnapshot
 from tyrex_pm.core.time_authority import SnapshotTimeAuthority
 from tyrex_pm.domain.polymarket.boundary_candidates import BoundaryTickView
-from tyrex_pm.domain.polymarket.discovery_binding import DiscoverySessionRole
 from tyrex_pm.domain.polymarket.ptb_attestation import AttestationResult
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.indicators.causal_pairing import PriceTickView, TradingReferenceIdentity
@@ -43,11 +39,16 @@ from tyrex_pm.market_data.binding_record import (
 )
 from tyrex_pm.market_data.book_feed import BookFeedSupervisor
 from tyrex_pm.market_data.book_store import MarketStateStore
+from tyrex_pm.facts import ids as F
+from tyrex_pm.runtime.composition import starts_adapter
+from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.market_runtime import (
+    MarketSessionRuntime,
     SessionSlot,
     ZGapMarketRuntime,
     project_session_quotes_from_view,
 )
+from tyrex_pm.runtime.scheduler import EvaluationScheduler
 from tyrex_pm.strategies.z_gap.config import ZGapConfig, ZGapPtbTimeQualityConfig
 
 # SSR openPrice often lags the EXACT Chainlink tick by a few seconds.
@@ -207,12 +208,12 @@ async def run_market_data_runtime(
     evaluation_interval_s: float = 1.0,
     basis_ewma_half_life_s: float | None = 30.0,
     on_book: Callable[[BookSnapshot], None] | None = None,
-    on_evaluation: Callable[[ZGapMarketRuntime], list[dict[str, Any]]] | None = None,
+    on_evaluation: Callable[[MarketSessionRuntime], list[dict[str, Any]]] | None = None,
     on_active_session: Callable[[Any], None] | None = None,
     on_prepared_session: Callable[[Any], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     stop_when_seals_met: bool = True,
-    runtime: ZGapMarketRuntime | None = None,
+    runtime: MarketSessionRuntime | None = None,
     require_ssr_price_match: bool = True,
     zgap_config: ZGapConfig | None = None,
     target_notional: Decimal | None = None,
@@ -221,9 +222,11 @@ async def run_market_data_runtime(
     readiness_diagnostics: Callable[[], dict[str, Any]] | None = None,
     before_promote: Callable[[], bool] | None = None,
     on_feed_supervisor: Callable[[BookFeedSupervisor], None] | None = None,
-    on_async_tick: Callable[[ZGapMarketRuntime], Awaitable[None]] | None = None,
+    on_async_tick: Callable[[MarketSessionRuntime], Awaitable[None]] | None = None,
     on_runtime_error: Callable[[str, BaseException], None] | None = None,
     max_clock_uncertainty_ms: int = 250,
+    market_family: str = "btc_updown_5m",
+    on_public_fact: Callable[[str, MarketSessionRuntime], None] | None = None,
 ) -> MarketDataSummary:
     """Bounded live composition: discover → ingest → EXACT seal → optional eval.
 
@@ -315,13 +318,11 @@ async def run_market_data_runtime(
         else "ssr_match_required=false; ptb_authority=chainlink_sealed_k; ssr_check_status=DISABLED"
     )
 
+    family = get_market_family(market_family)
     discovery = GammaMarketDiscovery()
     try:
-        active_binding = await discovery.resolve_btc_5m_window(
-            slug=current_btc_updown_slug(),
-            session_role=DiscoverySessionRole.ACTIVE,
-        )
-        prepared = await discovery.prepare_next_btc_5m()
+        active_binding = await family.resolve_active(discovery)
+        prepared = await family.prepare_next(discovery)
         summary.discovery = {
             "active_slug": active_binding.window_slug,
             "prepared_slug": prepared.window_slug,
@@ -368,6 +369,54 @@ async def run_market_data_runtime(
     sealed_windows: set[str] = set()
     seal_fail_logged: set[str] = set()
     last_eval_mono: float = 0.0
+    contract = runtime.input_contract
+    scheduler = EvaluationScheduler(
+        contract,
+        derived_ready=lambda fact: (
+            fact != F.PTB_SEALED
+            or (runtime.active is not None and runtime.active.sealed is not None)
+        ),
+        default_coalesce_s=evaluation_interval_s,
+    )
+
+    def _maybe_evaluate(fact: str | None = None, *, timer: bool = False) -> None:
+        nonlocal last_eval_mono
+        if runtime.active is None:
+            return
+        mono = clock.monotonic_ns() / 1e9
+        if timer:
+            if not scheduler.should_evaluate_timer(mono_s=mono):
+                return
+        elif fact is None or not scheduler.should_evaluate(fact, mono_s=mono):
+            return
+        if evaluation_ready is not None and not evaluation_ready():
+            af = feed_supervisor.active
+            diagnostics = {} if readiness_diagnostics is None else readiness_diagnostics()
+            blocker_codes = [
+                str(b.get("code"))
+                for b in diagnostics.get("blockers", [])
+                if isinstance(b, dict) and b.get("code")
+            ]
+            note = (
+                "entry_eval_skipped:not_ready"
+                f" blockers={','.join(blocker_codes) or 'UNSPECIFIED'}"
+                f" feed_phase={None if af is None else af.phase.value}"
+            )
+            if not feed_notes or feed_notes[-1] != note:
+                feed_notes.append(note)
+            return
+        scheduler.mark_evaluated(mono_s=mono)
+        last_eval_mono = mono
+        if on_evaluation is None:
+            return
+        try:
+            on_evaluation(runtime)
+        except Exception as exc:  # noqa: BLE001 - keep public sockets alive
+            summary.errors.append(f"entry_eval:{type(exc).__name__}:callback_failed")
+            notify_runtime_error("entry_evaluation", exc)
+            note = f"entry_eval_failed:{type(exc).__name__}"
+            if not feed_notes or feed_notes[-1] != note:
+                feed_notes.append(note)
 
     def _project_active_quotes() -> None:
         view = feed_supervisor.active_view()
@@ -442,7 +491,10 @@ async def run_market_data_runtime(
         ssr_status = "REQUIRED" if require_ssr_price_match else "DISABLED"
         provenance_warnings = list(sealed.blocker_reasons)
         entry_blockers: list[str] = []
-        maximum_ptb_lag_ms = runtime.zgap.config.ptb_time_quality.max_ptb_lag_ms
+        maximum_ptb_lag_ms = 5_000
+        ptb_quality = getattr(getattr(runtime.driver, "config", None), "ptb_time_quality", None)
+        if ptb_quality is not None:
+            maximum_ptb_lag_ms = ptb_quality.max_ptb_lag_ms
         lag_ok = (
             sealed.boundary_lag_ms is not None
             and sealed.boundary_lag_ms <= maximum_ptb_lag_ms
@@ -544,10 +596,11 @@ async def run_market_data_runtime(
                 market_id=sess.market_id,
                 tick=tick,
             )
-            _try_seal(sess.window_id)
+            if contract.includes(F.PTB_SEALED):
+                _try_seal(sess.window_id)
+        _maybe_evaluate(F.CHAINLINK_TWAP)
 
     def on_bn(e: ReferencePriceUpdated) -> None:
-        nonlocal last_eval_mono
         if e.source.value != "binance":
             return
         counts["binance"] += 1
@@ -565,38 +618,7 @@ async def run_market_data_runtime(
                 ingress=meta,
             )
         )
-        mono = clock.monotonic_ns() / 1e9
-        if mono - last_eval_mono < evaluation_interval_s:
-            return
-        if runtime.active is None or runtime.active.sealed is None:
-            return
-        # FRH-01: stop entry evaluation only — keep feeds/book updates alive.
-        if evaluation_ready is not None and not evaluation_ready():
-            af = feed_supervisor.active
-            diagnostics = {} if readiness_diagnostics is None else readiness_diagnostics()
-            blocker_codes = [
-                str(b.get("code"))
-                for b in diagnostics.get("blockers", [])
-                if isinstance(b, dict) and b.get("code")
-            ]
-            note = (
-                "entry_eval_skipped:not_ready"
-                f" blockers={','.join(blocker_codes) or 'UNSPECIFIED'}"
-                f" feed_phase={None if af is None else af.phase.value}"
-            )
-            if not feed_notes or feed_notes[-1] != note:
-                feed_notes.append(note)
-            return
-        last_eval_mono = mono
-        if on_evaluation is not None:
-            try:
-                on_evaluation(runtime)
-            except Exception as exc:  # noqa: BLE001 - keep the Binance socket alive
-                summary.errors.append(f"entry_eval:{type(exc).__name__}:callback_failed")
-                notify_runtime_error("entry_evaluation", exc)
-                note = f"entry_eval_failed:{type(exc).__name__}"
-                if not feed_notes or feed_notes[-1] != note:
-                    feed_notes.append(note)
+        _maybe_evaluate(F.BINANCE_SPOT_TRADES)
 
     def on_book_snap(e: BookSnapshotReceived) -> None:
         # Store owns mutation via MarketStateStore.attach; this is accounting only.
@@ -604,10 +626,16 @@ async def run_market_data_runtime(
         _project_active_quotes()
         if on_book is not None:
             on_book(e.book)
+        if on_public_fact is not None:
+            on_public_fact(F.POLYMARKET_BOOKS, runtime)
+        _maybe_evaluate(F.POLYMARKET_BOOKS)
 
     def on_book_delta(e: BookDeltaReceived) -> None:
         counts["clob"] += 1
         _project_active_quotes()
+        if on_public_fact is not None:
+            on_public_fact(F.POLYMARKET_BOOKS, runtime)
+        _maybe_evaluate(F.POLYMARKET_BOOKS)
 
     disp.subscribe(SettlementReferenceUpdated, on_cl)
     disp.subscribe(ReferencePriceUpdated, on_bn)
@@ -643,9 +671,17 @@ async def run_market_data_runtime(
     )
     tasks = [
         asyncio.create_task(clock_loop.run(), name="clock"),
-        asyncio.create_task(cl.run(disp), name="cl"),
-        asyncio.create_task(bn.run(disp), name="bn"),
     ]
+    if starts_adapter(contract, F.CHAINLINK_TWAP):
+        tasks.append(asyncio.create_task(cl.run(disp), name="cl"))
+        summary.gate_notes.append("adapter=chainlink.twap")
+    else:
+        summary.gate_notes.append("adapter=chainlink.twap skipped (not in InputContract)")
+    if starts_adapter(contract, F.BINANCE_SPOT_TRADES):
+        tasks.append(asyncio.create_task(bn.run(disp), name="bn"))
+        summary.gate_notes.append("adapter=binance.spot.trades")
+    else:
+        summary.gate_notes.append("adapter=binance.spot.trades skipped (not in InputContract)")
 
     compose_started_raw = datetime.now(timezone.utc)
     compose_started_mono_ns = time.monotonic_ns()
@@ -688,6 +724,9 @@ async def run_market_data_runtime(
                 except Exception as exc:  # noqa: BLE001
                     summary.errors.append(f"async_tick:{type(exc).__name__}:{exc}")
                     notify_runtime_error("async_tick", exc)
+            timer_mono = clock.monotonic_ns() / 1e9
+            if scheduler.should_evaluate_timer(mono_s=timer_mono):
+                _maybe_evaluate(timer=True)
             sleep_s = 1.0
             if trading_deadline is not None:
                 sleep_s = min(

@@ -137,6 +137,9 @@ def reduce_execution_event(
     if event.event_id in state.applied_event_ids:
         return state, ()
     effects: list[ReducerEffect] = []
+    # Late venue observations must not reopen a session that already required
+    # operator intervention (e.g. residual dust after exit_retry_budget_exhausted).
+    locked_manual = state.phase is ExecutionPhase.MANUAL_INTERVENTION
 
     if isinstance(event, SessionOpened):
         if state.identity is not None:
@@ -324,6 +327,8 @@ def reduce_execution_event(
                 effects.append(
                     ReducerEffect(EffectKind.REQUEST_RECONCILIATION, "conflicting_trade_identity")
                 )
+                if locked_manual:
+                    state.phase = ExecutionPhase.MANUAL_INTERVENTION
                 state.applied_event_ids.add(event.event_id)
                 state.event_count += 1
                 return state, tuple(effects)
@@ -339,6 +344,8 @@ def reduce_execution_event(
                     )
                 )
                 existing.sources.add(event.source)
+                if locked_manual:
+                    state.phase = ExecutionPhase.MANUAL_INTERVENTION
                 state.applied_event_ids.add(event.event_id)
                 state.event_count += 1
                 return state, tuple(effects)
@@ -425,6 +432,9 @@ def reduce_execution_event(
         state.phase = ExecutionPhase.MANUAL_INTERVENTION
         state.last_error = event.reason
         effects.append(ReducerEffect(EffectKind.SESSION_TERMINAL, event.reason))
+
+    if locked_manual:
+        state.phase = ExecutionPhase.MANUAL_INTERVENTION
 
     state.applied_event_ids.add(event.event_id)
     state.event_count += 1

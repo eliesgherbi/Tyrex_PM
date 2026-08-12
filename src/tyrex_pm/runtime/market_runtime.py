@@ -45,6 +45,8 @@ from tyrex_pm.indicators.reference_alignment import (
     BasisEwmaState,
     evaluate_dynamic_alignment,
 )
+from tyrex_pm.facts import ids as F
+from tyrex_pm.facts.contract import InputContract
 from tyrex_pm.market_data.binding_record import MarketBindingRecord, binding_record_from_discovery
 from tyrex_pm.market_data.book_health import SyncHealth
 from tyrex_pm.market_data.book_store import MarketStateStore
@@ -57,8 +59,7 @@ from tyrex_pm.market_data.freshness import (
     TimestampBasis,
 )
 from tyrex_pm.strategies.context import StrategyContext
-from tyrex_pm.strategies.z_gap.config import ZGapConfig
-from tyrex_pm.strategies.z_gap.driver import ZGapDriver, create_z_gap_driver
+from tyrex_pm.strategies.registry import get_strategy_plugin
 
 
 class SessionSlot(str, Enum):
@@ -101,7 +102,7 @@ class AlignedEvalReady:
     sealed: SealedWindowPtb | None
     dyn: DynamicAlignedReference | None
     snapshot: DecisionSnapshot | None
-    binding: ZGapDriver | None
+    binding: Any | None
     binance_raw: Decimal | None
     binance_source_ts: datetime | None
     model_spot: Decimal | None
@@ -157,12 +158,14 @@ def project_session_quotes_from_view(sess: MarketSession, view: BookView) -> Non
 
 
 @dataclass
-class ZGapMarketRuntime:
+class MarketSessionRuntime:
     """Strategy-data runtime over normalized public market events."""
 
     clock: Clock
     ptb_engine: PtbCaptureEngine
-    zgap: ZGapDriver
+    driver: Any
+    input_contract: InputContract
+    strategy_kind: str = "z_gap"
     accepted_basis: AcceptedBasisEstimate = field(default_factory=AcceptedBasisEstimate)
     active: MarketSession | None = None
     prepared_next: MarketSession | None = None
@@ -172,7 +175,12 @@ class ZGapMarketRuntime:
     active_binding_record: MarketBindingRecord | None = None
     _latest_binance: PriceTickView | None = None
     _latest_chainlink: PriceTickView | None = None
-    _strategy_by_window: dict[str, ZGapDriver] = field(default_factory=dict)
+    _strategy_by_window: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def zgap(self) -> Any:
+        """Backward-compatible alias for the root strategy driver."""
+        return self.driver
 
     @classmethod
     def create(
@@ -181,11 +189,13 @@ class ZGapMarketRuntime:
         clock: Clock | None = None,
         attestation_port: PtbAttestationPort | None = None,
         basis_ewma_half_life_s: float | None = None,
-        zgap_config: ZGapConfig | None = None,
+        zgap_config: Any | None = None,
+        strategy_kind: str = "z_gap",
+        strategy_config: Any | None = None,
         time_authority: TimeAuthority | None = None,
         require_ssr_price_match: bool = True,
         target_notional: Decimal | None = None,
-    ) -> "ZGapMarketRuntime":
+    ) -> "MarketSessionRuntime":
         clock = clock or FakeClock(_wall=datetime(2026, 7, 20, 21, 15, 0, tzinfo=timezone.utc))
         if time_authority is not None:
             auth = time_authority
@@ -206,22 +216,25 @@ class ZGapMarketRuntime:
             attestation_port=attestation_port,
             ewma=BasisEwmaState(half_life_s=basis_ewma_half_life_s),
         )
+        plugin = get_strategy_plugin(strategy_kind)
         binding_kwargs: dict[str, Any] = {
-            "strategy_kind": "z_gap",
-            "zgap_config": zgap_config or ZGapConfig(),
             "time_authority": auth,
             "clock": clock,
         }
         if target_notional is not None:
             binding_kwargs["target_notional"] = target_notional
-        binding_kwargs.pop("strategy_kind")
-        binding = create_z_gap_driver(config=binding_kwargs.pop("zgap_config"), **binding_kwargs)
+        cfg = strategy_config if strategy_config is not None else zgap_config
+        if cfg is None:
+            cfg = plugin.load_config({}, "MarketSessionRuntime.create")
+        binding = plugin.create_driver(config=cfg, **binding_kwargs)
         if not isinstance(require_ssr_price_match, bool):
             raise ValueError("require_ssr_price_match must be a boolean")
         return cls(
             clock=clock,
             ptb_engine=engine,
-            zgap=binding,
+            driver=binding,
+            input_contract=plugin.input_contract,
+            strategy_kind=strategy_kind,
             require_ssr_price_match=require_ssr_price_match,
         )
 
@@ -256,15 +269,8 @@ class ZGapMarketRuntime:
             event_start=market.event_start,
             event_end=market.event_end,
         )
-        auth = self.zgap.time_authority
-        child = create_z_gap_driver(
-            config=self.zgap.config,
-            time_authority=auth,
-            clock=self.clock,
-            window_id=window_id,
-            target_notional=self.zgap.target_notional,
-            fee_curve=self.zgap.fee_curve,
-        )
+        auth = self.driver.time_authority
+        child = self._create_window_driver(window_id=window_id, time_authority=auth)
         child.on_start(
             StrategyContext(
                 run_id=RunId(window_id),
@@ -273,10 +279,11 @@ class ZGapMarketRuntime:
             )
         )
         history = self.ptb_engine.binance_history
-        if history:
-            child.seed_volatility(
+        seed = getattr(child, "seed_volatility", None)
+        if history and callable(seed) and self.input_contract.includes(F.BINANCE_SPOT_TRADES):
+            seed(
                 [(tick.value, tick.source_ts) for tick in history],
-                now_ts=self.zgap.time_authority.now_corrected_utc(),
+                now_ts=self.driver.time_authority.now_corrected_utc(),
             )
         self._strategy_by_window[window_id] = child
         if slot is SessionSlot.ACTIVE:
@@ -286,6 +293,20 @@ class ZGapMarketRuntime:
             sess.publish_as_active = False
         return sess
 
+    def _create_window_driver(self, *, window_id: str, time_authority: TimeAuthority) -> Any:
+        plugin = get_strategy_plugin(self.strategy_kind)
+        kwargs: dict[str, Any] = {
+            "time_authority": time_authority,
+            "clock": self.clock,
+            "window_id": window_id,
+            "target_notional": self.driver.target_notional,
+            "config": self.driver.config,
+        }
+        fee_curve = getattr(self.driver, "fee_curve", None)
+        if fee_curve is not None:
+            kwargs["fee_curve"] = fee_curve
+        return plugin.create_driver(**kwargs)
+
     def ingest_binance(self, tick: PriceTickView) -> DynamicAlignedReference:
         self.ptb_engine.ingest_binance(tick)
         self._latest_binance = tick
@@ -293,7 +314,9 @@ class ZGapMarketRuntime:
         # the once-per-second strategy evaluation. Warm ACTIVE and PREPARED_NEXT
         # bindings so promotion does not reset sigma to MODEL_NOT_READY.
         for binding in tuple(self._strategy_by_window.values()):
-            binding.ingest_volatility(tick.value, tick.source_ts)
+            ingest = getattr(binding, "ingest_volatility", None)
+            if callable(ingest) and self.input_contract.includes(F.BINANCE_SPOT_TRADES):
+                ingest(tick.value, tick.source_ts)
         return evaluate_dynamic_alignment(
             current_binance=tick.value,
             binance_source_ts=tick.source_ts,
@@ -366,10 +389,12 @@ class ZGapMarketRuntime:
                 sess.sealed = sealed
         zg = self._strategy_by_window.get(window_id)
         if zg is not None:
-            state = self.ptb_engine.get_window(market_id, window_id)
-            if state is None or state.ptb_snapshot is None:
-                raise RuntimeError("sealed PTB has no authoritative snapshot")
-            zg.configure_ptb(state.ptb_snapshot)
+            configure = getattr(zg, "configure_ptb", None)
+            if callable(configure):
+                state = self.ptb_engine.get_window(market_id, window_id)
+                if state is None or state.ptb_snapshot is None:
+                    raise RuntimeError("sealed PTB has no authoritative snapshot")
+                configure(state.ptb_snapshot)
         return sealed
 
     def promote_prepared_next(self, *, at: datetime | None = None) -> MarketSession:
@@ -409,8 +434,17 @@ class ZGapMarketRuntime:
                 model_spot=None,
                 model_anchor=None,
             )
-        now = self.zgap.time_authority.now_corrected_utc()
+        now = self.driver.time_authority.now_corrected_utc()
         reasons: list[str] = []
+
+        if not self.input_contract.requires(F.PTB_SEALED):
+            return self._prepare_book_eval(
+                sess=sess,
+                now=now,
+                yes_book=yes_book,
+                no_book=no_book,
+            )
+
         if sess.sealed is None:
             reasons.append("exact_candidate_absent")
             st = self.ptb_engine.get_window(sess.market_id, sess.window_id)
@@ -589,3 +623,100 @@ class ZGapMarketRuntime:
             model_spot=model_spot,
             model_anchor=sealed.ptb_k,
         )
+
+    def _prepare_book_eval(
+        self,
+        *,
+        sess: MarketSession,
+        now: datetime,
+        yes_book=None,
+        no_book=None,
+    ) -> AlignedEvalReady:
+        """ask70 evaluation path: active window + books; sealed PTB optional."""
+        sealed = sess.sealed
+        reasons: list[str] = []
+        if sealed is not None and sealed.clock_status == "UNSYNCHRONIZED":
+            reasons.append("unsynchronized_clock")
+        zg = self._strategy_by_window.get(sess.window_id)
+        if zg is None:
+            reasons.append("strategy_binding_absent")
+
+        book_view: BookView | None = None
+        yes_q = _quote(sess.up_ask, sess.up_bid)
+        no_q = _quote(sess.down_ask, sess.down_bid)
+        yes_fresh = _fresh(True)
+        no_fresh = _fresh(True)
+        yes_b = yes_book
+        no_b = no_book
+        if self.book_store is not None:
+            binding_rec = self.active_binding_record
+            if binding_rec is None and sess.binding is not None:
+                binding_rec = binding_record_from_discovery(sess.binding)
+            if binding_rec is not None:
+                book_view = self.book_store.capture_pair(binding_rec)
+                project_session_quotes_from_view(sess, book_view)
+                yes_q = book_view.up.quote if book_view.up.book is not None else book_quote(None)
+                no_q = book_view.down.quote if book_view.down.book is not None else book_quote(None)
+                yes_b = yes_book if yes_book is not None else book_view.up.book
+                no_b = no_book if no_book is not None else book_view.down.book
+                yes_fresh = _fresh_from_sync(book_view.up.sync_health, now=now)
+                no_fresh = _fresh_from_sync(book_view.down.sync_health, now=now)
+
+        if not yes_fresh.is_fresh or not no_fresh.is_fresh:
+            reasons.append("books_not_fresh")
+
+        hard_skip = set(reasons) & {
+            "unsynchronized_clock",
+            "strategy_binding_absent",
+            "books_not_fresh",
+        }
+        if hard_skip or zg is None:
+            return AlignedEvalReady(
+                ok=False,
+                skip_reasons=tuple(dict.fromkeys(reasons)),
+                session=sess,
+                sealed=sealed,
+                dyn=None,
+                snapshot=None,
+                binding=zg,
+                binance_raw=None if self._latest_binance is None else self._latest_binance.value,
+                binance_source_ts=(
+                    None if self._latest_binance is None else self._latest_binance.source_ts
+                ),
+                model_spot=None,
+                model_anchor=None if sealed is None else sealed.ptb_k,
+            )
+
+        snap = DecisionSnapshot(
+            market=sess.market,
+            yes_book=yes_b,
+            no_book=no_b,
+            yes_quote=yes_q,
+            no_quote=no_q,
+            reference=None,
+            yes_freshness=yes_fresh,
+            no_freshness=no_fresh,
+            reference_freshness=_fresh(True),
+            observed_at=now,
+            correlation_id=new_correlation_id(),
+            causation_id=new_event_id(),
+            book_view=book_view,
+        )
+        return AlignedEvalReady(
+            ok=True,
+            skip_reasons=tuple(dict.fromkeys(reasons)),
+            session=sess,
+            sealed=sealed,
+            dyn=None,
+            snapshot=snap,
+            binding=zg,
+            binance_raw=None if self._latest_binance is None else self._latest_binance.value,
+            binance_source_ts=(
+                None if self._latest_binance is None else self._latest_binance.source_ts
+            ),
+            model_spot=None,
+            model_anchor=None if sealed is None else sealed.ptb_k,
+        )
+
+
+ZGapMarketRuntime = MarketSessionRuntime

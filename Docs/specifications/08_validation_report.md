@@ -1,5 +1,7 @@
 # 08 — Validation report
 
+> **Historical R-series evidence.** Not a current test plan. Run `pytest -q` and see [`../latest/running.md`](../latest/running.md).
+
 ## Checkpoints (committed, not pushed)
 
 | Phase | Commit | Message |

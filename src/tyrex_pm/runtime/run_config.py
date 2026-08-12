@@ -8,9 +8,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
+from tyrex_pm.protection.spec import ProtectionSpec, ProtectionSpecError, protection_spec_from_mapping
+from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.yaml_loading import load_yaml_mapping
-from tyrex_pm.strategies.z_gap.config import ZGapConfig
-from tyrex_pm.strategies.z_gap.schema import zgap_config_from_parameters
+from tyrex_pm.strategies.registry import get_strategy_plugin
 
 
 class RunConfigError(ValueError):
@@ -84,13 +85,24 @@ class TradingRunConfig:
     schema_version: int
     run_name: str
     strategy_kind: str
-    strategy: ZGapConfig
+    strategy: Any
     market: MarketRuntimeConfig
     account: AccountRuntimeConfig
     risk: RiskRuntimeConfig
     lifecycle: LifecycleRuntimeConfig
     state_directory: Path
     report_directory: Path
+    protection: ProtectionSpec | None
+
+
+def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
+    plugin = get_strategy_plugin(config.strategy_kind)
+    return plugin.entry_tau_bounds(config.strategy)
+
+
+def max_clock_uncertainty_ms(config: TradingRunConfig) -> float:
+    plugin = get_strategy_plugin(config.strategy_kind)
+    return plugin.max_clock_uncertainty_ms(config.strategy)
 
 
 def load_trading_run_config(path: Path) -> TradingRunConfig:
@@ -107,6 +119,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "lifecycle",
             "state_directory",
             "report_directory",
+            "protection",
         },
         "top-level",
     )
@@ -120,12 +133,27 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
     strategy_raw = dict(raw.get("strategy") or {})
     _reject_unknown(strategy_raw, {"kind", "parameters"}, "strategy")
     strategy_kind = str(strategy_raw.get("kind", "z_gap"))
-    if strategy_kind != "z_gap":
-        raise RunConfigError(f"strategy {strategy_kind!r} is not registered; available: z_gap")
     try:
-        strategy = zgap_config_from_parameters(strategy_raw.get("parameters") or {}, file=str(path))
-    except Exception as exc:  # noqa: BLE001
+        plugin = get_strategy_plugin(strategy_kind)
+    except KeyError as exc:
         raise RunConfigError(str(exc)) from exc
+    try:
+        strategy = plugin.load_config(strategy_raw.get("parameters") or {}, str(path))
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, RunConfigError):
+            raise
+        raise RunConfigError(str(exc)) from exc
+
+    protection: ProtectionSpec | None = None
+    if "protection" in raw:
+        if raw["protection"] is None:
+            raise RunConfigError("protection must be a mapping when present")
+        try:
+            protection = protection_spec_from_mapping(dict(raw["protection"]), where="protection")
+        except ProtectionSpecError as exc:
+            raise RunConfigError(str(exc)) from exc
+    if plugin.requires_protection and protection is None:
+        raise RunConfigError(f"{strategy_kind} requires an explicit top-level protection block")
 
     market_raw = dict(raw.get("market") or {})
     _reject_unknown(
@@ -155,8 +183,10 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         maximum_book_age_ms=int(market_raw.get("maximum_book_age_ms", 2_000)),
         maximum_candidate_age_ms=int(market_raw.get("maximum_candidate_age_ms", 5_000)),
     )
-    if market.family != "btc_updown_5m":
-        raise RunConfigError("only market family btc_updown_5m is registered")
+    try:
+        get_market_family(market.family)
+    except Exception as exc:  # noqa: BLE001
+        raise RunConfigError(str(exc)) from exc
     if (
         min(
             market.preparation_lead_s,
@@ -221,10 +251,11 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         raise RunConfigError("tiny-live maximum_total_debit cannot exceed 5 USDC")
     if risk.fee_reserve_rate < 0:
         raise RunConfigError("fee_reserve_rate cannot be negative")
-    if strategy.time_resolution.resolution_capability_default:
-        raise RunConfigError(
-            "automatic hold-to-resolution is not implemented by the execution lifecycle"
-        )
+    if plugin.validate_run_config is not None:
+        try:
+            plugin.validate_run_config(strategy)
+        except Exception as exc:  # noqa: BLE001
+            raise RunConfigError(str(exc)) from exc
 
     life_raw = dict(raw.get("lifecycle") or {})
     _reject_unknown(
@@ -274,4 +305,5 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         lifecycle=lifecycle,
         state_directory=Path(raw.get("state_directory", "var/runtime_state/execution")),
         report_directory=Path(raw.get("report_directory", "var/runs/z_gap")),
+        protection=protection,
     )

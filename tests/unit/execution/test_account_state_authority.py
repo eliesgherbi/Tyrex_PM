@@ -225,3 +225,27 @@ async def test_last_good_snapshot_expires_to_explicit_stale_state() -> None:
     assert "ACCOUNT_SNAPSHOT_STALE" in snapshot.blockers
     assert not snapshot.read_complete
     await authority.close()
+
+
+@pytest.mark.asyncio
+async def test_hold_ready_snapshot_keeps_ready_during_submit_critical_section() -> None:
+    authority = AccountStateAuthority(
+        _AccountGateway(),
+        policy=_policy(snapshot_max_age_s=0.01, refresh_interval_s=0.05),
+    )
+    authority.prepare(
+        market_id="condition",
+        token_ids=("yes", "no"),
+        required_collateral=Decimal("5"),
+        active=True,
+    )
+    await _wait_for_status(authority, AccountSnapshotStatus.READY)
+    async with authority.hold_ready_snapshot("condition"):
+        await asyncio.sleep(0.03)
+        held = authority.current("condition")
+        assert held.status is AccountSnapshotStatus.READY
+        assert held.read_complete
+    await asyncio.sleep(0.02)
+    aged = authority.current("condition")
+    assert aged.status in {AccountSnapshotStatus.STALE, AccountSnapshotStatus.READY}
+    await authority.close()

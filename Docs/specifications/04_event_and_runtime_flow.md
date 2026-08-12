@@ -1,5 +1,7 @@
 # 04 — Event and runtime flow
 
+> **Historical (R6A).** Current flow: [`../latest/architecture.md`](../latest/architecture.md) and [`../latest/execution_lifecycle.md`](../latest/execution_lifecycle.md). Evaluation is scheduled from `InputContract`, not from every market/reference event.
+
 **Phase:** R6A
 
 ## Chain

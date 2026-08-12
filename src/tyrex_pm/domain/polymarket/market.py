@@ -44,6 +44,9 @@ class BinaryMarket:
     event_end: datetime | None = None
     tick_size: Decimal | None = None
     min_order_size: Decimal | None = None
+    taker_delay_ms: int | None = None
+    fee_rate: Decimal | None = None
+    rule_version: str | None = None
     status: MarketStatus = MarketStatus.UNKNOWN
     event_slug: str | None = None
 
@@ -78,6 +81,17 @@ class BinaryMarket:
                 require_non_negative(
                     as_decimal(self.min_order_size, field_name="min_order_size"),
                     field_name="min_order_size",
+                ),
+            )
+        if self.taker_delay_ms is not None and self.taker_delay_ms < 0:
+            raise ValueError("taker_delay_ms must be >= 0")
+        if self.fee_rate is not None:
+            object.__setattr__(
+                self,
+                "fee_rate",
+                require_non_negative(
+                    as_decimal(self.fee_rate, field_name="fee_rate"),
+                    field_name="fee_rate",
                 ),
             )
 

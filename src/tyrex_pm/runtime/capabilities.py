@@ -30,6 +30,7 @@ class CapabilityController:
     user_stream_ready: bool = False
     collateral_ready: bool = False
     entry_allowance_ready: bool = False
+    order_metadata_ready: bool = False
     selected_token_sellable: bool = False
     prior_scope_clear: bool = False
     entry_window_open: bool = False
@@ -56,6 +57,7 @@ class CapabilityController:
             "USER_STREAM_NOT_READY": self.user_stream_ready,
             "COLLATERAL_NOT_READY": self.collateral_ready,
             "ENTRY_ALLOWANCE_NOT_READY": self.entry_allowance_ready,
+            "ORDER_METADATA_NOT_READY": self.order_metadata_ready,
             "PRIOR_SCOPE_NOT_CLEAR": self.prior_scope_clear,
             "ENTRY_WINDOW_CLOSED": self.entry_window_open,
         }
@@ -83,6 +85,7 @@ class CapabilityController:
             and self.user_stream_ready
             and self.collateral_ready
             and self.entry_allowance_ready
+            and self.order_metadata_ready
             and self.prior_scope_clear
             and self.entry_window_open
             and not self.kill_switch_active

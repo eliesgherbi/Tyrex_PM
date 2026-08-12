@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -118,6 +119,7 @@ def test_model_lockout_does_not_clear_execution_infrastructure() -> None:
         user_stream_ready=True,
         collateral_ready=True,
         entry_allowance_ready=True,
+        order_metadata_ready=True,
         prior_scope_clear=True,
         entry_window_open=True,
     )
@@ -127,6 +129,32 @@ def test_model_lockout_does_not_clear_execution_infrastructure() -> None:
     assert not result.decision_ready
     assert "MODEL_NOT_READY" in result.blockers
     assert "ACCOUNT_READS_NOT_READY" not in result.blockers
+
+
+def test_order_metadata_blocks_entry_until_warm() -> None:
+    caps = CapabilityController(
+        live_requested=True,
+        public_feeds_ready=True,
+        active_market_ready=True,
+        books_ready=True,
+        model_ready=True,
+        account_reads_ready=True,
+        user_stream_ready=True,
+        collateral_ready=True,
+        entry_allowance_ready=True,
+        order_metadata_ready=False,
+        prior_scope_clear=True,
+        entry_window_open=True,
+    )
+    result = caps.snapshot()
+    assert not result.entry_executable
+    assert not result.execution_infrastructure_ready
+    assert "ORDER_METADATA_NOT_READY" in result.blockers
+    caps.order_metadata_ready = True
+    ready = caps.snapshot()
+    assert ready.entry_executable
+    assert ready.execution_infrastructure_ready
+    assert "ORDER_METADATA_NOT_READY" not in ready.blockers
 
 
 def test_exit_capability_uses_fresh_dispatch_gate_not_cached_book_health() -> None:
@@ -146,17 +174,56 @@ def test_exit_capability_uses_fresh_dispatch_gate_not_cached_book_health() -> No
 
 @pytest.mark.asyncio
 async def test_degraded_public_data_does_not_starve_queued_exit() -> None:
+    consumed = asyncio.Event()
+
+    async def _consume() -> None:
+        if runtime.intent_queue.empty():
+            return
+        runtime.intent_queue.get_nowait()
+        runtime.intent_queue.task_done()
+        consumed.set()
+
     runtime = SimpleNamespace(
-        _bind_pending_market=AsyncMock(),
-        _market_data_ready=lambda: False,
-        active_market=None,
         intent_queue=asyncio.Queue(),
-        _consume_intent=AsyncMock(),
-        lifecycle=SimpleNamespace(state=None),
+        intent_wake=asyncio.Event(),
+        _intent_dispatcher_stop=asyncio.Event(),
+        _consume_intent=_consume,
     )
     runtime.intent_queue.put_nowait(_exit())
-    await TradingRuntime.on_async_tick(runtime, SimpleNamespace())
-    runtime._consume_intent.assert_awaited_once()
+    runtime.intent_wake.set()
+    await runtime.intent_wake.wait()
+    runtime.intent_wake.clear()
+    while not runtime.intent_queue.empty():
+        await runtime._consume_intent()
+    assert consumed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_intent_enqueue_wakes_dispatcher_without_one_hertz_tick() -> None:
+    consumed = asyncio.Event()
+
+    async def _consume(self) -> None:  # noqa: ANN001
+        if self.intent_queue.empty():
+            return
+        self.intent_queue.get_nowait()
+        self.intent_queue.task_done()
+        consumed.set()
+
+    runtime = TradingRuntime.__new__(TradingRuntime)
+    runtime.intent_queue = asyncio.Queue()
+    runtime.intent_wake = asyncio.Event()
+    runtime.intent_candidate_monotonic_ns = {}
+    runtime._intent_dispatcher_stop = asyncio.Event()
+    runtime._intent_dispatcher_task = None
+    runtime._consume_intent = _consume.__get__(runtime, TradingRuntime)
+    runtime._start_intent_dispatcher()
+    try:
+        started = time.monotonic()
+        TradingRuntime._enqueue_intent(runtime, _exit())
+        await asyncio.wait_for(consumed.wait(), timeout=0.5)
+        assert (time.monotonic() - started) < 0.45
+    finally:
+        await TradingRuntime._stop_intent_dispatcher(runtime)
 
 
 @pytest.mark.asyncio
@@ -177,16 +244,21 @@ async def test_manual_deadline_is_enforced_with_open_exposure() -> None:
         account_state_authority=SimpleNamespace(current=lambda _market_id: object()),
         _apply_account_snapshot=Mock(),
         config=SimpleNamespace(
+            strategy_kind="z_gap",
             strategy=SimpleNamespace(entry=SimpleNamespace(tau_min_s=0, tau_max_s=300)),
             lifecycle=SimpleNamespace(
                 mandatory_exit_before_end_s=90,
                 manual_deadline_before_end_s=45,
             ),
+            protection=None,
         ),
         capabilities=SimpleNamespace(entry_window_open=False),
         lifecycle=lifecycle,
         intent_queue=asyncio.Queue(),
         _consume_intent=AsyncMock(),
+        _maybe_arm_protection=Mock(),
+        _maybe_emit_protection_exit=Mock(),
+        _refresh_order_metadata_capability=Mock(),
         selected_instrument=None,
         stop_requested=False,
     )
@@ -264,6 +336,7 @@ async def test_async_production_shape_runs_entry_and_exit_to_flat() -> None:
         user_stream_ready=True,
         collateral_ready=True,
         entry_allowance_ready=True,
+        order_metadata_ready=True,
         prior_scope_clear=True,
         entry_window_open=True,
         selected_token_sellable=True,

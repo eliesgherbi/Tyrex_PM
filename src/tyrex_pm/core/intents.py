@@ -23,6 +23,13 @@ class IntentKind(str, Enum):
     HOLD_TO_RESOLUTION = "HOLD_TO_RESOLUTION"
 
 
+class LiquidityRole(str, Enum):
+    """How the planner should source liquidity for an enter."""
+
+    TAKER = "TAKER"
+    MAKER = "MAKER"
+
+
 class OrderSide(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
@@ -59,6 +66,7 @@ class EnterIntent:
     outcome: OutcomeSide = OutcomeSide.UNKNOWN
     decision_epoch: int = 0
     max_price: Decimal | None = None
+    liquidity_role: LiquidityRole = LiquidityRole.TAKER
     kind: IntentKind = IntentKind.ENTER
 
     def __post_init__(self) -> None:
@@ -143,6 +151,7 @@ class ExitIntent:
                 self.market_id.value,
                 self.instrument_id.value,
                 self.kind.value,
+                self.reason_code,
                 "FLAT",
             )
         )
@@ -209,6 +218,7 @@ class FlattenIntent:
                 self.market_id.value,
                 self.instrument_id.value,
                 self.kind.value,
+                self.reason_code,
             )
         )
         attempt_id = self.evidence.get("attempt_id")

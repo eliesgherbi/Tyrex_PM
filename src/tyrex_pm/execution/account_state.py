@@ -168,6 +168,8 @@ class AccountStateAuthority:
         # race, while keeping the whole refresh off the trading hot path.
         self._single_flight = _PrioritySingleFlight()
         self._closed = False
+        self._ready_holds: dict[str, int] = {}
+        self._hold_released: dict[str, asyncio.Event] = {}
 
     def prepare(
         self,
@@ -220,6 +222,10 @@ class AccountStateAuthority:
                 market_id,
                 self._latest_failures.get(market_id, ("ACCOUNT_STATE_NOT_OBSERVED",)),
             )
+        # During a submit critical section, keep the last complete snapshot
+        # executable even if wall-clock age would otherwise mark it STALE.
+        if self._ready_holds.get(market_id, 0) > 0 and snapshot.read_complete:
+            return snapshot
         age_s = max(0.0, time.monotonic() - snapshot.observed_monotonic_s)
         if age_s <= self.policy.snapshot_max_age_s:
             return snapshot
@@ -229,6 +235,30 @@ class AccountStateAuthority:
             blockers=tuple(dict.fromkeys((*snapshot.blockers, "ACCOUNT_SNAPSHOT_STALE"))),
         )
 
+    @asynccontextmanager
+    async def hold_ready_snapshot(self, market_id: str):
+        """Freeze last-known-good readiness and pause refresh for one market.
+
+        Used around coordinator submit so a slow overlapping account refresh
+        cannot flip entry capabilities mid prepare/final-gate.
+        """
+        if not market_id:
+            yield
+            return
+        self._ready_holds[market_id] = self._ready_holds.get(market_id, 0) + 1
+        released = self._hold_released.setdefault(market_id, asyncio.Event())
+        released.clear()
+        try:
+            yield
+        finally:
+            count = self._ready_holds.get(market_id, 0) - 1
+            if count <= 0:
+                self._ready_holds.pop(market_id, None)
+                released.set()
+                self._hold_released.pop(market_id, None)
+            else:
+                self._ready_holds[market_id] = count
+
     async def refresh_now(self, market_id: str) -> AccountStateSnapshot:
         target = self._targets[market_id]
         await self._refresh_with_retries(target)
@@ -237,6 +267,14 @@ class AccountStateAuthority:
     async def _refresh_loop(self, market_id: str) -> None:
         try:
             while not self._closed:
+                target = self._targets.get(market_id)
+                if target is None:
+                    return
+                while self._ready_holds.get(market_id, 0) > 0 and not self._closed:
+                    released = self._hold_released.setdefault(market_id, asyncio.Event())
+                    await released.wait()
+                    if market_id not in self._targets:
+                        return
                 target = self._targets.get(market_id)
                 if target is None:
                     return
@@ -470,6 +508,10 @@ class AccountStateAuthority:
         self._tasks.clear()
         self._targets.clear()
         self._wakeups.clear()
+        for event in self._hold_released.values():
+            event.set()
+        self._hold_released.clear()
+        self._ready_holds.clear()
         for task in tasks:
             task.cancel()
         if tasks:

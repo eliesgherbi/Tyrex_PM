@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -10,10 +10,11 @@ from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
 from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, TimeAuthority
 from tyrex_pm.domain.polymarket.fees import PROVISIONAL_SAMPLE_FEE, FeeCurveParams
 from tyrex_pm.domain.polymarket.ptb import PtbLockStore, PtbSnapshot
+from tyrex_pm.facts.contract import EligibilityFacts
 from tyrex_pm.indicators.ewma_volatility import EwmaVolatilityEstimator, SigmaConfig
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
-from tyrex_pm.strategies.decisions import IntentLike, StrategyDecision
+from tyrex_pm.strategies.evaluation import StrategyEvaluation
 from tyrex_pm.strategies.z_gap.assemble import assemble_zgap_decision_snapshot
 from tyrex_pm.strategies.z_gap.calibration import build_calibration_row
 from tyrex_pm.strategies.z_gap.config import ZGapConfig
@@ -21,13 +22,7 @@ from tyrex_pm.strategies.z_gap.snapshots import DecisionEpoch
 from tyrex_pm.strategies.z_gap.strategy import ZGapStrategy
 from tyrex_pm.strategies.z_gap.valuations import PositionView, ZGapLeg, value_entry_leg
 
-
-@dataclass(frozen=True)
-class StrategyEvaluation:
-    decision: StrategyDecision
-    intents: tuple[IntentLike, ...]
-    strategy_id: StrategyId
-    reporting_context: dict[str, Any] = field(default_factory=dict)
+__all__ = ["StrategyEvaluation", "ZGapDriver", "create_z_gap_driver"]
 
 
 @dataclass
@@ -153,10 +148,27 @@ class ZGapDriver:
             config=self.config,
             fee_curve=self.fee_curve,
         )
+        decision_evidence = dict(decision.evidence)
+        raw_blockers = decision_evidence.get("blockers", ())
+        if not isinstance(raw_blockers, (list, tuple)):
+            raw_blockers = ()
+        blockers = tuple(str(value) for value in raw_blockers)
+        model_ready = bool(decision_input.model.ready)
+        eligible = bool(
+            decision_evidence.get(
+                "strategy_inputs_eligible",
+                model_ready and not blockers,
+            )
+        )
         return StrategyEvaluation(
             decision=decision,
             intents=tuple(intents),
             strategy_id=self.strategy_id,
+            eligibility=EligibilityFacts(
+                strategy_inputs_eligible=eligible,
+                model_ready=model_ready,
+                blockers=blockers,
+            ),
             reporting_context={
                 "decision_input": decision_input,
                 "calibration": build_calibration_row(

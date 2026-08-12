@@ -1,0 +1,62 @@
+"""Declarative strategy inputs: fact catalog, contracts, and reference mappings."""
+
+from tyrex_pm.facts.contract import EligibilityFacts, EvalTrigger, InputContract, OnFact, OnTimer
+from tyrex_pm.facts.ids import (
+    ACCOUNT_SNAPSHOT,
+    BINANCE_PERP_FUNDING,
+    BINANCE_PERP_L2,
+    BINANCE_PERP_MID,
+    BINANCE_PERP_TRADES,
+    BINANCE_SPOT_L2,
+    BINANCE_SPOT_MID,
+    BINANCE_SPOT_TRADES,
+    CHAINLINK_TWAP,
+    CLOCK_SYNC,
+    DERIVED_FACTS,
+    KNOWN_FACTS,
+    POLYMARKET_BOOKS,
+    POLYMARKET_MARKET_META,
+    PTB_SEALED,
+    REFERENCE_ALIGNED,
+    SOURCE_FACTS,
+    TAU,
+)
+from tyrex_pm.facts.mappings import (
+    ASK70_INPUT_CONTRACT,
+    Q_EDGE_INPUT_CONTRACT,
+    REFERENCE_CONTRACTS,
+    Z_GAP_INPUT_CONTRACT,
+)
+from tyrex_pm.facts.producers import DERIVED_UPSTREAMS, expand_facts
+
+__all__ = [
+    "ACCOUNT_SNAPSHOT",
+    "ASK70_INPUT_CONTRACT",
+    "BINANCE_PERP_FUNDING",
+    "BINANCE_PERP_L2",
+    "BINANCE_PERP_MID",
+    "BINANCE_PERP_TRADES",
+    "BINANCE_SPOT_L2",
+    "BINANCE_SPOT_MID",
+    "BINANCE_SPOT_TRADES",
+    "CHAINLINK_TWAP",
+    "CLOCK_SYNC",
+    "DERIVED_FACTS",
+    "DERIVED_UPSTREAMS",
+    "EligibilityFacts",
+    "EvalTrigger",
+    "InputContract",
+    "KNOWN_FACTS",
+    "OnFact",
+    "OnTimer",
+    "POLYMARKET_BOOKS",
+    "POLYMARKET_MARKET_META",
+    "PTB_SEALED",
+    "Q_EDGE_INPUT_CONTRACT",
+    "REFERENCE_ALIGNED",
+    "REFERENCE_CONTRACTS",
+    "SOURCE_FACTS",
+    "TAU",
+    "Z_GAP_INPUT_CONTRACT",
+    "expand_facts",
+]

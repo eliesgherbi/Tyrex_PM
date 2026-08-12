@@ -1,5 +1,7 @@
 # 02 — Architecture and ownership
 
+> **Historical (R8).** Current ownership and composition: [`../latest/architecture.md`](../latest/architecture.md). The ObserveHost / ShadowOMS / LIVE_TINY split below is not the supported graph.
+
 **Phase:** R8 (framework acceptance; R7 live closed)  
 **Engine:** Minimal Tyrex in-process dispatcher (no NautilusTrader)  
 **R5:** `5cc1a30` · **R5.1:** `6b03cc3`

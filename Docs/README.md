@@ -1,56 +1,51 @@
 # Tyrex_PM documentation
 
-**Tyrex_PM** is a Polymarket-first, event-driven trading framework: strategies emit intents; shared modules own market state, risk, execution, portfolio, lifecycle, persistence, and facts.
+**Tyrex_PM** is a Polymarket-first, event-driven trading framework: strategies declare an `InputContract` and emit intents; shared modules own market state, risk, execution, protection, persistence, and facts.
 
-**Accepted checkpoint:** commit `fb9d0d8` (R8 PASS — framework validation complete; ready for Z-Gap *design*).  
-**Engine:** minimal in-process Tyrex dispatcher. **NautilusTrader is not a dependency.**
+**Engine:** in-process asyncio host (`TradingRuntime`). NautilusTrader is not a dependency. Package version `0.3.0`.
 
 ## Maturity
 
 | Area | Status |
 |------|--------|
-| Observe / shadow paths | Implemented and tested |
-| Live Polymarket OMS (tiny one-shot) | Implemented; three operator live validations complete |
-| Generic long-running live loop | Not productized |
-| Z-Gap strategy | Not implemented (future work) |
-| On-chain redeem / merge / cleanup | Forbidden / unsupported |
+| Unified live runtime (one YAML, `--live`) | Implemented |
+| `z_gap` plugin (PTB + spot trades + books) | Implemented |
+| `ask70` plugin (books-only entry harness + protection overlay) | Implemented |
+| InputContract / plugin registry / evaluation scheduler | Implemented |
+| Live Polymarket OMS (tiny debit cap) | Implemented |
+| Position protection (reactive FAK SL/TP/trailing) | Implemented |
+| Maker GTC live POST | Planned only (`MAKER_LIMIT_PLANNED`) |
+| `q_edge` / Binance L2 / perp adapters | Catalogued, not built |
+| On-chain redeem / merge / cleanup | Unsupported |
 | Legacy archive under `old/` | Reference only — never imported |
 
 ## Documentation layers
 
 | Layer | Path | Role |
 |-------|------|------|
-| **Latest** | [`latest/`](latest/README.md) | Current accepted behavior — start here to use or extend the framework |
-| **Specifications** | [`specifications/`](specifications/) | Objectives, requirements, architecture baselines, plans |
-| **Implementation** | [`implementation/`](implementation/) | Chronological evidence: phases, incidents, acceptance reports |
+| **Latest** | [`latest/`](latest/README.md) | Current accepted behavior — **start here** |
+| **Specifications** | [`specifications/`](specifications/) | Historical objectives and design baselines (R-series). Superseded where they disagree with `latest/` or code. |
+| **Implementation** | [`implementation/`](implementation/) | Chronological evidence (phase reports, incidents). Not current API. Some older R-series reports were removed from the tree. |
 
 ### Precedence
 
 1. **Active code and executable tests** define actual behavior.
 2. **`Docs/latest/`** explains current accepted behavior.
-3. **`Docs/specifications/`** records objectives and design baselines.
-4. **`Docs/implementation/`** records chronological evidence and decisions.
+3. **`Docs/specifications/`** records historical objectives. Do not implement from them without checking `latest/`.
+4. **`Docs/implementation/`** records chronological evidence.
 
-If documents disagree, trust code/tests, correct `latest/`, and preserve historical notes under `implementation/` or marked specifications.
+If documents disagree, trust code/tests, correct `latest/`, and leave historical notes unmarked as current.
 
 ## Who should read what
 
 | Reader | Start |
 |--------|-------|
-| New user | [`latest/getting_started/`](latest/getting_started/installation.md) |
-| Strategy developer | [`latest/concepts/strategy_execution_flow.md`](latest/concepts/strategy_execution_flow.md) → [`developer_guide/extending_the_framework.md`](latest/developer_guide/extending_the_framework.md) |
-| Framework developer | [`latest/modules/overview.md`](latest/modules/overview.md) → [`developer_guide/development.md`](latest/developer_guide/development.md) |
-| Operator | [`latest/how_to/run_modes.md`](latest/how_to/run_modes.md) → [`how_to/reconciliation_and_recovery.md`](latest/how_to/reconciliation_and_recovery.md) |
-| Incident investigator | [`implementation/r8_framework_acceptance.md`](implementation/r8_framework_acceptance.md) + live incident reports |
-
-## Implemented vs not
-
-**Implemented:** adapters (Polymarket + Binance reference), indicators/signals, `ReferenceMomentumStrategy` (validation only), risk, planning, ShadowOMS, live Polymarket OMS + settlement, portfolio/lifecycle, R7 ack/residual gates (local persistent state), facts/reporting, OBSERVE / SHADOW / LIVE_TINY one-shot.
-
-**Not implemented:** Z-Gap, paired-leg/guru migration, full backtest platform, automatic redemption, generic continuous live trading product.
+| New user / operator | [`latest/running.md`](latest/running.md) |
+| Strategy developer | [`latest/extending.md`](latest/extending.md) → [`latest/strategy_inputs.md`](latest/strategy_inputs.md) |
+| Framework developer | [`latest/architecture.md`](latest/architecture.md) → [`latest/execution_lifecycle.md`](latest/execution_lifecycle.md) |
+| Protection / exits | [`latest/protection.md`](latest/protection.md) |
 
 ## Navigation
 
 - Current docs TOC → [`latest/README.md`](latest/README.md)
-- Formal specs index → files under [`specifications/`](specifications/)
-- Evidence index → files under [`implementation/`](implementation/) (see [`r8_framework_acceptance.md`](implementation/r8_framework_acceptance.md))
+- Formal specs index (historical) → [`specifications/README.md`](specifications/README.md)

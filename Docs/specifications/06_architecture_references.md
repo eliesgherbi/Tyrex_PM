@@ -1,5 +1,7 @@
 # 06 — Architecture references
 
+> **Historical.** NautilusTrader non-dependency still holds. Current architecture: [`../latest/architecture.md`](../latest/architecture.md).
+
 **Engine decision: complete.** Tyrex_PM uses its own minimal event-driven engine.
 
 ## NautilusTrader status

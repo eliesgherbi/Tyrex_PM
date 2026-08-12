@@ -12,6 +12,8 @@ from typing import Any, Mapping, Sequence
 from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
 from tyrex_pm.persistence.run_evidence_journal import RunEvidenceRecord
 
+# Legacy v2 journals without strategy_inputs_eligible. v3 decisions carry
+# EligibilityFacts; this set is only a fallback for old evidence.
 _STRATEGY_INPUT_BLOCKERS = frozenset(
     {
         "TIME_NOT_READY",

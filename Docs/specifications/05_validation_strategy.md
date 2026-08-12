@@ -1,5 +1,7 @@
 # 05 — Validation strategy
 
+> **Historical (R6).** Current tests live under `tests/`. Live strategies are `z_gap` and `ask70`, not `ReferenceMomentumStrategy`.
+
 **Phase:** R6A/B
 
 ## Framework strategy

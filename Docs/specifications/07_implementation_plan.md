@@ -1,5 +1,7 @@
 # 07 — Implementation plan
 
+> **Historical R-series plan.** Completed. Current runtime: [`../latest/`](../latest/README.md).
+
 **Branch:** `rest_project`  
 **R7B CLI checkpoint:** `d506ea661a6478f7359fc623e69a0054b5dcdc65`  
 **Status:** R7C settlement hardening in progress — **no further live test until review**

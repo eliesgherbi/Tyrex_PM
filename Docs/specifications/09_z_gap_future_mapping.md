@@ -1,5 +1,7 @@
 # 09 — Z-Gap future mapping
 
+> **Superseded.** z_gap is a registered live plugin (`strategies/z_gap/`, `config/runs/z_gap_tiny_live.yaml`). Current behavior: [`../latest/`](../latest/README.md). This file is retained as the pre-implementation sequencing note.
+
 **Phase:** Planning stub until R8 acceptance. **Do not implement Z-Gap in R1–R7.**
 
 ## Sequencing

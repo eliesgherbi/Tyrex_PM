@@ -1,5 +1,7 @@
 # 01 — Functional requirements
 
+> **Historical (R5–R7).** Current operator surface: [`../latest/running.md`](../latest/running.md). Live mutations go through `TradingRuntime` + `--live`, not the R-series host table below.
+
 **Phase:** R5.1 complete; R6A/B adapter + read-only only. Real mutations begin R7.
 
 | Capability | Phase | Status |

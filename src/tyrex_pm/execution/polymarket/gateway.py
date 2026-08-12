@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -160,6 +161,29 @@ def _accepted_response(response: Any, *, spec: OrderSpec) -> GatewaySubmissionRe
     )
 
 
+@dataclass(frozen=True)
+class OrderMetadataWarmTokenResult:
+    token_id: str
+    ok: bool
+    elapsed_ms: float
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class OrderMetadataWarmResult:
+    """Outcome of discarded create_market_order warm calls (no venue POST)."""
+
+    tokens: tuple[OrderMetadataWarmTokenResult, ...]
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.tokens) and all(item.ok for item in self.tokens)
+
+    @property
+    def warmed_token_ids(self) -> tuple[str, ...]:
+        return tuple(item.token_id for item in self.tokens if item.ok)
+
+
 @dataclass
 class PolymarketAsyncGateway:
     """AsyncSecureClient adapter.
@@ -179,6 +203,65 @@ class PolymarketAsyncGateway:
     @classmethod
     async def from_env(cls, env: dict[str, str] | None = None) -> "PolymarketAsyncGateway":
         return cls(client=await build_async_secure_client(env=env))
+
+    async def warm_order_metadata(
+        self,
+        token_ids: Sequence[str],
+        *,
+        max_price: Decimal,
+        max_spend: Decimal,
+        amount: Decimal | None = None,
+    ) -> OrderMetadataWarmResult:
+        """Populate the official SDK order-metadata cache without posting.
+
+        Uses a discarded protected BUY ``create_market_order`` so tick / neg-risk
+        / fee resolution lands in ``AsyncOrderMetadataCache``. Never calls
+        ``post_order`` and never retains prepared digests.
+        """
+        spend = Decimal("1") if amount is None else Decimal(str(amount))
+        if spend <= 0:
+            raise ValueError("warm amount must be positive")
+        spend_cap = Decimal(str(max_spend))
+        price_cap = Decimal(str(max_price))
+        if spend_cap <= 0 or price_cap <= 0:
+            raise ValueError("warm max_spend and max_price must be positive")
+        if spend > spend_cap:
+            spend = spend_cap
+
+        results: list[OrderMetadataWarmTokenResult] = []
+        seen: set[str] = set()
+        for token_id in token_ids:
+            if not token_id or token_id in seen:
+                continue
+            seen.add(token_id)
+            started = time.monotonic()
+            try:
+                await self.client.create_market_order(
+                    token_id=token_id,
+                    side="BUY",
+                    amount=spend,
+                    max_spend=spend_cap,
+                    max_price=price_cap,
+                    order_type="FAK",
+                )
+            except Exception as exc:  # noqa: BLE001 - warm failure is readiness evidence
+                results.append(
+                    OrderMetadataWarmTokenResult(
+                        token_id=token_id,
+                        ok=False,
+                        elapsed_ms=round((time.monotonic() - started) * 1_000, 3),
+                        error=f"{type(exc).__name__}:{exc}",
+                    )
+                )
+            else:
+                results.append(
+                    OrderMetadataWarmTokenResult(
+                        token_id=token_id,
+                        ok=True,
+                        elapsed_ms=round((time.monotonic() - started) * 1_000, 3),
+                    )
+                )
+        return OrderMetadataWarmResult(tokens=tuple(results))
 
     async def _resolve_tick_size(self, token_id: str) -> Decimal | None:
         tick_size = (
