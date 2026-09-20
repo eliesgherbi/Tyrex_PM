@@ -21,6 +21,27 @@ Z_GAP_EWMA_VOL = IndicatorSpec(
     source=F.BINANCE_SPOT_TRADES,
 )
 
+FEATURE_PROBE_IMBALANCE = IndicatorSpec(
+    name="imbalance",
+    source=F.BINANCE_SPOT_L2,
+    levels=(1,),
+)
+
+FEATURE_PROBE_INPUT_CONTRACT = InputContract(
+    required=(
+        F.POLYMARKET_BOOKS,
+        F.CLOCK_SYNC,
+        F.ACCOUNT_SNAPSHOT,
+        F.BINANCE_SPOT_L2,
+    ),
+    optional=(F.POLYMARKET_MARKET_META,),
+    indicators=(FEATURE_PROBE_IMBALANCE,),
+    evaluate_on=(
+        OnFact(F.POLYMARKET_BOOKS, coalesce_s=1.0),
+        OnFact(F.BINANCE_SPOT_L2, coalesce_s=1.0),
+    ),
+)
+
 Z_GAP_INPUT_CONTRACT = InputContract(
     required=(
         F.POLYMARKET_BOOKS,
@@ -114,6 +135,7 @@ Q_EDGE_INPUT_CONTRACT = InputContract(
 
 REFERENCE_CONTRACTS: dict[str, InputContract] = {
     "ask70": ASK70_INPUT_CONTRACT,
-    "z_gap": Z_GAP_INPUT_CONTRACT,
+    "feature_probe": FEATURE_PROBE_INPUT_CONTRACT,
     "q_edge": Q_EDGE_INPUT_CONTRACT,
+    "z_gap": Z_GAP_INPUT_CONTRACT,
 }

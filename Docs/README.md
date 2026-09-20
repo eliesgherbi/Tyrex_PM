@@ -11,11 +11,14 @@
 | Unified live runtime (one YAML, `--live`) | Implemented |
 | `z_gap` plugin (PTB + spot trades + books) | Implemented |
 | `ask70` plugin (books-only entry harness + protection overlay) | Implemented |
+| `feature_probe` plugin (spot L2 imbalance seam proof) | Implemented (validate-only catalog) |
+| `eval` lab (`lab_evaluate_v1` fixtures, no gateway) | Implemented |
 | InputContract / plugin registry / evaluation scheduler | Implemented |
 | Live Polymarket OMS (tiny debit cap) | Implemented |
-| Position protection (reactive FAK SL/TP/trailing) | Implemented |
-| Maker GTC live POST | Planned only (`MAKER_LIMIT_PLANNED`) |
-| `q_edge` / Binance L2 / perp adapters | Catalogued, not built |
+| Position protection (reactive FAK SL/TP/trailing; resting GTD/GTC TP) | Implemented |
+| Maker GTC live POST | Implemented (`MAKER_LIMIT_POSTED`) |
+| Binance spot L2 + derived mid | Implemented (contract-scoped) |
+| `q_edge` / Binance perp trades/L2/funding | Catalogued; perp fail-closed; `q_edge` not registered |
 | On-chain redeem / merge / cleanup | Unsupported |
 | Legacy archive under `old/` | Reference only — never imported |
 
@@ -41,7 +44,8 @@ If documents disagree, trust code/tests, correct `latest/`, and leave historical
 | Reader | Start |
 |--------|-------|
 | New user / operator | [`latest/running.md`](latest/running.md) |
-| Strategy developer | [`latest/extending.md`](latest/extending.md) → [`latest/strategy_inputs.md`](latest/strategy_inputs.md) |
+| YAML parameter roles | [`latest/config_guide.md`](latest/config_guide.md) |
+| Strategy developer | [`latest/extending.md`](latest/extending.md) (per-module + lab fixture) → [`latest/strategy_inputs.md`](latest/strategy_inputs.md) |
 | Framework developer | [`latest/architecture.md`](latest/architecture.md) → [`latest/execution_lifecycle.md`](latest/execution_lifecycle.md) |
 | Protection / exits | [`latest/protection.md`](latest/protection.md) |
 

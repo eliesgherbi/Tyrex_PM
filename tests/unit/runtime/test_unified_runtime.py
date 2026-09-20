@@ -70,6 +70,28 @@ def test_single_run_config_is_strict_and_keeps_tiny_live_cap() -> None:
     assert cfg.strategy_kind == "z_gap"
     assert cfg.risk.maximum_total_debit == Decimal("5")
     assert cfg.lifecycle.mandatory_exit_before_end_s > cfg.lifecycle.manual_deadline_before_end_s
+    assert cfg.lifecycle.dust_abs_shares == Decimal("0.01")
+    assert cfg.lifecycle.dust_max_notional == Decimal("0.05")
+    assert cfg.lifecycle.prepare_budget_ms == 2000
+    assert cfg.lifecycle.refresh_wait_budget_ms == 500
+    assert cfg.lifecycle.prepare_budget_ms < cfg.market.maximum_candidate_age_ms
+    assert cfg.protection is not None
+    assert cfg.protection.take_profit is not None
+    assert cfg.protection.take_profit.style == "resting_gtd"
+
+
+def test_z_gap_loads_with_and_without_protection(tmp_path: Path) -> None:
+    with_protection = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
+    assert with_protection.protection is not None
+    text = Path("config/runs/z_gap_tiny_live.yaml").read_text(encoding="utf-8")
+    start = text.index("\nprotection:")
+    end = text.index("\nmarket:")
+    stripped = text[:start] + text[end:]
+    path = tmp_path / "z_gap_no_protection.yaml"
+    path.write_text(stripped, encoding="utf-8")
+    without = load_trading_run_config(path)
+    assert without.strategy_kind == "z_gap"
+    assert without.protection is None
 
 
 def test_cli_validates_single_config_without_network(capsys) -> None:
@@ -370,7 +392,12 @@ async def test_async_production_shape_runs_entry_and_exit_to_flat() -> None:
     state = await lifecycle.submit_entry(_entry(), token_id="token")
     assert state.phase is ExecutionPhase.POSITION_OPEN
     assert state.confirmed_position_shares == Decimal("10")
-    state = await lifecycle.submit_exit(_exit(), token_id="token")
+    state = await lifecycle.submit_exit(
+        _exit(),
+        token_id="token",
+        min_order_size=Decimal("1"),
+        last_bid=Decimal("0.49"),
+    )
     assert state.phase is ExecutionPhase.COMPLETED_FLAT
     assert venue.posts == ["BUY", "SELL"]
     assert coordinator.mutation_attempt_count("session") == 2

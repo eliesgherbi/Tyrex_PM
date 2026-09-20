@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from tyrex_pm.execution.final_gate import FinalExecutionGate, FinalGatePolicy
-from tyrex_pm.execution.orders import MarketBuyOrderSpec
+from tyrex_pm.execution.orders import LimitOrderSpec, MarketBuyOrderSpec, OrderSide, TimeInForce
 from tyrex_pm.market_data.book_health import SyncHealth
 from tyrex_pm.runtime.capabilities import CapabilityController
 
@@ -59,6 +59,7 @@ def _capabilities() -> CapabilityController:
         order_metadata_ready=True,
         prior_scope_clear=True,
         entry_window_open=True,
+        selected_token_sellable=True,
     )
 
 
@@ -99,3 +100,39 @@ async def test_post_sign_gate_rejects_stale_candidate_and_changed_tick() -> None
     )
     assert not allowed
     assert reason == "book_tick_size_changed_after_signing"
+
+
+def _limit(*, side: OrderSide, price: Decimal, post_only: bool = True) -> LimitOrderSpec:
+    return LimitOrderSpec(
+        order_id="limit",
+        market_id="market",
+        instrument_id="market:YES",
+        token_id="yes",
+        side=side,
+        shares=Decimal("5"),
+        limit_price=price,
+        time_in_force=TimeInForce.GTC,
+        metadata={
+            "post_only": post_only,
+            "candidate_monotonic_ns": time.monotonic_ns(),
+            "venue_tick_size": "0.01",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_only_limit_refuses_a_crossing_price() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    allowed, reason = await gate(_limit(side=OrderSide.BUY, price=Decimal("0.50")))
+    assert not allowed
+    assert reason == "post_only_would_cross"
+    allowed, reason = await gate(_limit(side=OrderSide.SELL, price=Decimal("0.49")))
+    assert not allowed
+    assert reason == "post_only_would_cross"
+    allowed, reason = await gate(_limit(side=OrderSide.BUY, price=Decimal("0.49")))
+    assert allowed
+    assert reason is None

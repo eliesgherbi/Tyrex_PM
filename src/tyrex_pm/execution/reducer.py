@@ -5,10 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 from tyrex_pm.execution.evidence import (
     BalanceObserved,
+    CancelObserved,
+    CancelRequested,
     DispatchAuthorized,
+    DustResidualRecorded,
     ExecutionEvidence,
     ExecutionRole,
     ExitRequested,
@@ -29,6 +33,7 @@ from tyrex_pm.execution.orders import OrderSide
 from tyrex_pm.execution.session_state import (
     ExecutionPhase,
     ExecutionSessionState,
+    KnownDustResidual,
     OrderExecutionState,
     SessionIdentity,
     TradeRecord,
@@ -60,6 +65,15 @@ _STATUS_RANK = {
     TradeStatus.CONFIRMED: 4,
     TradeStatus.FAILED: 4,
 }
+
+
+def _copy_prepare_timings(order: OrderExecutionState, event: Any) -> None:
+    order.prepare_queue_wait_ms = getattr(event, "prepare_queue_wait_ms", None)
+    order.tick_resolve_ms = getattr(event, "tick_resolve_ms", None)
+    order.create_market_order_ms = getattr(event, "create_market_order_ms", None)
+    order.refresh_wait_ms = getattr(event, "refresh_wait_ms", None)
+    order.refresh_elapsed_ms = getattr(event, "refresh_elapsed_ms", None)
+    order.order_metadata_cache_miss = bool(getattr(event, "order_metadata_cache_miss", False))
 
 
 def _require_session(state: ExecutionSessionState, session_id: str) -> None:
@@ -138,8 +152,9 @@ def reduce_execution_event(
         return state, ()
     effects: list[ReducerEffect] = []
     # Late venue observations must not reopen a session that already required
-    # operator intervention (e.g. residual dust after exit_retry_budget_exhausted).
+    # operator intervention or a classified leftover (known dust).
     locked_manual = state.phase is ExecutionPhase.MANUAL_INTERVENTION
+    locked_dust = state.phase is ExecutionPhase.COMPLETED_FLAT_WITH_DUST
 
     if isinstance(event, SessionOpened):
         if state.identity is not None:
@@ -198,6 +213,7 @@ def reduce_execution_event(
         order.requested_protection_price = event.requested_protection_price
         order.effective_protection_price = event.effective_protection_price
         order.tick_size = event.tick_size
+        _copy_prepare_timings(order, event)
 
     elif isinstance(event, OrderPreDispatchFailed):
         order = _order_for_event(state, event.role, event.order_id)
@@ -208,6 +224,7 @@ def reduce_execution_event(
         order.requested_protection_price = event.requested_protection_price
         order.effective_protection_price = event.effective_protection_price
         order.tick_size = event.tick_size
+        _copy_prepare_timings(order, event)
         order.last_error = f"{event.error_code}:{event.message}"
         state.last_error = order.last_error
         if event.role is ExecutionRole.ENTRY:
@@ -256,6 +273,17 @@ def reduce_execution_event(
                 state.phase = ExecutionPhase.POSITION_OPEN
         elif order.cumulative_matched_hwm > 0 or event.trade_ids:
             state.phase = ExecutionPhase.POSITION_PENDING_CONFIRMATION
+        elif event.accepted and str(event.status or "").lower() in {
+            "live",
+            "open",
+            "resting",
+        }:
+            # Working GTC/GTD: maker bid waits for fill; resting TP keeps exposure.
+            state.phase = (
+                ExecutionPhase.POSITION_PENDING_CONFIRMATION
+                if event.role is ExecutionRole.ENTRY
+                else ExecutionPhase.POSITION_OPEN
+            )
         if order.venue_order_id is not None:
             for trade in state.trades.values():
                 if trade.venue_order_id == order.venue_order_id:
@@ -329,6 +357,8 @@ def reduce_execution_event(
                 )
                 if locked_manual:
                     state.phase = ExecutionPhase.MANUAL_INTERVENTION
+                elif locked_dust:
+                    state.phase = ExecutionPhase.COMPLETED_FLAT_WITH_DUST
                 state.applied_event_ids.add(event.event_id)
                 state.event_count += 1
                 return state, tuple(effects)
@@ -346,6 +376,8 @@ def reduce_execution_event(
                 existing.sources.add(event.source)
                 if locked_manual:
                     state.phase = ExecutionPhase.MANUAL_INTERVENTION
+                elif locked_dust:
+                    state.phase = ExecutionPhase.COMPLETED_FLAT_WITH_DUST
                 state.applied_event_ids.add(event.event_id)
                 state.event_count += 1
                 return state, tuple(effects)
@@ -374,6 +406,22 @@ def reduce_execution_event(
             raise ReducerInvariantError("balance and allowance must be non-negative")
         state.sellable_shares = balance if allowance is None else min(balance, allowance)
         state.last_balance_source = event.source
+
+    elif isinstance(event, CancelRequested):
+        pass
+
+    elif isinstance(event, CancelObserved):
+        remaining = [
+            order_id
+            for order_id in state.open_venue_order_ids
+            if order_id not in set(event.canceled)
+        ]
+        state.open_venue_order_ids = tuple(remaining)
+        for order in state.orders.values():
+            if order.venue_order_id in event.canceled:
+                order.venue_status = "cancelled"
+            elif order.venue_order_id in event.matched_instead:
+                order.venue_status = "matched"
 
     elif isinstance(event, ExitRequested):
         if state.confirmed_position_shares <= 0:
@@ -433,8 +481,26 @@ def reduce_execution_event(
         state.last_error = event.reason
         effects.append(ReducerEffect(EffectKind.SESSION_TERMINAL, event.reason))
 
+    elif isinstance(event, DustResidualRecorded):
+        state.dust_residual = KnownDustResidual(
+            token_id=event.token_id,
+            shares=event.shares,
+            market_id=event.market_id,
+            window_id=event.window_id,
+            classification=event.classification,
+            last_bid=event.last_bid,
+            min_order_size=event.min_order_size,
+            sell_size_increment=event.sell_size_increment,
+            notional=event.notional,
+            reason=event.reason,
+        )
+        state.phase = ExecutionPhase.COMPLETED_FLAT_WITH_DUST
+        effects.append(ReducerEffect(EffectKind.SESSION_TERMINAL, event.classification))
+
     if locked_manual:
         state.phase = ExecutionPhase.MANUAL_INTERVENTION
+    elif locked_dust:
+        state.phase = ExecutionPhase.COMPLETED_FLAT_WITH_DUST
 
     state.applied_event_ids.add(event.event_id)
     state.event_count += 1

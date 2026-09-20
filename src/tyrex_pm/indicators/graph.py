@@ -9,12 +9,39 @@ from typing import Any
 
 from tyrex_pm.core.ids import InstrumentId
 from tyrex_pm.indicators.depth import DepthSnapshot, DepthStore
-from tyrex_pm.indicators.ewma_volatility import EwmaVolatilityEstimator, SigmaConfig
+from tyrex_pm.indicators.ewma_volatility import (
+    SIGMA_UNITS_PER_SQRT_SECOND,
+    EwmaVolatilityEstimator,
+    SigmaConfig,
+    VolatilitySnapshot,
+)
 from tyrex_pm.indicators.imbalance import imbalance, microprice_gap_bps
 from tyrex_pm.indicators.ofi import RollingOfi
 from tyrex_pm.indicators.realized_vol import RollingRealizedVol
 from tyrex_pm.indicators.spec import IndicatorSpec
 from tyrex_pm.indicators.trade_imbalance import RollingTradeImbalance, TradePrint
+
+_KNOWN_NAMES = frozenset(
+    {
+        "ofi",
+        "trade_imbalance",
+        "realized_vol",
+        "ewma_vol",
+        "imbalance",
+        "microprice_gap",
+        "momentum",
+        "basis",
+    }
+)
+
+_EWMA_PARAM_KEYS = (
+    "half_life_s",
+    "min_samples_s",
+    "jump_threshold_sigma",
+    "sample_interval_s",
+    "tau_floor_s",
+    "sigma_floor",
+)
 
 
 @dataclass
@@ -27,10 +54,46 @@ class FeatureBundle:
         return self.values.get(key, default)
 
 
+def empty_volatility_snapshot(*, reject_reason: str = "warming_up") -> VolatilitySnapshot:
+    return VolatilitySnapshot(
+        sigma=None,
+        sigma_units=SIGMA_UNITS_PER_SQRT_SECOND,
+        ready=False,
+        sample_count=0,
+        effective_samples_s=0.0,
+        last_update_ts=None,
+        jump_guard_tripped=False,
+        reject_reason=reject_reason,
+    )
+
+
+def sigma_config_from_spec(spec: IndicatorSpec) -> SigmaConfig:
+    if spec.name != "ewma_vol":
+        raise ValueError(f"sigma_config_from_spec requires ewma_vol, got {spec.name!r}")
+    mapping = spec.param_map
+    missing = [key for key in _EWMA_PARAM_KEYS if key not in mapping]
+    extra = sorted(set(mapping) - set(_EWMA_PARAM_KEYS))
+    if missing:
+        raise ValueError(f"ewma_vol missing required params: {missing}")
+    if extra:
+        raise ValueError(f"ewma_vol unknown params: {extra}")
+    return SigmaConfig(
+        half_life_s=float(mapping["half_life_s"]),
+        min_samples_s=float(mapping["min_samples_s"]),
+        jump_threshold_sigma=float(mapping["jump_threshold_sigma"]),
+        sample_interval_s=float(mapping["sample_interval_s"]),
+        tau_floor_s=float(mapping["tau_floor_s"]),
+        sigma_floor=float(mapping["sigma_floor"]),
+    )
+
+
 class IndicatorGraph:
     """Stateful producers for a frozen set of IndicatorSpecs."""
 
     def __init__(self, specs: tuple[IndicatorSpec, ...]) -> None:
+        unknown = sorted({spec.name for spec in specs} - _KNOWN_NAMES)
+        if unknown:
+            raise ValueError(f"unknown indicator name(s): {unknown}")
         self.specs = specs
         self.depth = DepthStore()
         self._bundle = FeatureBundle()
@@ -56,21 +119,32 @@ class IndicatorGraph:
                         horizon=timedelta(milliseconds=horizon)
                     )
             elif spec.name == "ewma_vol":
-                self._ewma[spec.instance_id] = EwmaVolatilityEstimator(SigmaConfig())
+                self._ewma[spec.instance_id] = EwmaVolatilityEstimator(
+                    sigma_config_from_spec(spec)
+                )
+                self._bundle.values[spec.instance_id] = empty_volatility_snapshot()
 
     def snapshot(self) -> FeatureBundle:
         return FeatureBundle(values=dict(self._bundle.values))
 
-    def on_depth(self, snapshot: DepthSnapshot, *, source: str) -> FeatureBundle:
-        previous_mid = None
-        prev = self.depth.capture(snapshot.instrument_id)
-        if prev is not None:
-            previous_mid = prev.mid
-        self.depth.apply(snapshot)
+    def on_depth(
+        self,
+        snapshot: DepthSnapshot,
+        *,
+        source: str,
+        already_applied: bool = False,
+    ) -> FeatureBundle:
+        if already_applied:
+            previous_mid = self._mids.get(source)
+        else:
+            previous_mid = None
+            prev = self.depth.capture(snapshot.instrument_id)
+            if prev is not None:
+                previous_mid = prev.mid
+            self.depth.apply(snapshot)
         mid = snapshot.mid
         if mid is not None:
             self._mids[source] = mid
-            # Treat L2 source as also producing the corresponding .mid fact.
             if source.endswith(".l2"):
                 self._mids[source[: -len(".l2")] + ".mid"] = mid
         for spec in self.specs:
@@ -110,12 +184,8 @@ class IndicatorGraph:
                 continue
             if spec.name == "ewma_vol":
                 est = self._ewma[spec.instance_id]
-                est.update(price, ts_event)
-                snap = est.snapshot()
-                self._bundle.values[spec.instance_id] = {
-                    "sigma": snap.sigma,
-                    "ready": snap.ready,
-                }
+                snap = est.update(price, ts_event)
+                self._bundle.values[spec.instance_id] = snap
             elif spec.name == "realized_vol":
                 for horizon in spec.horizons_ms or (10000,):
                     key = f"{spec.instance_id}|{horizon}"
@@ -141,8 +211,6 @@ class IndicatorGraph:
         self, spec: IndicatorSpec, *, mid: Decimal, previous_mid: Decimal
     ) -> None:
         del previous_mid
-        # Latest mid is stored; horizon momentum is log(S_t / S_{t-h}) approximated
-        # by the caller supplying successive mids into realized path. Store last mid.
         self._bundle.values[f"{spec.instance_id}|last_mid"] = mid
 
     def _update_basis(self, spec: IndicatorSpec) -> None:

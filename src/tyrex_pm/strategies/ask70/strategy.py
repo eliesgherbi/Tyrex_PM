@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from tyrex_pm.core.ids import StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
-from tyrex_pm.core.intents import EnterIntent, new_intent_id
+from tyrex_pm.core.intents import EnterIntent, LiquidityRole, new_intent_id
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.ask70.config import Ask70Config
 from tyrex_pm.strategies.ask70.reasons import Ask70Reason
@@ -146,6 +146,13 @@ class Ask70Strategy:
         max_price = ask + self.config.max_price_pad
         if max_price > Decimal("0.99"):
             max_price = Decimal("0.99")
+        role = (
+            LiquidityRole.MAKER
+            if self.config.liquidity_role == "maker"
+            else LiquidityRole.TAKER
+        )
+        if role is LiquidityRole.MAKER and self.config.maker_limit_price is not None:
+            max_price = self.config.maker_limit_price
         self._decision_epoch_counter += 1
         self._entry_lineage_consumed = True
         intent = EnterIntent(
@@ -167,6 +174,7 @@ class Ask70Strategy:
             outcome=outcome,
             decision_epoch=self._decision_epoch_counter,
             max_price=max_price,
+            liquidity_role=role,
         )
         return (
             StrategyDecision(

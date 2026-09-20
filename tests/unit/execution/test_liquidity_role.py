@@ -45,6 +45,7 @@ def test_maker_entry_plans_gtc_limit() -> None:
     assert isinstance(spec, LimitOrderSpec)
     assert spec.time_in_force is TimeInForce.GTC
     assert spec.side.value == "BUY"
+    assert spec.metadata.get("post_only") is True
 
 
 def test_hold_to_resolution_intent_is_constructible() -> None:

@@ -33,20 +33,21 @@ from tyrex_pm.domain.polymarket.sealed_reference import (
     DynamicAlignedReference,
     SealedWindowPtb,
 )
+from tyrex_pm.facts import ids as F
+from tyrex_pm.facts.contract import InputContract
 from tyrex_pm.indicators.causal_pairing import (
     PAIRING_POLICY_ID,
     PriceTickView,
     TradingReferenceIdentity,
     select_latest_binance_at_or_before,
 )
+from tyrex_pm.indicators.graph import IndicatorGraph
 from tyrex_pm.indicators.reference_alignment import (
     AcceptedBasisEstimate,
     AlignmentMode,
     BasisEwmaState,
     evaluate_dynamic_alignment,
 )
-from tyrex_pm.facts import ids as F
-from tyrex_pm.facts.contract import InputContract
 from tyrex_pm.market_data.binding_record import MarketBindingRecord, binding_record_from_discovery
 from tyrex_pm.market_data.book_health import SyncHealth
 from tyrex_pm.market_data.book_store import MarketStateStore
@@ -59,7 +60,7 @@ from tyrex_pm.market_data.freshness import (
     TimestampBasis,
 )
 from tyrex_pm.strategies.context import StrategyContext
-from tyrex_pm.strategies.registry import get_strategy_plugin
+from tyrex_pm.strategies.registry import get_strategy_plugin, plugin_indicator_specs
 
 
 class SessionSlot(str, Enum):
@@ -172,6 +173,8 @@ class MarketSessionRuntime:
     require_ssr_price_match: bool = True
     # Authoritative quote store for the active market binding.
     book_store: MarketStateStore | None = None
+    spot_depth_store: Any | None = None
+    indicator_graph: IndicatorGraph = field(default_factory=lambda: IndicatorGraph(()))
     active_binding_record: MarketBindingRecord | None = None
     _latest_binance: PriceTickView | None = None
     _latest_chainlink: PriceTickView | None = None
@@ -236,6 +239,7 @@ class MarketSessionRuntime:
             input_contract=plugin.input_contract,
             strategy_kind=strategy_kind,
             require_ssr_price_match=require_ssr_price_match,
+            indicator_graph=IndicatorGraph(plugin_indicator_specs(plugin, cfg)),
         )
 
     def open_session(
@@ -278,13 +282,6 @@ class MarketSessionRuntime:
                 market=market,
             )
         )
-        history = self.ptb_engine.binance_history
-        seed = getattr(child, "seed_volatility", None)
-        if history and callable(seed) and self.input_contract.includes(F.BINANCE_SPOT_TRADES):
-            seed(
-                [(tick.value, tick.source_ts) for tick in history],
-                now_ts=self.driver.time_authority.now_corrected_utc(),
-            )
         self._strategy_by_window[window_id] = child
         if slot is SessionSlot.ACTIVE:
             self.active = sess
@@ -310,13 +307,11 @@ class MarketSessionRuntime:
     def ingest_binance(self, tick: PriceTickView) -> DynamicAlignedReference:
         self.ptb_engine.ingest_binance(tick)
         self._latest_binance = tick
-        # Volatility is a continuous reference-data concern, not a side effect of
-        # the once-per-second strategy evaluation. Warm ACTIVE and PREPARED_NEXT
-        # bindings so promotion does not reset sigma to MODEL_NOT_READY.
-        for binding in tuple(self._strategy_by_window.values()):
-            ingest = getattr(binding, "ingest_volatility", None)
-            if callable(ingest) and self.input_contract.includes(F.BINANCE_SPOT_TRADES):
-                ingest(tick.value, tick.source_ts)
+        self.indicator_graph.on_trade(
+            source=F.BINANCE_SPOT_TRADES,
+            price=tick.value,
+            ts_event=tick.source_ts,
+        )
         return evaluate_dynamic_alignment(
             current_binance=tick.value,
             binance_source_ts=tick.source_ts,

@@ -13,7 +13,12 @@ from tyrex_pm.protection.state import ArmedProtection, ProtectionPhase
 from tyrex_pm.protection.triggers import TriggerDecision, evaluate_triggers
 
 
-def observe_mark(armed: ArmedProtection, *, mark: Decimal) -> TriggerDecision:
+def observe_mark(
+    armed: ArmedProtection,
+    *,
+    mark: Decimal,
+    skip_take_profit: bool = False,
+) -> TriggerDecision:
     decision = evaluate_triggers(
         spec=armed.spec,
         mark=mark,
@@ -21,6 +26,7 @@ def observe_mark(armed: ArmedProtection, *, mark: Decimal) -> TriggerDecision:
         peak=armed.peak_mark,
         trailing_active=armed.trailing_active,
         thresholds=armed.thresholds,
+        skip_take_profit=skip_take_profit,
     )
     armed.peak_mark = decision.peak
     armed.trailing_active = decision.trailing_active

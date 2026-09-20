@@ -1,0 +1,215 @@
+# =============================================================================
+# Generic parameter catalog (ask70 pattern)
+# =============================================================================
+# Loadable: `python -m tyrex_pm.application.cli run --config <this file> --validate-config`
+# Not a second live operator file. Tiny-live operator configs stay:
+#   config/runs/ask70_protection_tiny_live.yaml
+#   config/runs/z_gap_tiny_live.yaml
+#
+# Unknown keys fail. XOR alternatives are commented, not both set.
+# strategy.parameters are KIND-SPECIFIC. This file is kind: ask70.
+# z_gap-only leaves are in the commented appendix (they fail if uncommented here).
+#
+# CLI (not YAML): --live, --dotenv, --out-dir (overrides report_directory stamp),
+#                 --validate-config, --show-config
+# =============================================================================
+
+schema_version: 1
+run_name: generic_parameter_catalog
+
+# -----------------------------------------------------------------------------
+# strategy — plugin registry + kind-owned parameters
+# Loader: runtime/run_config.py → strategies/<kind>/schema.py
+# -----------------------------------------------------------------------------
+strategy:
+  # Registered kinds today: ask70 | z_gap. Unknown kind fails at load.
+  kind: ask70
+  parameters:
+    # Ask70Config — strategies/ask70/config.py
+    # Enter when a YES/NO best ask is >= this (in (0, 1)).
+    entry_ask_threshold: "0.70"
+    # Which leg if both qualify: first_hit | up_then_down | down_then_up
+    leg_preference: first_hit
+    # Taker worst price = ask + pad. Host final-gate rejects if ask moved above that.
+    max_price_pad: "0.08"
+    # Host AND ask70 both use these for "seconds remaining in the window" (tau).
+    # Host: capabilities.entry_window_open. Ask70: skip if tau outside band.
+    tau_min_s: 10.0
+    tau_max_s: 290.0
+    # Clock-sync uncertainty ceiling (ms). Host reads via plugin.max_clock_uncertainty_ms.
+    # There is NO market.max_clock_uncertainty_ms — it lives on the strategy.
+    max_clock_uncertainty_ms: 750.0
+    # taker (FAK market buy) | maker (post-only GTC bid). Default taker if omitted.
+    liquidity_role: taker
+    # Required only when liquidity_role: maker. In (0, 1). Invalid on taker.
+    # maker_limit_price: "0.01"
+
+# -----------------------------------------------------------------------------
+# protection — framework overlay (protection/spec.py)
+# Required for ask70. Optional for z_gap. Arms after confirmed fill.
+# Independent of strategy.evaluate(). Mark is held-token best bid.
+# At least one of take_profit, stop_loss, or enabled trailing.
+# -----------------------------------------------------------------------------
+protection:
+  mark: bid          # only allowed value today
+  size_mode: full    # only allowed value today (sell all remaining legal size)
+  take_profit:
+    # reactive_fak | resting_gtc | resting_gtd
+    style: resting_gtd
+    # XOR: absolute in (0, 1)  OR  pct_from_entry > 0. Never both.
+    absolute: "0.85"
+    # pct_from_entry: "0.10"
+  stop_loss:
+    style: stop_market_fak   # only allowed value (venue has no stop order)
+    # XOR: absolute in (0, 1)  OR  pct_from_entry > 0. Never both.
+    absolute: "0.55"
+    # pct_from_entry: "0.20"
+  trailing:
+    enabled: false
+    # immediate = trail from fill. after_profit = wait until peak >= entry + activation_profit_abs
+    activation: immediate
+    mark: bid                 # only allowed value; duplicates protection.mark on purpose
+    # Required when enabled: XOR trail_abs OR trail_pct (never both).
+    # trail_abs: "0.05"
+    # trail_pct: "0.10"
+    # Required only when activation: after_profit
+    # activation_profit_abs: "0.03"
+
+# -----------------------------------------------------------------------------
+# market — discovery, window clock, book freshness, candidate fuse
+# Loader: runtime/run_config.py  MarketRuntimeConfig
+# Family registry: runtime/market_family.py  (only btc_updown_5m today)
+# -----------------------------------------------------------------------------
+market:
+  family: btc_updown_5m
+  # Always parsed. Adapter starts ONLY if the strategy InputContract needs Binance.
+  # ask70 does not start Binance; this field is then unused at runtime.
+  binance_symbol: BTCUSDT
+  # Chainlink PTB vs Polymarket SSR openPrice. ask70 has no PTB; leave false.
+  require_ssr_price_match: false
+  # Seconds before event_start to bind prepared-next and warm metadata.
+  preparation_lead_s: 45
+  # Authoritative trading-duration cap from prepared window start (not process start).
+  maximum_duration_s: 300
+  # Host coalesce/timer clamp for EvaluationScheduler (overrides contract coalesce).
+  # Does NOT wake protection; book ticks still call the overlay independently.
+  evaluation_interval_s: 1
+  # BookView older than this is not executable (final gate / capabilities).
+  maximum_book_age_ms: 2000
+  # Monotonic fuse: intent created → POST must complete inside this, else no dispatch.
+  # MUST be > lifecycle.prepare_budget_ms.
+  maximum_candidate_age_ms: 5000
+
+# -----------------------------------------------------------------------------
+# account — authenticated wallet observation (execution/account_state.py)
+# Never converts a failed read into a zero balance.
+# -----------------------------------------------------------------------------
+account:
+  # Background refresh cadence for collateral / tokens / open orders.
+  refresh_interval_s: 5
+  # Snapshot older than this is STALE (entry blocked). Last-good is kept until then.
+  snapshot_max_age_s: 15
+  # Diagnostic "slow read" threshold only. Does NOT cancel SDK HTTP/2 (unsafe on Windows).
+  read_timeout_s: 4
+  retry_attempts: 3
+  retry_base_delay_s: 0.25
+
+# -----------------------------------------------------------------------------
+# risk — planner debit cap (execution/planner.py), NOT model fees
+# -----------------------------------------------------------------------------
+risk:
+  # Desired entry notional stamped on EnterIntent (USDC).
+  target_notional: "5"
+  # Hard cap on total BUY debit. Tiny-live refuses > 5. Planner uses min(target, cap).
+  maximum_total_debit: "5"
+  # OMS haircut: spend = desired / (1 + fee_reserve_rate). Not the Polymarket fee curve.
+  fee_reserve_rate: "0.02"
+  # Host kill. true blocks new entry / forces safety path. Not a strategy exit.
+  kill_switch_active: false
+
+# -----------------------------------------------------------------------------
+# lifecycle — execution host (execution/lifecycle.py, exit_sizing.py, gateway prepare)
+# Required leaves: sell_size_increment, dust_*, prepare_budget_ms, refresh_wait_budget_ms
+# -----------------------------------------------------------------------------
+lifecycle:
+  # Host flatten while tau <= this (MANDATORY_FLATTEN). Must be > manual_deadline.
+  # Orthogonal to z_gap time_resolution.flatten_before_event_end_s (strategy EXIT).
+  mandatory_exit_before_end_s: 90
+  # If still exposed at this tau → MANUAL_INTERVENTION and stop. Must be < mandatory.
+  manual_deadline_before_end_s: 45
+  # How long the lifecycle waits for venue evidence after a POST.
+  evidence_timeout_s: 15
+  # REST reconcile poll while a session is open/uncertain.
+  reconciliation_interval_s: 0.25
+  exit_retry_limit: 3
+  exit_retry_budget_s: 30
+  # Floor on sell limit (planner). In (0, 1].
+  minimum_exit_price: "0.01"
+  # Round remaining shares DOWN to this increment before POST (typically 0.01).
+  sell_size_increment: "0.01"
+  # Known-dust: leftover <= this (and below min_order_size / dust_max_notional).
+  dust_abs_shares: "0.01"
+  # Known-dust notional ceiling: leftover × last bid.
+  dust_max_notional: "0.05"
+  # Abandon create/sign if it exceeds this (ms). No POST. Must be < maximum_candidate_age_ms.
+  prepare_budget_ms: 2000
+  # If a wallet refresh is in-flight at submit, wait up to this then fail closed
+  # (ACCOUNT_REFRESH_IN_FLIGHT). 0 = do not wait.
+  refresh_wait_budget_ms: 500
+
+# Persistence — execution journal (replay/recovery). Do not delete to "clear" a blocker.
+state_directory: var/runtime_state/execution
+# Default report root. CLI --out-dir wins and stamps run_name_UTCtime.
+report_directory: var/runs/ask70
+
+# =============================================================================
+# APPENDIX — z_gap strategy.parameters (DO NOT uncomment in this file)
+# Kind must be z_gap. Loader: strategies/z_gap/schema.py
+# Host blocks above are identical. protection: is optional for z_gap.
+# =============================================================================
+# strategy:
+#   kind: z_gap
+#   parameters:
+#     volatility:                    # indicators/ewma_volatility.py via ZGapDriver
+#       half_life_s: 30.0
+#       min_samples_s: 20.0
+#       jump_threshold_sigma: 4.0    # lockout if return > this × sigma
+#       sample_interval_s: 1.0
+#       tau_floor_s: 1.0             # vol scaling floor
+#       sigma_floor: 0.0001          # per √second; quiet warmup guard
+#     entry:                         # strategies/z_gap/valuations.py + policies.py
+#       theta_take: "0.05"           # min edge to take
+#       theta_fill_floor: "0.03"
+#       z_min: "0.8"
+#       z_max: "2.2"
+#       block_abs_z: "20"
+#       tau_min_s: 10.0              # SAME ROLE as ask70 tau_* (plugin.entry_tau_bounds)
+#       tau_max_s: 290.0
+#       expected_slippage_buy: "0.01"
+#       exit_friction_reserve: "0"
+#       require_repricing_edge: true
+#       tie_epsilon: "0.001"
+#       reject_both_legs_edge: true
+#     realization:                   # rich-exit (strategy EXIT, not protection TP)
+#       theta_rich: "0.02"
+#       min_exit_depth: "0"          # 0 disables
+#       expected_slippage_sell: "0.01"
+#       slippage_included_in_executable_bid: true
+#     thesis:                        # model thesis-stop — NOT protection.stop_loss
+#       p_stop: "0.4013"
+#       stop_confirm_s: 1.0
+#       reset_on_stale_model: true
+#     time_resolution:               # strategy time-exit — NOT lifecycle.mandatory_exit
+#       flatten_before_event_end_s: 20.0
+#       sell_vs_resolve_margin: "0"
+#       resolution_capability_default: false   # true is rejected (redeem not implemented)
+#       ponr_before_event_end_s: 5.0
+#     ptb_time_quality:
+#       basis_max_bps: "3"
+#       max_ptb_lag_ms: 30000        # arrival delay for EXACT PTB; not book freshness
+#       max_clock_uncertainty_ms: 750  # SAME ROLE as ask70 max_clock_uncertainty_ms
+#     friction:                      # MODEL fee curve — NOT risk.fee_reserve_rate
+#       fee_curve:
+#         fee_rate: "0.07"
+#         exponent: "1"
+#       provisional_resolve_penalty_per_share: "0"

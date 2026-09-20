@@ -36,6 +36,9 @@ class ArmedProtection:
     phase: ProtectionPhase = ProtectionPhase.ARMED
     trigger_reason: str | None = None
     trigger_evidence: dict[str, Any] = field(default_factory=dict)
+    resting_venue_order_id: str | None = None
+    resting_posted: bool = False
+    resting_fallback_reason: str | None = None
 
     @classmethod
     def arm(

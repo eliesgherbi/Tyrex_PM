@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
+from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
@@ -30,8 +31,7 @@ class StrategyDriver(Protocol):
         correlation_id: CorrelationId,
         context: DecisionContext,
         trigger: str,
-        settlement_reference: Any,
-        settlement_reference_fresh: bool,
+        features: FeatureBundle,
     ) -> StrategyEvaluation: ...
 
     def persistence_slice(self) -> dict[str, Any]: ...

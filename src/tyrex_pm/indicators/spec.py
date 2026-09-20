@@ -14,6 +14,7 @@ class IndicatorSpec:
     extra_sources: tuple[str, ...] = ()
     horizons_ms: tuple[int, ...] = ()
     levels: tuple[int, ...] = ()
+    params: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -24,14 +25,24 @@ class IndicatorSpec:
             raise ValueError("horizons_ms must be positive")
         if any(level <= 0 for level in self.levels):
             raise ValueError("levels must be positive")
+        keys = [key for key, _value in self.params]
+        if any(not key.strip() for key in keys):
+            raise ValueError("indicator param keys must be non-empty")
+        if len(keys) != len(set(keys)):
+            raise ValueError("indicator param keys must be unique")
 
     @property
     def all_sources(self) -> tuple[str, ...]:
         return (self.source, *self.extra_sources)
 
     @property
+    def param_map(self) -> dict[str, str]:
+        return dict(self.params)
+
+    @property
     def instance_id(self) -> str:
         extras = ",".join(self.extra_sources)
         horizons = ",".join(str(h) for h in self.horizons_ms)
         levels = ",".join(str(level) for level in self.levels)
-        return f"{self.name}|{self.source}|{extras}|h={horizons}|l={levels}"
+        param_part = ",".join(f"{key}={value}" for key, value in self.params)
+        return f"{self.name}|{self.source}|{extras}|h={horizons}|l={levels}|p={param_part}"

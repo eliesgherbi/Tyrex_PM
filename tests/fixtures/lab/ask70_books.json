@@ -1,0 +1,24 @@
+{
+  "schema": "lab_evaluate_v1",
+  "target_notional": "5",
+  "window": {
+    "market_id": "lab-ask70",
+    "condition_id": "lab-ask70-condition",
+    "question": "ask70 lab books",
+    "window_id": "lab-ask70",
+    "event_start": "2026-09-13T12:00:00+00:00",
+    "event_end": "2026-09-13T12:05:00+00:00"
+  },
+  "steps": [
+    {
+      "ts": "2026-09-13T12:01:00+00:00",
+      "evaluate": true,
+      "books": {
+        "up_ask": "0.71",
+        "down_ask": "0.30",
+        "up_bid": "0.69",
+        "down_bid": "0.28"
+      }
+    }
+  ]
+}

@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from tyrex_pm.facts import ids as F
 from tyrex_pm.facts.mappings import Z_GAP_INPUT_CONTRACT
+from tyrex_pm.indicators.spec import IndicatorSpec
 from tyrex_pm.strategies.registry import StrategyPlugin
+from tyrex_pm.strategies.z_gap.config import ZGapVolatilityConfig
 from tyrex_pm.strategies.z_gap.driver import create_z_gap_driver
 from tyrex_pm.strategies.z_gap.schema import zgap_config_from_parameters
 
@@ -30,6 +33,25 @@ def _validate_run_config(config: Any) -> None:
         )
 
 
+def ewma_vol_spec_from_volatility(volatility: ZGapVolatilityConfig) -> IndicatorSpec:
+    return IndicatorSpec(
+        name="ewma_vol",
+        source=F.BINANCE_SPOT_TRADES,
+        params=(
+            ("half_life_s", str(volatility.half_life_s)),
+            ("min_samples_s", str(volatility.min_samples_s)),
+            ("jump_threshold_sigma", str(volatility.jump_threshold_sigma)),
+            ("sample_interval_s", str(volatility.sample_interval_s)),
+            ("tau_floor_s", str(volatility.tau_floor_s)),
+            ("sigma_floor", str(volatility.sigma_floor)),
+        ),
+    )
+
+
+def _indicator_specs(config: Any) -> tuple[IndicatorSpec, ...]:
+    return (ewma_vol_spec_from_volatility(config.volatility),)
+
+
 ZGAP_PLUGIN = StrategyPlugin(
     kind="z_gap",
     input_contract=Z_GAP_INPUT_CONTRACT,
@@ -39,4 +61,5 @@ ZGAP_PLUGIN = StrategyPlugin(
     max_clock_uncertainty_ms=_clock_uncertainty_ms,
     requires_protection=False,
     validate_run_config=_validate_run_config,
+    indicator_specs=_indicator_specs,
 )

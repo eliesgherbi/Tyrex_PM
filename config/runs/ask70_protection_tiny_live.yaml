@@ -6,7 +6,7 @@ strategy:
   parameters:
     entry_ask_threshold: "0.70"
     leg_preference: first_hit
-    max_price_pad: "0.02"
+    max_price_pad: "0.08"
     tau_min_s: 10.0
     tau_max_s: 290.0
     max_clock_uncertainty_ms: 750.0
@@ -15,15 +15,14 @@ protection:
   mark: bid
   size_mode: full
   take_profit:
-    style: reactive_fak
+    style: resting_gtd
     absolute: "0.85"
   stop_loss:
     style: stop_market_fak
     absolute: "0.55"
   trailing:
-    enabled: true
+    enabled: false
     activation: immediate
-    trail_abs: "0.05"
     mark: bid
 
 market:
@@ -57,6 +56,11 @@ lifecycle:
   exit_retry_limit: 3
   exit_retry_budget_s: 30
   minimum_exit_price: "0.01"
+  sell_size_increment: "0.01"
+  dust_abs_shares: "0.01"
+  dust_max_notional: "0.05"
+  prepare_budget_ms: 2000
+  refresh_wait_budget_ms: 500
 
 state_directory: var/runtime_state/execution
 report_directory: var/runs/ask70

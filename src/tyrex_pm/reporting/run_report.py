@@ -44,6 +44,36 @@ def execution_state_payload(state: ExecutionSessionState | None) -> dict[str, An
         "token_id": None if state.identity is None else state.identity.token_id,
         "confirmed_position_shares": str(state.confirmed_position_shares),
         "sellable_shares": str(state.sellable_shares),
+        "dust_residual": None
+        if state.dust_residual is None
+        else {
+            "token_id": state.dust_residual.token_id,
+            "shares": str(state.dust_residual.shares),
+            "market_id": state.dust_residual.market_id,
+            "window_id": state.dust_residual.window_id,
+            "classification": state.dust_residual.classification,
+            "last_bid": (
+                None
+                if state.dust_residual.last_bid is None
+                else str(state.dust_residual.last_bid)
+            ),
+            "min_order_size": (
+                None
+                if state.dust_residual.min_order_size is None
+                else str(state.dust_residual.min_order_size)
+            ),
+            "sell_size_increment": (
+                None
+                if state.dust_residual.sell_size_increment is None
+                else str(state.dust_residual.sell_size_increment)
+            ),
+            "notional": (
+                None
+                if state.dust_residual.notional is None
+                else str(state.dust_residual.notional)
+            ),
+            "reason": state.dust_residual.reason,
+        },
         "open_venue_order_ids": list(state.open_venue_order_ids),
         "entry_order_ids": list(state.entry_order_ids),
         "exit_order_ids": list(state.exit_order_ids),
@@ -71,6 +101,12 @@ def execution_state_payload(state: ExecutionSessionState | None) -> dict[str, An
                     else str(order.effective_protection_price)
                 ),
                 "tick_size": None if order.tick_size is None else str(order.tick_size),
+                "prepare_queue_wait_ms": order.prepare_queue_wait_ms,
+                "tick_resolve_ms": order.tick_resolve_ms,
+                "create_market_order_ms": order.create_market_order_ms,
+                "refresh_wait_ms": order.refresh_wait_ms,
+                "refresh_elapsed_ms": order.refresh_elapsed_ms,
+                "order_metadata_cache_miss": order.order_metadata_cache_miss,
                 "last_error": order.last_error,
             }
             for order_id, order in state.orders.items()
@@ -109,6 +145,9 @@ def _outcome(
         return "COMPLETED_NO_FILL", True
     if state.phase is ExecutionPhase.COMPLETED_FLAT:
         return "COMPLETED_FLAT", True
+    if state.phase is ExecutionPhase.COMPLETED_FLAT_WITH_DUST:
+        residual = state.dust_residual
+        return "COMPLETED_FLAT_WITH_DUST", residual is not None
     if state.phase is ExecutionPhase.MANUAL_INTERVENTION:
         return "MANUAL_INTERVENTION_REQUIRED", False
     if state.has_exposure:

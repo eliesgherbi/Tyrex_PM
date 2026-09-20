@@ -23,6 +23,7 @@ from tyrex_pm.facts.ids import (
 )
 from tyrex_pm.facts.mappings import (
     ASK70_INPUT_CONTRACT,
+    FEATURE_PROBE_INPUT_CONTRACT,
     Q_EDGE_INPUT_CONTRACT,
     REFERENCE_CONTRACTS,
     Z_GAP_INPUT_CONTRACT,
@@ -45,6 +46,7 @@ __all__ = [
     "DERIVED_UPSTREAMS",
     "EligibilityFacts",
     "EvalTrigger",
+    "FEATURE_PROBE_INPUT_CONTRACT",
     "InputContract",
     "KNOWN_FACTS",
     "OnFact",

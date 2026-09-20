@@ -112,6 +112,10 @@ def test_ask70_config_loads_from_yaml() -> None:
     assert cfg.protection is not None
     assert cfg.protection.take_profit is not None
     assert cfg.protection.take_profit.absolute == Decimal("0.85")
+    assert cfg.protection.take_profit.style == "resting_gtd"
+    assert cfg.protection.trailing is not None
+    assert cfg.protection.trailing.enabled is False
+    assert cfg.strategy.liquidity_role == "taker"
 
 
 def test_ask70_enters_first_leg_at_or_above_threshold() -> None:
@@ -173,8 +177,16 @@ def test_ask70_holds_without_exit_intents() -> None:
     assert intents == []
 
 
-def test_z_gap_config_still_loads_without_protection() -> None:
-    cfg = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
+def test_z_gap_config_still_loads_without_protection(tmp_path: Path) -> None:
+    shipped = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
+    assert shipped.strategy_kind == "z_gap"
+    assert shipped.protection is not None
+    text = Path("config/runs/z_gap_tiny_live.yaml").read_text(encoding="utf-8")
+    start = text.index("\nprotection:")
+    end = text.index("\nmarket:")
+    path = tmp_path / "z_gap_no_protection.yaml"
+    path.write_text(text[:start] + text[end:], encoding="utf-8")
+    cfg = load_trading_run_config(path)
     assert cfg.strategy_kind == "z_gap"
     assert cfg.protection is None
 

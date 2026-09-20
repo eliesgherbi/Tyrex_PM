@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Literal, Mapping
 
 MarkSource = Literal["bid"]
-TakeProfitStyle = Literal["reactive_fak"]
+TakeProfitStyle = Literal["reactive_fak", "resting_gtc", "resting_gtd"]
 StopLossStyle = Literal["stop_market_fak"]
 TrailingActivation = Literal["immediate", "after_profit"]
 SizeMode = Literal["full"]
@@ -40,9 +40,9 @@ class TakeProfitSpec:
     pct_from_entry: Decimal | None
 
     def __post_init__(self) -> None:
-        if self.style != "reactive_fak":
+        if self.style not in {"reactive_fak", "resting_gtc", "resting_gtd"}:
             raise ProtectionSpecError(
-                "take_profit.style must be reactive_fak (resting_gtc is not implemented)"
+                "take_profit.style must be reactive_fak, resting_gtc, or resting_gtd"
             )
         if self.absolute is None and self.pct_from_entry is None:
             raise ProtectionSpecError("take_profit requires absolute or pct_from_entry")

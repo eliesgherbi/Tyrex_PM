@@ -40,6 +40,15 @@ class StrategyContext:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ReferenceFacts:
+    """Last aligned-eval reference prints. Empty when the contract has no PTB/Chainlink."""
+
+    chainlink_raw: Decimal | None = None
+    chainlink_fresh: bool = False
+    sealed_k: Decimal | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class DecisionContext:
     """Immutable context for on_signal — no mutable stores."""
 
@@ -69,3 +78,5 @@ class DecisionContext:
     resolution_capability: ResolutionCapability = DISABLED_RESOLUTION
     # True when wall τ is at/inside the configured point-of-no-return window.
     ponr_reached: bool = False
+    # Host-filled from AlignedEvalReady for every plugin; unused fields stay None.
+    references: ReferenceFacts = ReferenceFacts()

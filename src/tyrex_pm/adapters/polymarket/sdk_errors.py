@@ -7,6 +7,32 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+# Import the official SDK at module load. A first-use import from inside an
+# in-flight ``except`` / ``await`` on the running loop can miss a Future
+# wakeup (Windows Proactor + httpx/h2 init). Tests without the package still
+# classify as UNKNOWN.
+try:
+    from polymarket import (
+        RateLimitError,
+        RequestRejectedError,
+        TransportError,
+        UnexpectedResponseError,
+        UserInputError,
+    )
+    from polymarket import (
+        TimeoutError as PmTimeoutError,
+    )
+    from polymarket.errors import ConnectionLostError, PolymarketError
+except ImportError:  # pragma: no cover
+    RateLimitError = None  # type: ignore[misc, assignment]
+    RequestRejectedError = None  # type: ignore[misc, assignment]
+    TransportError = None  # type: ignore[misc, assignment]
+    UnexpectedResponseError = None  # type: ignore[misc, assignment]
+    UserInputError = None  # type: ignore[misc, assignment]
+    PmTimeoutError = None  # type: ignore[misc, assignment]
+    ConnectionLostError = None  # type: ignore[misc, assignment]
+    PolymarketError = None  # type: ignore[misc, assignment]
+
 
 class PolymarketErrorCategory(str, Enum):
     TRANSIENT = "TRANSIENT"
@@ -74,19 +100,7 @@ def classify_polymarket_error(
             message=msg,
             original_type=name,
         )
-    try:
-        from polymarket import (
-            RateLimitError,
-            RequestRejectedError,
-            TransportError,
-            UnexpectedResponseError,
-            UserInputError,
-        )
-        from polymarket import (
-            TimeoutError as PmTimeoutError,
-        )
-        from polymarket.errors import ConnectionLostError, PolymarketError
-    except ImportError:  # pragma: no cover
+    if RateLimitError is None:
         return ClassifiedPolymarketError(
             category=PolymarketErrorCategory.UNKNOWN,
             retryable=False,
@@ -197,32 +211,19 @@ def is_retryable(exc: BaseException) -> bool:
 
 
 def sdk_exception_names() -> tuple[type[BaseException], ...]:
-    """Import SDK exception types for isinstance checks in tests."""
-    try:
-        from polymarket import (
-            RateLimitError,
-            RequestRejectedError,
-            TransportError,
-            UnexpectedResponseError,
-            UserInputError,
-        )
-        from polymarket import (
-            TimeoutError as PmTimeoutError,
-        )
-        from polymarket.errors import ConnectionLostError, PolymarketError
-
-        return (
-            RateLimitError,
-            RequestRejectedError,
-            PmTimeoutError,
-            TransportError,
-            UnexpectedResponseError,
-            UserInputError,
-            ConnectionLostError,
-            PolymarketError,
-        )
-    except ImportError:  # pragma: no cover
+    """SDK exception types for isinstance checks in tests."""
+    if RateLimitError is None:
         return ()
+    return (
+        RateLimitError,
+        RequestRejectedError,
+        PmTimeoutError,
+        TransportError,
+        UnexpectedResponseError,
+        UserInputError,
+        ConnectionLostError,
+        PolymarketError,
+    )
 
 
 def describe_error(

@@ -116,6 +116,36 @@ class _AccountTarget:
 EvidenceSink = Callable[[str, dict[str, Any]], None]
 
 
+@dataclass(frozen=True)
+class RefreshInFlight:
+    market_id: str
+    elapsed_ms: float
+
+
+@dataclass(frozen=True)
+class RefreshWaitResult:
+    idle: bool
+    wait_ms: float
+    refresh_elapsed_ms: float | None
+    market_ids: tuple[str, ...] = ()
+
+
+class _SdkSlotLease:
+    """Holds the shared SDK single-flight lock until explicitly released."""
+
+    def __init__(self, flight: "_PrioritySingleFlight") -> None:
+        self._flight = flight
+        self._released = False
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        async with self._flight._condition:
+            self._flight._locked = False
+            self._flight._condition.notify_all()
+
+
 class _PrioritySingleFlight:
     """One SDK call at a time, with active-market waiters served first."""
 
@@ -124,8 +154,11 @@ class _PrioritySingleFlight:
         self._locked = False
         self._active_waiters = 0
 
-    @asynccontextmanager
-    async def slot(self, *, active: bool):
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+    async def acquire(self, *, active: bool) -> _SdkSlotLease:
         async with self._condition:
             if active:
                 self._active_waiters += 1
@@ -137,12 +170,15 @@ class _PrioritySingleFlight:
             finally:
                 if active:
                     self._active_waiters -= 1
+        return _SdkSlotLease(self)
+
+    @asynccontextmanager
+    async def slot(self, *, active: bool):
+        lease = await self.acquire(active=active)
         try:
             yield
         finally:
-            async with self._condition:
-                self._locked = False
-                self._condition.notify_all()
+            await lease.release()
 
 
 class AccountStateAuthority:
@@ -170,6 +206,9 @@ class AccountStateAuthority:
         self._closed = False
         self._ready_holds: dict[str, int] = {}
         self._hold_released: dict[str, asyncio.Event] = {}
+        self._refresh_started: dict[str, float] = {}
+        self._refresh_idle = asyncio.Event()
+        self._refresh_idle.set()
 
     def prepare(
         self,
@@ -259,6 +298,59 @@ class AccountStateAuthority:
             else:
                 self._ready_holds[market_id] = count
 
+    def sdk_slot(self, *, active: bool = True):
+        """Serialize a prepare/sign against the same client as account reads."""
+        return self._single_flight.slot(active=active)
+
+    async def acquire_sdk_slot(self, *, active: bool = True) -> _SdkSlotLease:
+        return await self._single_flight.acquire(active=active)
+
+    def refresh_status(self) -> RefreshInFlight | None:
+        if not self._refresh_started:
+            return None
+        market_id, started = max(self._refresh_started.items(), key=lambda item: time.monotonic() - item[1])
+        return RefreshInFlight(
+            market_id=market_id,
+            elapsed_ms=round((time.monotonic() - started) * 1_000, 3),
+        )
+
+    async def wait_until_refresh_idle(self, *, timeout_s: float) -> RefreshWaitResult:
+        """Wait briefly for an in-flight wallet refresh; never cancel the SDK call."""
+        started = time.monotonic()
+        initial = self.refresh_status()
+        initial_elapsed = None if initial is None else initial.elapsed_ms
+        if not self._refresh_started:
+            return RefreshWaitResult(idle=True, wait_ms=0.0, refresh_elapsed_ms=initial_elapsed)
+        deadline = started + max(0.0, timeout_s)
+        while self._refresh_started:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                status = self.refresh_status()
+                return RefreshWaitResult(
+                    idle=False,
+                    wait_ms=round((time.monotonic() - started) * 1_000, 3),
+                    refresh_elapsed_ms=None if status is None else status.elapsed_ms,
+                    market_ids=tuple(self._refresh_started),
+                )
+            self._refresh_idle.clear()
+            if not self._refresh_started:
+                break
+            try:
+                await asyncio.wait_for(self._refresh_idle.wait(), timeout=remaining)
+            except TimeoutError:
+                status = self.refresh_status()
+                return RefreshWaitResult(
+                    idle=False,
+                    wait_ms=round((time.monotonic() - started) * 1_000, 3),
+                    refresh_elapsed_ms=None if status is None else status.elapsed_ms,
+                    market_ids=tuple(self._refresh_started),
+                )
+        return RefreshWaitResult(
+            idle=True,
+            wait_ms=round((time.monotonic() - started) * 1_000, 3),
+            refresh_elapsed_ms=initial_elapsed,
+        )
+
     async def refresh_now(self, market_id: str) -> AccountStateSnapshot:
         target = self._targets[market_id]
         await self._refresh_with_retries(target)
@@ -299,6 +391,16 @@ class AccountStateAuthority:
                     self._wakeups.pop(market_id, None)
 
     async def _refresh_with_retries(self, target: _AccountTarget) -> None:
+        self._refresh_started[target.market_id] = time.monotonic()
+        self._refresh_idle.clear()
+        try:
+            await self._refresh_with_retries_inner(target)
+        finally:
+            self._refresh_started.pop(target.market_id, None)
+            if not self._refresh_started:
+                self._refresh_idle.set()
+
+    async def _refresh_with_retries_inner(self, target: _AccountTarget) -> None:
         for attempt in range(1, self.policy.retry_attempts + 1):
             started = time.monotonic()
             snapshot, failures, retryable, diagnostics = await self._capture_once(

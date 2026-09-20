@@ -7,7 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from tyrex_pm.execution.orders import MarketBuyOrderSpec, MarketSellOrderSpec, OrderSpec
+from tyrex_pm.execution.orders import (
+    LimitOrderSpec,
+    MarketBuyOrderSpec,
+    MarketSellOrderSpec,
+    OrderSide,
+    OrderSpec,
+)
 from tyrex_pm.market_data.book_health import SyncHealth
 from tyrex_pm.market_data.book_view import BookView, LegBookSnapshot
 from tyrex_pm.runtime.capabilities import CapabilityController
@@ -49,10 +55,16 @@ class FinalExecutionGate:
         view = self._capture_book()
         self.last_view = view
         reason: str | None = None
-        caps = self._capabilities.snapshot(exposed=isinstance(spec, MarketSellOrderSpec))
-        if isinstance(spec, MarketBuyOrderSpec) and not caps.entry_executable:
+        is_exit = isinstance(spec, MarketSellOrderSpec) or (
+            isinstance(spec, LimitOrderSpec) and spec.side is OrderSide.SELL
+        )
+        is_entry = isinstance(spec, MarketBuyOrderSpec) or (
+            isinstance(spec, LimitOrderSpec) and spec.side is OrderSide.BUY
+        )
+        caps = self._capabilities.snapshot(exposed=is_exit)
+        if is_entry and not caps.entry_executable:
             reason = "entry_capability_blocked:" + ",".join(caps.blockers)
-        elif isinstance(spec, MarketSellOrderSpec) and not caps.exit_executable:
+        elif is_exit and not caps.exit_executable:
             reason = "exit_capability_blocked:" + ",".join(caps.blockers)
         elif view is None:
             reason = "book_view_unavailable"
@@ -82,6 +94,20 @@ class FinalExecutionGate:
                     reason = "entry_price_moved"
                 elif leg.quote.ask_size_at_touch < self._policy.minimum_entry_depth_shares:
                     reason = "entry_depth_below_minimum"
+            elif isinstance(spec, LimitOrderSpec):
+                post_only = bool(spec.metadata.get("post_only"))
+                if spec.side is OrderSide.BUY:
+                    ask = leg.quote.best_ask
+                    if ask is None:
+                        reason = "no_entry_ask"
+                    elif post_only and spec.limit_price >= ask:
+                        reason = "post_only_would_cross"
+                else:
+                    bid = leg.quote.best_bid
+                    if bid is None:
+                        reason = "no_exit_bid"
+                    elif post_only and spec.limit_price <= bid:
+                        reason = "post_only_would_cross"
             else:
                 bid = leg.quote.best_bid
                 if bid is None:

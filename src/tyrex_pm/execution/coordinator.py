@@ -6,11 +6,14 @@ import asyncio
 import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol, Sequence
 from uuid import uuid4
 
 from tyrex_pm.adapters.polymarket.sdk_errors import PolymarketOperation, describe_error
+from tyrex_pm.execution.cancel import CancelResult
 from tyrex_pm.execution.evidence import (
+    CancelObserved,
+    CancelRequested,
     DispatchAuthorized,
     ExecutionEvidence,
     ExecutionRole,
@@ -50,6 +53,26 @@ class PreparedOrder:
     requested_protection_price: Decimal | None = None
     effective_protection_price: Decimal | None = None
     tick_size: Decimal | None = None
+    prepare_queue_wait_ms: float | None = None
+    tick_resolve_ms: float | None = None
+    create_market_order_ms: float | None = None
+    refresh_wait_ms: float | None = None
+    refresh_elapsed_ms: float | None = None
+    order_metadata_cache_miss: bool = False
+
+
+def _prepare_timing_kwargs(source: Any) -> dict[str, Any]:
+    if source is None:
+        return {}
+    getter = source.get if isinstance(source, dict) else lambda key, default=None: getattr(source, key, default)
+    return {
+        "prepare_queue_wait_ms": getter("prepare_queue_wait_ms"),
+        "tick_resolve_ms": getter("tick_resolve_ms"),
+        "create_market_order_ms": getter("create_market_order_ms"),
+        "refresh_wait_ms": getter("refresh_wait_ms"),
+        "refresh_elapsed_ms": getter("refresh_elapsed_ms"),
+        "order_metadata_cache_miss": bool(getter("order_metadata_cache_miss") or False),
+    }
 
 
 @dataclass(frozen=True)
@@ -68,6 +91,10 @@ class ExecutionGateway(Protocol):
     async def discard_prepared(self, prepared: PreparedOrder) -> None: ...
     async def post_order(self, prepared: PreparedOrder) -> GatewaySubmissionResult: ...
     async def close(self) -> None: ...
+
+
+class CancelUnsupported(RuntimeError):
+    """Gateway has no official cancel surface."""
 
 
 FinalDispatchGate = Callable[[OrderSpec], Awaitable[tuple[bool, str | None]]]
@@ -154,15 +181,18 @@ class AccountExecutionCoordinator:
                 order=spec,
             )
         )
+        prepare_error: BaseException | None = None
         try:
             prepared = await self.gateway.prepare_order(spec)
         except Exception as exc:
+            prepare_error = exc
+        if prepare_error is not None:
             classified = describe_error(
-                getattr(exc, "original_error", None) or exc,
+                getattr(prepare_error, "original_error", None) or prepare_error,
                 operation=PolymarketOperation.PREPARE,
             )
-            details = getattr(exc, "preparation_details", {})
-            error_code = str(getattr(exc, "error_code", None) or classified["category"])
+            details = getattr(prepare_error, "preparation_details", {})
+            error_code = str(getattr(prepare_error, "error_code", None) or classified["category"])
             await self.apply(
                 OrderPreDispatchFailed(
                     **new_envelope(
@@ -178,11 +208,12 @@ class AccountExecutionCoordinator:
                     requested_protection_price=details.get("requested_protection_price"),
                     effective_protection_price=details.get("effective_protection_price"),
                     tick_size=details.get("tick_size"),
+                    **_prepare_timing_kwargs(details),
                 )
             )
             raise OrderPreparationFailed(
                 f"{error_code}:{classified['original_type']}:{classified['message']}"
-            ) from exc
+            ) from prepare_error
 
         digest = (
             prepared.digest
@@ -200,6 +231,7 @@ class AccountExecutionCoordinator:
                 requested_protection_price=prepared.requested_protection_price,
                 effective_protection_price=prepared.effective_protection_price,
                 tick_size=prepared.tick_size,
+                **_prepare_timing_kwargs(prepared),
             )
         )
         dispatch_spec = prepared.dispatch_spec or spec
@@ -307,6 +339,53 @@ class AccountExecutionCoordinator:
                 trade_ids=result.trade_ids,
                 error_code=result.error_code,
                 message=result.message,
+            )
+        )
+        return result
+
+    async def cancel(
+        self,
+        *,
+        session_id: str,
+        venue_order_ids: Sequence[str],
+        reason: str,
+        token_id: str | None = None,
+    ) -> CancelResult:
+        """Cancel session-owned live orders. Does not increment mutation_attempts."""
+        ids = tuple(str(item) for item in venue_order_ids if str(item).strip())
+        if not ids:
+            return CancelResult(canceled=(), not_canceled=())
+        cancel_orders = getattr(self.gateway, "cancel_orders", None)
+        if not callable(cancel_orders):
+            raise CancelUnsupported("gateway has no cancel_orders")
+        await self.apply(
+            CancelRequested(
+                **new_envelope(
+                    session_id=session_id,
+                    dedupe_key=f"cancel-requested:{'|'.join(ids)}:{reason}",
+                ),
+                venue_order_ids=ids,
+                reason=reason,
+                token_id=token_id,
+            )
+        )
+        raw = await cancel_orders(ids)
+        result = raw if isinstance(raw, CancelResult) else CancelResult(
+            canceled=tuple(getattr(raw, "canceled", ()) or ()),
+            not_canceled=tuple((getattr(raw, "not_canceled", {}) or {}).items())
+            if not isinstance(getattr(raw, "not_canceled", ()), tuple)
+            else tuple(getattr(raw, "not_canceled", ())),
+        )
+        await self.apply(
+            CancelObserved(
+                **new_envelope(
+                    session_id=session_id,
+                    dedupe_key=f"cancel-observed:{'|'.join(ids)}:{reason}",
+                ),
+                canceled=result.canceled,
+                not_canceled=result.not_canceled,
+                matched_instead=result.matched_instead,
+                delay_pending=result.delay_pending,
             )
         )
         return result

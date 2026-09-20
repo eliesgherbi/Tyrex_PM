@@ -11,7 +11,8 @@ from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, 
 from tyrex_pm.domain.polymarket.fees import PROVISIONAL_SAMPLE_FEE, FeeCurveParams
 from tyrex_pm.domain.polymarket.ptb import PtbLockStore, PtbSnapshot
 from tyrex_pm.facts.contract import EligibilityFacts
-from tyrex_pm.indicators.ewma_volatility import EwmaVolatilityEstimator, SigmaConfig
+from tyrex_pm.indicators.ewma_volatility import VolatilitySnapshot
+from tyrex_pm.indicators.graph import FeatureBundle, empty_volatility_snapshot
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
@@ -28,7 +29,6 @@ __all__ = ["StrategyEvaluation", "ZGapDriver", "create_z_gap_driver"]
 @dataclass
 class ZGapDriver:
     strategy: ZGapStrategy
-    volatility: EwmaVolatilityEstimator
     time_authority: TimeAuthority
     ptb_store: PtbLockStore
     fee_curve: FeeCurveParams
@@ -51,12 +51,6 @@ class ZGapDriver:
         self.ptb = ptb
         self.window_id = ptb.window_id
         self.ptb_store.lock(ptb)
-
-    def ingest_volatility(self, price: Decimal | str | int, timestamp):  # noqa: ANN001
-        return self.volatility.update(price, timestamp)
-
-    def seed_volatility(self, observations, *, now_ts=None):  # noqa: ANN001
-        return self.volatility.seed_observations(observations, now_ts=now_ts)
 
     def persistence_slice(self) -> dict[str, Any]:
         return self.strategy.persistence_slice()
@@ -97,6 +91,12 @@ class ZGapDriver:
             entry_cost_total=context.position_cost_total,
         )
 
+    def _volatility(self, features: FeatureBundle) -> VolatilitySnapshot:
+        for key, value in features.values.items():
+            if key.startswith("ewma_vol|") and isinstance(value, VolatilitySnapshot):
+                return value
+        return empty_volatility_snapshot()
+
     def evaluate(
         self,
         *,
@@ -105,12 +105,12 @@ class ZGapDriver:
         correlation_id: CorrelationId,
         context: DecisionContext,
         trigger: str,
-        settlement_reference: Decimal | None,
-        settlement_reference_fresh: bool,
+        features: FeatureBundle | None = None,
     ) -> StrategyEvaluation:
-        vol = self.volatility.snapshot()
+        vol = self._volatility(features or FeatureBundle())
         time_view = self.time_authority.view()
         ptb = None if self.ptb is None else self.ptb_store.observe(self.ptb)
+        refs = context.references
         decision_input = assemble_zgap_decision_snapshot(
             market_snapshot=market_snapshot,
             vol=vol,
@@ -124,8 +124,8 @@ class ZGapDriver:
             correlation_id=correlation_id,
             causation_id=causation_id,
             window_id=self.window_id,
-            settlement_ref=settlement_reference,
-            settlement_ref_fresh=settlement_reference_fresh,
+            settlement_ref=refs.chainlink_raw,
+            settlement_ref_fresh=refs.chainlink_fresh,
             position=self._position(market_snapshot, context),
             capabilities={
                 "resolution_capability": context.resolution_capability.available,
@@ -203,16 +203,6 @@ def create_z_gap_driver(
         )
     return ZGapDriver(
         strategy=ZGapStrategy(config=config),
-        volatility=EwmaVolatilityEstimator(
-            SigmaConfig(
-                half_life_s=config.volatility.half_life_s,
-                min_samples_s=config.volatility.min_samples_s,
-                jump_threshold_sigma=config.volatility.jump_threshold_sigma,
-                sample_interval_s=config.volatility.sample_interval_s,
-                tau_floor_s=config.volatility.tau_floor_s,
-                sigma_floor=config.volatility.sigma_floor,
-            )
-        ),
         time_authority=time_authority,
         ptb_store=PtbLockStore(),
         fee_curve=fee_curve or PROVISIONAL_SAMPLE_FEE,

@@ -88,6 +88,7 @@ def evaluate_triggers(
     peak: Decimal,
     trailing_active: bool,
     thresholds: ResolvedThresholds,
+    skip_take_profit: bool = False,
 ) -> TriggerDecision:
     """Precedence: stop-loss, then trailing, then take-profit."""
     if mark <= 0:
@@ -145,7 +146,11 @@ def evaluate_triggers(
             evidence={**evidence, "layer": "trailing"},
         )
 
-    if thresholds.take_profit is not None and mark >= thresholds.take_profit:
+    if (
+        not skip_take_profit
+        and thresholds.take_profit is not None
+        and mark >= thresholds.take_profit
+    ):
         return TriggerDecision(
             fired=True,
             reason=ProtectionReason.PROTECTION_TP,

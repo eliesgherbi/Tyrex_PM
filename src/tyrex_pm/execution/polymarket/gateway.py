@@ -16,6 +16,7 @@ from tyrex_pm.adapters.polymarket.sdk_secure import (
     balance_allowance_to_decimal,
     build_async_secure_client,
 )
+from tyrex_pm.execution.cancel import CancelResult, cancel_result_from_sdk
 from tyrex_pm.execution.coordinator import (
     GatewaySubmissionResult,
     PreparedOrder,
@@ -195,10 +196,17 @@ class PolymarketAsyncGateway:
     client: Any
     tick_size_resolver: TickSizeResolver | None = None
     tick_size_fetcher: TickSizeFetcher | None = None
+    client_guard: Any | None = None
+    prepare_budget_ms: float | None = None
+    refresh_wait_budget_ms: float | None = None
+    metadata_cache_miss_ms: float = 500.0
+    evidence_sink: Callable[[str, Mapping[str, Any]], None] | None = None
+    warmed_token_ids: set[str] = field(default_factory=set)
     _prepared_specs: dict[str, OrderSpec] = field(default_factory=dict)
     _stream_task: asyncio.Task[None] | None = None
     _stream_handle: Any | None = None
     _stream_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    _abandoned_prepares: set[asyncio.Task[Any]] = field(default_factory=set)
 
     @classmethod
     async def from_env(cls, env: dict[str, str] | None = None) -> "PolymarketAsyncGateway":
@@ -254,6 +262,7 @@ class PolymarketAsyncGateway:
                     )
                 )
             else:
+                self.warmed_token_ids.add(token_id)
                 results.append(
                     OrderMetadataWarmTokenResult(
                         token_id=token_id,
@@ -273,77 +282,213 @@ class PolymarketAsyncGateway:
             return None
         return await self.tick_size_fetcher(token_id)
 
+    async def _invoke_create(self, dispatch_spec: OrderSpec) -> Any:
+        if isinstance(dispatch_spec, MarketBuyOrderSpec):
+            return await self.client.create_market_order(
+                token_id=dispatch_spec.token_id,
+                side="BUY",
+                amount=dispatch_spec.spend_amount,
+                max_spend=dispatch_spec.maximum_total_debit,
+                max_price=dispatch_spec.worst_price,
+                order_type=dispatch_spec.time_in_force.value,
+            )
+        if isinstance(dispatch_spec, MarketSellOrderSpec):
+            return await self.client.create_market_order(
+                token_id=dispatch_spec.token_id,
+                side="SELL",
+                shares=dispatch_spec.shares,
+                min_price=dispatch_spec.minimum_price,
+                order_type=dispatch_spec.time_in_force.value,
+            )
+        if isinstance(dispatch_spec, LimitOrderSpec):
+            return await self.client.create_limit_order(
+                token_id=dispatch_spec.token_id,
+                price=dispatch_spec.limit_price,
+                size=dispatch_spec.shares,
+                side=dispatch_spec.side.value,
+                post_only=bool(dispatch_spec.metadata.get("post_only")),
+                expiration=dispatch_spec.expiration_epoch_s,
+            )
+        raise TypeError(f"unsupported order spec: {type(dispatch_spec).__name__}")
+
+    def _track_abandoned_prepare(self, task: asyncio.Task[Any], lease: Any) -> None:
+        self._abandoned_prepares.add(task)
+
+        async def _finish() -> None:
+            try:
+                signed = await task
+            except Exception:
+                signed = None
+            finally:
+                if lease is not None:
+                    await lease.release()
+                self._abandoned_prepares.discard(task)
+            if signed is not None:
+                self._prepared_specs.pop(_signed_digest(signed), None)
+
+        follow = asyncio.create_task(_finish(), name="abandoned-prepare")
+        self._abandoned_prepares.add(follow)
+        follow.add_done_callback(self._abandoned_prepares.discard)
+
     async def prepare_order(self, spec: OrderSpec) -> PreparedOrder:
         requested_price = _protection_price(spec)
-        tick_size = await self._resolve_tick_size(spec.token_id)
-        details = {
+        details: dict[str, Any] = {
             "requested_protection_price": requested_price,
             "effective_protection_price": None,
-            "tick_size": tick_size,
+            "tick_size": None,
+            "prepare_queue_wait_ms": None,
+            "tick_resolve_ms": None,
+            "create_market_order_ms": None,
+            "refresh_wait_ms": None,
+            "refresh_elapsed_ms": None,
+            "order_metadata_cache_miss": False,
         }
-        if tick_size is None:
-            raise VenueOrderPreparationError(
-                "TICK_SIZE_UNAVAILABLE",
-                f"authoritative tick size is unavailable for token {spec.token_id}",
-                details=details,
+        guard = self.client_guard
+        if guard is not None and self.refresh_wait_budget_ms is not None:
+            waited = await guard.wait_until_refresh_idle(
+                timeout_s=float(self.refresh_wait_budget_ms) / 1000.0
             )
+            details["refresh_wait_ms"] = waited.wait_ms
+            details["refresh_elapsed_ms"] = waited.refresh_elapsed_ms
+            if not waited.idle:
+                raise VenueOrderPreparationError(
+                    "ACCOUNT_REFRESH_IN_FLIGHT",
+                    (
+                        "account refresh still owns the SDK client after "
+                        f"{self.refresh_wait_budget_ms}ms; refusing to start sign"
+                    ),
+                    details=details,
+                )
+
+        lease = None
+        queue_started = time.monotonic()
+        if guard is not None:
+            lease = await guard.acquire_sdk_slot(active=True)
+        details["prepare_queue_wait_ms"] = round((time.monotonic() - queue_started) * 1_000, 3)
         try:
-            dispatch_spec = _adapt_spec_to_tick(spec, tick_size)
-        except ValueError as exc:
-            raise VenueOrderPreparationError(
-                "PRICE_ADAPTATION_FAILED",
-                str(exc),
-                details=details,
-                original_error=exc,
-            ) from exc
-        effective_price = _protection_price(dispatch_spec)
-        details["effective_protection_price"] = effective_price
-        try:
-            if isinstance(dispatch_spec, MarketBuyOrderSpec):
-                signed = await self.client.create_market_order(
-                    token_id=dispatch_spec.token_id,
-                    side="BUY",
-                    amount=dispatch_spec.spend_amount,
-                    max_spend=dispatch_spec.maximum_total_debit,
-                    max_price=dispatch_spec.worst_price,
-                    order_type=dispatch_spec.time_in_force.value,
+            tick_started = time.monotonic()
+            tick_size = await self._resolve_tick_size(spec.token_id)
+            details["tick_resolve_ms"] = round((time.monotonic() - tick_started) * 1_000, 3)
+            details["tick_size"] = tick_size
+            if tick_size is None:
+                raise VenueOrderPreparationError(
+                    "TICK_SIZE_UNAVAILABLE",
+                    f"authoritative tick size is unavailable for token {spec.token_id}",
+                    details=details,
                 )
-            elif isinstance(dispatch_spec, MarketSellOrderSpec):
-                signed = await self.client.create_market_order(
-                    token_id=dispatch_spec.token_id,
-                    side="SELL",
-                    shares=dispatch_spec.shares,
-                    min_price=dispatch_spec.minimum_price,
-                    order_type=dispatch_spec.time_in_force.value,
+            try:
+                dispatch_spec = _adapt_spec_to_tick(spec, tick_size)
+            except ValueError as exc:
+                raise VenueOrderPreparationError(
+                    "PRICE_ADAPTATION_FAILED",
+                    str(exc),
+                    details=details,
+                    original_error=exc,
+                ) from exc
+            effective_price = _protection_price(dispatch_spec)
+            details["effective_protection_price"] = effective_price
+            create_started = time.monotonic()
+            create_task = asyncio.create_task(self._invoke_create(dispatch_spec))
+            budget_s = (
+                None
+                if self.prepare_budget_ms is None
+                else float(self.prepare_budget_ms) / 1000.0
+            )
+            try:
+                if budget_s is None:
+                    signed = await create_task
+                else:
+                    signed = await asyncio.wait_for(asyncio.shield(create_task), timeout=budget_s)
+            except TimeoutError:
+                details["create_market_order_ms"] = round(
+                    (time.monotonic() - create_started) * 1_000, 3
                 )
-            elif isinstance(dispatch_spec, LimitOrderSpec):
-                signed = await self.client.create_limit_order(
-                    token_id=dispatch_spec.token_id,
-                    price=dispatch_spec.limit_price,
-                    size=dispatch_spec.shares,
-                    side=dispatch_spec.side.value,
-                    expiration=dispatch_spec.expiration_epoch_s,
+                details["order_metadata_cache_miss"] = spec.token_id in self.warmed_token_ids
+                if details["order_metadata_cache_miss"] and self.evidence_sink is not None:
+                    self.evidence_sink(
+                        "ORDER_METADATA_CACHE_MISS",
+                        {
+                            "token_id": spec.token_id,
+                            "create_market_order_ms": details["create_market_order_ms"],
+                            "metadata_cache_miss_ms": float(self.metadata_cache_miss_ms),
+                            "reason": "PREPARE_BUDGET_EXCEEDED",
+                        },
+                    )
+                self._track_abandoned_prepare(create_task, lease)
+                lease = None
+                raise VenueOrderPreparationError(
+                    "PREPARE_BUDGET_EXCEEDED",
+                    f"create_market_order exceeded prepare_budget_ms={self.prepare_budget_ms}",
+                    details=details,
                 )
-            else:  # pragma: no cover - closed TypeAlias, defensive runtime guard
-                raise TypeError(f"unsupported order spec: {type(dispatch_spec).__name__}")
-        except Exception as exc:
-            raise VenueOrderPreparationError(
-                "SDK_ORDER_PREPARATION_FAILED",
-                str(exc),
-                details=details,
-                original_error=exc,
-            ) from exc
-        digest = _signed_digest(signed)
-        self._prepared_specs[digest] = dispatch_spec
-        return PreparedOrder(
-            local_order_id=spec.order_id,
-            digest=digest,
-            payload=signed,
-            dispatch_spec=dispatch_spec,
-            requested_protection_price=requested_price,
-            effective_protection_price=effective_price,
-            tick_size=tick_size,
-        )
+            except VenueOrderPreparationError:
+                raise
+            except Exception as exc:
+                details["create_market_order_ms"] = round(
+                    (time.monotonic() - create_started) * 1_000, 3
+                )
+                raise VenueOrderPreparationError(
+                    "SDK_ORDER_PREPARATION_FAILED",
+                    str(exc),
+                    details=details,
+                    original_error=exc,
+                ) from exc
+            details["create_market_order_ms"] = round(
+                (time.monotonic() - create_started) * 1_000, 3
+            )
+            cache_miss = bool(
+                spec.token_id in self.warmed_token_ids
+                and details["create_market_order_ms"] is not None
+                and details["create_market_order_ms"] >= float(self.metadata_cache_miss_ms)
+            )
+            details["order_metadata_cache_miss"] = cache_miss
+            if cache_miss and self.evidence_sink is not None:
+                self.evidence_sink(
+                    "ORDER_METADATA_CACHE_MISS",
+                    {
+                        "token_id": spec.token_id,
+                        "create_market_order_ms": details["create_market_order_ms"],
+                        "metadata_cache_miss_ms": float(self.metadata_cache_miss_ms),
+                    },
+                )
+            digest = _signed_digest(signed)
+            self._prepared_specs[digest] = dispatch_spec
+            return PreparedOrder(
+                local_order_id=spec.order_id,
+                digest=digest,
+                payload=signed,
+                dispatch_spec=dispatch_spec,
+                requested_protection_price=requested_price,
+                effective_protection_price=effective_price,
+                tick_size=tick_size,
+                prepare_queue_wait_ms=details["prepare_queue_wait_ms"],
+                tick_resolve_ms=details["tick_resolve_ms"],
+                create_market_order_ms=details["create_market_order_ms"],
+                refresh_wait_ms=details["refresh_wait_ms"],
+                refresh_elapsed_ms=details["refresh_elapsed_ms"],
+                order_metadata_cache_miss=cache_miss,
+            )
+        finally:
+            if lease is not None:
+                await lease.release()
+
+    async def cancel_orders(self, order_ids: Sequence[str]) -> CancelResult:
+        """Cancel specific session-owned orders. Never calls cancel_all."""
+        ids = tuple(str(item) for item in order_ids if str(item).strip())
+        if not ids:
+            return CancelResult(canceled=(), not_canceled=())
+        if len(ids) == 1:
+            raw = await self.client.cancel_order(order_id=ids[0])
+        else:
+            raw = await self.client.cancel_orders(order_ids=ids)
+        return cancel_result_from_sdk(raw)
+
+    async def cancel_token_orders(
+        self, *, token_id: str, market_id: str | None = None
+    ) -> CancelResult:
+        """Cancel our resting orders on one token. Not cancel_all."""
+        raw = await self.client.cancel_market_orders(token_id=token_id, market=market_id)
+        return cancel_result_from_sdk(raw)
 
     async def discard_prepared(self, prepared: PreparedOrder) -> None:
         """Forget a signed order that the final gate refused to dispatch."""
@@ -506,4 +651,6 @@ class PolymarketAsyncGateway:
 
     async def close(self) -> None:
         await self.stop_user_stream()
+        if self._abandoned_prepares:
+            await asyncio.gather(*tuple(self._abandoned_prepares), return_exceptions=True)
         await self.client.close()

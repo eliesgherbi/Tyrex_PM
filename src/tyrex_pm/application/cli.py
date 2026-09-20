@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from tyrex_pm import __version__
@@ -48,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the typed effective configuration and exit",
     )
+    ev = commands.add_parser("eval", help="Replay evaluate() on a lab fixture (no venue)")
+    ev.add_argument("--config", type=Path, required=True, help="Run YAML (kind + parameters)")
+    ev.add_argument("--fixture", type=Path, required=True, help="lab_evaluate_v1 JSON pack")
+    ev.add_argument(
+        "--live",
+        action="store_true",
+        help="Rejected: eval never submits orders",
+    )
+    ev.add_argument("--out", type=Path, default=None, help="Optional JSON output path")
     return parser
 
 
@@ -62,7 +72,7 @@ def _config_payload(config) -> dict:  # noqa: ANN001 - dataclass projection
             for key, value in config.risk.__dict__.items()
         },
         "lifecycle": {
-            key: str(value) if key == "minimum_exit_price" else value
+            key: str(value) if isinstance(value, Decimal) else value
             for key, value in config.lifecycle.__dict__.items()
         },
         "state_directory": str(config.state_directory),
@@ -124,6 +134,26 @@ def _run(args: argparse.Namespace) -> int:
     return 0 if result.ok else 2
 
 
+def _eval(args: argparse.Namespace) -> int:
+    if args.live:
+        print("eval refuses --live; it never submits orders.", file=sys.stderr)
+        return 2
+    from tyrex_pm.lab.evaluate_replay import evaluation_as_record, replay_configured_run
+
+    try:
+        results = replay_configured_run(config_path=args.config, fixture_path=args.fixture)
+    except (RunConfigError, OSError, ValueError) as exc:
+        print(f"eval error: {exc}", file=sys.stderr)
+        return 2
+    payload = [evaluation_as_record(item) for item in results]
+    text = json.dumps(payload, indent=2, default=str)
+    print(text)
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(text + "\n", encoding="utf-8")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -132,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         return _run(args)
+    if args.command == "eval":
+        return _eval(args)
     parser.print_help()
     return 0
 

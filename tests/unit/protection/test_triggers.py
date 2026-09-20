@@ -147,3 +147,44 @@ def test_pct_thresholds_resolve_from_entry() -> None:
     thresholds = resolve_thresholds(spec=spec, entry_price=Decimal("0.50"))
     assert thresholds.take_profit == Decimal("0.60")
     assert thresholds.stop_loss == Decimal("0.45")
+
+
+def test_resting_styles_are_accepted_and_unknown_style_fails() -> None:
+    for style in ("resting_gtc", "resting_gtd"):
+        spec = protection_spec_from_mapping(
+            {
+                "mark": "bid",
+                "size_mode": "full",
+                "take_profit": {"style": style, "absolute": "0.85"},
+                "stop_loss": {"style": "stop_market_fak", "absolute": "0.55"},
+                "trailing": {"enabled": False, "activation": "immediate", "mark": "bid"},
+            }
+        )
+        assert spec.take_profit is not None
+        assert spec.take_profit.style == style
+    with pytest.raises(ProtectionSpecError, match="take_profit.style"):
+        protection_spec_from_mapping(
+            {
+                "mark": "bid",
+                "size_mode": "full",
+                "take_profit": {"style": "resting_ioc", "absolute": "0.85"},
+                "stop_loss": {"style": "stop_market_fak", "absolute": "0.55"},
+                "trailing": {"enabled": False, "activation": "immediate", "mark": "bid"},
+            }
+        )
+
+
+def test_skip_take_profit_lets_resting_order_own_the_tp_layer() -> None:
+    spec = _spec()
+    thresholds = resolve_thresholds(spec=spec, entry_price=Decimal("0.50"))
+    decision = evaluate_triggers(
+        spec=spec,
+        mark=Decimal("0.86"),
+        entry_price=Decimal("0.50"),
+        peak=Decimal("0.50"),
+        trailing_active=False,
+        thresholds=thresholds,
+        skip_take_profit=True,
+    )
+    assert not decision.fired
+    assert decision.reason is None

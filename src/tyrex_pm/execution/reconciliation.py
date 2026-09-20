@@ -16,6 +16,7 @@ from tyrex_pm.execution.evidence import (
     new_envelope,
 )
 from tyrex_pm.execution.orders import OrderSide
+from tyrex_pm.execution.exit_sizing import trade_remaining_after_exits
 from tyrex_pm.execution.session_state import ExecutionSessionState
 
 
@@ -171,10 +172,12 @@ class SessionReconciler:
         # Either source may lag.  Confirmed session trades create an exposure
         # obligation that a stale balance read cannot erase; conversely, a
         # lagging post-SELL balance prevents a premature flat declaration.
+        # A matched-but-unconfirmed EXIT HWM is subtracted so leftover crumbs
+        # are not treated as the original buy clip.
         position = max(
             Decimal("0"),
             account_position,
-            state.confirmed_trade_net_shares,
+            trade_remaining_after_exits(state),
         )
         if current_allowance is None:
             sellable = account_position

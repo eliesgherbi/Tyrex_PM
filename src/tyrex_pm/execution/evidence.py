@@ -85,6 +85,12 @@ class OrderRequested(EvidenceEnvelope):
     order: OrderSpec
 
 
+def _coerce_optional_ms(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
 @dataclass(frozen=True, kw_only=True)
 class OrderPrepared(EvidenceEnvelope):
     role: ExecutionRole
@@ -93,6 +99,12 @@ class OrderPrepared(EvidenceEnvelope):
     requested_protection_price: Decimal | None = None
     effective_protection_price: Decimal | None = None
     tick_size: Decimal | None = None
+    prepare_queue_wait_ms: float | None = None
+    tick_resolve_ms: float | None = None
+    create_market_order_ms: float | None = None
+    refresh_wait_ms: float | None = None
+    refresh_elapsed_ms: float | None = None
+    order_metadata_cache_miss: bool = False
 
     def __post_init__(self) -> None:
         EvidenceEnvelope.__post_init__(self)
@@ -104,6 +116,15 @@ class OrderPrepared(EvidenceEnvelope):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, Decimal(str(value)))
+        for field_name in (
+            "prepare_queue_wait_ms",
+            "tick_resolve_ms",
+            "create_market_order_ms",
+            "refresh_wait_ms",
+            "refresh_elapsed_ms",
+        ):
+            object.__setattr__(self, field_name, _coerce_optional_ms(getattr(self, field_name)))
+        object.__setattr__(self, "order_metadata_cache_miss", bool(self.order_metadata_cache_miss))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -117,6 +138,12 @@ class OrderPreDispatchFailed(EvidenceEnvelope):
     requested_protection_price: Decimal | None = None
     effective_protection_price: Decimal | None = None
     tick_size: Decimal | None = None
+    prepare_queue_wait_ms: float | None = None
+    tick_resolve_ms: float | None = None
+    create_market_order_ms: float | None = None
+    refresh_wait_ms: float | None = None
+    refresh_elapsed_ms: float | None = None
+    order_metadata_cache_miss: bool = False
 
     def __post_init__(self) -> None:
         EvidenceEnvelope.__post_init__(self)
@@ -128,6 +155,15 @@ class OrderPreDispatchFailed(EvidenceEnvelope):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, Decimal(str(value)))
+        for field_name in (
+            "prepare_queue_wait_ms",
+            "tick_resolve_ms",
+            "create_market_order_ms",
+            "refresh_wait_ms",
+            "refresh_elapsed_ms",
+        ):
+            object.__setattr__(self, field_name, _coerce_optional_ms(getattr(self, field_name)))
+        object.__setattr__(self, "order_metadata_cache_miss", bool(self.order_metadata_cache_miss))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -268,8 +304,67 @@ class ReconciliationObserved(EvidenceEnvelope):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CancelRequested(EvidenceEnvelope):
+    venue_order_ids: tuple[str, ...]
+    reason: str
+    token_id: str | None = None
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        object.__setattr__(self, "venue_order_ids", tuple(self.venue_order_ids))
+
+
+@dataclass(frozen=True, kw_only=True)
+class CancelObserved(EvidenceEnvelope):
+    canceled: tuple[str, ...]
+    not_canceled: tuple[tuple[str, str], ...] = ()
+    matched_instead: tuple[str, ...] = ()
+    delay_pending: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        object.__setattr__(self, "canceled", tuple(self.canceled))
+        object.__setattr__(
+            self,
+            "not_canceled",
+            tuple((str(order_id), str(reason)) for order_id, reason in self.not_canceled),
+        )
+        object.__setattr__(self, "matched_instead", tuple(self.matched_instead))
+        object.__setattr__(self, "delay_pending", tuple(self.delay_pending))
+
+
+@dataclass(frozen=True, kw_only=True)
 class ManualInterventionRequired(EvidenceEnvelope):
     reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class DustResidualRecorded(EvidenceEnvelope):
+    token_id: str
+    shares: Decimal
+    market_id: str
+    window_id: str
+    classification: str
+    last_bid: Decimal | None = None
+    min_order_size: Decimal | None = None
+    sell_size_increment: Decimal | None = None
+    notional: Decimal | None = None
+    reason: str = "classified_dust"
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        object.__setattr__(self, "shares", Decimal(str(self.shares)))
+        if self.shares <= 0:
+            raise ValueError("dust residual shares must be > 0")
+        for field_name in (
+            "last_bid",
+            "min_order_size",
+            "sell_size_increment",
+            "notional",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, Decimal(str(value)))
 
 
 ExecutionEvidence: TypeAlias = (
@@ -286,7 +381,10 @@ ExecutionEvidence: TypeAlias = (
     | BalanceObserved
     | ExitRequested
     | ReconciliationObserved
+    | CancelRequested
+    | CancelObserved
     | ManualInterventionRequired
+    | DustResidualRecorded
 )
 
 
@@ -306,7 +404,10 @@ _EVENT_TYPES = {
         BalanceObserved,
         ExitRequested,
         ReconciliationObserved,
+        CancelRequested,
+        CancelObserved,
         ManualInterventionRequired,
+        DustResidualRecorded,
     )
 }
 

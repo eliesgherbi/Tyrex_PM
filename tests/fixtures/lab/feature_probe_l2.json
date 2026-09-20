@@ -1,0 +1,32 @@
+{
+  "schema": "lab_evaluate_v1",
+  "target_notional": "5",
+  "window": {
+    "market_id": "lab-probe",
+    "condition_id": "lab-probe-condition",
+    "question": "feature_probe lab l2",
+    "window_id": "lab-probe",
+    "event_start": "2026-09-13T12:00:00+00:00",
+    "event_end": "2026-09-13T12:05:00+00:00"
+  },
+  "steps": [
+    {
+      "ts": "2026-09-13T12:01:00+00:00",
+      "evaluate": false,
+      "depth": {
+        "source": "binance.spot.l2",
+        "instrument_id": "btcusdt",
+        "bids": [["64000", "4"]],
+        "asks": [["64010", "1"]]
+      }
+    },
+    {
+      "ts": "2026-09-13T12:01:01+00:00",
+      "evaluate": true,
+      "books": {
+        "up_ask": "0.71",
+        "down_ask": "0.30"
+      }
+    }
+  ]
+}

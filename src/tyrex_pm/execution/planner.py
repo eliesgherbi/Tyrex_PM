@@ -66,7 +66,7 @@ class IntentOrderPlanner:
                 shares=shares,
                 limit_price=worst,
                 time_in_force=TimeInForce.GTC,
-                metadata=metadata,
+                metadata={**metadata, "post_only": True, "worst_price": str(worst)},
             )
         return MarketBuyOrderSpec(
             order_id=f"entry-{uuid4()}",
@@ -100,6 +100,41 @@ class IntentOrderPlanner:
             metadata={
                 "intent_id": intent.intent_id.value,
                 "reason_code": intent.reason_code,
+                "candidate_at": datetime.now(timezone.utc).isoformat(),
+                "candidate_monotonic_ns": (
+                    time.monotonic_ns()
+                    if candidate_monotonic_ns is None
+                    else int(candidate_monotonic_ns)
+                ),
+            },
+        )
+
+    def resting_take_profit(
+        self,
+        *,
+        market_id: str,
+        instrument_id: str,
+        token_id: str,
+        shares: Decimal,
+        limit_price: Decimal,
+        time_in_force: TimeInForce = TimeInForce.GTC,
+        expiration_epoch_s: int | None = None,
+        reason_code: str = "PROTECTION_TP_RESTING",
+        candidate_monotonic_ns: int | None = None,
+    ) -> LimitOrderSpec:
+        return LimitOrderSpec(
+            order_id=f"resting-tp-{uuid4()}",
+            market_id=market_id,
+            instrument_id=instrument_id,
+            token_id=token_id,
+            side=OrderSide.SELL,
+            shares=shares,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            expiration_epoch_s=expiration_epoch_s,
+            metadata={
+                "reason_code": reason_code,
+                "post_only": True,
                 "candidate_at": datetime.now(timezone.utc).isoformat(),
                 "candidate_monotonic_ns": (
                     time.monotonic_ns()

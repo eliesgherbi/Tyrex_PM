@@ -8,10 +8,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
-from tyrex_pm.protection.spec import ProtectionSpec, ProtectionSpecError, protection_spec_from_mapping
+from tyrex_pm.protection.spec import (
+    ProtectionSpec,
+    ProtectionSpecError,
+    protection_spec_from_mapping,
+)
 from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.yaml_loading import load_yaml_mapping
-from tyrex_pm.strategies.registry import get_strategy_plugin
+from tyrex_pm.strategies.registry import get_strategy_plugin, plugin_requires_protection
 
 
 class RunConfigError(ValueError):
@@ -78,6 +82,11 @@ class LifecycleRuntimeConfig:
     exit_retry_limit: int
     exit_retry_budget_s: float
     minimum_exit_price: Decimal
+    sell_size_increment: Decimal
+    dust_abs_shares: Decimal
+    dust_max_notional: Decimal
+    prepare_budget_ms: float
+    refresh_wait_budget_ms: float
 
 
 @dataclass(frozen=True)
@@ -152,7 +161,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             protection = protection_spec_from_mapping(dict(raw["protection"]), where="protection")
         except ProtectionSpecError as exc:
             raise RunConfigError(str(exc)) from exc
-    if plugin.requires_protection and protection is None:
+    if plugin_requires_protection(plugin, strategy) and protection is None:
         raise RunConfigError(f"{strategy_kind} requires an explicit top-level protection block")
 
     market_raw = dict(raw.get("market") or {})
@@ -268,9 +277,23 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "exit_retry_limit",
             "exit_retry_budget_s",
             "minimum_exit_price",
+            "sell_size_increment",
+            "dust_abs_shares",
+            "dust_max_notional",
+            "prepare_budget_ms",
+            "refresh_wait_budget_ms",
         },
         "lifecycle",
     )
+    for required in (
+        "sell_size_increment",
+        "dust_abs_shares",
+        "dust_max_notional",
+        "prepare_budget_ms",
+        "refresh_wait_budget_ms",
+    ):
+        if required not in life_raw:
+            raise RunConfigError(f"lifecycle.{required} is required")
     lifecycle = LifecycleRuntimeConfig(
         mandatory_exit_before_end_s=float(life_raw.get("mandatory_exit_before_end_s", 90.0)),
         manual_deadline_before_end_s=float(life_raw.get("manual_deadline_before_end_s", 45.0)),
@@ -281,6 +304,11 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         minimum_exit_price=_decimal(
             life_raw.get("minimum_exit_price", "0.01"), "minimum_exit_price"
         ),
+        sell_size_increment=_decimal(life_raw["sell_size_increment"], "sell_size_increment"),
+        dust_abs_shares=_decimal(life_raw["dust_abs_shares"], "dust_abs_shares"),
+        dust_max_notional=_decimal(life_raw["dust_max_notional"], "dust_max_notional"),
+        prepare_budget_ms=float(life_raw["prepare_budget_ms"]),
+        refresh_wait_budget_ms=float(life_raw["refresh_wait_budget_ms"]),
     )
     if lifecycle.mandatory_exit_before_end_s <= lifecycle.manual_deadline_before_end_s:
         raise RunConfigError("mandatory exit must begin before the manual deadline")
@@ -292,8 +320,15 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         or lifecycle.manual_deadline_before_end_s < 0
         or lifecycle.minimum_exit_price <= 0
         or lifecycle.minimum_exit_price > 1
+        or lifecycle.sell_size_increment <= 0
+        or lifecycle.dust_abs_shares <= 0
+        or lifecycle.dust_max_notional <= 0
+        or lifecycle.prepare_budget_ms <= 0
+        or lifecycle.refresh_wait_budget_ms < 0
     ):
         raise RunConfigError("lifecycle retry settings must be positive")
+    if lifecycle.prepare_budget_ms >= float(market.maximum_candidate_age_ms):
+        raise RunConfigError("prepare_budget_ms must be less than market.maximum_candidate_age_ms")
     return TradingRunConfig(
         schema_version=version,
         run_name=run_name,

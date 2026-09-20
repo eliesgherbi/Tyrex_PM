@@ -5,13 +5,14 @@ from __future__ import annotations
 from tyrex_pm.facts import ids as F
 from tyrex_pm.facts.contract import InputContract
 
-# Catalog entries that exist as live adapters today. L2/perp/funding are
-# registered facts; adapters are added when a strategy that needs them is built.
+# Catalog entries that exist as live adapters today. Perp/funding stay
+# unimplemented until a strategy that needs them is built.
 LIVE_ADAPTERS: frozenset[str] = frozenset(
     {
         F.CLOCK_SYNC,
         F.CHAINLINK_TWAP,
         F.BINANCE_SPOT_TRADES,
+        F.BINANCE_SPOT_L2,
         F.POLYMARKET_BOOKS,
         F.POLYMARKET_MARKET_META,
         F.ACCOUNT_SNAPSHOT,
@@ -20,7 +21,6 @@ LIVE_ADAPTERS: frozenset[str] = frozenset(
 
 UNIMPLEMENTED_ADAPTERS: frozenset[str] = frozenset(
     {
-        F.BINANCE_SPOT_L2,
         F.BINANCE_PERP_TRADES,
         F.BINANCE_PERP_L2,
         F.BINANCE_PERP_FUNDING,

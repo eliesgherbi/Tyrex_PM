@@ -9,6 +9,7 @@ from typing import Any
 from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
 from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, TimeAuthority
 from tyrex_pm.facts.contract import EligibilityFacts
+from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.ask70.config import Ask70Config
 from tyrex_pm.strategies.ask70.strategy import Ask70Strategy
@@ -54,10 +55,9 @@ class Ask70Driver:
         correlation_id: CorrelationId,
         context: DecisionContext,
         trigger: str,
-        settlement_reference: Decimal | None,
-        settlement_reference_fresh: bool,
+        features: FeatureBundle | None = None,
     ) -> StrategyEvaluation:
-        del causation_id, correlation_id, trigger, settlement_reference, settlement_reference_fresh
+        del causation_id, correlation_id, trigger, features
         decision, intents = self.strategy.on_decision(
             market_snapshot=market_snapshot,
             context=context,

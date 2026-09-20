@@ -6,18 +6,28 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent
+from tyrex_pm.core.intents import CancelIntent, EnterIntent, ExitIntent, FlattenIntent
+from tyrex_pm.execution.orders import LimitOrderSpec
 from tyrex_pm.execution.coordinator import (
     AccountExecutionCoordinator,
+    CancelUnsupported,
     DispatchBlocked,
     PreDispatchFailure,
 )
 from tyrex_pm.execution.evidence import (
+    DustResidualRecorded,
     ExecutionRole,
     ExitRequested,
     ManualInterventionRequired,
     SessionOpened,
     new_envelope,
+)
+from tyrex_pm.execution.exit_sizing import (
+    can_post_exit,
+    classify_dust_leftover,
+    remaining_exit_shares,
+    should_wait_before_exit_post,
+    venue_legal_sell_shares,
 )
 from tyrex_pm.execution.planner import IntentOrderPlanner
 from tyrex_pm.execution.reconciliation import SessionReconciler
@@ -31,6 +41,22 @@ class LifecyclePolicy:
     reconciliation_interval_s: float = 0.25
     exit_retry_limit: int = 3
     exit_retry_budget_s: float = 30.0
+    cancel_delay_s: float = 0.30
+    cancel_retry_limit: int = 1
+    sell_size_increment: Decimal = Decimal("0.01")
+    dust_abs_shares: Decimal = Decimal("0.01")
+    dust_max_notional: Decimal = Decimal("0.05")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sell_size_increment", Decimal(str(self.sell_size_increment)))
+        object.__setattr__(self, "dust_abs_shares", Decimal(str(self.dust_abs_shares)))
+        object.__setattr__(self, "dust_max_notional", Decimal(str(self.dust_max_notional)))
+        if self.sell_size_increment <= 0:
+            raise ValueError("sell_size_increment must be positive")
+        if self.dust_abs_shares <= 0:
+            raise ValueError("dust_abs_shares must be positive")
+        if self.dust_max_notional <= 0:
+            raise ValueError("dust_max_notional must be positive")
 
 
 class ExecutionLifecycle:
@@ -153,6 +179,9 @@ class ExecutionLifecycle:
             return self.coordinator.state(self.session_id)
         except Exception:  # submission ambiguity is already durable
             pass
+        state = self.coordinator.state(self.session_id)
+        if state.working_maker_entry:
+            return state
         return await self._reconcile_until_entry_resolved()
 
     async def _reconcile_until_entry_resolved(self) -> ExecutionSessionState:
@@ -164,6 +193,7 @@ class ExecutionLifecycle:
             state = self.coordinator.state(self.session_id)
             if state.phase in {
                 ExecutionPhase.POSITION_OPEN,
+                ExecutionPhase.COMPLETED_NO_DISPATCH,
                 ExecutionPhase.COMPLETED_NO_FILL,
                 ExecutionPhase.MANUAL_INTERVENTION,
             }:
@@ -196,9 +226,18 @@ class ExecutionLifecycle:
         token_id: str,
         protective: bool = False,
         candidate_monotonic_ns: int | None = None,
+        min_order_size: Decimal | None = None,
+        last_bid: Decimal | None = None,
     ) -> ExecutionSessionState:
         if self.session_id is None:
             raise RuntimeError("execution lifecycle is not open")
+        await self._cancel_open_orders(reason=intent.reason_code)
+        await self.reconciler.reconcile(self.coordinator, self.session_id)
+        state = self.coordinator.state(self.session_id)
+        if state.phase is ExecutionPhase.MANUAL_INTERVENTION:
+            return state
+        if state.confirmed_position_shares <= 0:
+            return state
         await self.coordinator.apply(
             ExitRequested(
                 **new_envelope(
@@ -215,44 +254,87 @@ class ExecutionLifecycle:
         while attempts < self.policy.exit_retry_limit and loop.time() < deadline:
             await self.reconciler.reconcile(self.coordinator, self.session_id)
             state = self.coordinator.state(self.session_id)
-            if state.phase is ExecutionPhase.COMPLETED_FLAT:
+            if state.phase in {
+                ExecutionPhase.COMPLETED_FLAT,
+                ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
+                ExecutionPhase.MANUAL_INTERVENTION,
+            }:
                 return state
-            if state.has_confirmed_sell and state.confirmed_trade_net_shares <= 0:
-                # The session-owned trade ledger says the exit is complete;
-                # wait for the account balance to converge instead of sending
-                # a duplicate SELL against a lagging balance endpoint.
+            if should_wait_before_exit_post(state):
                 await asyncio.sleep(self.policy.reconciliation_interval_s)
                 continue
-            shares = min(state.confirmed_position_shares, state.sellable_shares)
-            if state.has_confirmed_buy:
-                shares = min(
-                    shares,
-                    max(Decimal("0"), state.confirmed_trade_net_shares),
+            remaining = remaining_exit_shares(state)
+            legal = venue_legal_sell_shares(remaining, self.policy.sell_size_increment)
+            if can_post_exit(legal_shares=legal, min_order_size=min_order_size):
+                spec = self.planner.exit(
+                    intent,
+                    token_id=token_id,
+                    shares=legal,
+                    candidate_monotonic_ns=candidate_monotonic_ns,
                 )
-            if shares <= 0:
+                try:
+                    await self.coordinator.submit(
+                        session_id=self.session_id,
+                        role=ExecutionRole.EXIT,
+                        spec=spec,
+                    )
+                except DispatchBlocked:
+                    if not protective:
+                        raise
+                except Exception:  # ambiguous attempt is reconciled before retry
+                    pass
+                attempts += 1
                 await asyncio.sleep(self.policy.reconciliation_interval_s)
                 continue
-            spec = self.planner.exit(
-                intent,
-                token_id=token_id,
-                shares=shares,
-                candidate_monotonic_ns=candidate_monotonic_ns,
+            dust = classify_dust_leftover(
+                remaining,
+                increment=self.policy.sell_size_increment,
+                min_order_size=min_order_size,
+                last_bid=last_bid,
+                dust_abs_shares=self.policy.dust_abs_shares,
+                dust_max_notional=self.policy.dust_max_notional,
             )
-            try:
-                await self.coordinator.submit(
-                    session_id=self.session_id,
-                    role=ExecutionRole.EXIT,
-                    spec=spec,
+            if dust is not None:
+                return await self._record_dust(
+                    state,
+                    remaining=remaining,
+                    classification=dust.code,
+                    min_order_size=min_order_size,
+                    last_bid=last_bid,
                 )
-            except DispatchBlocked:
-                if not protective:
-                    raise
-            except Exception:  # ambiguous attempt is reconciled before retry
-                pass
-            attempts += 1
+            if state.has_confirmed_sell and state.confirmed_trade_net_shares <= 0:
+                # Trade ledger is flat; wait for the account balance to converge.
+                await asyncio.sleep(self.policy.reconciliation_interval_s)
+                continue
             await asyncio.sleep(self.policy.reconciliation_interval_s)
         await self.reconciler.reconcile(self.coordinator, self.session_id)
         state = self.coordinator.state(self.session_id)
+        if state.phase in {
+            ExecutionPhase.COMPLETED_FLAT,
+            ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
+            ExecutionPhase.MANUAL_INTERVENTION,
+        }:
+            return state
+        remaining = remaining_exit_shares(state)
+        dust = classify_dust_leftover(
+            remaining,
+            increment=self.policy.sell_size_increment,
+            min_order_size=min_order_size,
+            last_bid=last_bid,
+            dust_abs_shares=self.policy.dust_abs_shares,
+            dust_max_notional=self.policy.dust_max_notional,
+        )
+        if (
+            dust is not None
+            and not should_wait_before_exit_post(state)
+        ):
+            return await self._record_dust(
+                state,
+                remaining=remaining,
+                classification=dust.code,
+                min_order_size=min_order_size,
+                last_bid=last_bid,
+            )
         if state.confirmed_position_shares > 0:
             await self.coordinator.apply(
                 ManualInterventionRequired(
@@ -265,6 +347,104 @@ class ExecutionLifecycle:
             )
             state = self.coordinator.state(self.session_id)
         return state
+
+    async def submit_resting_limit(self, spec: LimitOrderSpec) -> ExecutionSessionState:
+        """POST a sitting EXIT limit without marking the session as exiting."""
+        if self.session_id is None:
+            raise RuntimeError("execution lifecycle is not open")
+        try:
+            await self.coordinator.submit(
+                session_id=self.session_id,
+                role=ExecutionRole.EXIT,
+                spec=spec,
+            )
+        except PreDispatchFailure:
+            return self.coordinator.state(self.session_id)
+        except Exception:
+            pass
+        return self.coordinator.state(self.session_id)
+
+    async def cancel_intent(self, intent: CancelIntent) -> ExecutionSessionState:
+        if self.session_id is None:
+            raise RuntimeError("execution lifecycle is not open")
+        await self.coordinator.cancel(
+            session_id=self.session_id,
+            venue_order_ids=(intent.order_id.value,),
+            reason=intent.reason_code,
+        )
+        await self.reconciler.reconcile(self.coordinator, self.session_id)
+        return self.coordinator.state(self.session_id)
+
+    async def _cancel_open_orders(self, *, reason: str) -> ExecutionSessionState:
+        assert self.session_id is not None
+        state = self.coordinator.state(self.session_id)
+        ids = state.resting_limit_venue_ids
+        if not ids:
+            return state
+        attempts = 0
+        while True:
+            try:
+                result = await self.coordinator.cancel(
+                    session_id=self.session_id,
+                    venue_order_ids=ids,
+                    reason=reason,
+                )
+            except CancelUnsupported:
+                await self.mark_manual("cancel_unsupported")
+                return self.coordinator.state(self.session_id)
+            except Exception:
+                await self.mark_manual("cancel_failed")
+                return self.coordinator.state(self.session_id)
+            if result.delay_pending and attempts < self.policy.cancel_retry_limit:
+                attempts += 1
+                await asyncio.sleep(self.policy.cancel_delay_s)
+                await self.reconciler.reconcile(self.coordinator, self.session_id)
+                state = self.coordinator.state(self.session_id)
+                ids = state.resting_limit_venue_ids
+                if not ids:
+                    return state
+                continue
+            break
+        await self.reconciler.reconcile(self.coordinator, self.session_id)
+        state = self.coordinator.state(self.session_id)
+        if state.resting_limit_venue_ids:
+            await self.mark_manual("cancel_still_live")
+            return self.coordinator.state(self.session_id)
+        return state
+
+    async def _record_dust(
+        self,
+        state: ExecutionSessionState,
+        *,
+        remaining: Decimal,
+        classification: str,
+        min_order_size: Decimal | None,
+        last_bid: Decimal | None,
+    ) -> ExecutionSessionState:
+        assert self.session_id is not None
+        identity = state.identity
+        if identity is None:
+            raise RuntimeError("cannot record dust on an unopened session")
+        notional = None if last_bid is None else remaining * Decimal(str(last_bid))
+        await self.coordinator.apply(
+            DustResidualRecorded(
+                **new_envelope(
+                    session_id=self.session_id,
+                    dedupe_key=f"dust:{identity.token_id}:{remaining}",
+                ),
+                token_id=identity.token_id,
+                shares=remaining,
+                market_id=identity.market_id,
+                window_id=identity.window_id,
+                classification=classification,
+                last_bid=last_bid,
+                min_order_size=min_order_size,
+                sell_size_increment=self.policy.sell_size_increment,
+                notional=notional,
+                reason="classified_dust",
+            )
+        )
+        return self.coordinator.state(self.session_id)
 
     async def reconcile(self) -> ExecutionSessionState | None:
         if self.session_id is None:

@@ -42,6 +42,8 @@ def ask70_config_from_parameters(
             "tau_min_s",
             "tau_max_s",
             "max_clock_uncertainty_ms",
+            "liquidity_role",
+            "maker_limit_price",
         },
         file=file,
     )
@@ -72,6 +74,16 @@ def ask70_config_from_parameters(
             tau_min_s=float(raw["tau_min_s"]),
             tau_max_s=float(raw["tau_max_s"]),
             max_clock_uncertainty_ms=float(raw["max_clock_uncertainty_ms"]),
+            liquidity_role=str(raw.get("liquidity_role", "taker")),  # type: ignore[arg-type]
+            maker_limit_price=(
+                None
+                if raw.get("maker_limit_price") is None
+                else _decimal(
+                    raw["maker_limit_price"],
+                    field="parameters.maker_limit_price",
+                    file=file,
+                )
+            ),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(str(exc), file=file, field="parameters") from exc

@@ -15,6 +15,7 @@ Public feeds -> stores (ingest always) -> EvaluationScheduler
         |                                      |
         |                                      v  (declared OnFact / OnTimer only)
         |                               Strategy driver.evaluate
+        |                               (same signature as lab/)
         |                                      |
         |                               typed intent
         |                                      v
@@ -29,23 +30,24 @@ Account-state authority -> capabilities -> execution lifecycle -> async gateway
 Book updates also wake the protection overlay (independent of evaluate()).
 ```
 
-Registered live plugins: `z_gap` and `ask70`. `q_edge` is a guide mapping only. Session state lives in `MarketSessionRuntime` (`ZGapMarketRuntime` is a compatibility alias).
+Registered live plugins: `z_gap`, `ask70`, and `feature_probe`. `q_edge` is a guide mapping only. Session state lives in `MarketSessionRuntime` (`ZGapMarketRuntime` is a compatibility alias). Adding a plugin or a host enhancement: [extending.md](extending.md).
 
 ## Ownership rules
 
 - `facts/` owns the open fact catalog, `InputContract`, evaluation triggers, and eligibility facts. Strategies declare contracts; the runtime starts only the transitive source closure. See [strategy_inputs.md](strategy_inputs.md).
-- `indicators/` owns reusable parameterized producers (OFI, imbalance, microprice, realized vol, EWMA) over a generic instrument-keyed L2/trade store.
+- `indicators/` owns reusable parameterized producers (OFI, imbalance, microprice, realized vol, EWMA) over a generic instrument-keyed L2/trade store. `MarketSessionRuntime` constructs one `IndicatorGraph` from the plugin’s `indicator_specs(config)` (else `InputContract.indicators`) and passes a `FeatureBundle` into `evaluate()`. `evaluate()` itself is strategy-neutral: books + `DecisionContext` + features + trigger/ids. PTB/Chainlink prints, when present, are `DecisionContext.references` (`ReferenceFacts`), not extra kwargs.
 - `strategies/registry.py` owns `StrategyPlugin` registration. `run_config.py` loads kind via the registry; it has no `if strategy_kind == ...` branches.
 - `runtime/scheduler.py` owns when `evaluate()` runs. Feed ingest never implies evaluation.
-- `runtime/composition.py` owns which live adapters exist vs catalogued-but-unimplemented (Binance L2 / perp / funding).
+- `runtime/composition.py` owns which live adapters exist vs catalogued-but-unimplemented (Binance perp trades / L2 / funding). Spot L2 is live.
 - `runtime/market_family.py` owns discovery/window model per family (`btc_updown_5m` today).
 - `market_data/` owns normalized books, synchronization, freshness, and immutable views.
 - `runtime/market_runtime.py` (`MarketSessionRuntime`) owns window preparation, optional PTB sealing / reference alignment as derived producers, and strategy-ready snapshots. PTB seal runs only when the contract requires `ptb.sealed`.
-- `strategies/<name>/` owns only strategy calculations, intent decisions, and an `InputContract` plugin.
+- `strategies/<name>/` owns only strategy calculations, intent decisions, and an `InputContract` plugin. Every plugin implements the same `evaluate(market_snapshot, context, features, trigger, causation_id, correlation_id)` signature. Last Chainlink / sealed K, when aligned-eval has them, live on `DecisionContext.references` (`ReferenceFacts`), not extra kwargs.
+- `lab/` owns deterministic `evaluate()` replay from `lab_evaluate_v1` JSON packs. It constructs the same `FeatureBundle` + driver call as production and never imports the gateway. Prove a new strategy here before `--live`. See [extending.md](extending.md).
 - `protection/` owns `ProtectionSpec`, arming, and bid-mark triggers. See [protection.md](protection.md).
 - `runtime/capabilities.py` owns readiness facts; the strategy cannot override them.
 - `execution/account_state.py` owns continuous authenticated balance, allowance, token-inventory, and open-order observations. It publishes immutable `READY`, `INSUFFICIENT`, `UNAVAILABLE`, or `STALE` snapshots and never converts a failed read into a zero balance.
-- `execution/planner.py` converts generic intents into side-correct typed order specifications (`TAKER` → FAK market buy; `MAKER` → GTC limit, not POSTed live).
+- `execution/planner.py` converts generic intents into side-correct typed order specifications (`TAKER` → FAK market buy; `MAKER` → post-only GTC, POSTed live). The host returns while the bid is `live` (`MAKER_LIMIT_POSTED`) until fill, cancel, or expire.
 - `execution/coordinator.py` is the only submission authority and the only writer to execution state.
 - `execution/reducer.py` derives state from durable normalized evidence.
 - `execution/reconciliation.py` uses authenticated read-only SDK calls to resolve uncertainty.
@@ -78,7 +80,7 @@ Three **schedulers** share the loop and must not be collapsed:
 The runtime also keeps three **readiness** concepts distinct:
 
 1. `execution_infrastructure_ready`: account, stream, book, allowance, order-metadata warm, scope, and entry-window machinery can submit safely.
-2. `strategy_inputs_eligible`: the driver's `EligibilityFacts` for **this** contract (z_gap: clock, exact PTB, model, basis, time bands; ask70: books/clock/account eligibility — no PTB). The host reads `result.eligibility`, not `strategy_kind`.
+2. `strategy_inputs_eligible`: the driver's `EligibilityFacts` for **this** contract (z_gap: clock, exact PTB, model, basis, time bands; ask70 / feature_probe: books/clock/account eligibility — no PTB). The host reads `result.eligibility`, not `strategy_kind`.
 3. economic signal: an eligible strategy evaluation selected an entry after fees and thresholds.
 
 `entry_executable` requires both infrastructure readiness and model readiness. A volatility or PTB lockout therefore blocks entry without being classified as an infrastructure failure. Missing Binance on an ask70 run is not an infrastructure failure because that adapter is not started.
@@ -99,13 +101,13 @@ Read failures are safe to retry because they cannot mutate the venue. A transpor
 
 Exits are three orthogonal planes that share the same intent → planner → lifecycle sell spine:
 
-1. **Strategy policy** — thesis / rich / time (z_gap) or entry-only harness policies (ask70).
+1. **Strategy policy** — thesis / rich / time (z_gap) or entry-only harness policies (ask70; `feature_probe` when `emit_entry: true`).
 2. **Risk / safety** — kill switch, mandatory flatten, crash recovery, manual deadline.
 3. **Protection overlay** — framework-owned SL / reactive TP / trailing armed after confirmed fill from an explicit run-config `protection:` block (`ProtectionSpec`).
 
 Strategies declare thresholds; the framework arms on confirmed exposure, evaluates the held token **best bid**, and emits `ExitIntent` / `FlattenIntent` with `PROTECTION_*` reason codes. Gateway “protection price” (tick-adapted limit) is unrelated to `ProtectionSpec`.
 
-The `ask70` harness evaluates from active-window books and does not require a sealed PTB EXACT candidate. Z-Gap still requires sealed PTB before model evaluation. Full overlay contract: [protection.md](protection.md).
+The `ask70` harness and `feature_probe` evaluate from active-window books and do not require a sealed PTB EXACT candidate. Z-Gap still requires sealed PTB before model evaluation. `feature_probe` requires a `protection:` block only when `emit_entry: true`. Full overlay contract: [protection.md](protection.md).
 
 Precedence (high → low): emergency/kill → mandatory flatten / manual deadline → hard SL → strategy exits → trailing → take-profit.
 
@@ -123,10 +125,9 @@ A run with no execution session includes `no_entry_diagnosis`. It is successful 
 
 These exist as types, catalog entries, or recorded intents — they are not live product behavior:
 
-- `q_edge` strategy plugin
-- Binance spot L2, perp trades/L2, and funding adapters
-- Live POST of `LiquidityRole.MAKER` GTC limits (`MAKER_LIMIT_PLANNED` only)
-- Resting GTC take-profit (`reactive_fak` only)
+- `q_edge` strategy plugin (guide contract only)
+- Binance perp trades/L2 and funding adapters (spot L2 + derived mid are live)
 - Automatic on-chain redeem / merge / hold-to-resolution execution
 - Market families other than `btc_updown_5m`
+- Historical backtester (the `eval` lab is fixture replay of `evaluate()`, not a research simulator)
 

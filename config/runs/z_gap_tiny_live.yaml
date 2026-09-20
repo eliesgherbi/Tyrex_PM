@@ -54,6 +54,20 @@ strategy:
         exponent: "1"
       provisional_resolve_penalty_per_share: "0"
 
+protection:
+  mark: bid
+  size_mode: full
+  take_profit:
+    style: resting_gtd
+    absolute: "0.85"
+  stop_loss:
+    style: stop_market_fak
+    absolute: "0.55"
+  trailing:
+    enabled: false
+    activation: immediate
+    mark: bid
+
 market:
   family: btc_updown_5m
   binance_symbol: BTCUSDT
@@ -85,6 +99,11 @@ lifecycle:
   exit_retry_limit: 3
   exit_retry_budget_s: 30
   minimum_exit_price: "0.01"
+  sell_size_increment: "0.01"
+  dust_abs_shares: "0.01"
+  dust_max_notional: "0.05"
+  prepare_budget_ms: 2000
+  refresh_wait_budget_ms: 500
 
 state_directory: var/runtime_state/execution
 report_directory: var/runs/z_gap

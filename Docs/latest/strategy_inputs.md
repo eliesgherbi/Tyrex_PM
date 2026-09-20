@@ -16,7 +16,7 @@ Stable identifiers live in `src/tyrex_pm/facts/ids.py`. Unknown ids fail contrac
 | `polymarket.market_meta` | Yes |
 | `chainlink.twap` | Yes |
 | `binance.spot.trades` | Yes |
-| `binance.spot.l2` | Catalogued; **no adapter** |
+| `binance.spot.l2` | Yes (`adapters/binance/depth_adapter.py`) |
 | `binance.perp.trades` | Catalogued; **no adapter** |
 | `binance.perp.l2` | Catalogued; **no adapter** |
 | `binance.perp.funding` | Catalogued; **no adapter** |
@@ -28,7 +28,7 @@ Stable identifiers live in `src/tyrex_pm/facts/ids.py`. Unknown ids fail contrac
 | `ptb.sealed` | Chainlink TWAP, clock, market meta, Binance spot trades |
 | `reference.aligned` | Binance spot trades, Chainlink TWAP |
 | `tau` | Market meta, clock |
-| `binance.spot.mid` | `binance.spot.l2` (unimplemented adapter) |
+| `binance.spot.mid` | `binance.spot.l2` (live when that adapter starts) |
 | `binance.perp.mid` | `binance.perp.l2` (unimplemented adapter) |
 
 `runtime/composition.py` starts the transitive **source** closure. A contract that names an unimplemented source fails closed at composition (`missing_live_adapters`).
@@ -44,6 +44,8 @@ Stable identifiers live in `src/tyrex_pm/facts/ids.py`. Unknown ids fail contrac
 `source_facts()` expands derived facts to the adapters the host must start. A connector that is not in that set is not a liveness dependency.
 
 `EligibilityFacts` is the host’s only strategy-readiness surface: `strategy_inputs_eligible`, `model_ready`, and `blockers`. The host must not inspect `strategy_kind` to decide model readiness.
+
+Every plugin’s `evaluate()` takes the same arguments: `market_snapshot`, `context` (`DecisionContext`, including `references` when aligned-eval has them), `features`, `trigger` (`"feed"` or `"timer"`), and the two ids. Strategy-private snapshots are assembled inside `strategies/<name>/`.
 
 ## EvaluationScheduler
 
@@ -71,6 +73,14 @@ Required: books, Binance spot trades, Chainlink TWAP, clock, account, `ptb.seale
 Indicator: EWMA vol on spot trades.  
 Wake: Binance spot trades **after** `ptb.sealed`, 1 s coalesce.
 
+### feature_probe (live plugin)
+
+Required: `polymarket.books`, `clock.sync`, `account.snapshot`, `binance.spot.l2`.  
+Optional: `polymarket.market_meta`.  
+Indicator: L1 `imbalance` on spot L2.  
+Wake: book updates and spot L2 (1 s coalesce).  
+**Does not** start Chainlink, spot trades, or perp. Shipped YAML is validate-only (`emit_entry: false`).
+
 ### q_edge (guide only)
 
 Mapped in `facts/mappings.py` for a future multi-venue strategy. **Not** a registered plugin. It names L2 / perp / funding facts whose adapters are not implemented. Do not treat it as runnable.
@@ -79,7 +89,9 @@ Mapped in `facts/mappings.py` for a future multi-venue strategy. **Not** a regis
 
 `src/tyrex_pm/indicators/` owns reusable producers over a generic instrument-keyed L2/trade store (`DepthSnapshot` / `DepthStore`). That store is **not** the Polymarket `[0,1]` `BookSnapshot`.
 
-z_gap EWMA vol is one `IndicatorSpec` instance. Producers for OFI, imbalance, trade imbalance, and realized vol exist for later strategies; they do not start connectors by themselves.
+z_gap EWMA vol is one `IndicatorSpec` instance. The registered plugin supplies YAML `volatility.*` as spec `params`; the host runs `IndicatorGraph` and passes a `FeatureBundle` into `evaluate()`. `feature_probe` does the same for L1 `imbalance` on `binance.spot.l2`. Producers for OFI, imbalance, trade imbalance, and realized vol exist for later strategies; they do not start connectors by themselves.
+
+The lab (`tyrex_pm.lab.evaluate_replay`) rebuilds that graph from the same `indicator_specs(config)` and applies fixture `trade` / `depth` steps before `evaluate()`. It does not start adapters. Adding a pack: [extending.md](extending.md#lab-fixture-before-live).
 
 ## Market families
 

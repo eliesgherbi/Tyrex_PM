@@ -49,3 +49,17 @@ def test_indicator_graph_runs_only_subscribed_specs() -> None:
     assert bundle.get(key) == Decimal("0")
     empty = graph.on_depth(snap, source=F.BINANCE_PERP_L2)
     assert empty.get(key) == Decimal("0")
+
+
+def test_on_depth_already_applied_does_not_double_count_ofi() -> None:
+    spec = IndicatorSpec(name="ofi", source=F.BINANCE_SPOT_L2, horizons_ms=(1000,))
+    graph = IndicatorGraph((spec,))
+    first = _book(bid="100", bid_qty="1", ask="101", ask_qty="1")
+    graph.depth.apply(first)
+    graph.on_depth(first, source=F.BINANCE_SPOT_L2, already_applied=True)
+    second = _book(bid="100", bid_qty="4", ask="101", ask_qty="1")
+    graph.depth.apply(second)
+    bundle = graph.on_depth(second, source=F.BINANCE_SPOT_L2, already_applied=True)
+    key = f"{spec.instance_id}|1000"
+    assert bundle.get(key) == Decimal("3")
+

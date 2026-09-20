@@ -14,27 +14,15 @@ from typing import Any
 from uuid import uuid4
 
 from tyrex_pm.core.clock import SystemClock
-from tyrex_pm.core.ids import RunId
+from tyrex_pm.core.ids import InstrumentId, RunId
 from tyrex_pm.core.intents import (
+    CancelIntent,
     EnterIntent,
     ExitIntent,
     FlattenIntent,
     HoldToResolutionIntent,
     LiquidityRole,
     new_intent_id,
-)
-from tyrex_pm.protection import (
-    ArmedProtection,
-    ProtectionPhase,
-    ProtectionRegistry,
-    build_protection_intent,
-    mark_triggered,
-    observe_mark,
-)
-from tyrex_pm.runtime.run_config import (
-    TradingRunConfig,
-    entry_tau_bounds,
-    max_clock_uncertainty_ms,
 )
 from tyrex_pm.execution.account_state import (
     AccountSnapshotStatus,
@@ -45,6 +33,7 @@ from tyrex_pm.execution.account_state import (
 from tyrex_pm.execution.coordinator import AccountExecutionCoordinator, DispatchBlocked
 from tyrex_pm.execution.evidence import (
     DispatchAuthorized,
+    ExecutionRole,
     OrderPreDispatchFailed,
     OrderPrepared,
     OrderRequested,
@@ -52,18 +41,38 @@ from tyrex_pm.execution.evidence import (
     SubmissionFailed,
     SubmissionResponseObserved,
 )
+from tyrex_pm.execution.exit_sizing import (
+    can_post_exit,
+    is_exempt_prior_position_blocker,
+    remaining_exit_shares,
+    venue_legal_sell_shares,
+)
 from tyrex_pm.execution.final_gate import FinalExecutionGate, FinalGatePolicy
 from tyrex_pm.execution.lifecycle import ExecutionLifecycle, LifecyclePolicy
+from tyrex_pm.execution.orders import TimeInForce
 from tyrex_pm.execution.planner import ExecutionRiskPolicy, IntentOrderPlanner
 from tyrex_pm.execution.polymarket.gateway import PolymarketAsyncGateway
 from tyrex_pm.execution.reconciliation import SessionReconciler
-from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
+from tyrex_pm.execution.session_state import (
+    ExecutionPhase,
+    ExecutionSessionState,
+    KnownDustResidual,
+)
+from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.market_data.book_health import ConnectionHealth, FeedSyncPhase, SyncHealth
 from tyrex_pm.persistence.execution_journal import SqliteExecutionJournal
 from tyrex_pm.persistence.run_evidence_journal import (
     RunEvidenceRecord,
     RunEvidenceRecorder,
     SqliteRunEvidenceJournal,
+)
+from tyrex_pm.protection import (
+    ArmedProtection,
+    ProtectionPhase,
+    ProtectionRegistry,
+    build_protection_intent,
+    mark_triggered,
+    observe_mark,
 )
 from tyrex_pm.reporting.run_report import (
     RunReportInput,
@@ -74,8 +83,14 @@ from tyrex_pm.reporting.run_report import (
 from tyrex_pm.runtime.capabilities import CapabilityController
 from tyrex_pm.runtime.market_data_runtime import MarketDataSummary, run_market_data_runtime
 from tyrex_pm.runtime.market_runtime import MarketSessionRuntime, ZGapMarketRuntime
+from tyrex_pm.runtime.run_config import (
+    TradingRunConfig,
+    entry_tau_bounds,
+    max_clock_uncertainty_ms,
+)
 from tyrex_pm.strategies.context import (
     DecisionContext,
+    ReferenceFacts,
     StrategyLifecycleSnapshot,
     StrategyPositionPhase,
 )
@@ -99,6 +114,17 @@ def load_dotenv_values(path: Path | None) -> dict[str, str]:
     return values
 
 
+def _prepare_timing_row(event: Any) -> dict[str, Any]:
+    return {
+        "prepare_queue_wait_ms": event.prepare_queue_wait_ms,
+        "tick_resolve_ms": event.tick_resolve_ms,
+        "create_market_order_ms": event.create_market_order_ms,
+        "refresh_wait_ms": event.refresh_wait_ms,
+        "refresh_elapsed_ms": event.refresh_elapsed_ms,
+        "order_metadata_cache_miss": bool(event.order_metadata_cache_miss),
+    }
+
+
 def _lifecycle_view(
     state: ExecutionSessionState | None, *, instrument_id=None
 ) -> StrategyLifecycleSnapshot:
@@ -120,6 +146,7 @@ def _lifecycle_view(
         ExecutionPhase.COMPLETED_NO_DISPATCH: StrategyPositionPhase.FLAT,
         ExecutionPhase.COMPLETED_NO_FILL: StrategyPositionPhase.FLAT,
         ExecutionPhase.COMPLETED_FLAT: StrategyPositionPhase.FLAT,
+        ExecutionPhase.COMPLETED_FLAT_WITH_DUST: StrategyPositionPhase.FLAT,
         ExecutionPhase.MANUAL_INTERVENTION: StrategyPositionPhase.MANUAL_INTERVENTION,
     }
     return StrategyLifecycleSnapshot(
@@ -168,6 +195,7 @@ class TradingRuntime:
     execution_timeline: list[dict[str, Any]] = field(default_factory=list)
     _last_readiness_key: tuple[Any, ...] | None = None
     protection_registry: ProtectionRegistry = field(default_factory=ProtectionRegistry)
+    known_dust_residuals: list[KnownDustResidual] = field(default_factory=list)
     _order_metadata_warmed_at: dict[str, float] = field(default_factory=dict)
     _order_metadata_warm_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     _intent_dispatcher_task: asyncio.Task[None] | None = None
@@ -289,6 +317,9 @@ class TradingRuntime:
                 reconciliation_interval_s=config.lifecycle.reconciliation_interval_s,
                 exit_retry_limit=config.lifecycle.exit_retry_limit,
                 exit_retry_budget_s=config.lifecycle.exit_retry_budget_s,
+                sell_size_increment=config.lifecycle.sell_size_increment,
+                dust_abs_shares=config.lifecycle.dust_abs_shares,
+                dust_max_notional=config.lifecycle.dust_max_notional,
             ),
         )
         result = cls(
@@ -315,6 +346,12 @@ class TradingRuntime:
             restored_sessions=restored_sessions,
         )
         holder["runtime"] = result
+        active_gateway.client_guard = result.account_state_authority
+        active_gateway.prepare_budget_ms = config.lifecycle.prepare_budget_ms
+        active_gateway.refresh_wait_budget_ms = config.lifecycle.refresh_wait_budget_ms
+        active_gateway.evidence_sink = run_recorder.record
+        for restored in coordinator.states.values():
+            result._remember_dust(restored)
         run_recorder.record(
             "RUN_STARTED",
             {
@@ -398,7 +435,9 @@ class TradingRuntime:
         token_ids = self._market_token_ids(market_session)
         now = time.monotonic()
         pending = tuple(
-            token_id for token_id in token_ids if not self._token_metadata_is_warm(token_id, now=now)
+            token_id
+            for token_id in token_ids
+            if not self._token_metadata_is_warm(token_id, now=now)
         )
         self._refresh_order_metadata_capability()
         if not pending:
@@ -557,13 +596,23 @@ class TradingRuntime:
         prior_exposure_blockers = tuple(
             blocker
             for blocker in snapshot.blockers
-            if blocker.startswith("PRIOR_POSITION") or blocker.startswith("PRIOR_OPEN_ORDER")
+            if (
+                (
+                    blocker.startswith("PRIOR_POSITION")
+                    and not is_exempt_prior_position_blocker(
+                        blocker, self.known_dust_residuals
+                    )
+                )
+                or blocker.startswith("PRIOR_OPEN_ORDER")
+            )
         )
         self.capabilities.prior_scope_clear = complete and not prior_exposure_blockers
         for code in tuple(self.capabilities.extra_blockers):
             if code.startswith("ACCOUNT_STATE_"):
                 self.capabilities.clear_blocker(code)
         for index, blocker in enumerate(snapshot.blockers):
+            if is_exempt_prior_position_blocker(blocker, self.known_dust_residuals):
+                continue
             self.capabilities.set_blocker(f"ACCOUNT_STATE_{index}", blocker)
         if snapshot.status in {AccountSnapshotStatus.UNAVAILABLE, AccountSnapshotStatus.STALE}:
             self.capabilities.set_blocker("ACCOUNT_STATE_AUTHORITY", snapshot.status.value)
@@ -734,17 +783,21 @@ class TradingRuntime:
             exit_block_reason=None if caps.exit_executable else ",".join(caps.blockers),
             unknown_inventory=not self.capabilities.prior_scope_clear,
             kill_switch_active=self.capabilities.kill_switch_active,
+            references=ReferenceFacts(
+                chainlink_raw=None if ready.dyn is None else ready.dyn.chainlink_raw,
+                chainlink_fresh=ready.dyn is not None and ready.dyn.chainlink_raw is not None,
+                sealed_k=None if ready.sealed is None else ready.sealed.ptb_k,
+            ),
         )
+        graph = getattr(market_runtime, "indicator_graph", None)
+        features = graph.snapshot() if graph is not None else FeatureBundle()
         result = ready.binding.evaluate(
             market_snapshot=ready.snapshot,
             causation_id=ready.snapshot.causation_id,
             correlation_id=ready.snapshot.correlation_id,
             trigger="feed",
             context=context,
-            settlement_reference=(ready.dyn.chainlink_raw if ready.dyn is not None else None),
-            settlement_reference_fresh=(
-                ready.dyn is not None and ready.dyn.chainlink_raw is not None
-            ),
+            features=features,
         )
         self.capabilities.model_ready = result.eligibility.model_ready
         decision_evidence = dict(result.decision.evidence)
@@ -842,12 +895,41 @@ class TradingRuntime:
                 return leg.quote.best_bid
         return None
 
+    def _held_min_order_size(self) -> Decimal | None:
+        """BookView first, then binding/store. Missing min size is fail-closed."""
+        token = self.selected_token_id
+        if token is None or self.feed_supervisor is None:
+            return None
+        view = self.feed_supervisor.active_view()
+        if view is not None:
+            for leg in (view.up, view.down):
+                if leg.token_id == token and leg.min_order_size is not None:
+                    return leg.min_order_size
+        feed = self.feed_supervisor.active
+        if feed is None or not feed.binding.owns_token(token):
+            return None
+        if feed.binding.min_order_size is not None:
+            return feed.binding.min_order_size
+        return feed.store.get(InstrumentId(token)).min_order_size
+
+    def _remember_dust(self, state: ExecutionSessionState | None) -> None:
+        if state is None or state.dust_residual is None:
+            return
+        residual = state.dust_residual
+        if any(
+            existing.token_id == residual.token_id and existing.shares == residual.shares
+            for existing in self.known_dust_residuals
+        ):
+            return
+        self.known_dust_residuals.append(residual)
+
     def _maybe_arm_protection(self, market_runtime: ZGapMarketRuntime) -> None:
         spec = self.config.protection
         state = self.lifecycle.state
         if (
             spec is None
             or state is None
+            or state.terminal
             or not state.has_exposure
             or state.identity is None
             or self.selected_instrument is None
@@ -903,7 +985,15 @@ class TradingRuntime:
         mark = self._held_best_bid(market_runtime)
         if mark is None:
             return
-        decision = observe_mark(armed, mark=mark)
+        tp = armed.thresholds.take_profit
+        style = None if armed.spec.take_profit is None else armed.spec.take_profit.style
+        skip_tp = bool(armed.resting_venue_order_id) or (
+            style in {"resting_gtc", "resting_gtd"}
+            and not armed.resting_fallback_reason
+            and tp is not None
+            and mark < tp
+        )
+        decision = observe_mark(armed, mark=mark, skip_take_profit=skip_tp)
         if not decision.fired or decision.reason is None:
             return
         mark_triggered(armed, decision)
@@ -928,6 +1018,109 @@ class TradingRuntime:
                 "mark": str(mark),
                 "evidence": dict(decision.evidence),
             },
+        )
+
+    async def _maybe_post_resting_take_profit(self, market_runtime: ZGapMarketRuntime) -> None:
+        spec = self.config.protection
+        state = self.lifecycle.state
+        if (
+            spec is None
+            or spec.take_profit is None
+            or spec.take_profit.style not in {"resting_gtc", "resting_gtd"}
+            or state is None
+            or state.terminal
+            or not state.has_exposure
+            or state.identity is None
+            or self.selected_instrument is None
+            or self.active_market is None
+            or self.selected_token_id is None
+        ):
+            return
+        armed = self.protection_registry.get(state.session_id)
+        if armed is None or armed.phase is not ProtectionPhase.ARMED:
+            return
+        if armed.resting_venue_order_id:
+            self._watch_resting_take_profit(armed, state)
+            return
+        if state.exit_requested_reason or armed.resting_fallback_reason:
+            return
+        mark = self._held_best_bid(market_runtime)
+        tp = armed.thresholds.take_profit
+        if mark is None or tp is None or mark >= tp:
+            return
+        expiration = None
+        time_in_force = TimeInForce.GTC
+        if spec.take_profit.style == "resting_gtd":
+            event_end = self.active_market.market.event_end
+            if event_end is None:
+                armed.resting_fallback_reason = "gtd_event_end_unknown"
+                return
+            remain_s = (event_end - datetime.now(timezone.utc)).total_seconds()
+            if remain_s < 180:
+                armed.resting_fallback_reason = "gtd_expiration_below_3m"
+                return
+            time_in_force = TimeInForce.GTD
+            expiration = int(event_end.timestamp())
+        remaining = remaining_exit_shares(state)
+        legal = venue_legal_sell_shares(remaining, self.lifecycle.policy.sell_size_increment)
+        if not can_post_exit(legal_shares=legal, min_order_size=self._held_min_order_size()):
+            return
+        limit = self.lifecycle.planner.resting_take_profit(
+            market_id=(
+                self.active_market.market.condition_id
+                or self.active_market.market.market_id.value
+            ),
+            instrument_id=self.selected_instrument.instrument_id.value,
+            token_id=self.selected_token_id,
+            shares=legal,
+            limit_price=tp,
+            time_in_force=time_in_force,
+            expiration_epoch_s=expiration,
+        )
+        try:
+            posted = await self.lifecycle.submit_resting_limit(limit)
+        except DispatchBlocked as exc:
+            armed.resting_fallback_reason = str(exc) or "post_only_would_cross"
+            self.run_recorder.record(
+                "RESTING_TP_FALLBACK",
+                {"reason": armed.resting_fallback_reason},
+            )
+            return
+        armed.resting_posted = True
+        for order in posted.orders.values():
+            if order.role is ExecutionRole.EXIT and order.venue_order_id:
+                armed.resting_venue_order_id = order.venue_order_id
+        self.run_recorder.record(
+            "RESTING_TAKE_PROFIT_POSTED",
+            {
+                "session_id": state.session_id,
+                "venue_order_id": armed.resting_venue_order_id,
+                "limit_price": str(tp),
+                "shares": str(legal),
+                "time_in_force": time_in_force.value,
+            },
+        )
+
+    def _watch_resting_take_profit(
+        self, armed: ArmedProtection, state: ExecutionSessionState
+    ) -> None:
+        if not armed.resting_venue_order_id:
+            return
+        live = set(state.resting_limit_venue_ids) | set(state.open_venue_order_ids)
+        if armed.resting_venue_order_id in live:
+            return
+        exit_order = state.exit
+        filled = exit_order is not None and (
+            exit_order.cumulative_matched_hwm > 0 or bool(exit_order.trade_ids_from_response)
+        )
+        armed.resting_venue_order_id = None
+        armed.resting_posted = False
+        if filled:
+            return
+        armed.resting_fallback_reason = "resting_order_disappeared"
+        self.run_recorder.record(
+            "RESTING_TP_WATCHDOG",
+            {"reason": "disappeared_unfilled"},
         )
 
     async def _consume_intent(self) -> None:
@@ -976,22 +1169,6 @@ class TradingRuntime:
                     baseline_open_order_ids=account_state.open_order_ids,
                 )
                 try:
-                    if intent.liquidity_role is LiquidityRole.MAKER:
-                        spec = self.lifecycle.planner.entry(
-                            intent,
-                            token_id=token_id,
-                            candidate_monotonic_ns=candidate_monotonic_ns,
-                        )
-                        self.run_recorder.record(
-                            "MAKER_LIMIT_PLANNED",
-                            {
-                                "intent_id": intent.intent_id.value,
-                                "order_kind": spec.kind.value,
-                                "time_in_force": spec.time_in_force.value,
-                                "token_id": token_id,
-                            },
-                        )
-                        return
                     async with self.account_state_authority.hold_ready_snapshot(market_id):
                         # Re-apply held READY snapshot so final-gate capabilities
                         # stay entry_executable for the full prepare window.
@@ -1015,6 +1192,25 @@ class TradingRuntime:
                     state = await self.lifecycle.reconcile()
                 if state is not None:
                     self.capabilities.selected_token_sellable = state.sellable_shares > 0
+                    if intent.liquidity_role is LiquidityRole.MAKER and state.working_maker_entry:
+                        self.run_recorder.record(
+                            "MAKER_LIMIT_POSTED",
+                            {
+                                "intent_id": intent.intent_id.value,
+                                "token_id": token_id,
+                                "venue_order_id": (
+                                    None
+                                    if state.entry is None
+                                    else state.entry.venue_order_id
+                                ),
+                            },
+                        )
+                    if (
+                        state.phase is ExecutionPhase.POSITION_OPEN
+                        and self.active_market is not None
+                    ):
+                        self._maybe_arm_protection(self.active_market)
+                        await self._maybe_post_resting_take_profit(self.active_market)
                     if state.terminal:
                         self.stop_requested = True
             elif isinstance(intent, (ExitIntent, FlattenIntent)):
@@ -1034,8 +1230,23 @@ class TradingRuntime:
                         token_id=self.selected_token_id,
                         protective=isinstance(intent, FlattenIntent),
                         candidate_monotonic_ns=candidate_monotonic_ns,
+                        min_order_size=self._held_min_order_size(),
+                        last_bid=self._held_best_bid(self.active_market),
                     )
+                self._remember_dust(state)
                 self.capabilities.selected_token_sellable = state.sellable_shares > 0
+                if state.terminal:
+                    self.stop_requested = True
+            elif isinstance(intent, CancelIntent):
+                state = await self.lifecycle.cancel_intent(intent)
+                self.run_recorder.record(
+                    "CANCEL_INTENT_CONSUMED",
+                    {
+                        "intent_id": intent.intent_id.value,
+                        "order_id": intent.order_id.value,
+                        "reason_code": intent.reason_code,
+                    },
+                )
                 if state.terminal:
                     self.stop_requested = True
             elif isinstance(intent, HoldToResolutionIntent):
@@ -1104,6 +1315,7 @@ class TradingRuntime:
                     )
                 )
             self._maybe_arm_protection(market_runtime)
+            await self._maybe_post_resting_take_profit(market_runtime)
             if tau > self.config.lifecycle.mandatory_exit_before_end_s:
                 self._maybe_emit_protection_exit(market_runtime)
         # Intent drain is owned by the event-woken intent dispatcher so entry
@@ -1317,6 +1529,7 @@ class TradingRuntime:
                 elif isinstance(event, OrderPrepared):
                     row["prepared_at"] = event.observed_at.isoformat()
                     row["_prepared_mono"] = event.observed_monotonic_ns
+                    row.update(_prepare_timing_row(event))
                 elif isinstance(event, OrderPreDispatchFailed):
                     row["pre_dispatch_failed_at"] = event.observed_at.isoformat()
                     row["_pre_dispatch_failed_mono"] = event.observed_monotonic_ns
@@ -1327,6 +1540,7 @@ class TradingRuntime:
                         "error_code": event.error_code,
                         "message": event.message,
                     }
+                    row.update(_prepare_timing_row(event))
                 elif isinstance(event, DispatchAuthorized):
                     row["dispatch_authorized_at"] = event.observed_at.isoformat()
                     row["_authorized_mono"] = event.observed_monotonic_ns

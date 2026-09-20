@@ -1,4 +1,4 @@
-"""Live public-data runtime for the Z-Gap strategy.
+"""Live public-data runtime.
 
 This module owns public-feed evidence only. Authentication, orders, account
 state and venue mutations belong to the unified execution runtime.
@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
+from tyrex_pm.adapters.binance.depth_adapter import BinanceDepthWsAdapter
 from tyrex_pm.adapters.binance.ws_adapter import BinanceTradeWsAdapter
 from tyrex_pm.adapters.clock_sync import ClockSyncLoop, OsMonitorClockSyncProvider
 from tyrex_pm.adapters.polymarket.discovery import GammaMarketDiscovery
@@ -32,6 +33,7 @@ from tyrex_pm.core.time_authority import SnapshotTimeAuthority
 from tyrex_pm.domain.polymarket.boundary_candidates import BoundaryTickView
 from tyrex_pm.domain.polymarket.ptb_attestation import AttestationResult
 from tyrex_pm.engine.dispatcher import EventDispatcher
+from tyrex_pm.facts import ids as F
 from tyrex_pm.indicators.causal_pairing import PriceTickView, TradingReferenceIdentity
 from tyrex_pm.market_data.binding_record import (
     BindingLifecycleRole,
@@ -39,7 +41,6 @@ from tyrex_pm.market_data.binding_record import (
 )
 from tyrex_pm.market_data.book_feed import BookFeedSupervisor
 from tyrex_pm.market_data.book_store import MarketStateStore
-from tyrex_pm.facts import ids as F
 from tyrex_pm.runtime.composition import starts_adapter
 from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.market_runtime import (
@@ -364,7 +365,7 @@ async def run_market_data_runtime(
     feed_supervisor = BookFeedSupervisor(store=book_store, dispatcher=disp, out_dir=out_dir)
     if on_feed_supervisor is not None:
         on_feed_supervisor(feed_supervisor)
-    counts = {"chainlink": 0, "binance": 0, "clob": 0}
+    counts = {"chainlink": 0, "binance": 0, "binance_l2": 0, "clob": 0}
     feed_notes: list[str] = []
     sealed_windows: set[str] = set()
     seal_fail_logged: set[str] = set()
@@ -682,6 +683,30 @@ async def run_market_data_runtime(
         summary.gate_notes.append("adapter=binance.spot.trades")
     else:
         summary.gate_notes.append("adapter=binance.spot.trades skipped (not in InputContract)")
+    spot_depth = runtime.indicator_graph.depth
+    runtime.spot_depth_store = spot_depth
+
+    def _on_spot_depth(snapshot) -> None:
+        runtime.indicator_graph.on_depth(
+            snapshot, source=F.BINANCE_SPOT_L2, already_applied=True
+        )
+        counts["binance_l2"] += 1
+        _maybe_evaluate(F.BINANCE_SPOT_L2)
+        _maybe_evaluate(F.BINANCE_SPOT_MID)
+        if on_public_fact is not None:
+            on_public_fact(F.BINANCE_SPOT_L2, runtime)
+
+    bn_l2 = BinanceDepthWsAdapter(
+        symbol=binance_symbol,
+        store=spot_depth,
+        on_update=_on_spot_depth,
+        on_health=_on_binance_health,
+    )
+    if starts_adapter(contract, F.BINANCE_SPOT_L2):
+        tasks.append(asyncio.create_task(bn_l2.run(), name="bn_l2"))
+        summary.gate_notes.append("adapter=binance.spot.l2")
+    else:
+        summary.gate_notes.append("adapter=binance.spot.l2 skipped (not in InputContract)")
 
     compose_started_raw = datetime.now(timezone.utc)
     compose_started_mono_ns = time.monotonic_ns()
@@ -846,6 +871,7 @@ async def run_market_data_runtime(
         await clock_loop.stop()
         await cl.stop()
         await bn.stop()
+        await bn_l2.stop()
         await feed_supervisor.stop()
         for t in tasks:
             t.cancel()
@@ -858,6 +884,7 @@ async def run_market_data_runtime(
     summary.feeds = {
         "chainlink_ticks": counts["chainlink"],
         "binance_ticks": counts["binance"],
+        "binance_l2_events": counts["binance_l2"],
         "clob_book_events": counts["clob"],
         "clob_ready": bool(active_feed is not None and active_feed.phase.value == "READY"),
         "book_path": "MarketStateStore",

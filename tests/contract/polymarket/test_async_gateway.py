@@ -35,6 +35,8 @@ class _AsyncClient:
     def __init__(self) -> None:
         self.created: list[dict] = []
         self.posted: list[object] = []
+        self.canceled: list[object] = []
+        self.cancel_all_called = False
         self.closed = False
 
     async def create_market_order(self, **kwargs):  # noqa: ANN003
@@ -66,6 +68,18 @@ class _AsyncClient:
 
     def list_account_trades(self, **kwargs):  # noqa: ANN003
         return _AsyncPaginator(({"id": "t1", **kwargs},))
+
+    async def cancel_order(self, *, order_id: str):
+        self.canceled.append(order_id)
+        return {"canceled": (order_id,), "not_canceled": {}}
+
+    async def cancel_orders(self, *, order_ids):
+        self.canceled.append(tuple(order_ids))
+        return {"canceled": tuple(order_ids), "not_canceled": {}}
+
+    async def cancel_all(self):
+        self.cancel_all_called = True
+        return {"canceled": (), "not_canceled": {}}
 
     async def close(self) -> None:
         self.closed = True
@@ -377,6 +391,20 @@ async def test_warm_order_metadata_reports_partial_failure() -> None:
     assert not by_token["bad"].ok
     assert "RuntimeError" in str(by_token["bad"].error)
     assert client.posted == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_orders_never_calls_cancel_all() -> None:
+    client = _AsyncClient()
+    gateway = PolymarketAsyncGateway(client=client)
+    result = await gateway.cancel_orders(["gtc-1", "gtc-2"])
+    assert result.canceled == ("gtc-1", "gtc-2")
+    assert client.canceled == [("gtc-1", "gtc-2")]
+    assert client.cancel_all_called is False
+    single = await gateway.cancel_orders(["only"])
+    assert single.canceled == ("only",)
+    assert "only" in client.canceled
+    assert client.cancel_all_called is False
 
 
 async def _resolved(value):  # noqa: ANN001

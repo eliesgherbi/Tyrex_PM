@@ -28,6 +28,7 @@ class ExecutionPhase(str, Enum):
     COMPLETED_NO_DISPATCH = "COMPLETED_NO_DISPATCH"
     COMPLETED_NO_FILL = "COMPLETED_NO_FILL"
     COMPLETED_FLAT = "COMPLETED_FLAT"
+    COMPLETED_FLAT_WITH_DUST = "COMPLETED_FLAT_WITH_DUST"
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
 
 
@@ -35,6 +36,7 @@ TERMINAL_PHASES = {
     ExecutionPhase.COMPLETED_NO_DISPATCH,
     ExecutionPhase.COMPLETED_NO_FILL,
     ExecutionPhase.COMPLETED_FLAT,
+    ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
     ExecutionPhase.MANUAL_INTERVENTION,
 }
 
@@ -70,6 +72,12 @@ class OrderExecutionState:
     requested_protection_price: Decimal | None = None
     effective_protection_price: Decimal | None = None
     tick_size: Decimal | None = None
+    prepare_queue_wait_ms: float | None = None
+    tick_resolve_ms: float | None = None
+    create_market_order_ms: float | None = None
+    refresh_wait_ms: float | None = None
+    refresh_elapsed_ms: float | None = None
+    order_metadata_cache_miss: bool = False
     pre_dispatch_stage: str | None = None
     pre_dispatch_error_code: str | None = None
     dispatch_authorized: bool = False
@@ -81,6 +89,20 @@ class OrderExecutionState:
     trade_ids_from_response: set[str] = field(default_factory=set)
     ambiguous: bool = False
     last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class KnownDustResidual:
+    token_id: str
+    shares: Decimal
+    market_id: str
+    window_id: str
+    classification: str
+    last_bid: Decimal | None = None
+    min_order_size: Decimal | None = None
+    sell_size_increment: Decimal | None = None
+    notional: Decimal | None = None
+    reason: str = "classified_dust"
 
 
 @dataclass
@@ -102,6 +124,7 @@ class ExecutionSessionState:
     reconciliation_complete: bool = False
     reconciliation_notes: tuple[str, ...] = ()
     open_venue_order_ids: tuple[str, ...] = ()
+    dust_residual: KnownDustResidual | None = None
     applied_event_ids: set[str] = field(default_factory=set)
     event_count: int = 0
     last_error: str | None = None
@@ -116,33 +139,55 @@ class ExecutionSessionState:
 
     @property
     def has_exposure(self) -> bool:
+        if self.phase is ExecutionPhase.COMPLETED_FLAT_WITH_DUST:
+            return False
         return self.confirmed_position_shares > 0
 
     @property
-    def confirmed_trade_net_shares(self) -> Decimal:
-        """Net position proven by confirmed, session-owned venue trades."""
+    def confirmed_buy_shares(self) -> Decimal:
         return sum(
             (
-                trade.shares if trade.side == "BUY" else -trade.shares
+                trade.shares
                 for trade in self.trades.values()
-                if trade.status is TradeStatus.CONFIRMED
+                if trade.status is TradeStatus.CONFIRMED and trade.side == "BUY"
             ),
             Decimal("0"),
         )
 
     @property
-    def has_confirmed_buy(self) -> bool:
-        return any(
-            trade.status is TradeStatus.CONFIRMED and trade.side == "BUY"
-            for trade in self.trades.values()
+    def confirmed_sell_shares(self) -> Decimal:
+        return sum(
+            (
+                trade.shares
+                for trade in self.trades.values()
+                if trade.status is TradeStatus.CONFIRMED and trade.side == "SELL"
+            ),
+            Decimal("0"),
         )
 
     @property
-    def has_confirmed_sell(self) -> bool:
-        return any(
-            trade.status is TradeStatus.CONFIRMED and trade.side == "SELL"
-            for trade in self.trades.values()
+    def exit_matched_hwm(self) -> Decimal:
+        return sum(
+            (
+                order.cumulative_matched_hwm
+                for order in self.orders.values()
+                if order.role is ExecutionRole.EXIT
+            ),
+            Decimal("0"),
         )
+
+    @property
+    def confirmed_trade_net_shares(self) -> Decimal:
+        """Net position proven by confirmed, session-owned venue trades."""
+        return self.confirmed_buy_shares - self.confirmed_sell_shares
+
+    @property
+    def has_confirmed_buy(self) -> bool:
+        return self.confirmed_buy_shares > 0
+
+    @property
+    def has_confirmed_sell(self) -> bool:
+        return self.confirmed_sell_shares > 0
 
     @property
     def entry_authoritatively_unfilled(self) -> bool:
@@ -151,7 +196,13 @@ class ExecutionSessionState:
             return False
         if entry.accepted is False:
             return True
-        return entry.accepted is True and str(entry.venue_status or "").lower() == "unmatched"
+        status = str(entry.venue_status or "").lower()
+        return entry.accepted is True and status in {
+            "unmatched",
+            "cancelled",
+            "canceled",
+            "expired",
+        }
 
     @property
     def entry_match_awaiting_confirmation(self) -> bool:
@@ -183,3 +234,23 @@ class ExecutionSessionState:
 
     def order_for_role(self, role: ExecutionRole) -> OrderExecutionState | None:
         return self.entry if role is ExecutionRole.ENTRY else self.exit
+
+    @property
+    def working_maker_entry(self) -> bool:
+        entry = self.entry
+        if entry is None or self.has_confirmed_buy:
+            return False
+        status = str(entry.venue_status or "").lower()
+        return bool(entry.accepted) and status in {"live", "open", "resting"}
+
+    @property
+    def resting_limit_venue_ids(self) -> tuple[str, ...]:
+        ids: list[str] = []
+        for order in self.orders.values():
+            status = str(order.venue_status or "").lower()
+            if order.venue_order_id and status in {"live", "open", "resting"}:
+                ids.append(order.venue_order_id)
+        for venue_id in self.open_venue_order_ids:
+            if venue_id not in ids:
+                ids.append(venue_id)
+        return tuple(ids)
