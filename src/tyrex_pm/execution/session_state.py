@@ -62,6 +62,7 @@ class TradeRecord:
     status: TradeStatus
     sources: set[str] = field(default_factory=set)
     position_applied: bool = False
+    attribution_digest: str | None = None
 
 
 @dataclass
@@ -136,6 +137,36 @@ class ExecutionSessionState:
     @property
     def terminal(self) -> bool:
         return self.phase in TERMINAL_PHASES
+
+    @property
+    def needs_venue_followup(self) -> bool:
+        return bool(
+            self.has_exposure
+            or self.working_maker_entry
+            or self.resting_limit_venue_ids
+            or self.has_unresolved_mutation_attempt
+            or self.entry_match_awaiting_confirmation
+            or (self.phase is ExecutionPhase.RECONCILING)
+        )
+
+    @property
+    def has_journal_uncertainty(self) -> bool:
+        return bool(
+            self.has_unresolved_mutation_attempt
+            or self.entry_match_awaiting_confirmation
+            or self.resting_limit_venue_ids
+        )
+
+    @property
+    def safe_to_open_entry(self) -> bool:
+        """Finished reporting is not the same as safe to start a new BUY."""
+        if self.phase is ExecutionPhase.MANUAL_INTERVENTION:
+            return False
+        if self.has_exposure or self.has_journal_uncertainty:
+            return False
+        if self.phase is ExecutionPhase.RECONCILING:
+            return False
+        return self.terminal
 
     @property
     def has_exposure(self) -> bool:

@@ -117,7 +117,9 @@ Market-data reporting owns only public-feed, book-health, clock, discovery, seal
 
 The unified `run_summary.json` derives mutation counts and order timelines exclusively from `execution_events`. Readiness transitions, strategy decisions, skipped evaluations, and runtime errors are appended to `run_events` in the same SQLite database. Reporting never feeds back into trading state.
 
-Normal and failed runs write `run_summary.json` atomically. If full projection fails, the outer runtime writes a primitive emergency report containing the fatal error and the journal-derived mutation count.
+Normal and failed runs write `run_summary.json` atomically. Identity (`reproducibility`) is captured before runtime/network creation. If full projection fails, the outer runtime writes a primitive emergency report containing the fatal error, the journal-derived mutation count, and the already-captured identity/hashes (not the full effective-config dump).
+
+Tick, intent consume, and the final BUY gate share the runtime `TimeAuthority.now_corrected_utc` callable. The BUY gate also applies a contract-driven `features_ready` check (z_gap EWMA); SELL and protective flatten do not.
 
 A run with no execution session includes `no_entry_diagnosis`. It is successful only when execution infrastructure was ready, at least one strategy decision had fully eligible inputs, and the strategy selected no economic entry. `NO_ENTRY_RUNTIME_BLOCKED` and `NO_ENTRY_STRATEGY_INPUT_BLOCKED` are explicit non-success outcomes. Every strategy decision retains a deterministic primary reason plus all simultaneous input blockers.
 

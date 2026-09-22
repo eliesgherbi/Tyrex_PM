@@ -45,6 +45,10 @@ python -m tyrex_pm.application.cli eval \
 python -m tyrex_pm.application.cli eval \
   --config config/runs/z_gap_tiny_live.yaml \
   --fixture tests/fixtures/lab/z_gap_trades.json
+
+python -m tyrex_pm.application.cli eval \
+  --config config/runs/z_gap_tiny_live.yaml \
+  --fixture tests/fixtures/lab/z_gap_entry_eligible.json
 ```
 
 Fixture schema and packs: [`tests/fixtures/lab/`](../../tests/fixtures/lab/README.md). Helper: `tyrex_pm.lab.evaluate_replay`.
@@ -61,7 +65,7 @@ Prove the door before any venue mutation. Lab success is **not** OMS proof (fill
 2. `eval --config … --fixture tests/fixtures/lab/<name>_….json` — same `evaluate()` as production; `--live` is rejected. How to add a pack: [extending.md](extending.md#lab-fixture-before-live).
 3. Only then `--live` with the $5 cap and a real `--out-dir`.
 
-Shipped fixtures: `ask70_books.json`, `feature_probe_l2.json`, `z_gap_trades.json`.
+Shipped fixtures: `ask70_books.json`, `feature_probe_l2.json`, `z_gap_trades.json`, plus the R4 packs `z_gap_entry_eligible.json`, `z_gap_no_entry_eligible.json`, `z_gap_inputs_invalid.json`, and `z_gap_exit_held.json` (`MARKET_RICH_EXIT` at τ=180 s, before the 90 s host flatten).
 
 ## Live command
 
@@ -103,6 +107,33 @@ Every live run writes `run_summary.json` under `--out-dir` (or `report_directory
 - `REPORTING_DEGRADED`: explanatory evidence could not be fully persisted or projected.
 - `RUNTIME_FAILURE`: the composition failed; `run_summary.json` still contains the fatal stage and mutation count.
 
-`run_summary.json` schema version 4 includes `run_evidence_summary`, `no_entry_diagnosis`, and `validation_scope`. For no-entry runs, inspect `furthest_stage`, `execution_infrastructure_ready_ever`, `entry_executable_ever`, `strategy_inputs_eligible_ever`, `strategy_input_blocker_counts`, and `last_readiness_blockers`. `NO_ENTRY_RUNTIME_BLOCKED` is reserved for infrastructure that never cleared; model/jump-guard/PTB lockouts with healthy account/stream/books are `NO_ENTRY_STRATEGY_INPUT_BLOCKED`. `COMPLETED_NO_ENTRY_SIGNAL` is reserved for a genuinely eligible economic evaluation. `validation_scope.execution_lifecycle_exercised=false` means the run provides no evidence about BUY, fills, or EXIT. The full ordered `run_evidence` list is persisted incrementally in SQLite and projected into the report.
+`run_summary.json` schema version 4 includes `run_evidence_summary`, `no_entry_diagnosis`, `validation_scope`, and `reproducibility`. For no-entry runs, inspect `furthest_stage`, `execution_infrastructure_ready_ever`, `entry_executable_ever`, `strategy_inputs_eligible_ever`, `strategy_input_blocker_counts`, and `last_readiness_blockers`. `NO_ENTRY_RUNTIME_BLOCKED` is reserved for infrastructure that never cleared; model/jump-guard/PTB lockouts with healthy account/stream/books are `NO_ENTRY_STRATEGY_INPUT_BLOCKED`. `COMPLETED_NO_ENTRY_SIGNAL` is reserved for a genuinely eligible economic evaluation. `validation_scope.execution_lifecycle_exercised=false` means the run provides no evidence about BUY, fills, or EXIT. The full ordered `run_evidence` list is persisted incrementally in SQLite and projected into the report.
+
+`reproducibility` is captured **before** runtime/network creation so a composition failure still writes identity. It includes package version, full `sys.version`, listed dependency versions (`polymarket-client`, `PyYAML`, `websockets`), git revision and dirty flag, source-config SHA-256, canonical effective config and its separate SHA-256, config path, permitted CLI flags (`live`, `out_dir`), run instance id, and recovery identifiers. It does not include secrets or environment values. Emergency reports keep those ids/hashes and omit the large `effective_config` dump.
+
+Fill language is not implied from an empty list:
+
+- `COMPLETED_NO_DISPATCH` is a confirmed no-mutation outcome. Venue reconciliation is not required to call it certain.
+- A process with `state is None` can still have `prior_session_risk=true` when an unsafe restored session blocked entry.
+- Pending or ambiguous BUY **or SELL** attempts make `observed_fills_complete` false.
+- `MANUAL_INTERVENTION` never presents empty fills as proven zero.
+- Unknown fees and unclassified residuals stay `null`.
+
+The CLI refuses to start if `--out-dir` (or the stamped default) already contains `run_summary.json`. That check runs before `TradingRuntime.create`.
 
 Never delete the configured SQLite state to make a blocker disappear. Inspect `run_summary.json`, account open orders, balances, and the journal first. Deleting state destroys the evidence required for safe recovery.
+
+## Prior-session recovery
+
+Account snapshots read balances for specified tokens and open orders for **one** specified market. They are not wallet-wide. A clear current-window snapshot does not prove an old retained market is flat.
+
+| Situation | Host action | Operator |
+|-----------|-------------|----------|
+| Same discovered market + token, confirmed exposure | `resume_flatten` | Next `--live` same `state_directory`. Recovery may POST a SELL. Journal stays MANUAL until scoped evidence is flat. |
+| Same market, live owned order, position 0 | `resume_cancel_then_prove` | Expect cancel, then no-fill proof or flatten of a late fill. |
+| Same market, ambiguous POST or MANUAL leftover | `block_manual` | No new BUY. Resolve on the venue UI against journal attempt ids. |
+| Different market/window than the active bind | `block_foreign` | Do not flatten or cancel the foreign token from this process. Do not select that old window — CLI cannot bind it. Inspect journal + venue UI for that condition_id. |
+| Scoped old-market snapshot fresh, complete, zero position, no open orders, no journal uncertainty | `foreign_inventory_absent` | New entry on the **current** window may proceed. The MANUAL sqlite row remains for audit. |
+| Old market exposed/stale/unavailable, or journal still uncertain, even if the current window is clear | stay blocked | Missing or wrong-market evidence is not clearance. |
+
+`--continue` is not a first-release operator step. Discovery is current + next 5m only.

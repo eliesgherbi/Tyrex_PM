@@ -44,7 +44,15 @@ Protection arms after confirmed exposure using the run-config `protection:` bloc
 
 ## Recovery
 
-On startup, SQLite sessions are replayed. A fully reconstructable session for the active market is reconciled and, if exposed, receives a protective flatten intent. Foreign or ambiguous unresolved sessions block new entry and require operator review.
+On startup, SQLite sessions are replayed. `terminal` (including `MANUAL_INTERVENTION`) is not the same as `safe_to_open_entry`. Restore keeps every session that is not safe to open: MANUAL, confirmed exposure, live owned ids, match-awaiting-confirmation, or an unresolved mutation.
+
+Same-market unsafe sessions are cancelled (session-owned ids only) and, when confirmed exposure remains, flattened through the existing lifecycle/coordinator/reducer path. That recovery EXIT is allowed only while the session is MANUAL and `confirmed_position_shares > 0`. It never posts a BUY. The original `ManualInterventionRequired` row stays in the append-only journal; recovery events do not rewrite MANUAL to `COMPLETED_FLAT`. New trading stays blocked until a **scoped** observation of that session’s own market and token proves no material position, open order, or unresolved mutation.
+
+A clear snapshot of the newly discovered window does not clear a retained old market. Foreign leftover is inspect-and-block (`block_foreign`); this process does not POST or cancel on the foreign token and cannot bind an old 5m slug.
+
+## Shutdown drain
+
+`run_market_data_runtime` `finally` calls `TradingRuntime._shutdown_execution` **once** (`_cleanup_lock`) **before** clock, public feeds, `feed_supervisor`, account authority, coordinator, or gateway close. Drain waits for an in-flight `submit()` (`_mutation_lock`), cancels session-owned live ids, reconciles, and flattens confirmed inventory. Stop during prepare closes the final BUY gate (`STOP_REQUESTED`) so POST does not start. Stop during POST waits for that mutation’s outcome or ambiguity and does not start another BUY. Incomplete recovery becomes `MANUAL_INTERVENTION` before resources close.
 
 ## Time and run boundary
 

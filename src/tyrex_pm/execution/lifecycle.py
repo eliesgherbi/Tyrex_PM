@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from tyrex_pm.core.intents import CancelIntent, EnterIntent, ExitIntent, FlattenIntent
-from tyrex_pm.execution.orders import LimitOrderSpec
 from tyrex_pm.execution.coordinator import (
     AccountExecutionCoordinator,
     CancelUnsupported,
@@ -29,6 +28,7 @@ from tyrex_pm.execution.exit_sizing import (
     should_wait_before_exit_post,
     venue_legal_sell_shares,
 )
+from tyrex_pm.execution.orders import LimitOrderSpec
 from tyrex_pm.execution.planner import IntentOrderPlanner
 from tyrex_pm.execution.reconciliation import SessionReconciler
 from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
@@ -134,8 +134,8 @@ class ExecutionLifecycle:
         state = self.state
         if state is None:
             return
-        if not state.terminal:
-            raise RuntimeError("cannot release a non-terminal execution session")
+        if not state.safe_to_open_entry:
+            raise RuntimeError("cannot release a session that is not safe to open entry")
         self.session_id = None
         self._changed.clear()
 
@@ -164,6 +164,9 @@ class ExecutionLifecycle:
     ) -> ExecutionSessionState:
         if self.session_id is None:
             raise RuntimeError("execution lifecycle is not open")
+        current = self.coordinator.state(self.session_id)
+        if current.phase is ExecutionPhase.MANUAL_INTERVENTION:
+            raise RuntimeError("recovery cannot request a BUY")
         spec = self.planner.entry(
             intent,
             token_id=token_id,
@@ -234,8 +237,7 @@ class ExecutionLifecycle:
         await self._cancel_open_orders(reason=intent.reason_code)
         await self.reconciler.reconcile(self.coordinator, self.session_id)
         state = self.coordinator.state(self.session_id)
-        if state.phase is ExecutionPhase.MANUAL_INTERVENTION:
-            return state
+        recovery = state.phase is ExecutionPhase.MANUAL_INTERVENTION
         if state.confirmed_position_shares <= 0:
             return state
         await self.coordinator.apply(
@@ -257,9 +259,11 @@ class ExecutionLifecycle:
             if state.phase in {
                 ExecutionPhase.COMPLETED_FLAT,
                 ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
-                ExecutionPhase.MANUAL_INTERVENTION,
             }:
                 return state
+            if state.phase is ExecutionPhase.MANUAL_INTERVENTION:
+                if not recovery or state.confirmed_position_shares <= 0:
+                    return state
             if should_wait_before_exit_post(state):
                 await asyncio.sleep(self.policy.reconciliation_interval_s)
                 continue
@@ -277,6 +281,7 @@ class ExecutionLifecycle:
                         session_id=self.session_id,
                         role=ExecutionRole.EXIT,
                         spec=spec,
+                        recovery=recovery,
                     )
                 except DispatchBlocked:
                     if not protective:
@@ -445,6 +450,86 @@ class ExecutionLifecycle:
             )
         )
         return self.coordinator.state(self.session_id)
+
+    def fill_context(self) -> tuple[set[str], str | None, dict[str, str]]:
+        state = self.state
+        if state is None:
+            return set(), None, {}
+        owned: set[str] = set()
+        sides: dict[str, str] = {}
+        for order in state.orders.values():
+            if order.venue_order_id:
+                owned.add(order.venue_order_id)
+                sides[order.venue_order_id] = order.spec.side.value
+        token_id = None if state.identity is None else state.identity.token_id
+        return owned, token_id, sides
+
+    async def drain_open_session(
+        self,
+        reason: str,
+        *,
+        min_order_size: Decimal | None = None,
+        last_bid: Decimal | None = None,
+    ) -> ExecutionSessionState | None:
+        """Cancel, prove, and flatten while gateway/books are still available."""
+        if self.session_id is None:
+            return None
+        state = self.coordinator.state(self.session_id)
+        if state.safe_to_open_entry and not state.needs_venue_followup:
+            return state
+        await self._cancel_open_orders(reason=reason)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.policy.evidence_timeout_s
+        while loop.time() < deadline:
+            await self.reconciler.reconcile(self.coordinator, self.session_id)
+            state = self.coordinator.state(self.session_id)
+            if state.phase in {
+                ExecutionPhase.COMPLETED_NO_FILL,
+                ExecutionPhase.COMPLETED_FLAT,
+                ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
+                ExecutionPhase.COMPLETED_NO_DISPATCH,
+            }:
+                return state
+            if (
+                state.phase is ExecutionPhase.MANUAL_INTERVENTION
+                and not state.has_exposure
+                and not state.working_maker_entry
+                and not state.resting_limit_venue_ids
+                and not state.has_unresolved_mutation_attempt
+            ):
+                return state
+            if state.has_exposure:
+                from datetime import datetime, timezone
+
+                from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, StrategyId
+                from tyrex_pm.core.intents import FlattenIntent, new_intent_id
+
+                identity = state.identity
+                if identity is None:
+                    break
+                await self.submit_exit(
+                    FlattenIntent(
+                        intent_id=new_intent_id(),
+                        strategy_id=StrategyId(identity.strategy_id),
+                        instrument_id=InstrumentId(identity.token_id),
+                        market_id=MarketId(identity.market_id),
+                        created_at=datetime.now(timezone.utc),
+                        correlation_id=CorrelationId("drain"),
+                        causation_id=None,
+                        reason_code=reason,
+                    ),
+                    token_id=identity.token_id,
+                    protective=True,
+                    min_order_size=min_order_size,
+                    last_bid=last_bid,
+                )
+                # MANUAL remains terminal after recovery events. Keep looping
+                # while exposure, live orders, or unresolved mutations remain.
+            await asyncio.sleep(self.policy.reconciliation_interval_s)
+        state = self.coordinator.state(self.session_id)
+        if not state.safe_to_open_entry:
+            return await self.mark_manual(f"drain_incomplete:{reason}")
+        return state
 
     async def reconcile(self) -> ExecutionSessionState | None:
         if self.session_id is None:

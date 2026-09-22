@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -156,3 +157,83 @@ def test_z_gap_driver_maps_bundle_ewma_snapshot() -> None:
     empty = driver._volatility(FeatureBundle())
     assert empty.ready is False
     assert empty.sigma is None
+
+
+def test_v5_reconnect_invalidates_ewma() -> None:
+    spec = _ewma_spec(min_samples_s="1.0")
+    graph = IndicatorGraph((spec,))
+    start = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+    for i in range(5):
+        graph.on_trade(
+            source=F.BINANCE_SPOT_TRADES,
+            price=Decimal("100") + Decimal(i),
+            ts_event=start + timedelta(seconds=i),
+            generation=1,
+        )
+    graph.invalidate_source(F.BINANCE_SPOT_TRADES)
+    snap = graph.snapshot().get(spec.instance_id)
+    assert isinstance(snap, VolatilitySnapshot)
+    assert snap.ready is False
+    assert snap.reject_reason == "source_invalidated"
+    graph.on_trade(
+        source=F.BINANCE_SPOT_TRADES,
+        price=Decimal("110"),
+        ts_event=start + timedelta(seconds=10),
+        generation=1,
+    )
+    snap = graph.snapshot().get(spec.instance_id)
+    assert isinstance(snap, VolatilitySnapshot)
+    assert snap.ready is False
+
+
+def test_v6_v7_new_generation_warmup_and_old_generation_rejected() -> None:
+    spec = _ewma_spec(min_samples_s="1.0")
+    graph = IndicatorGraph((spec,))
+    start = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+    for i in range(5):
+        graph.on_trade(
+            source=F.BINANCE_SPOT_TRADES,
+            price=Decimal("100") + Decimal(i),
+            ts_event=start + timedelta(seconds=i),
+            generation=1,
+        )
+    graph.invalidate_source(F.BINANCE_SPOT_TRADES)
+    graph.on_trade(
+        source=F.BINANCE_SPOT_TRADES,
+        price=Decimal("110"),
+        ts_event=start + timedelta(seconds=20),
+        generation=1,
+    )
+    snap = graph.snapshot().get(spec.instance_id)
+    assert isinstance(snap, VolatilitySnapshot)
+    assert snap.ready is False
+    for i in range(5):
+        graph.on_trade(
+            source=F.BINANCE_SPOT_TRADES,
+            price=Decimal("111") + Decimal(i),
+            ts_event=start + timedelta(seconds=30 + i),
+            generation=2,
+        )
+    snap = graph.snapshot().get(spec.instance_id)
+    assert isinstance(snap, VolatilitySnapshot)
+    assert snap.ready is True
+
+
+def test_graph_uses_configured_trade_age() -> None:
+    spec = _ewma_spec(min_samples_s="1.0")
+    graph = IndicatorGraph((spec,), max_trade_age_ms=50)
+    start = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+    for i in range(5):
+        graph.on_trade(
+            source=F.BINANCE_SPOT_TRADES,
+            price=Decimal("100") + Decimal(i),
+            ts_event=start + timedelta(seconds=i),
+        )
+    warmed = graph.snapshot().get(spec.instance_id)
+    assert isinstance(warmed, VolatilitySnapshot)
+    assert warmed.ready is True
+    graph._last_trade_mono_ns[F.BINANCE_SPOT_TRADES] = time.monotonic_ns() - 80_000_000
+    snap = graph.snapshot().get(spec.instance_id)
+    assert isinstance(snap, VolatilitySnapshot)
+    assert snap.ready is False
+    assert snap.reject_reason == "stale_tape"

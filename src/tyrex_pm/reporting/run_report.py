@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from tyrex_pm.execution.evidence import TradeStatus
 from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
 from tyrex_pm.persistence.run_evidence_journal import RunEvidenceRecord
 
@@ -140,7 +141,7 @@ def _outcome(
             return "COMPLETED_NO_ENTRY_SIGNAL", True
         return "NO_ENTRY_RUNTIME_BLOCKED", False  # defensive unreachable fallback
     if state.phase is ExecutionPhase.COMPLETED_NO_DISPATCH:
-        return "ENTRY_PRE_DISPATCH_FAILED", False
+        return "COMPLETED_NO_DISPATCH", True
     if state.phase is ExecutionPhase.COMPLETED_NO_FILL:
         return "COMPLETED_NO_FILL", True
     if state.phase is ExecutionPhase.COMPLETED_FLAT:
@@ -276,6 +277,95 @@ class RunReportInput:
     runtime_errors: Sequence[str]
     fatal_error: Mapping[str, Any] | None = None
     reporting_failures: Sequence[str] = ()
+    prior_session_risk: bool | None = None
+    reproducibility: Mapping[str, Any] | None = None
+    projection_failed: bool = False
+
+
+def _fill_completeness(
+    state: ExecutionSessionState | None,
+    *,
+    prior_session_risk: bool | None = None,
+    projection_failed: bool = False,
+) -> dict[str, Any]:
+    if projection_failed:
+        return {
+            "observed_fills": None,
+            "observed_fills_complete": False,
+            "reconciliation_complete": None,
+            "prior_session_risk": prior_session_risk,
+            "fees": None,
+            "residual_shares": None,
+            "open_venue_order_ids": None,
+        }
+    if state is None:
+        risk = bool(prior_session_risk)
+        return {
+            "observed_fills": [],
+            "observed_fills_complete": not risk,
+            "reconciliation_complete": None,
+            "prior_session_risk": risk,
+            "fees": None,
+            "residual_shares": None,
+            "open_venue_order_ids": None,
+        }
+    fills = [
+        {
+            "venue_trade_id": trade.venue_trade_id,
+            "side": trade.side,
+            "shares": str(trade.shares),
+            "price": str(trade.price),
+        }
+        for trade in state.trades.values()
+        if trade.status is TradeStatus.CONFIRMED
+    ]
+    pending_or_ambiguous = bool(
+        state.has_journal_uncertainty
+        or state.has_unresolved_mutation_attempt
+        or state.entry_match_awaiting_confirmation
+        or state.working_maker_entry
+        or state.resting_limit_venue_ids
+        or any(trade.status is not TradeStatus.CONFIRMED for trade in state.trades.values())
+    )
+    if state.phase is ExecutionPhase.MANUAL_INTERVENTION:
+        complete = False
+        recon: bool | None = False
+        residual = None
+    elif state.phase is ExecutionPhase.COMPLETED_NO_DISPATCH:
+        complete = not pending_or_ambiguous
+        recon = True
+        residual = None
+    else:
+        complete = (
+            state.phase
+            in {
+                ExecutionPhase.COMPLETED_NO_FILL,
+                ExecutionPhase.COMPLETED_FLAT,
+                ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
+            }
+            and state.reconciliation_complete
+            and not pending_or_ambiguous
+        )
+        recon = state.reconciliation_complete
+        residual = (
+            None
+            if state.dust_residual is None
+            else str(state.dust_residual.shares)
+        )
+        if state.has_exposure and state.phase is not ExecutionPhase.COMPLETED_FLAT_WITH_DUST:
+            residual = str(state.confirmed_position_shares)
+    risk = True if prior_session_risk is None else bool(prior_session_risk)
+    if prior_session_risk is None:
+        risk = not state.safe_to_open_entry
+    return {
+        "observed_fills": fills,
+        "observed_fills_complete": complete,
+        "reconciliation_complete": recon,
+        "prior_session_risk": risk,
+        "fees": None,
+        "residual_shares": residual,
+        "open_venue_order_ids": list(state.open_venue_order_ids),
+    }
 
 
 def build_run_report(source: RunReportInput) -> dict[str, Any]:
@@ -329,6 +419,12 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         "run_evidence": [record.to_dict() for record in records],
         "runtime_errors": list(source.runtime_errors),
         "fatal_error": None if source.fatal_error is None else dict(source.fatal_error),
+        "summary": _fill_completeness(
+            source.state,
+            prior_session_risk=source.prior_session_risk,
+            projection_failed=source.projection_failed,
+        ),
+        "reproducibility": None if source.reproducibility is None else dict(source.reproducibility),
         "reporting": {
             "degraded": bool(source.reporting_failures),
             "failures": list(source.reporting_failures),
@@ -390,8 +486,12 @@ def write_emergency_report(
     mutation_attempts: int | None,
     fatal_error: Mapping[str, Any] | None,
     reporting_error: BaseException,
+    reproducibility: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a primitive-only report if normal projection or serialization fails."""
+    repro = None if reproducibility is None else dict(reproducibility)
+    if repro is not None:
+        repro.pop("effective_config", None)
     payload = {
         "schema_version": 4,
         "generated_at": _utc_now_text(),
@@ -403,6 +503,7 @@ def write_emergency_report(
         "mutation_attempts": None if mutation_attempts is None else int(mutation_attempts),
         "execution": None,
         "fatal_error": None if fatal_error is None else dict(fatal_error),
+        "reproducibility": repro,
         "reporting": {
             "degraded": True,
             "emergency": True,

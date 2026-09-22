@@ -64,7 +64,10 @@ class PreparedOrder:
 def _prepare_timing_kwargs(source: Any) -> dict[str, Any]:
     if source is None:
         return {}
-    getter = source.get if isinstance(source, dict) else lambda key, default=None: getattr(source, key, default)
+    def getter(key: str, default: Any = None) -> Any:
+        if isinstance(source, dict):
+            return source.get(key, default)
+        return getattr(source, key, default)
     return {
         "prepare_queue_wait_ms": getter("prepare_queue_wait_ms"),
         "tick_resolve_ms": getter("tick_resolve_ms"),
@@ -115,6 +118,7 @@ class AccountExecutionCoordinator:
     ] = field(default_factory=asyncio.Queue, init=False)
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
+    _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def start(self) -> None:
         if self._writer_task is None:
@@ -169,8 +173,24 @@ class AccountExecutionCoordinator:
         session_id: str,
         role: ExecutionRole,
         spec: OrderSpec,
+        recovery: bool = False,
     ) -> GatewaySubmissionResult:
         """Prepare/sign, revalidate, durably authorize, then POST."""
+        if recovery and role is ExecutionRole.ENTRY:
+            raise DispatchBlocked("recovery cannot request a BUY")
+        async with self._mutation_lock:
+            return await self._submit_locked(
+                session_id=session_id, role=role, spec=spec, recovery=recovery
+            )
+
+    async def _submit_locked(
+        self,
+        *,
+        session_id: str,
+        role: ExecutionRole,
+        spec: OrderSpec,
+        recovery: bool = False,
+    ) -> GatewaySubmissionResult:
         await self.apply(
             OrderRequested(
                 **new_envelope(
@@ -179,6 +199,7 @@ class AccountExecutionCoordinator:
                 ),
                 role=role,
                 order=spec,
+                recovery=recovery,
             )
         )
         prepare_error: BaseException | None = None
@@ -352,6 +373,22 @@ class AccountExecutionCoordinator:
         token_id: str | None = None,
     ) -> CancelResult:
         """Cancel session-owned live orders. Does not increment mutation_attempts."""
+        async with self._mutation_lock:
+            return await self._cancel_locked(
+                session_id=session_id,
+                venue_order_ids=venue_order_ids,
+                reason=reason,
+                token_id=token_id,
+            )
+
+    async def _cancel_locked(
+        self,
+        *,
+        session_id: str,
+        venue_order_ids: Sequence[str],
+        reason: str,
+        token_id: str | None = None,
+    ) -> CancelResult:
         ids = tuple(str(item) for item in venue_order_ids if str(item).strip())
         if not ids:
             return CancelResult(canceled=(), not_canceled=())

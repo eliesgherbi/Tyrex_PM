@@ -1,0 +1,253 @@
+{
+  "schema": "lab_evaluate_v1",
+  "target_notional": "5",
+  "window": {
+    "market_id": "lab-zgap",
+    "condition_id": "lab-zgap-condition",
+    "question": "z_gap lab",
+    "window_id": "lab-zgap",
+    "event_start": "2026-09-20T12:00:00+00:00",
+    "event_end": "2026-09-20T12:05:00+00:00"
+  },
+  "ptb": {
+    "market_id": "lab-zgap",
+    "window_id": "lab-zgap",
+    "event_start": "2026-09-20T12:00:00+00:00",
+    "event_end": "2026-09-20T12:05:00+00:00",
+    "k": "64000",
+    "receive_ts": "2026-09-20T12:00:00+00:00"
+  },
+  "steps": [
+    {
+      "ts": "2026-09-20T12:00:00+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64008"
+      },
+      "reference_price": "64008"
+    },
+    {
+      "ts": "2026-09-20T12:00:01+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64016"
+      },
+      "reference_price": "64016"
+    },
+    {
+      "ts": "2026-09-20T12:00:02+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64024"
+      },
+      "reference_price": "64024"
+    },
+    {
+      "ts": "2026-09-20T12:00:03+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64032"
+      },
+      "reference_price": "64032"
+    },
+    {
+      "ts": "2026-09-20T12:00:04+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64040"
+      },
+      "reference_price": "64040"
+    },
+    {
+      "ts": "2026-09-20T12:00:05+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64048"
+      },
+      "reference_price": "64048"
+    },
+    {
+      "ts": "2026-09-20T12:00:06+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64056"
+      },
+      "reference_price": "64056"
+    },
+    {
+      "ts": "2026-09-20T12:00:07+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64064"
+      },
+      "reference_price": "64064"
+    },
+    {
+      "ts": "2026-09-20T12:00:08+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64072"
+      },
+      "reference_price": "64072"
+    },
+    {
+      "ts": "2026-09-20T12:00:09+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64080"
+      },
+      "reference_price": "64080"
+    },
+    {
+      "ts": "2026-09-20T12:00:10+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64088"
+      },
+      "reference_price": "64088"
+    },
+    {
+      "ts": "2026-09-20T12:00:11+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64096"
+      },
+      "reference_price": "64096"
+    },
+    {
+      "ts": "2026-09-20T12:00:12+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64104"
+      },
+      "reference_price": "64104"
+    },
+    {
+      "ts": "2026-09-20T12:00:13+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64112"
+      },
+      "reference_price": "64112"
+    },
+    {
+      "ts": "2026-09-20T12:00:14+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64120"
+      },
+      "reference_price": "64120"
+    },
+    {
+      "ts": "2026-09-20T12:00:15+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64128"
+      },
+      "reference_price": "64128"
+    },
+    {
+      "ts": "2026-09-20T12:00:16+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64136"
+      },
+      "reference_price": "64136"
+    },
+    {
+      "ts": "2026-09-20T12:00:17+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64144"
+      },
+      "reference_price": "64144"
+    },
+    {
+      "ts": "2026-09-20T12:00:18+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64152"
+      },
+      "reference_price": "64152"
+    },
+    {
+      "ts": "2026-09-20T12:00:19+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64160"
+      },
+      "reference_price": "64160"
+    },
+    {
+      "ts": "2026-09-20T12:00:20+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64168"
+      },
+      "reference_price": "64168"
+    },
+    {
+      "ts": "2026-09-20T12:00:21+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64176"
+      },
+      "reference_price": "64176"
+    },
+    {
+      "ts": "2026-09-20T12:00:22+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64184"
+      },
+      "reference_price": "64184"
+    },
+    {
+      "ts": "2026-09-20T12:00:23+00:00",
+      "evaluate": false,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64192"
+      },
+      "reference_price": "64192"
+    },
+    {
+      "ts": "2026-09-20T12:00:24+00:00",
+      "evaluate": true,
+      "trade": {
+        "source": "binance.spot.trades",
+        "price": "64200"
+      },
+      "reference_price": "64200",
+      "books": {
+        "up_ask": "0.20",
+        "down_ask": "0.80",
+        "up_bid": "0.18000000000000002",
+        "down_bid": "0.78"
+      }
+    }
+  ]
+}

@@ -198,6 +198,7 @@ class MarketSessionRuntime:
         time_authority: TimeAuthority | None = None,
         require_ssr_price_match: bool = True,
         target_notional: Decimal | None = None,
+        maximum_trade_age_ms: float | None = None,
     ) -> "MarketSessionRuntime":
         clock = clock or FakeClock(_wall=datetime(2026, 7, 20, 21, 15, 0, tzinfo=timezone.utc))
         if time_authority is not None:
@@ -239,7 +240,12 @@ class MarketSessionRuntime:
             input_contract=plugin.input_contract,
             strategy_kind=strategy_kind,
             require_ssr_price_match=require_ssr_price_match,
-            indicator_graph=IndicatorGraph(plugin_indicator_specs(plugin, cfg)),
+            indicator_graph=IndicatorGraph(
+                plugin_indicator_specs(plugin, cfg),
+                max_trade_age_ms=(
+                    2000.0 if maximum_trade_age_ms is None else float(maximum_trade_age_ms)
+                ),
+            ),
         )
 
     def open_session(
@@ -307,10 +313,12 @@ class MarketSessionRuntime:
     def ingest_binance(self, tick: PriceTickView) -> DynamicAlignedReference:
         self.ptb_engine.ingest_binance(tick)
         self._latest_binance = tick
+        generation = None if tick.ingress is None else tick.ingress.connection_generation
         self.indicator_graph.on_trade(
             source=F.BINANCE_SPOT_TRADES,
             price=tick.value,
             ts_event=tick.source_ts,
+            generation=generation,
         )
         return evaluate_dynamic_alignment(
             current_binance=tick.value,

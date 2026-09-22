@@ -24,6 +24,7 @@ from tyrex_pm.core.intents import (
     LiquidityRole,
     new_intent_id,
 )
+from tyrex_pm.core.time_authority import SnapshotTimeAuthority, TimeAuthority
 from tyrex_pm.execution.account_state import (
     AccountSnapshotStatus,
     AccountStateAuthority,
@@ -85,6 +86,7 @@ from tyrex_pm.runtime.market_data_runtime import MarketDataSummary, run_market_d
 from tyrex_pm.runtime.market_runtime import MarketSessionRuntime, ZGapMarketRuntime
 from tyrex_pm.runtime.run_config import (
     TradingRunConfig,
+    effective_entry_cutoff_s,
     entry_tau_bounds,
     max_clock_uncertainty_ms,
 )
@@ -200,6 +202,13 @@ class TradingRuntime:
     _order_metadata_warm_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     _intent_dispatcher_task: asyncio.Task[None] | None = None
     _intent_dispatcher_stop: asyncio.Event = field(default_factory=asyncio.Event)
+    _cleanup_done: bool = False
+    _cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    time_authority: TimeAuthority | None = None
+    indicator_graph: Any | None = None
+    _required_feature_specs: tuple[Any, ...] = ()
+    prior_session_risk: bool = False
+    reproducibility: dict[str, Any] | None = None
 
     @classmethod
     async def create(
@@ -275,6 +284,35 @@ class TradingRuntime:
         active_gateway.tick_size_resolver = tick_size
         active_gateway.tick_size_fetcher = fetch_tick_size
 
+        time_authority = SnapshotTimeAuthority(
+            clock=SystemClock(),
+            max_uncertainty_ms=max_clock_uncertainty_ms(config),
+        )
+        from tyrex_pm.strategies.registry import get_strategy_plugin, plugin_indicator_specs
+
+        plugin = get_strategy_plugin(config.strategy_kind)
+        required_features = tuple(
+            spec
+            for spec in plugin_indicator_specs(plugin, config.strategy)
+            if spec.name == "ewma_vol"
+        )
+
+        def features_ready() -> bool | str:
+            runtime = holder["runtime"]
+            if runtime is None:
+                return "FEATURE_NOT_READY"
+            if not runtime._required_feature_specs:
+                return True
+            graph = runtime.indicator_graph
+            if graph is None:
+                return "EWMA_NOT_READY"
+            bundle = graph.snapshot()
+            for spec in runtime._required_feature_specs:
+                snap = bundle.get(spec.instance_id)
+                if snap is None or not bool(getattr(snap, "ready", False)):
+                    return "EWMA_NOT_READY"
+            return True
+
         final_gate = FinalExecutionGate(
             capture_book=capture_book,
             capabilities=capabilities,
@@ -284,6 +322,7 @@ class TradingRuntime:
                 max_candidate_age_ms=config.market.maximum_candidate_age_ms,
             ),
         )
+        final_gate.features_ready = features_ready
         journal_path = config.state_directory / "execution.sqlite3"
         active_run_instance_id = run_instance_id or str(uuid4())
         journal = SqliteExecutionJournal(journal_path)
@@ -299,7 +338,7 @@ class TradingRuntime:
         restored_sessions: list[ExecutionSessionState] = []
         for session_id in journal.sessions():
             restored = await coordinator.restore(session_id)
-            if not restored.terminal:
+            if not restored.safe_to_open_entry:
                 restored_sessions.append(restored)
         lifecycle = ExecutionLifecycle(
             coordinator=coordinator,
@@ -344,9 +383,17 @@ class TradingRuntime:
             run_instance_id=active_run_instance_id,
             run_recorder=run_recorder,
             restored_sessions=restored_sessions,
+            time_authority=time_authority,
+            _required_feature_specs=required_features,
+            prior_session_risk=any(
+                not restored.safe_to_open_entry for restored in restored_sessions
+            ),
         )
         holder["runtime"] = result
         active_gateway.client_guard = result.account_state_authority
+        active_gateway.fill_context = result.lifecycle.fill_context
+        final_gate.entry_cutoff_s = effective_entry_cutoff_s(config)
+        final_gate.entry_tau_s = result._current_entry_tau_s
         active_gateway.prepare_budget_ms = config.lifecycle.prepare_budget_ms
         active_gateway.refresh_wait_budget_ms = config.lifecycle.refresh_wait_budget_ms
         active_gateway.evidence_sink = run_recorder.record
@@ -499,7 +546,107 @@ class TradingRuntime:
 
     def can_promote(self) -> bool:
         state = self.lifecycle.state
-        return state is None or state.terminal
+        return state is None or state.safe_to_open_entry
+
+    def _current_entry_tau_s(self) -> float | None:
+        if self.active_market is None or self.active_market.market.event_end is None:
+            return None
+        if self.time_authority is None:
+            return None
+        now = self.time_authority.now_corrected_utc()
+        return (self.active_market.market.event_end - now).total_seconds()
+
+    async def _inspect_retained_session(
+        self,
+        restored: ExecutionSessionState,
+        *,
+        bound_market_id: str,
+    ) -> str:
+        identity = restored.identity
+        payload = {
+            "session_id": restored.session_id,
+            "phase": restored.phase.value,
+            "confirmed_position_shares": str(restored.confirmed_position_shares),
+            "open_venue_order_ids": list(restored.resting_limit_venue_ids),
+            "mutation_ambiguous": restored.has_unresolved_mutation_attempt,
+            "match_awaiting": restored.entry_match_awaiting_confirmation,
+        }
+        if identity is None:
+            payload["host_action"] = "missing_identity"
+            self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+            return "missing_identity"
+        payload.update(
+            {
+                "market_id": identity.market_id,
+                "window_id": identity.window_id,
+                "token_id": identity.token_id,
+            }
+        )
+        same_market = identity.market_id == bound_market_id
+        if same_market:
+            host_action = "resume_flatten" if restored.has_exposure else (
+                "resume_cancel_then_prove"
+                if restored.working_maker_entry or restored.resting_limit_venue_ids
+                else "block_manual"
+            )
+            payload["host_action"] = host_action
+            self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+            return host_action
+        if restored.has_journal_uncertainty:
+            payload["host_action"] = "block_foreign"
+            payload["block_reason"] = "journal_uncertainty"
+            self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+            return "block_foreign"
+        snapshot = await self.account_state_authority.observe(
+            market_id=identity.market_id,
+            token_ids=(identity.token_id,),
+            required_collateral=self.config.risk.maximum_total_debit,
+        )
+        payload["scoped_snapshot_status"] = snapshot.status.value
+        payload["scoped_snapshot_market_id"] = snapshot.market_id
+        payload["scoped_blockers"] = list(snapshot.blockers)
+        if (
+            snapshot.status
+            in {AccountSnapshotStatus.UNAVAILABLE, AccountSnapshotStatus.STALE}
+            or snapshot.market_id != identity.market_id
+            or identity.token_id not in snapshot.token_ids
+            or not snapshot.read_complete
+        ):
+            payload["host_action"] = "block_foreign"
+            payload["block_reason"] = "snapshot_incomplete"
+            self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+            return "block_foreign"
+        leftover = []
+        for blocker in snapshot.blockers:
+            if blocker.startswith("PRIOR_OPEN_ORDER"):
+                leftover.append(blocker)
+            elif blocker.startswith("PRIOR_POSITION") and not is_exempt_prior_position_blocker(
+                blocker, self.known_dust_residuals
+            ):
+                leftover.append(blocker)
+        if leftover:
+            payload["host_action"] = "block_foreign"
+            payload["block_reason"] = "scoped_leftover"
+            self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+            return "block_foreign"
+        payload["host_action"] = "foreign_inventory_absent"
+        self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+        return "foreign_inventory_absent"
+
+    async def _shutdown_execution(self, reason: str) -> None:
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
+            self._cleanup_done = True
+            self.stop_requested = True
+            self.capabilities.entry_window_open = False
+            self.capabilities.set_blocker("STOP_REQUESTED", reason)
+            await self._stop_intent_dispatcher(cancel_inflight=False)
+            await self.lifecycle.drain_open_session(
+                reason,
+                min_order_size=self._held_min_order_size(),
+                last_bid=self._held_best_bid(self.active_market),
+            )
 
     def _market_data_ready(self) -> bool:
         feed = None if self.feed_supervisor is None else self.feed_supervisor.active
@@ -625,7 +772,7 @@ class TradingRuntime:
         if session is None or session is self.active_market:
             return
         state = self.lifecycle.state
-        if state is not None and not state.terminal:
+        if state is not None and not state.safe_to_open_entry:
             return
         if state is not None:
             self.lifecycle.release_terminal()
@@ -664,17 +811,28 @@ class TradingRuntime:
         foreign_restored = [
             restored for restored in self.restored_sessions if restored not in matching_restored
         ]
-        if foreign_restored:
+        blocking_foreign: list[ExecutionSessionState] = []
+        for restored in foreign_restored:
+            host_action = await self._inspect_retained_session(restored, bound_market_id=market_id)
+            if host_action != "foreign_inventory_absent":
+                blocking_foreign.append(restored)
+        if blocking_foreign:
+            self.prior_session_risk = True
             self.capabilities.set_blocker(
                 "UNRESOLVED_PRIOR_MARKET_SESSION",
-                ",".join(str(restored.session_id) for restored in foreign_restored),
+                ",".join(str(restored.session_id) for restored in blocking_foreign),
             )
         else:
             self.capabilities.clear_blocker("UNRESOLVED_PRIOR_MARKET_SESSION")
+        for restored in matching_restored:
+            await self._inspect_retained_session(restored, bound_market_id=market_id)
         if len(matching_restored) > 1:
+            self.prior_session_risk = True
             self.capabilities.set_blocker("MULTIPLE_RESTORED_SESSIONS")
         else:
             self.capabilities.clear_blocker("MULTIPLE_RESTORED_SESSIONS")
+        if matching_restored:
+            self.prior_session_risk = True
         restored = matching_restored[0] if len(matching_restored) == 1 else None
         self.stream_session_id = (
             str(restored.session_id)
@@ -860,14 +1018,15 @@ class TradingRuntime:
             name="intent-dispatcher",
         )
 
-    async def _stop_intent_dispatcher(self) -> None:
+    async def _stop_intent_dispatcher(self, *, cancel_inflight: bool = True) -> None:
         self._intent_dispatcher_stop.set()
         self.intent_wake.set()
         task = self._intent_dispatcher_task
         self._intent_dispatcher_task = None
         if task is None:
             return
-        task.cancel()
+        if cancel_inflight:
+            task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
     async def _intent_dispatcher_loop(self) -> None:
@@ -1149,6 +1308,20 @@ class TradingRuntime:
                         },
                     )
                     return
+                tau = self._current_entry_tau_s()
+                cutoff_s = effective_entry_cutoff_s(self.config)
+                if tau is None or tau < cutoff_s:
+                    self.run_recorder.record(
+                        "INTENT_BLOCKED",
+                        {
+                            "intent_id": intent.intent_id.value,
+                            "intent_type": type(intent).__name__,
+                            "reason": "ENTRY_CUTOFF_PASSED",
+                            "tau_s": tau,
+                            "cutoff_s": cutoff_s,
+                        },
+                    )
+                    return
                 baseline = account_state.token(token_id)
                 self.account_state = account_state
                 self.selected_token_id = token_id
@@ -1275,20 +1448,24 @@ class TradingRuntime:
             market_id = market.condition_id or market.market_id.value
             self._apply_account_snapshot(self.account_state_authority.current(market_id))
         self._market_data_ready()
+        graph = getattr(market_runtime, "indicator_graph", None)
+        if graph is not None:
+            self.indicator_graph = graph
         if self.active_market is not None and self.active_market.market.event_end is not None:
-            tau = (
-                self.active_market.market.event_end
-                - market_runtime.zgap.time_authority.now_corrected_utc()
-            ).total_seconds()
-            tau_min_s, tau_max_s = entry_tau_bounds(self.config)
-            self.capabilities.entry_window_open = (
-                self.active_market.entry_enabled and tau_min_s <= tau <= tau_max_s
+            tau = self._current_entry_tau_s()
+            _tau_min_s, tau_max_s = entry_tau_bounds(self.config)
+            cutoff_s = effective_entry_cutoff_s(self.config)
+            self.capabilities.entry_window_open = bool(
+                tau is not None
+                and self.active_market.entry_enabled
+                and cutoff_s <= tau <= tau_max_s
             )
             state = self.lifecycle.state
+            remaining = float("-inf") if tau is None else tau
             if (
                 state is not None
                 and state.has_exposure
-                and tau <= self.config.lifecycle.manual_deadline_before_end_s
+                and remaining <= self.config.lifecycle.manual_deadline_before_end_s
             ):
                 await self.lifecycle.mark_manual("manual_deadline_reached_with_exposure")
                 self.stop_requested = True
@@ -1296,7 +1473,7 @@ class TradingRuntime:
             if (
                 state is not None
                 and state.has_exposure
-                and tau <= self.config.lifecycle.mandatory_exit_before_end_s
+                and remaining <= self.config.lifecycle.mandatory_exit_before_end_s
                 and not state.exit_requested_reason
                 and self.selected_instrument is not None
             ):
@@ -1316,14 +1493,14 @@ class TradingRuntime:
                 )
             self._maybe_arm_protection(market_runtime)
             await self._maybe_post_resting_take_profit(market_runtime)
-            if tau > self.config.lifecycle.mandatory_exit_before_end_s:
+            if remaining > self.config.lifecycle.mandatory_exit_before_end_s:
                 self._maybe_emit_protection_exit(market_runtime)
         # Intent drain is owned by the event-woken intent dispatcher so entry
         # does not wait for the 1 Hz market-data tick. Tick still refreshes
         # readiness and reconciles open exposure.
         self._refresh_order_metadata_capability()
         state = self.lifecycle.state
-        if state is not None and state.has_exposure:
+        if state is not None and state.needs_venue_followup:
             reconciled = await self.lifecycle.reconcile()
             if reconciled is not None:
                 self.capabilities.selected_token_sellable = reconciled.sellable_shares > 0
@@ -1343,7 +1520,10 @@ class TradingRuntime:
             strategy_config=self.config.strategy,
             require_ssr_price_match=self.config.market.require_ssr_price_match,
             target_notional=self.config.risk.target_notional,
+            time_authority=self.time_authority,
+            maximum_trade_age_ms=self.config.market.maximum_book_age_ms,
         )
+        self.indicator_graph = runtime.indicator_graph
         fatal_exception: BaseException | None = None
         fatal_error: dict[str, Any] | None = None
         reporting_failures: list[str] = []
@@ -1377,6 +1557,7 @@ class TradingRuntime:
                 max_clock_uncertainty_ms=int(max_clock_uncertainty_ms(self.config)),
                 market_family=self.config.market.family,
                 on_public_fact=self.on_public_fact,
+                on_shutdown=self._shutdown_execution,
             )
         except BaseException as exc:  # always project a report before propagating interrupts
             fatal_exception = exc
@@ -1616,6 +1797,8 @@ class TradingRuntime:
             runtime_errors=self.runtime_errors,
             fatal_error=fatal_error,
             reporting_failures=reporting_failures,
+            prior_session_risk=self.prior_session_risk,
+            reproducibility=self.reproducibility,
         )
         try:
             payload = build_run_report(source)
@@ -1629,6 +1812,7 @@ class TradingRuntime:
                 mutation_attempts=mutation_attempts,
                 fatal_error=fatal_error,
                 reporting_error=exc,
+                reproducibility=self.reproducibility,
             )
         return TradingRunResult(
             outcome=str(payload["outcome"]),
@@ -1662,8 +1846,18 @@ async def run_trading_runtime(
     config: TradingRunConfig,
     output_directory: Path,
     dotenv: Path | None,
+    config_path: Path | str | None = None,
 ) -> TradingRunResult:
+    from tyrex_pm.reporting.reproducibility import capture_reproducibility
+
     run_instance_id = str(uuid4())
+    output_directory.mkdir(parents=True, exist_ok=True)
+    reproducibility = capture_reproducibility(
+        config=config,
+        config_path=config_path,
+        cli_flags={"live": True, "out_dir": output_directory},
+        run_instance_id=run_instance_id,
+    )
     try:
         runtime = await TradingRuntime.create(
             config=config,
@@ -1686,6 +1880,7 @@ async def run_trading_runtime(
             mutation_attempts=0,
             fatal_error=fatal_error,
             reporting_error=exc,
+            reproducibility=reproducibility,
         )
         return TradingRunResult(
             outcome=str(payload["outcome"]),
@@ -1694,4 +1889,5 @@ async def run_trading_runtime(
             mutation_attempts=0,
             state=None,
         )
+    runtime.reproducibility = reproducibility
     return await runtime.run()

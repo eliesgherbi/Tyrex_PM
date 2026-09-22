@@ -89,7 +89,9 @@ Mapped in `facts/mappings.py` for a future multi-venue strategy. **Not** a regis
 
 `src/tyrex_pm/indicators/` owns reusable producers over a generic instrument-keyed L2/trade store (`DepthSnapshot` / `DepthStore`). That store is **not** the Polymarket `[0,1]` `BookSnapshot`.
 
-z_gap EWMA vol is one `IndicatorSpec` instance. The registered plugin supplies YAML `volatility.*` as spec `params`; the host runs `IndicatorGraph` and passes a `FeatureBundle` into `evaluate()`. `feature_probe` does the same for L1 `imbalance` on `binance.spot.l2`. Producers for OFI, imbalance, trade imbalance, and realized vol exist for later strategies; they do not start connectors by themselves.
+z_gap EWMA vol is one `IndicatorSpec` instance. The registered plugin supplies YAML `volatility.*` as spec `params`; the host runs `IndicatorGraph` and passes a `FeatureBundle` into `evaluate()`. Trade-tape freshness for that graph uses `market.maximum_book_age_ms` (not a hardcoded 2000 ms). A reconnect increments the Binance trade `connection_generation` and invalidates the estimator; eligibility returns only after `min_samples_s` on the new generation. The final BUY gate re-reads the bound graph snapshot (`features_ready`) and fails closed if EWMA is stale, invalidated, or unready. It does not re-run `evaluate()`. SELL and protective flatten ignore EWMA unreadiness. ask70’s empty indicator graph is a no-op at the gate.
+
+`feature_probe` does the same graph wiring for L1 `imbalance` on `binance.spot.l2`. Consume-time L2 age and L2 reconnect invalidation are **deferred (F-L2)** and are not a first-release pass criterion. Producers for OFI, imbalance, trade imbalance, and realized vol exist for later strategies; they do not start connectors by themselves.
 
 The lab (`tyrex_pm.lab.evaluate_replay`) rebuilds that graph from the same `indicator_specs(config)` and applies fixture `trade` / `depth` steps before `evaluate()`. It does not start adapters. Adding a pack: [extending.md](extending.md#lab-fixture-before-live).
 

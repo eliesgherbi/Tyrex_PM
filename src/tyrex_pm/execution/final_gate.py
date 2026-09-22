@@ -43,6 +43,9 @@ class FinalExecutionGate:
         self._policy = policy or FinalGatePolicy()
         self.last_view: BookView | None = None
         self.last_reason: str | None = None
+        self.entry_tau_s: Callable[[], float | None] | None = None
+        self.entry_cutoff_s: float | None = None
+        self.features_ready: Callable[[], bool | str] | None = None
 
     def _leg(self, view: BookView, token_id: str) -> LegBookSnapshot | None:
         if view.up.token_id == token_id:
@@ -62,15 +65,25 @@ class FinalExecutionGate:
             isinstance(spec, LimitOrderSpec) and spec.side is OrderSide.BUY
         )
         caps = self._capabilities.snapshot(exposed=is_exit)
-        if is_entry and not caps.entry_executable:
+        if is_entry and self.entry_cutoff_s is not None:
+            tau = None if self.entry_tau_s is None else self.entry_tau_s()
+            if tau is None or tau < self.entry_cutoff_s:
+                reason = "ENTRY_CUTOFF_PASSED"
+        if reason is None and is_entry and self.features_ready is not None:
+            ready = self.features_ready()
+            if ready is False:
+                reason = "FEATURE_NOT_READY"
+            elif isinstance(ready, str) and ready:
+                reason = ready
+        if reason is None and is_entry and not caps.entry_executable:
             reason = "entry_capability_blocked:" + ",".join(caps.blockers)
-        elif is_exit and not caps.exit_executable:
+        elif reason is None and is_exit and not caps.exit_executable:
             reason = "exit_capability_blocked:" + ",".join(caps.blockers)
-        elif view is None:
+        elif reason is None and view is None:
             reason = "book_view_unavailable"
-        elif view.binding_id != self._active_binding_id():
+        elif reason is None and view.binding_id != self._active_binding_id():
             reason = "active_binding_changed"
-        else:
+        elif reason is None:
             leg = self._leg(view, spec.token_id)
             if leg is None:
                 reason = "token_not_in_active_market"

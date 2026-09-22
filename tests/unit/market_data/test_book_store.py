@@ -268,6 +268,95 @@ def test_capture_pair_atomic_under_concurrent_writes() -> None:
         assert view.pair_version == (view.up.book_version, view.down.book_version)
 
 
+def _publish_pair(store: MarketStateStore, disp: EventDispatcher) -> None:
+    for iid in (UP, DOWN):
+        disp.publish(
+            BookSnapshotReceived(
+                **_evt(),
+                book=BookSnapshot(
+                    instrument_id=iid,
+                    ts_event=TS,
+                    bids=(BookLevel(price=Decimal("0.4"), quantity=Decimal("5")),),
+                    asks=(BookLevel(price=Decimal("0.6"), quantity=Decimal("5")),),
+                ),
+            )
+        )
+
+
+def test_v1_capture_age_is_monotonic_receipt() -> None:
+    store = MarketStateStore()
+    disp = EventDispatcher()
+    store.attach(disp)
+    _publish_pair(store, disp)
+    applied = store.get(UP).last_apply_mono_ns
+    assert applied is not None
+    view = store.capture_pair(_binding())
+    assert view.up.apply_mono_ns == applied
+    assert view.up.data_age_ms is not None
+    assert 0 <= view.up.data_age_ms < 2000
+
+
+def test_v2_stale_silence_marks_book_and_ages_past_gate(monkeypatch) -> None:
+    store = MarketStateStore()
+    store._stale_after_ms = 2000
+    disp = EventDispatcher()
+    store.attach(disp)
+    _publish_pair(store, disp)
+    applied = store.get(UP).last_apply_mono_ns
+    assert applied is not None
+    monkeypatch.setattr(
+        "tyrex_pm.market_data.book_store.time.monotonic_ns",
+        lambda: applied + 3_000_000_000,
+    )
+    view = store.capture_pair(_binding())
+    assert view.up.data_age_ms is not None
+    assert view.up.data_age_ms >= 2000
+    assert view.up.sync_health is SyncHealth.STALE
+
+
+def test_v3_wall_rewind_does_not_rejuvenate_mono_age(monkeypatch) -> None:
+    store = MarketStateStore()
+    store._stale_after_ms = 2000
+    disp = EventDispatcher()
+    store.attach(disp)
+    _publish_pair(store, disp)
+    applied = store.get(UP).last_apply_mono_ns
+    assert applied is not None
+    monkeypatch.setattr(
+        "tyrex_pm.market_data.book_store.time.monotonic_ns",
+        lambda: applied + 3_000_000_000,
+    )
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    view = store.capture_pair(_binding(), captured_at=past)
+    assert view.up.data_age_ms is not None
+    assert view.up.data_age_ms >= 2000
+    assert view.up.sync_health is SyncHealth.STALE
+
+
+def test_v4_freshness_uses_apply_mono_not_source_ts() -> None:
+    store = MarketStateStore()
+    disp = EventDispatcher()
+    store.attach(disp)
+    old_source = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    for iid in (UP, DOWN):
+        disp.publish(
+            BookSnapshotReceived(
+                **{**_evt(), "ts_event": old_source, "ts_received": TS},
+                book=BookSnapshot(
+                    instrument_id=iid,
+                    ts_event=old_source,
+                    bids=(BookLevel(price=Decimal("0.4"), quantity=Decimal("5")),),
+                    asks=(BookLevel(price=Decimal("0.6"), quantity=Decimal("5")),),
+                ),
+            )
+        )
+    view = store.capture_pair(_binding(), captured_at=TS)
+    assert view.up.source_ts == old_source
+    assert view.up.data_age_ms is not None
+    assert view.up.data_age_ms < 2000
+    assert view.up.apply_mono_ns is not None
+
+
 def test_explicit_empty_ask_liquidity_when_ready() -> None:
     store = MarketStateStore()
     disp = EventDispatcher()

@@ -83,6 +83,7 @@ class SessionOpened(EvidenceEnvelope):
 class OrderRequested(EvidenceEnvelope):
     role: ExecutionRole
     order: OrderSpec
+    recovery: bool = False
 
 
 def _coerce_optional_ms(value: Any) -> float | None:
@@ -247,6 +248,8 @@ class TradeStatusObserved(EvidenceEnvelope):
     price: Decimal
     status: TradeStatus
     venue_event_at: datetime | None = None
+    raw_maker_order_ids: tuple[str, ...] = ()
+    attribution: str | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -258,8 +261,56 @@ class TradeStatusObserved(EvidenceEnvelope):
             raise ValueError("trade price must be in (0, 1]")
         object.__setattr__(self, "shares", shares)
         object.__setattr__(self, "price", price)
+        object.__setattr__(self, "raw_maker_order_ids", tuple(self.raw_maker_order_ids))
         if self.venue_event_at is not None:
             object.__setattr__(self, "venue_event_at", _utc(self.venue_event_at))
+
+
+@dataclass(frozen=True, kw_only=True)
+class TradeAttributionCorrected(EvidenceEnvelope):
+    source: str
+    venue_trade_id: str
+    original_event_id: str | None
+    previous_venue_order_id: str
+    previous_side: OrderSide
+    previous_shares: Decimal
+    previous_price: Decimal
+    previous_token_id: str
+    venue_order_id: str
+    order_id: str | None
+    token_id: str
+    side: OrderSide
+    shares: Decimal
+    price: Decimal
+    status: TradeStatus
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        shares = Decimal(str(self.shares))
+        previous_shares = Decimal(str(self.previous_shares))
+        price = Decimal(str(self.price))
+        previous_price = Decimal(str(self.previous_price))
+        if shares <= 0 or previous_shares <= 0:
+            raise ValueError("trade shares must be > 0")
+        if price <= 0 or price > 1 or previous_price <= 0 or previous_price > 1:
+            raise ValueError("trade price must be in (0, 1]")
+        object.__setattr__(self, "shares", shares)
+        object.__setattr__(self, "previous_shares", previous_shares)
+        object.__setattr__(self, "price", price)
+        object.__setattr__(self, "previous_price", previous_price)
+
+    @property
+    def correction_digest(self) -> str:
+        return "|".join(
+            (
+                self.venue_trade_id,
+                self.venue_order_id,
+                self.side.value,
+                str(self.shares),
+                str(self.price),
+                self.token_id,
+            )
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -378,6 +429,7 @@ ExecutionEvidence: TypeAlias = (
     | SubmissionFailed
     | OrderSnapshotObserved
     | TradeStatusObserved
+    | TradeAttributionCorrected
     | BalanceObserved
     | ExitRequested
     | ReconciliationObserved
@@ -401,6 +453,7 @@ _EVENT_TYPES = {
         SubmissionFailed,
         OrderSnapshotObserved,
         TradeStatusObserved,
+        TradeAttributionCorrected,
         BalanceObserved,
         ExitRequested,
         ReconciliationObserved,
@@ -443,13 +496,17 @@ def evidence_to_dict(event: ExecutionEvidence) -> dict[str, Any]:
         payload["role"] = event.role.value
     if isinstance(event, OrderPreDispatchFailed):
         payload["stage"] = event.stage.value
-    if isinstance(event, (OrderSnapshotObserved, TradeStatusObserved)):
+    if isinstance(event, (OrderSnapshotObserved, TradeStatusObserved, TradeAttributionCorrected)):
         payload["side"] = event.side.value
+    if isinstance(event, TradeAttributionCorrected):
+        payload["previous_side"] = event.previous_side.value
+        payload["status"] = event.status.value
     if isinstance(event, TradeStatusObserved):
         payload["status"] = event.status.value
         payload["venue_event_at"] = (
             None if event.venue_event_at is None else event.venue_event_at.isoformat()
         )
+        payload["raw_maker_order_ids"] = list(event.raw_maker_order_ids)
     for key, value in tuple(payload.items()):
         if isinstance(value, Decimal):
             payload[key] = str(value)
@@ -467,6 +524,7 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> ExecutionEvidence:
     if cls is OrderRequested:
         data["role"] = ExecutionRole(str(data["role"]))
         data["order"] = order_spec_from_dict(data["order"])
+        data["recovery"] = bool(data.get("recovery", False))
     elif cls in {
         OrderPrepared,
         OrderPreDispatchFailed,
@@ -478,10 +536,15 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> ExecutionEvidence:
         data["role"] = ExecutionRole(str(data["role"]))
     if cls is OrderPreDispatchFailed:
         data["stage"] = PreDispatchStage(str(data["stage"]))
-    if cls in {OrderSnapshotObserved, TradeStatusObserved}:
+    if cls in {OrderSnapshotObserved, TradeStatusObserved, TradeAttributionCorrected}:
         data["side"] = OrderSide(str(data["side"]))
+    if cls is TradeAttributionCorrected:
+        data["previous_side"] = OrderSide(str(data["previous_side"]))
+        data["status"] = TradeStatus(str(data["status"]))
     if cls is TradeStatusObserved:
         data["status"] = TradeStatus(str(data["status"]))
         if data.get("venue_event_at") is not None:
             data["venue_event_at"] = datetime.fromisoformat(str(data["venue_event_at"]))
+        raw_makers = data.get("raw_maker_order_ids") or ()
+        data["raw_maker_order_ids"] = tuple(raw_makers)
     return cls(**data)

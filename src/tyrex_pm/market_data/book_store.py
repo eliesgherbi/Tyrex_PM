@@ -506,6 +506,7 @@ class MarketStateStore:
         captured_at: datetime | None = None,
     ) -> BookView:
         """Atomic immutable two-leg view under the store lock."""
+        self.mark_stale_if_aged()
         at = captured_at or datetime.now(timezone.utc)
         with self._lock:
             up = self._leg_snapshot(
@@ -542,7 +543,9 @@ class MarketStateStore:
     ) -> LegBookSnapshot:
         state = self._books.get(instrument_id, BookState())
         age_ms = None
-        if state.last_apply_ts is not None:
+        if state.last_apply_mono_ns is not None:
+            age_ms = int((time.monotonic_ns() - state.last_apply_mono_ns) / 1e6)
+        elif state.last_apply_ts is not None:
             age_ms = int((now - state.last_apply_ts).total_seconds() * 1000)
         return LegBookSnapshot(
             token_id=token_id,

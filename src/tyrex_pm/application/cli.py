@@ -101,6 +101,10 @@ def _run(args: argparse.Namespace) -> int:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = args.out_dir or config.report_directory / f"{config.run_name}_{stamp}"
+    if (out_dir / "run_summary.json").exists():
+        existing = out_dir / "run_summary.json"
+        print(f"refusing to overwrite existing report: {existing}", file=sys.stderr)
+        return 2
     from tyrex_pm.runtime.trading_runtime import run_trading_runtime
 
     try:
@@ -109,6 +113,7 @@ def _run(args: argparse.Namespace) -> int:
                 config=config,
                 output_directory=out_dir,
                 dotenv=args.dotenv if args.dotenv.exists() else None,
+                config_path=args.config,
             )
         )
     except KeyboardInterrupt:

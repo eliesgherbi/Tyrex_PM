@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
@@ -90,7 +91,12 @@ def sigma_config_from_spec(spec: IndicatorSpec) -> SigmaConfig:
 class IndicatorGraph:
     """Stateful producers for a frozen set of IndicatorSpecs."""
 
-    def __init__(self, specs: tuple[IndicatorSpec, ...]) -> None:
+    def __init__(
+        self,
+        specs: tuple[IndicatorSpec, ...],
+        *,
+        max_trade_age_ms: float = 2000.0,
+    ) -> None:
         unknown = sorted({spec.name for spec in specs} - _KNOWN_NAMES)
         if unknown:
             raise ValueError(f"unknown indicator name(s): {unknown}")
@@ -102,6 +108,9 @@ class IndicatorGraph:
         self._rv: dict[str, RollingRealizedVol] = {}
         self._ewma: dict[str, EwmaVolatilityEstimator] = {}
         self._mids: dict[str, Decimal] = {}
+        self._source_generation: dict[str, int] = {}
+        self._last_trade_mono_ns: dict[str, int] = {}
+        self.max_trade_age_ms: float = float(max_trade_age_ms)
         for spec in specs:
             if spec.name == "ofi":
                 for horizon in spec.horizons_ms or (1000,):
@@ -125,7 +134,34 @@ class IndicatorGraph:
                 self._bundle.values[spec.instance_id] = empty_volatility_snapshot()
 
     def snapshot(self) -> FeatureBundle:
-        return FeatureBundle(values=dict(self._bundle.values))
+        now_mono = time.monotonic_ns()
+        values = dict(self._bundle.values)
+        for spec in self.specs:
+            if spec.name != "ewma_vol":
+                continue
+            snap = values.get(spec.instance_id)
+            if not isinstance(snap, VolatilitySnapshot) or not snap.ready:
+                continue
+            last = self._last_trade_mono_ns.get(spec.source)
+            if last is None or (now_mono - last) / 1e6 > self.max_trade_age_ms:
+                values[spec.instance_id] = replace(
+                    snap, ready=False, reject_reason="stale_tape"
+                )
+        return FeatureBundle(values=values)
+
+    def invalidate_source(self, source: str) -> None:
+        current = self._source_generation.get(source, 0)
+        self._source_generation[source] = current + 1
+        self._last_trade_mono_ns.pop(source, None)
+        for spec in self.specs:
+            if spec.source != source or spec.name != "ewma_vol":
+                continue
+            self._ewma[spec.instance_id] = EwmaVolatilityEstimator(
+                sigma_config_from_spec(spec)
+            )
+            self._bundle.values[spec.instance_id] = empty_volatility_snapshot(
+                reject_reason="source_invalidated"
+            )
 
     def on_depth(
         self,
@@ -177,8 +213,19 @@ class IndicatorGraph:
         quantity: Decimal | None = None,
         aggressor: str | None = None,
         instrument_id: InstrumentId | None = None,
+        generation: int | None = None,
     ) -> FeatureBundle:
         del instrument_id
+        if generation is not None:
+            current = self._source_generation.get(source)
+            if current is None:
+                self._source_generation[source] = generation
+            elif generation < current:
+                return self.snapshot()
+            elif generation > current:
+                self.invalidate_source(source)
+                self._source_generation[source] = generation
+        self._last_trade_mono_ns[source] = time.monotonic_ns()
         for spec in self.specs:
             if spec.source != source:
                 continue

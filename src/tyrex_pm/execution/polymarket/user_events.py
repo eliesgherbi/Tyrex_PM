@@ -25,6 +25,8 @@ class UserStreamTradeEvidence:
     kind: Literal["trade"] = "trade"
     venue_trade_id: str
     venue_order_id: str | None
+    taker_order_id: str | None
+    maker_orders: tuple[dict[str, Any], ...]
     client_order_id: str | None
     status: str
     side: str
@@ -32,6 +34,7 @@ class UserStreamTradeEvidence:
     size: Decimal
     price: Decimal
     cumulative_matched_qty: Decimal | None
+    raw_payload: dict[str, Any]
 
 
 UserStreamEvidence: TypeAlias = UserStreamOrderEvidence | UserStreamTradeEvidence
@@ -109,13 +112,17 @@ def normalize_user_stream_message(
         trade_id = row.get("id") or row.get("trade_id") or row.get("tradeID")
         if trade_id is None or not str(trade_id):
             return None
-        venue_order = row.get("taker_order_id") or row.get("order_id") or row.get("maker_order_id")
+        taker = row.get("taker_order_id") or row.get("takerOrderId")
+        makers_raw = row.get("maker_orders") or row.get("makerOrders") or ()
+        makers = tuple(dict(item) if isinstance(item, Mapping) else {} for item in makers_raw)
         token = row.get("asset_id") or row.get("assetId") or row.get("token_id")
         client = row.get("client_order_id") or row.get("clientOrderId")
         cumulative = row.get("size_matched") or row.get("sizeMatched")
         return UserStreamTradeEvidence(
             venue_trade_id=str(trade_id),
-            venue_order_id=None if venue_order is None else str(venue_order),
+            venue_order_id=None if taker is None else str(taker),
+            taker_order_id=None if taker is None else str(taker),
+            maker_orders=makers,
             client_order_id=None if client is None else str(client),
             status=str(row.get("status") or "MATCHED").removeprefix("TRADE_STATUS_").upper(),
             side=str(row.get("side") or "BUY").upper(),
@@ -123,6 +130,7 @@ def normalize_user_stream_message(
             size=_decimal(row.get("size") or row.get("matched_amount") or row.get("matchedAmount")),
             price=_decimal(row.get("price")),
             cumulative_matched_qty=None if cumulative is None else _decimal(cumulative),
+            raw_payload=dict(row),
         )
     # Official payloads occasionally omit the envelope type.
     if row.get("size_matched") is not None or row.get("sizeMatched") is not None:

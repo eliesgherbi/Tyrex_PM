@@ -26,6 +26,7 @@ from tyrex_pm.execution.evidence import (
     SubmissionAttempted,
     SubmissionFailed,
     SubmissionResponseObserved,
+    TradeAttributionCorrected,
     TradeStatus,
     TradeStatusObserved,
 )
@@ -114,6 +115,13 @@ def _confirmed_trade_delta(state: ExecutionSessionState, trade: TradeRecord) -> 
     return trade.shares if trade.side == OrderSide.BUY.value else -trade.shares
 
 
+def _unapply_confirmed_trade(state: ExecutionSessionState, trade: TradeRecord) -> None:
+    if not trade.position_applied:
+        return
+    state.confirmed_position_shares -= _confirmed_trade_delta(state, trade)
+    trade.position_applied = False
+
+
 def _apply_confirmed_trade(
     state: ExecutionSessionState,
     trade: TradeRecord,
@@ -186,8 +194,24 @@ def reduce_execution_event(
         _require_session(state, event.session_id)
 
     if isinstance(event, OrderRequested):
-        if state.terminal:
-            raise ReducerInvariantError("terminal session cannot request an order")
+        recovery = bool(getattr(event, "recovery", False))
+        if event.role is ExecutionRole.ENTRY:
+            if recovery:
+                raise ReducerInvariantError("recovery cannot request a BUY")
+            if state.terminal:
+                raise ReducerInvariantError("terminal session cannot request an order")
+        else:
+            recovery_exit = (
+                recovery
+                and state.phase is ExecutionPhase.MANUAL_INTERVENTION
+                and state.confirmed_position_shares > 0
+            )
+            if recovery and not recovery_exit:
+                raise ReducerInvariantError(
+                    "recovery EXIT is only valid for MANUAL sessions with confirmed exposure"
+                )
+            if state.terminal and not recovery_exit:
+                raise ReducerInvariantError("terminal session cannot request an order")
         if event.order.order_id in state.orders:
             raise ReducerInvariantError("local order_id already exists")
         if event.role is ExecutionRole.ENTRY:
@@ -396,6 +420,72 @@ def reduce_execution_event(
             # A trade delta is never added to a cumulative HWM.  The HWM and
             # trade ledger are independent observations reconciled later.
             _apply_confirmed_trade(state, existing, effects)
+
+    elif isinstance(event, TradeAttributionCorrected):
+        existing = state.trades.get(event.venue_trade_id)
+        if existing is None:
+            pass
+        elif existing.attribution_digest == event.correction_digest:
+            pass
+        elif (
+            existing.venue_order_id != event.previous_venue_order_id
+            or existing.side != event.previous_side.value
+            or existing.shares != event.previous_shares
+            or existing.price != event.previous_price
+            or existing.token_id != event.previous_token_id
+        ):
+            state.phase = ExecutionPhase.MANUAL_INTERVENTION
+            state.last_error = "correction_previous_mismatch"
+            effects.append(
+                ReducerEffect(EffectKind.SESSION_TERMINAL, "correction_previous_mismatch")
+            )
+        elif (
+            existing.venue_order_id == event.venue_order_id
+            and existing.side == event.side.value
+            and existing.shares == event.shares
+            and existing.price == event.price
+            and existing.token_id == event.token_id
+        ):
+            existing.attribution_digest = event.correction_digest
+        elif (
+            existing.attribution_digest
+            and existing.attribution_digest != event.correction_digest
+        ):
+            state.phase = ExecutionPhase.MANUAL_INTERVENTION
+            state.last_error = "conflicting_trade_identity"
+            effects.append(
+                ReducerEffect(EffectKind.SESSION_TERMINAL, "conflicting_trade_identity")
+            )
+        else:
+            _unapply_confirmed_trade(state, existing)
+            existing.venue_order_id = event.venue_order_id
+            existing.local_order_id = event.order_id or existing.local_order_id
+            existing.token_id = event.token_id
+            existing.side = event.side.value
+            existing.shares = event.shares
+            existing.price = event.price
+            existing.status = event.status
+            existing.sources.add(event.source)
+            existing.attribution_digest = event.correction_digest
+            order = _order_by_identity(
+                state, order_id=event.order_id, venue_order_id=event.venue_order_id
+            )
+            if order is None:
+                state.phase = ExecutionPhase.RECONCILING
+                effects.append(
+                    ReducerEffect(EffectKind.REQUEST_RECONCILIATION, "unowned_trade")
+                )
+            else:
+                order.venue_order_id = event.venue_order_id
+                _apply_confirmed_trade(state, existing, effects)
+                if state.confirmed_position_shares < 0:
+                    state.phase = ExecutionPhase.MANUAL_INTERVENTION
+                    state.last_error = "unrepairable_trade_attribution"
+                    effects.append(
+                        ReducerEffect(
+                            EffectKind.SESSION_TERMINAL, "unrepairable_trade_attribution"
+                        )
+                    )
 
     elif isinstance(event, BalanceObserved):
         if state.identity is not None and event.token_id != state.identity.token_id:

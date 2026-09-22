@@ -34,3 +34,5 @@ The host starts **only** connectors in the strategy’s input-contract closure. 
 `q_edge` is a guide contract only — not a registered plugin.
 
 Historical milestone reports under `Docs/implementation/` and numbered specs under `Docs/specifications/` are evidence or design baselines, not current API.
+
+First-release R1–R5 behavior (recovery-only MANUAL flatten, shared cutoff clock, BUY-only `features_ready`, z_gap lab packs, reproducibility) is described in the pages above. `--continue` (R6) and the live campaign (R7) are not operator steps on this revision. L2 / `feature_probe` consume-time freshness is deferred as F-L2.

@@ -228,6 +228,7 @@ async def run_market_data_runtime(
     max_clock_uncertainty_ms: int = 250,
     market_family: str = "btc_updown_5m",
     on_public_fact: Callable[[str, MarketSessionRuntime], None] | None = None,
+    on_shutdown: Callable[[str], Awaitable[None]] | None = None,
 ) -> MarketDataSummary:
     """Bounded live composition: discover → ingest → EXACT seal → optional eval.
 
@@ -261,10 +262,21 @@ async def run_market_data_runtime(
     _ = prep_lead_s
 
     clock = runtime.clock if runtime is not None else SystemClock()
-    auth = SnapshotTimeAuthority(
-        clock=clock,
-        max_uncertainty_ms=max_clock_uncertainty_ms,
-    )
+    existing_auth = None if runtime is None else getattr(runtime, "time_authority", None)
+    if existing_auth is None and runtime is not None:
+        existing_auth = getattr(getattr(runtime, "driver", None), "time_authority", None)
+    if existing_auth is not None and hasattr(existing_auth, "last_snapshot"):
+        auth = existing_auth
+    else:
+        auth = SnapshotTimeAuthority(
+            clock=clock,
+            max_uncertainty_ms=max_clock_uncertainty_ms,
+        )
+    if runtime is not None and getattr(runtime, "time_authority", None) is None:
+        try:
+            runtime.time_authority = auth
+        except Exception:
+            pass
     provider = OsMonitorClockSyncProvider(enable_binance_cross_check=True)
     clock_loop = ClockSyncLoop(provider=provider, apply=auth.apply_snapshot, interval_s=5.0)
     try:
@@ -653,6 +665,10 @@ async def run_market_data_runtime(
             note = f"binance_reconnecting:{detail.get('error') or 'connection_closed'}"
             if not feed_notes or feed_notes[-1] != note:
                 feed_notes.append(note)
+            graph = getattr(runtime, "indicator_graph", None)
+            invalidate = getattr(graph, "invalidate_source", None)
+            if callable(invalidate):
+                invalidate(F.BINANCE_SPOT_TRADES)
 
     bn = BinanceTradeWsAdapter(
         symbol=binance_symbol, time_authority=auth, on_health=_on_binance_health
@@ -868,6 +884,15 @@ async def run_market_data_runtime(
                 summary.gate_notes.append("stop: caller_requested")
                 break
     finally:
+        if on_shutdown is not None:
+            stop_reason = "caller_requested"
+            if summary.gate_notes:
+                stop_reason = str(summary.gate_notes[-1])
+            try:
+                await on_shutdown(stop_reason)
+            except Exception as exc:  # noqa: BLE001 - drain failure must not skip feed stop
+                summary.errors.append(f"on_shutdown:{type(exc).__name__}:{exc}")
+                notify_runtime_error("on_shutdown", exc)
         await clock_loop.stop()
         await cl.stop()
         await bn.stop()

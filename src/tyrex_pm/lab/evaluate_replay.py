@@ -66,6 +66,10 @@ class LabPack:
     steps: tuple[ReplayStep, ...]
     target_notional: Decimal = Decimal("5")
     window_id: str = "lab"
+    ptb: dict[str, Any] | None = None
+    position_quantity: Decimal = Decimal("0")
+    instrument_id: str | None = None
+    position_cost_total: Decimal | None = None
 
 
 def evaluate_replay(
@@ -77,6 +81,10 @@ def evaluate_replay(
     target_notional: Decimal = Decimal("5"),
     window_id: str = "lab",
     entry_allowed: bool = True,
+    ptb: dict[str, Any] | None = None,
+    position_quantity: Decimal = Decimal("0"),
+    instrument_id: str | None = None,
+    position_cost_total: Decimal | None = None,
 ) -> tuple[StrategyEvaluation, ...]:
     """Run plugin.evaluate() on fixture steps. Never imports the venue gateway."""
     if not steps:
@@ -88,6 +96,29 @@ def evaluate_replay(
         target_notional=target_notional,
         window_id=window_id,
     )
+    configure_ptb = getattr(driver, "configure_ptb", None)
+    if callable(configure_ptb) and ptb:
+        from tyrex_pm.domain.polymarket.ptb import make_fixture_ptb
+
+        if hasattr(ptb, "k"):
+            configure_ptb(ptb)
+        else:
+            configure_ptb(
+                make_fixture_ptb(
+                    market_id=MarketId(str(ptb.get("market_id") or market.market_id.value)),
+                    window_id=str(ptb.get("window_id") or window_id),
+                    event_start=_parse_ts(ptb["event_start"])
+                    if ptb.get("event_start")
+                    else market.event_start,
+                    event_end=_parse_ts(ptb["event_end"])
+                    if ptb.get("event_end")
+                    else market.event_end,
+                    k=ptb.get("k"),
+                    receive_ts=_parse_ts(ptb["receive_ts"])
+                    if ptb.get("receive_ts")
+                    else steps[0].ts,
+                )
+            )
     driver.on_start(
         StrategyContext(run_id=RunId("lab"), strategy_id=driver.strategy_id, market=market)
     )
@@ -117,12 +148,25 @@ def evaluate_replay(
             ts=step.ts,
             reference_price=last_reference,
         )
+        lifecycle = None
+        if instrument_id:
+            from tyrex_pm.strategies.context import StrategyLifecycleSnapshot, StrategyPositionPhase
+
+            lifecycle = StrategyLifecycleSnapshot(
+                phase=StrategyPositionPhase.ACTIVE
+                if position_quantity > 0
+                else StrategyPositionPhase.FLAT,
+                instrument_id=InstrumentId(instrument_id),
+            )
         context = DecisionContext(
             run_id=RunId("lab"),
             snapshot=snapshot,
             target_notional=target_notional,
             now=step.ts,
             entry_allowed=entry_allowed,
+            lifecycle=lifecycle,
+            position_quantity=position_quantity,
+            position_cost_total=position_cost_total or Decimal("0"),
         )
         results.append(
             driver.evaluate(
@@ -150,11 +194,20 @@ def load_lab_pack(path: Path | str) -> LabPack:
         raise ValueError("lab fixture steps must be non-empty")
     notional = Decimal(str(raw.get("target_notional", "5")))
     window_id = str(window.get("window_id") or "lab")
+    position = dict(raw.get("position") or {})
     return LabPack(
         market=market,
         steps=steps,
         target_notional=notional,
         window_id=window_id,
+        ptb=None if raw.get("ptb") is None else dict(raw["ptb"]),
+        position_quantity=Decimal(str(position.get("quantity") or "0")),
+        instrument_id=None if not position.get("instrument_id") else str(position["instrument_id"]),
+        position_cost_total=(
+            None
+            if position.get("cost_total") is None
+            else Decimal(str(position["cost_total"]))
+        ),
     )
 
 
@@ -176,6 +229,10 @@ def replay_configured_run(
         market=pack.market,
         target_notional=pack.target_notional or run.risk.target_notional,
         window_id=pack.window_id,
+        ptb=pack.ptb,
+        position_quantity=pack.position_quantity,
+        instrument_id=pack.instrument_id,
+        position_cost_total=pack.position_cost_total,
     )
 
 

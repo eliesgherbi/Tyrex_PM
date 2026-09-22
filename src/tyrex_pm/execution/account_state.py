@@ -254,6 +254,28 @@ class AccountStateAuthority:
         self._snapshots.pop(market_id, None)
         self._latest_failures.pop(market_id, None)
 
+    async def observe(
+        self,
+        *,
+        market_id: str,
+        token_ids: tuple[str, ...],
+        required_collateral: Decimal,
+    ) -> AccountStateSnapshot:
+        """One-shot read for a specified market and tokens. Does not bind trading."""
+        target = _AccountTarget(
+            market_id=market_id,
+            token_ids=tuple(token_ids),
+            required_collateral=required_collateral,
+            active=False,
+        )
+        snapshot, failures, _retryable, _diagnostics = await self._capture_once(
+            target, attempt=1
+        )
+        if snapshot is None:
+            return self._unavailable_snapshot(market_id, failures)
+        self._snapshots[market_id] = snapshot
+        return self.current(market_id)
+
     def current(self, market_id: str) -> AccountStateSnapshot:
         snapshot = self._snapshots.get(market_id)
         if snapshot is None:
@@ -308,7 +330,10 @@ class AccountStateAuthority:
     def refresh_status(self) -> RefreshInFlight | None:
         if not self._refresh_started:
             return None
-        market_id, started = max(self._refresh_started.items(), key=lambda item: time.monotonic() - item[1])
+        market_id, started = max(
+            self._refresh_started.items(),
+            key=lambda item: time.monotonic() - item[1],
+        )
         return RefreshInFlight(
             market_id=market_id,
             elapsed_ms=round((time.monotonic() - started) * 1_000, 3),

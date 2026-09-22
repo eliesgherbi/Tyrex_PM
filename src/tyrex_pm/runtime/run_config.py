@@ -109,6 +109,18 @@ def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
     return plugin.entry_tau_bounds(config.strategy)
 
 
+def host_safety_floor_s(config: TradingRunConfig) -> float:
+    return (
+        config.lifecycle.mandatory_exit_before_end_s
+        + config.lifecycle.evidence_timeout_s
+    )
+
+
+def effective_entry_cutoff_s(config: TradingRunConfig) -> float:
+    tau_min_s, _tau_max_s = entry_tau_bounds(config)
+    return max(tau_min_s, host_safety_floor_s(config))
+
+
 def max_clock_uncertainty_ms(config: TradingRunConfig) -> float:
     plugin = get_strategy_plugin(config.strategy_kind)
     return plugin.max_clock_uncertainty_ms(config.strategy)
@@ -329,7 +341,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         raise RunConfigError("lifecycle retry settings must be positive")
     if lifecycle.prepare_budget_ms >= float(market.maximum_candidate_age_ms):
         raise RunConfigError("prepare_budget_ms must be less than market.maximum_candidate_age_ms")
-    return TradingRunConfig(
+    config = TradingRunConfig(
         schema_version=version,
         run_name=run_name,
         strategy_kind=strategy_kind,
@@ -342,3 +354,13 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         report_directory=Path(raw.get("report_directory", "var/runs/z_gap")),
         protection=protection,
     )
+    tau_min_s, tau_max_s = entry_tau_bounds(config)
+    floor_s = host_safety_floor_s(config)
+    if tau_min_s < floor_s:
+        raise RunConfigError(
+            f"strategy tau_min_s={tau_min_s} must be >= host safety floor "
+            f"{floor_s} (mandatory_exit_before_end_s + evidence_timeout_s)"
+        )
+    if tau_max_s <= effective_entry_cutoff_s(config):
+        raise RunConfigError("tau_max_s must be greater than the effective entry cutoff")
+    return config

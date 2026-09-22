@@ -65,6 +65,25 @@ def _exit() -> ExitIntent:
     )
 
 
+def test_d1_tiny_live_loads_with_effective_cutoff() -> None:
+    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s, host_safety_floor_s
+
+    cfg = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
+    assert host_safety_floor_s(cfg) == 105.0
+    assert effective_entry_cutoff_s(cfg) == 105.0
+    assert cfg.strategy.entry.tau_min_s == 105.0
+
+
+def test_d2_tau_min_below_host_floor_fails_load(tmp_path: Path) -> None:
+    from tyrex_pm.runtime.run_config import RunConfigError
+
+    text = Path("config/runs/z_gap_tiny_live.yaml").read_text(encoding="utf-8")
+    path = tmp_path / "low_tau.yaml"
+    path.write_text(text.replace("tau_min_s: 105.0", "tau_min_s: 10.0"), encoding="utf-8")
+    with pytest.raises(RunConfigError, match="host safety floor"):
+        load_trading_run_config(path)
+
+
 def test_single_run_config_is_strict_and_keeps_tiny_live_cap() -> None:
     cfg = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
     assert cfg.strategy_kind == "z_gap"
@@ -250,7 +269,11 @@ async def test_intent_enqueue_wakes_dispatcher_without_one_hertz_tick() -> None:
 
 @pytest.mark.asyncio
 async def test_manual_deadline_is_enforced_with_open_exposure() -> None:
-    state = SimpleNamespace(has_exposure=True, exit_requested_reason="MANDATORY_FLATTEN")
+    state = SimpleNamespace(
+        has_exposure=True,
+        needs_venue_followup=False,
+        exit_requested_reason="MANDATORY_FLATTEN",
+    )
     lifecycle = SimpleNamespace(state=state, mark_manual=AsyncMock())
     runtime = SimpleNamespace(
         _bind_pending_market=AsyncMock(),
@@ -271,6 +294,7 @@ async def test_manual_deadline_is_enforced_with_open_exposure() -> None:
             lifecycle=SimpleNamespace(
                 mandatory_exit_before_end_s=90,
                 manual_deadline_before_end_s=45,
+                evidence_timeout_s=15,
             ),
             protection=None,
         ),
@@ -283,6 +307,8 @@ async def test_manual_deadline_is_enforced_with_open_exposure() -> None:
         _refresh_order_metadata_capability=Mock(),
         selected_instrument=None,
         stop_requested=False,
+        time_authority=SimpleNamespace(now_corrected_utc=lambda: NOW),
+        _current_entry_tau_s=lambda: 0.0,
     )
     market_runtime = SimpleNamespace(
         zgap=SimpleNamespace(
@@ -462,8 +488,10 @@ async def test_known_entry_preparation_failure_returns_without_reconciliation_ti
             runtime_errors=(),
         )
     )
-    assert report["outcome"] == "ENTRY_PRE_DISPATCH_FAILED"
-    assert report["ok"] is False
+    assert report["outcome"] == "COMPLETED_NO_DISPATCH"
+    assert report["ok"] is True
+    assert report["summary"]["observed_fills_complete"] is True
+    assert report["summary"]["reconciliation_complete"] is True
     assert report["validation_scope"]["furthest_execution_stage"] == ("ENTRY_PREPARATION_FAILED")
     assert report["validation_scope"]["entry_http_post_attempted"] is False
     assert timeline[0]["pre_dispatch_failure"]["stage"] == "PREPARATION"
@@ -751,3 +779,68 @@ async def test_report_projection_failure_writes_emergency_report(
     assert payload["reporting"]["emergency"] is True
     assert payload["reporting"]["error_type"] == "ValueError"
     assert payload["mutation_attempts"] == 0
+
+
+@pytest.mark.asyncio
+async def test_r2_nonzero_clock_correction_aligns_tick_consume_and_gate() -> None:
+    from tyrex_pm.core.clock import FakeClock
+    from tyrex_pm.core.time_authority import (
+        ClockSyncSnapshot,
+        SnapshotTimeAuthority,
+        TimeSyncStatus,
+    )
+    from tyrex_pm.execution.final_gate import FinalExecutionGate
+    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s
+
+    config = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
+    event_end = datetime(2026, 9, 20, 12, 5, tzinfo=timezone.utc)
+    wall = datetime(2026, 9, 20, 12, 3, 20, tzinfo=timezone.utc)
+    clock = FakeClock(_wall=wall)
+    auth = SnapshotTimeAuthority(clock=clock, max_uncertainty_ms=10_000)
+    auth.apply_snapshot(
+        ClockSyncSnapshot(
+            measured_at_wall_utc=wall,
+            measured_at_monotonic_ns=clock.monotonic_ns(),
+            estimated_offset_ms=20_000.0,
+            uncertainty_ms=10,
+            sync_status=TimeSyncStatus.READY,
+            primary_source="test",
+        )
+    )
+    runtime = object.__new__(TradingRuntime)
+    runtime.config = config
+    runtime.time_authority = auth
+    runtime.active_market = SimpleNamespace(
+        market=SimpleNamespace(event_end=event_end),
+        entry_enabled=True,
+    )
+    tau = runtime._current_entry_tau_s()
+    uncorrected = (event_end - wall).total_seconds()
+    assert tau == pytest.approx(uncorrected - 20.0)
+    cutoff = effective_entry_cutoff_s(config)
+    tick_open = bool(tau is not None and cutoff <= tau <= 290.0)
+    consume_open = bool(tau is not None and tau >= cutoff)
+    assert tick_open is consume_open
+    assert tau < cutoff
+    gate = FinalExecutionGate(
+        capture_book=lambda: None,
+        capabilities=CapabilityController(live_requested=True, entry_window_open=True),
+        active_binding_id=lambda: "b",
+    )
+    gate.entry_cutoff_s = cutoff
+    gate.entry_tau_s = runtime._current_entry_tau_s
+    from tyrex_pm.execution.orders import MarketBuyOrderSpec
+
+    spec = MarketBuyOrderSpec(
+        order_id="e",
+        market_id="m",
+        instrument_id="yes",
+        token_id="yes",
+        spend_amount=Decimal("5"),
+        maximum_total_debit=Decimal("5"),
+        worst_price=Decimal("0.6"),
+        metadata={"candidate_monotonic_ns": time.monotonic_ns()},
+    )
+    allowed, reason = await gate(spec)
+    assert allowed is False
+    assert reason == "ENTRY_CUTOFF_PASSED"

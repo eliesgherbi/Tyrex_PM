@@ -7,7 +7,7 @@ strategy:
     entry_ask_threshold: "0.70"
     leg_preference: first_hit
     max_price_pad: "0.08"
-    tau_min_s: 10.0
+    tau_min_s: 105.0
     tau_max_s: 290.0
     max_clock_uncertainty_ms: 750.0
 

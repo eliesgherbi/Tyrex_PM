@@ -136,3 +136,86 @@ async def test_post_only_limit_refuses_a_crossing_price() -> None:
     allowed, reason = await gate(_limit(side=OrderSide.BUY, price=Decimal("0.49")))
     assert allowed
     assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_d6_buy_gate_refuses_below_effective_cutoff() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.entry_cutoff_s = 105.0
+    gate.entry_tau_s = lambda: 100.0
+    allowed, reason = await gate(_spec(candidate_monotonic_ns=time.monotonic_ns()))
+    assert not allowed
+    assert reason == "ENTRY_CUTOFF_PASSED"
+
+
+@pytest.mark.asyncio
+async def test_d8_sell_ignores_entry_cutoff() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.entry_cutoff_s = 105.0
+    gate.entry_tau_s = lambda: 40.0
+    sell = _limit(side=OrderSide.SELL, price=Decimal("0.40"), post_only=False)
+    allowed, reason = await gate(sell)
+    assert allowed
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_d10_stricter_strategy_cutoff_crossed_during_prepare() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.entry_cutoff_s = 120.0
+    gate.entry_tau_s = lambda: 118.0
+    allowed, reason = await gate(_spec(candidate_monotonic_ns=time.monotonic_ns()))
+    assert not allowed
+    assert reason == "ENTRY_CUTOFF_PASSED"
+
+
+@pytest.mark.asyncio
+async def test_v8_buy_gate_fails_when_features_invalidate() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.features_ready = lambda: "EWMA_NOT_READY"
+    allowed, reason = await gate(_spec(candidate_monotonic_ns=time.monotonic_ns()))
+    assert not allowed
+    assert reason == "EWMA_NOT_READY"
+
+
+@pytest.mark.asyncio
+async def test_v9_sell_ignores_ewma_unreadiness() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.features_ready = lambda: "EWMA_NOT_READY"
+    sell = _limit(side=OrderSide.SELL, price=Decimal("0.40"), post_only=False)
+    allowed, reason = await gate(sell)
+    assert allowed
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_v10_empty_graph_features_callback_is_noop() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.features_ready = lambda: True
+    allowed, reason = await gate(_spec(candidate_monotonic_ns=time.monotonic_ns()))
+    assert allowed
+    assert reason is None

@@ -126,6 +126,20 @@ Dust / prepare / refresh-wait leaves are **required** (no hidden defaults). `man
 | `prepare_budget_ms` | Abandon create/sign if slower; no POST (`PREPARE_BUDGET_EXCEEDED`). Must be **less than** `market.maximum_candidate_age_ms`. | gateway prepare |
 | `refresh_wait_budget_ms` | If a wallet refresh is in-flight at submit, wait up to this then fail closed (`ACCOUNT_REFRESH_IN_FLIGHT`). `0` = do not wait. | gateway + `account_state.py` |
 
+Shipped YAML sets `tau_min_s: 105` so the plugin band matches the host floor `mandatory_exit_before_end_s + evidence_timeout_s` (90+15). That 105 s cutoff is operational policy: refuse a new BUY once remaining time cannot hold a full evidence timeout **after POST returns** before mandatory flatten. It is not a guarantee that prepare, POST, cancel, or flatten finish inside a reserved margin.
+
+On a 300 s `btc_updown_5m` window with `tau_max_s=290` and cutoff 105:
+
+| Elapsed from `event_start` | tau | What is allowed |
+|----------------------------|-----|-----------------|
+| 0–10 s | 300–290 | No entry (`tau_max`) |
+| 10–195 s | 290–105 | Entry if strategy + infrastructure are ready |
+| 195–210 s | 105–90 | No new BUY. Existing exposure: strategy/protection exits still allowed |
+| 210–255 s | 90–45 | Host `MANDATORY_FLATTEN` / drain. No BUY |
+| 255–300 s | 45–0 | `MANUAL_INTERVENTION` if still exposed |
+
+A stricter plugin `tau_min_s` (for example 120) is the cutoff at evaluate, consume, and the BUY gate.
+
 ## ask70 parameters
 
 `strategy.kind: ask70`. Six core fields are required. Maker fields are optional. After fill, ask70 HOLDs and emits **no exits** — SL/TP/trail must come from `protection:`.
@@ -244,7 +258,7 @@ Setting one does not set the other.
 
 | Looks similar | Actually |
 |---------------|----------|
-| `tau_min_s` / `tau_max_s` vs `lifecycle.mandatory_exit_before_end_s` vs z_gap `flatten_before_event_end_s` | Tau band = may we **enter**. Mandatory = **host** `FlattenIntent`. Z-gap flatten = **strategy** `ExitIntent`. All three can apply on one run. Host flatten wins over strategy time-exit. |
+| `tau_min_s` / `tau_max_s` vs `lifecycle.mandatory_exit_before_end_s` vs z_gap `flatten_before_event_end_s` | Tau band = may we **enter**. The host effective BUY cutoff is `max(plugin tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)` (shipped 90+15=105). That 105 s figure is operational policy, not an end-to-end latency SLA. Evidence timeout starts after `post_order` returns. Mandatory = **host** `FlattenIntent`. Z-gap flatten = **strategy** `ExitIntent`. Host flatten wins over strategy time-exit. SELL and protective exits ignore the entry cutoff. |
 | `protection.stop_loss` vs z_gap `thesis.p_stop` | Overlay watches held **bid** and FAK-sells. `p_stop` is a model probability for a strategy thesis exit. |
 | `risk.fee_reserve_rate` vs z_gap `friction.fee_curve.fee_rate` | OMS haircut so the $5 cap still covers fees. Model CLOB curve inside z_gap fair value. Planner does not read the model rate. |
 | `risk.target_notional` vs `risk.maximum_total_debit` | Desired vs hard cap. Planner uses `min(target, cap)`. |

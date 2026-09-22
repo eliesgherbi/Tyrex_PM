@@ -28,6 +28,7 @@ from tyrex_pm.execution.evidence import (
     TradeStatusObserved,
     new_envelope,
 )
+from tyrex_pm.execution.fill_attribution import attribute_owned_fill
 from tyrex_pm.execution.orders import (
     LimitOrderSpec,
     MarketBuyOrderSpec,
@@ -201,6 +202,7 @@ class PolymarketAsyncGateway:
     refresh_wait_budget_ms: float | None = None
     metadata_cache_miss_ms: float = 500.0
     evidence_sink: Callable[[str, Mapping[str, Any]], None] | None = None
+    fill_context: Callable[[], tuple[set[str], str | None, dict[str, str]]] | None = None
     warmed_token_ids: set[str] = field(default_factory=set)
     _prepared_specs: dict[str, OrderSpec] = field(default_factory=dict)
     _stream_task: asyncio.Task[None] | None = None
@@ -610,12 +612,46 @@ class PolymarketAsyncGateway:
                 status=str(normalized.status or "UNKNOWN"),
             )
         if isinstance(normalized, UserStreamTradeEvidence):
-            if normalized.venue_order_id is None:
-                return None
             try:
                 status = TradeStatus(normalized.status.upper())
             except ValueError:
                 return None
+            owned: set[str] = set()
+            token_id = normalized.instrument_token_id or None
+            sides: dict[str, str] = {}
+            if self.fill_context is not None:
+                owned, token_id, sides = self.fill_context()
+            attributed = attribute_owned_fill(
+                normalized.raw_payload,
+                owned,
+                token_id,
+                owned_side_by_venue=sides,
+            )
+            clip = attributed.clip
+            if clip is None:
+                if normalized.venue_order_id is None:
+                    return None
+                return TradeStatusObserved(
+                    **new_envelope(
+                        session_id=session_id,
+                        dedupe_key=f"stream-trade:{normalized.venue_trade_id}:{status.value}",
+                    ),
+                    source="user_stream",
+                    venue_trade_id=normalized.venue_trade_id,
+                    venue_order_id=normalized.venue_order_id,
+                    order_id=normalized.client_order_id,
+                    token_id=normalized.instrument_token_id,
+                    side=OrderSide(normalized.side.upper()),
+                    shares=normalized.size,
+                    price=normalized.price,
+                    status=status,
+                    venue_event_at=now,
+                    raw_maker_order_ids=tuple(
+                        str(row.get("order_id") or row.get("orderID") or "")
+                        for row in normalized.maker_orders
+                        if str(row.get("order_id") or row.get("orderID") or "")
+                    ),
+                )
             return TradeStatusObserved(
                 **new_envelope(
                     session_id=session_id,
@@ -623,14 +659,16 @@ class PolymarketAsyncGateway:
                 ),
                 source="user_stream",
                 venue_trade_id=normalized.venue_trade_id,
-                venue_order_id=normalized.venue_order_id,
+                venue_order_id=clip.venue_order_id,
                 order_id=normalized.client_order_id,
-                token_id=normalized.instrument_token_id,
-                side=OrderSide(normalized.side.upper()),
-                shares=normalized.size,
-                price=normalized.price,
+                token_id=clip.token_id or normalized.instrument_token_id,
+                side=OrderSide(clip.side),
+                shares=clip.shares,
+                price=clip.price,
                 status=status,
                 venue_event_at=now,
+                raw_maker_order_ids=clip.raw_maker_order_ids,
+                attribution=clip.attribution,
             )
         return None
 

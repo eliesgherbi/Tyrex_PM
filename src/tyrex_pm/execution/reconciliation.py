@@ -11,12 +11,17 @@ from tyrex_pm.execution.evidence import (
     ExecutionRole,
     OrderSnapshotObserved,
     ReconciliationObserved,
+    TradeAttributionCorrected,
     TradeStatus,
     TradeStatusObserved,
     new_envelope,
 )
-from tyrex_pm.execution.orders import OrderSide
 from tyrex_pm.execution.exit_sizing import trade_remaining_after_exits
+from tyrex_pm.execution.fill_attribution import (
+    attribute_owned_fill,
+    is_known_normalization_defect,
+)
+from tyrex_pm.execution.orders import OrderSide
 from tyrex_pm.execution.session_state import ExecutionSessionState
 
 
@@ -26,15 +31,12 @@ def _value(model: Any, name: str, default: Any = None) -> Any:
     return getattr(model, name, default)
 
 
-def _trade_order_id(trade: Any, owned: set[str]) -> str | None:
-    taker = str(_value(trade, "taker_order_id", "") or "")
-    if taker in owned:
-        return taker
-    for maker in _value(trade, "maker_orders", ()) or ():
-        candidate = str(_value(maker, "order_id", "") or "")
-        if candidate in owned:
-            return candidate
-    return None
+def _owned_sides(state: ExecutionSessionState) -> dict[str, str]:
+    sides: dict[str, str] = {}
+    for order in state.orders.values():
+        if order.venue_order_id:
+            sides[order.venue_order_id] = order.spec.side.value
+    return sides
 
 
 def _trade_status(raw: Any) -> TradeStatus | None:
@@ -122,11 +124,27 @@ class SessionReconciler:
             trades = await self._gateway.list_account_trades(
                 token_id=identity.token_id, market_id=identity.market_id
             )
+            state = coordinator.state(session_id)
             owned_ids = set(owned_by_venue)
+            sides = _owned_sides(state)
             for trade in trades:
-                venue_order_id = _trade_order_id(trade, owned_ids)
-                if venue_order_id is None:
+                attributed = attribute_owned_fill(
+                    trade,
+                    owned_ids,
+                    identity.token_id,
+                    owned_side_by_venue=sides,
+                )
+                clip = attributed.clip
+                if clip is None:
+                    if attributed.reason in {
+                        "multiple_owned_clips",
+                        "both_roles",
+                        "token_mismatch",
+                    }:
+                        notes.append(f"trade_attribution:{attributed.reason}")
+                        complete = False
                     continue
+                venue_order_id = clip.venue_order_id
                 local_id, _role = owned_by_venue[venue_order_id]
                 status = _trade_status(_value(trade, "status"))
                 if status is None:
@@ -136,24 +154,72 @@ class SessionReconciler:
                 updated_at = _value(trade, "updated_at")
                 if not isinstance(updated_at, datetime):
                     updated_at = datetime.now(timezone.utc)
+                venue_trade_id = str(_value(trade, "id"))
+                existing = state.trades.get(venue_trade_id)
+                if existing is not None and (
+                    existing.venue_order_id != clip.venue_order_id
+                    or existing.side != clip.side
+                    or existing.shares != clip.shares
+                    or existing.price != clip.price
+                    or existing.token_id != clip.token_id
+                ):
+                    if is_known_normalization_defect(
+                        stored_venue_order_id=existing.venue_order_id,
+                        clip_venue_order_id=clip.venue_order_id,
+                        owned_venue_ids=owned_ids,
+                    ):
+                        await coordinator.apply(
+                            TradeAttributionCorrected(
+                                **new_envelope(
+                                    session_id=session_id,
+                                    dedupe_key=(
+                                        f"trade-attribution-corrected:{venue_trade_id}:"
+                                        f"{clip.venue_order_id}:{clip.shares}:{clip.side}"
+                                    ),
+                                ),
+                                source="readonly_rest",
+                                venue_trade_id=venue_trade_id,
+                                original_event_id=None,
+                                previous_venue_order_id=existing.venue_order_id,
+                                previous_side=OrderSide(existing.side),
+                                previous_shares=existing.shares,
+                                previous_price=existing.price,
+                                previous_token_id=existing.token_id,
+                                venue_order_id=clip.venue_order_id,
+                                order_id=local_id,
+                                token_id=clip.token_id or identity.token_id,
+                                side=OrderSide(clip.side),
+                                shares=clip.shares,
+                                price=clip.price,
+                                status=status,
+                            )
+                        )
+                        state = coordinator.state(session_id)
+                        continue
+                    notes.append("trade_attribution:conflicting_trade_identity")
+                    complete = False
+                    continue
                 await coordinator.apply(
                     TradeStatusObserved(
                         **new_envelope(
                             session_id=session_id,
-                            dedupe_key=(f"rest-trade:{_value(trade, 'id', '')}:{status.value}"),
+                            dedupe_key=(f"rest-trade:{venue_trade_id}:{status.value}"),
                         ),
                         source="readonly_rest",
-                        venue_trade_id=str(_value(trade, "id")),
+                        venue_trade_id=venue_trade_id,
                         venue_order_id=venue_order_id,
                         order_id=local_id,
-                        token_id=identity.token_id,
-                        side=OrderSide(str(_value(trade, "side", "BUY")).upper()),
-                        shares=Decimal(str(_value(trade, "size", "0"))),
-                        price=Decimal(str(_value(trade, "price", "0"))),
+                        token_id=clip.token_id or identity.token_id,
+                        side=OrderSide(clip.side),
+                        shares=clip.shares,
+                        price=clip.price,
                         status=status,
                         venue_event_at=updated_at,
+                        raw_maker_order_ids=clip.raw_maker_order_ids,
+                        attribution=clip.attribution,
                     )
                 )
+                state = coordinator.state(session_id)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"trades:{type(exc).__name__}:{exc}")
             complete = False
