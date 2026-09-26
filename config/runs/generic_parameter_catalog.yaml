@@ -157,6 +157,11 @@ lifecycle:
   # (ACCOUNT_REFRESH_IN_FLIGHT). 0 = do not wait.
   refresh_wait_budget_ms: 500
 
+# Optional startup inspection. Omitted keys use these defaults.
+# inspection_budget_s: 60
+# prompt_timeout_s: 120
+# monitor_interval_s: 15
+
 # Persistence — execution journal (replay/recovery). Do not delete to "clear" a blocker.
 state_directory: var/runtime_state/execution
 # Default report root. CLI --out-dir wins and stamps run_name_UTCtime.

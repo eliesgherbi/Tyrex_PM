@@ -45,6 +45,9 @@ Loader map:
 | `run_name` | Report folder name. Characters: `[A-Za-z0-9._-]+`. | `run_config.py` |
 | `state_directory` | SQLite execution journal (replay / recovery). Do not delete to “clear” a blocker. | `persistence/execution_journal.py` |
 | `report_directory` | Default report root. CLI `--out-dir` wins. | `reporting/run_report.py` |
+| `startup` | Optional. `inspection_budget_s` (60), `prompt_timeout_s` (120), `monitor_interval_s` (15). | `runtime/startup_controller.py` |
+
+`TYREX_POLYGON_RPC_URL` is an environment variable, not a YAML field. When it is set to an HTTP(S) Polygon mainnet JSON-RPC endpoint, startup and `--check-account` use it for read-only `eth_chainId` and `eth_call` payout reads. The URL is not written into reports. A missing URL, a wrong chain, or a failed call leaves the affected market unresolved.
 
 ## `strategy`
 

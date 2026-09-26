@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print the typed effective configuration and exit",
     )
+    run.add_argument(
+        "--check-account",
+        action="store_true",
+        help="Inspect the account and write startup_report.json without trading",
+    )
     ev = commands.add_parser("eval", help="Replay evaluate() on a lab fixture (no venue)")
     ev.add_argument("--config", type=Path, required=True, help="Run YAML (kind + parameters)")
     ev.add_argument("--fixture", type=Path, required=True, help="lab_evaluate_v1 JSON pack")
@@ -92,6 +97,11 @@ def _run(args: argparse.Namespace) -> int:
     if args.show_config:
         print(json.dumps(_config_payload(config), indent=2, default=str))
         return 0
+    if args.check_account and args.live:
+        print("refusing --check-account together with --live", file=sys.stderr)
+        return 2
+    if args.check_account:
+        return _check_account(args, config)
     if not args.live:
         print(
             "LIVE submission is disabled. Re-run with --live after reviewing the config.",
@@ -101,9 +111,19 @@ def _run(args: argparse.Namespace) -> int:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = args.out_dir or config.report_directory / f"{config.run_name}_{stamp}"
-    if (out_dir / "run_summary.json").exists():
-        existing = out_dir / "run_summary.json"
-        print(f"refusing to overwrite existing report: {existing}", file=sys.stderr)
+    existing_report = next(
+        (
+            path
+            for path in (
+                out_dir / "run_summary.json",
+                out_dir / "startup_report.json",
+            )
+            if path.exists()
+        ),
+        None,
+    )
+    if existing_report is not None:
+        print(f"refusing to overwrite existing report: {existing_report}", file=sys.stderr)
         return 2
     from tyrex_pm.runtime.trading_runtime import run_trading_runtime
 
@@ -135,8 +155,52 @@ def _run(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
+    startup_report = out_dir / "startup_report.json"
+    if startup_report.exists():
+        payload = json.loads(startup_report.read_text(encoding="utf-8"))
+        if payload.get("summary"):
+            print(payload["summary"], file=sys.stderr)
     print(f"report={result.report_path}", file=sys.stderr)
     return 0 if result.ok else 2
+
+
+def _check_account(args: argparse.Namespace, config) -> int:  # noqa: ANN001
+    """Online inspection only. This process cannot sign, post, cancel, or redeem."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = args.out_dir or config.report_directory / f"{config.run_name}_check_{stamp}"
+    existing = out_dir / "startup_report.json"
+    if existing.exists():
+        print(f"refusing to overwrite existing report: {existing}", file=sys.stderr)
+        return 2
+    from tyrex_pm.runtime.trading_runtime import run_account_inspection
+
+    try:
+        status = asyncio.run(
+            run_account_inspection(
+                config=config,
+                output_directory=out_dir,
+                dotenv=args.dotenv if args.dotenv.exists() else None,
+            )
+        )
+    except KeyboardInterrupt:
+        print("account check interrupted by operator", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        print(f"account check error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    report_path = out_dir / "startup_report.json"
+    if report_path.exists():
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        print(payload.get("summary") or status)
+        for proposal in payload.get("proposals") or ():
+            print(
+                f"Proposal {proposal.get('issue_id')}: {proposal.get('action')} "
+                f"up to {proposal.get('max_shares')} shares."
+            )
+        print(f"live_requested={str(payload.get('live_requested')).lower()}")
+    else:
+        print(status)
+    return 0 if status == "READY" else 2
 
 
 def _eval(args: argparse.Namespace) -> int:

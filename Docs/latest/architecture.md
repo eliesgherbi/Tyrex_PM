@@ -97,6 +97,8 @@ The gateway adapts continuous strategy protection prices to the authoritative Po
 
 Read failures are safe to retry because they cannot mutate the venue. A transport failure or task cancellation after `post_order` starts is different: it is durably classified as an uncertain dispatch and must be reconciled before another mutation.
 
+Startup inspection is a read path plus local evidence. It does not sign or submit. Background readiness reads the local assessment deadline on the strategy tick and does not add an account-wide network call to `evaluate()`. An expired or contradictory assessment closes new BUYs. A protective exit on the active market stays available.
+
 ## Position protection
 
 Exits are three orthogonal planes that share the same intent → planner → lifecycle sell spine:

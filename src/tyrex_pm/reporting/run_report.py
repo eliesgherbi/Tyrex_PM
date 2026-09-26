@@ -122,7 +122,10 @@ def _outcome(
     reporting_failures: Sequence[str],
     runtime_errors: Sequence[str],
     run_evidence: Sequence[RunEvidenceRecord],
+    startup_outcome: str | None = None,
 ) -> tuple[str, bool]:
+    if startup_outcome:
+        return startup_outcome, False
     if fatal_error is not None:
         return "RUNTIME_FAILURE", False
     if reporting_failures:
@@ -280,6 +283,11 @@ class RunReportInput:
     prior_session_risk: bool | None = None
     reproducibility: Mapping[str, Any] | None = None
     projection_failed: bool = False
+    startup_outcome: str | None = None
+    startup_reconciliation: Mapping[str, Any] | None = None
+    recovery_sessions: Sequence[Mapping[str, Any]] = ()
+    process_mutation_attempts: int | None = None
+    strategy_started: bool = True
 
 
 def _fill_completeness(
@@ -376,12 +384,13 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         reporting_failures=source.reporting_failures,
         runtime_errors=source.runtime_errors,
         run_evidence=source.run_evidence,
+        startup_outcome=source.startup_outcome,
     )
     records = tuple(source.run_evidence)
     no_entry = _no_entry_diagnosis(records) if source.state is None else None
     execution_stage = _execution_stage(source.state)
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "generated_at": _utc_now_text(),
         "run_instance_id": source.run_instance_id,
         "configured_run_name": source.configured_run_name,
@@ -391,8 +400,22 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         "mutation_attempts": (
             None if source.mutation_attempts is None else int(source.mutation_attempts)
         ),
+        "process_mutation_attempts": (
+            None
+            if source.process_mutation_attempts is None
+            else int(source.process_mutation_attempts)
+        ),
         "execution": execution_state_payload(source.state),
         "no_entry_diagnosis": no_entry,
+        "startup_reconciliation": (
+            None if source.startup_reconciliation is None else dict(source.startup_reconciliation)
+        ),
+        "recovery_sessions": [dict(item) for item in source.recovery_sessions],
+        "strategy_session": (
+            None
+            if not source.strategy_started or source.state is None
+            else source.state.session_id
+        ),
         "validation_scope": {
             "execution_lifecycle_exercised": source.state is not None,
             "furthest_execution_stage": execution_stage,
@@ -493,7 +516,7 @@ def write_emergency_report(
     if repro is not None:
         repro.pop("effective_config", None)
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "generated_at": _utc_now_text(),
         "run_instance_id": str(run_instance_id),
         "configured_run_name": str(configured_run_name),

@@ -8,11 +8,34 @@ decisions are projections of this state.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
 from tyrex_pm.execution.evidence import ExecutionRole, TradeStatus
 from tyrex_pm.execution.orders import OrderSpec
+
+
+class OperationalDisposition(str, Enum):
+    """Separate from historical phase. Never inferred from a zero balance."""
+
+    UNRESOLVED = "UNRESOLVED"
+    CLEARED_FLAT = "CLEARED_FLAT"
+    CLEARED_DUST = "CLEARED_DUST"
+    SETTLEMENT_ONLY = "SETTLEMENT_ONLY"
+
+
+@dataclass(frozen=True)
+class RecoveryAuthorization:
+    action_id: str
+    token_id: str
+    condition_id: str
+    max_shares: Decimal
+    min_price: Decimal
+    expires_at: datetime
+    generation: str
+    action: str = "cancel_and_close"
+    venue_order_ids: tuple[str, ...] = ()
 
 
 class ExecutionPhase(str, Enum):
@@ -109,6 +132,7 @@ class KnownDustResidual:
 @dataclass
 class ExecutionSessionState:
     identity: SessionIdentity | None = None
+    opened_at: datetime | None = None
     phase: ExecutionPhase = ExecutionPhase.NEW
     orders: dict[str, OrderExecutionState] = field(default_factory=dict)
     entry_order_ids: list[str] = field(default_factory=list)
@@ -129,6 +153,15 @@ class ExecutionSessionState:
     applied_event_ids: set[str] = field(default_factory=set)
     event_count: int = 0
     last_error: str | None = None
+    operational_disposition: OperationalDisposition = OperationalDisposition.UNRESOLVED
+    operational_proof_event_ids: tuple[str, ...] = ()
+    external_activity_ids: set[str] = field(default_factory=set)
+    external_reduction_shares: Decimal = Decimal("0")
+    settlement_keys: set[str] = field(default_factory=set)
+    settlement_holding_shares: Decimal = Decimal("0")
+    settlement_excluded_shares: Decimal = Decimal("0")
+    resolved_attempt_ids: set[str] = field(default_factory=set)
+    recovery_authorization: RecoveryAuthorization | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -158,8 +191,26 @@ class ExecutionSessionState:
         )
 
     @property
+    def clearance_prerequisites_hold(self) -> bool:
+        if self.has_unresolved_mutation_attempt or self.entry_match_awaiting_confirmation:
+            return False
+        if self.resting_limit_venue_ids:
+            return False
+        if self.operational_disposition is OperationalDisposition.SETTLEMENT_ONLY:
+            return self.confirmed_position_shares <= 0
+        return self.confirmed_position_shares <= 0
+
+    @property
     def safe_to_open_entry(self) -> bool:
-        """Finished reporting is not the same as safe to start a new BUY."""
+        """Finished reporting is not the same as safe to start a new BUY.
+
+        A recorded operational clearance can make a historical MANUAL session
+        safe. A zero balance, a missing open order, or a passed end time cannot.
+        A previous process's clearance still requires a fresh startup check
+        before any new BUY; that gate lives on the process, not this property.
+        """
+        if self.operational_disposition is not OperationalDisposition.UNRESOLVED:
+            return self.clearance_prerequisites_hold
         if self.phase is ExecutionPhase.MANUAL_INTERVENTION:
             return False
         if self.has_exposure or self.has_journal_uncertainty:

@@ -16,7 +16,11 @@ from tyrex_pm.execution.session_state import ExecutionSessionState, KnownDustRes
 
 def trade_remaining_after_exits(state: ExecutionSessionState) -> Decimal:
     """Buy inventory not yet covered by a confirmed sell or a matched EXIT HWM."""
-    covered = max(state.confirmed_sell_shares, state.exit_matched_hwm)
+    covered = (
+        max(state.confirmed_sell_shares, state.exit_matched_hwm)
+        + state.external_reduction_shares
+        + state.settlement_excluded_shares
+    )
     return max(Decimal("0"), state.confirmed_buy_shares - covered)
 
 

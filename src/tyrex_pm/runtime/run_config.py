@@ -90,6 +90,13 @@ class LifecycleRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class StartupRuntimeConfig:
+    inspection_budget_s: float = 60
+    prompt_timeout_s: float = 120
+    monitor_interval_s: float = 15
+
+
+@dataclass(frozen=True)
 class TradingRunConfig:
     schema_version: int
     run_name: str
@@ -102,6 +109,7 @@ class TradingRunConfig:
     state_directory: Path
     report_directory: Path
     protection: ProtectionSpec | None
+    startup: StartupRuntimeConfig = StartupRuntimeConfig()
 
 
 def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
@@ -141,6 +149,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "state_directory",
             "report_directory",
             "protection",
+            "startup",
         },
         "top-level",
     )
@@ -339,6 +348,23 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         or lifecycle.refresh_wait_budget_ms < 0
     ):
         raise RunConfigError("lifecycle retry settings must be positive")
+    startup_raw = dict(raw.get("startup") or {})
+    _reject_unknown(
+        startup_raw,
+        {"inspection_budget_s", "prompt_timeout_s", "monitor_interval_s"},
+        "startup",
+    )
+    startup = StartupRuntimeConfig(
+        inspection_budget_s=float(startup_raw.get("inspection_budget_s", 60)),
+        prompt_timeout_s=float(startup_raw.get("prompt_timeout_s", 120)),
+        monitor_interval_s=float(startup_raw.get("monitor_interval_s", 15)),
+    )
+    if (
+        startup.inspection_budget_s <= 0
+        or startup.prompt_timeout_s <= 0
+        or startup.monitor_interval_s <= 0
+    ):
+        raise RunConfigError("startup budgets must be positive")
     if lifecycle.prepare_budget_ms >= float(market.maximum_candidate_age_ms):
         raise RunConfigError("prepare_budget_ms must be less than market.maximum_candidate_age_ms")
     config = TradingRunConfig(
@@ -353,6 +379,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         state_directory=Path(raw.get("state_directory", "var/runtime_state/execution")),
         report_directory=Path(raw.get("report_directory", "var/runs/z_gap")),
         protection=protection,
+        startup=startup,
     )
     tau_min_s, tau_max_s = entry_tau_bounds(config)
     floor_s = host_safety_floor_s(config)

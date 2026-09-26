@@ -418,6 +418,101 @@ class DustResidualRecorded(EvidenceEnvelope):
                 object.__setattr__(self, field_name, Decimal(str(value)))
 
 
+@dataclass(frozen=True, kw_only=True)
+class OrderAttemptResolved(EvidenceEnvelope):
+    order_id: str
+    attempt_id: str
+    venue_order_id: str
+    terminal_status: str
+    cumulative_matched_shares: Decimal
+    proof_source: str
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        object.__setattr__(
+            self,
+            "cumulative_matched_shares",
+            Decimal(str(self.cumulative_matched_shares)),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExternalPositionAdjustmentObserved(EvidenceEnvelope):
+    activity_id: str
+    token_id: str
+    condition_id: str
+    shares: Decimal
+    cause: str
+    venue_trade_id: str | None = None
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        shares = Decimal(str(self.shares))
+        if shares <= 0:
+            raise ValueError("external adjustment shares must be > 0")
+        object.__setattr__(self, "shares", shares)
+
+
+@dataclass(frozen=True, kw_only=True)
+class MarketSettlementObserved(EvidenceEnvelope):
+    condition_id: str
+    token_id: str
+    holding_shares: Decimal
+    payout_per_share: Decimal
+    proof_source: str
+    supported: bool
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        holding = Decimal(str(self.holding_shares))
+        payout = Decimal(str(self.payout_per_share))
+        if holding < 0 or payout < 0 or payout > 1:
+            raise ValueError("settlement holding and payout must be non-negative and payout <= 1")
+        object.__setattr__(self, "holding_shares", holding)
+        object.__setattr__(self, "payout_per_share", payout)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionOperationalClearanceRecorded(EvidenceEnvelope):
+    disposition: str
+    proof_event_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        object.__setattr__(self, "proof_event_ids", tuple(self.proof_event_ids))
+
+
+@dataclass(frozen=True, kw_only=True)
+class SessionOperationalClearanceRevoked(EvidenceEnvelope):
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class RecoveryActionAuthorized(EvidenceEnvelope):
+    action_id: str
+    token_id: str
+    condition_id: str
+    max_shares: Decimal
+    min_price: Decimal
+    expires_at: datetime
+    generation: str
+    action: str = "cancel_and_close"
+    venue_order_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        EvidenceEnvelope.__post_init__(self)
+        object.__setattr__(self, "max_shares", Decimal(str(self.max_shares)))
+        object.__setattr__(self, "min_price", Decimal(str(self.min_price)))
+        object.__setattr__(self, "expires_at", _utc(self.expires_at))
+        object.__setattr__(self, "venue_order_ids", tuple(self.venue_order_ids))
+
+
+@dataclass(frozen=True, kw_only=True)
+class RecoveryActionFinished(EvidenceEnvelope):
+    action_id: str
+    outcome: str
+
+
 ExecutionEvidence: TypeAlias = (
     SessionOpened
     | OrderRequested
@@ -437,6 +532,13 @@ ExecutionEvidence: TypeAlias = (
     | CancelObserved
     | ManualInterventionRequired
     | DustResidualRecorded
+    | OrderAttemptResolved
+    | ExternalPositionAdjustmentObserved
+    | MarketSettlementObserved
+    | SessionOperationalClearanceRecorded
+    | SessionOperationalClearanceRevoked
+    | RecoveryActionAuthorized
+    | RecoveryActionFinished
 )
 
 
@@ -461,6 +563,13 @@ _EVENT_TYPES = {
         CancelObserved,
         ManualInterventionRequired,
         DustResidualRecorded,
+        OrderAttemptResolved,
+        ExternalPositionAdjustmentObserved,
+        MarketSettlementObserved,
+        SessionOperationalClearanceRecorded,
+        SessionOperationalClearanceRevoked,
+        RecoveryActionAuthorized,
+        RecoveryActionFinished,
     )
 }
 
@@ -507,6 +616,10 @@ def evidence_to_dict(event: ExecutionEvidence) -> dict[str, Any]:
             None if event.venue_event_at is None else event.venue_event_at.isoformat()
         )
         payload["raw_maker_order_ids"] = list(event.raw_maker_order_ids)
+    if isinstance(event, RecoveryActionAuthorized):
+        payload["expires_at"] = event.expires_at.isoformat()
+    if isinstance(event, SessionOperationalClearanceRecorded):
+        payload["proof_event_ids"] = list(event.proof_event_ids)
     for key, value in tuple(payload.items()):
         if isinstance(value, Decimal):
             payload[key] = str(value)
@@ -547,4 +660,12 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> ExecutionEvidence:
             data["venue_event_at"] = datetime.fromisoformat(str(data["venue_event_at"]))
         raw_makers = data.get("raw_maker_order_ids") or ()
         data["raw_maker_order_ids"] = tuple(raw_makers)
+    if cls is SessionOperationalClearanceRecorded:
+        data["proof_event_ids"] = tuple(data.get("proof_event_ids") or ())
+    if cls is RecoveryActionAuthorized and data.get("expires_at") is not None:
+        expires_at = data["expires_at"]
+        if not isinstance(expires_at, datetime):
+            data["expires_at"] = datetime.fromisoformat(str(expires_at))
+        data["venue_order_ids"] = tuple(data.get("venue_order_ids") or ())
+        data.setdefault("action", "cancel_and_close")
     return cls(**data)

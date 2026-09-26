@@ -46,6 +46,8 @@ class FinalExecutionGate:
         self.entry_tau_s: Callable[[], float | None] | None = None
         self.entry_cutoff_s: float | None = None
         self.features_ready: Callable[[], bool | str] | None = None
+        self.startup_buy_block: Callable[[], str | None] | None = None
+        self.note_stream_gap: Callable[[], None] | None = None
 
     def _leg(self, view: BookView, token_id: str) -> LegBookSnapshot | None:
         if view.up.token_id == token_id:
@@ -65,7 +67,11 @@ class FinalExecutionGate:
             isinstance(spec, LimitOrderSpec) and spec.side is OrderSide.BUY
         )
         caps = self._capabilities.snapshot(exposed=is_exit)
-        if is_entry and self.entry_cutoff_s is not None:
+        if reason is None and is_entry and self.startup_buy_block is not None:
+            blocked = self.startup_buy_block()
+            if blocked:
+                reason = blocked
+        if reason is None and is_entry and self.entry_cutoff_s is not None:
             tau = None if self.entry_tau_s is None else self.entry_tau_s()
             if tau is None or tau < self.entry_cutoff_s:
                 reason = "ENTRY_CUTOFF_PASSED"
@@ -141,5 +147,9 @@ class FinalExecutionGate:
                     reason = "candidate_stale_after_signing"
             except (TypeError, ValueError):
                 reason = "candidate_monotonic_time_invalid"
+        if is_entry and view is not None and self.note_stream_gap is not None:
+            leg = self._leg(view, spec.token_id)
+            if leg is not None and leg.sync_health is not SyncHealth.READY:
+                self.note_stream_gap()
         self.last_reason = reason
         return reason is None, reason

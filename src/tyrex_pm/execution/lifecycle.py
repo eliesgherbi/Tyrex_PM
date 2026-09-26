@@ -231,13 +231,14 @@ class ExecutionLifecycle:
         candidate_monotonic_ns: int | None = None,
         min_order_size: Decimal | None = None,
         last_bid: Decimal | None = None,
+        historical_recovery: bool = False,
     ) -> ExecutionSessionState:
         if self.session_id is None:
             raise RuntimeError("execution lifecycle is not open")
         await self._cancel_open_orders(reason=intent.reason_code)
         await self.reconciler.reconcile(self.coordinator, self.session_id)
         state = self.coordinator.state(self.session_id)
-        recovery = state.phase is ExecutionPhase.MANUAL_INTERVENTION
+        recovery = historical_recovery or state.phase is ExecutionPhase.MANUAL_INTERVENTION
         if state.confirmed_position_shares <= 0:
             return state
         await self.coordinator.apply(
@@ -282,6 +283,7 @@ class ExecutionLifecycle:
                         role=ExecutionRole.EXIT,
                         spec=spec,
                         recovery=recovery,
+                        historical_recovery=historical_recovery,
                     )
                 except DispatchBlocked:
                     if not protective:

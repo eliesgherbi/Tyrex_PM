@@ -39,6 +39,13 @@ class MemoryExecutionJournal:
     def __init__(self) -> None:
         self._events = []
         self._dedupe = set()
+        self._meta: dict[str, str] = {}
+
+    def get_meta(self, key: str) -> str | None:
+        return self._meta.get(key)
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._meta[key] = value
 
     def append(self, event: ExecutionEvidence) -> bool:
         key = (event.session_id, event.dedupe_key)
@@ -196,6 +203,21 @@ class SqliteExecutionJournal:
             ).fetchall()
         for row in rows:
             yield evidence_from_dict(json.loads(row[0]))
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM journal_meta WHERE key=?", (key,)
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO journal_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
 
     def close(self) -> None:
         with self._lock:

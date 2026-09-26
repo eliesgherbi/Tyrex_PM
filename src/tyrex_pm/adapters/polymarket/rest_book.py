@@ -118,6 +118,135 @@ def normalize_rest_book_payload(
     )
 
 
+def _sdk_book_mapping(book: Any) -> dict[str, Any]:
+    if isinstance(book, Mapping):
+        return dict(book)
+
+    def levels(rows: Any) -> list[dict[str, Any]]:
+        parsed: list[dict[str, Any]] = []
+        for row in rows or ():
+            if isinstance(row, Mapping):
+                parsed.append({"price": row.get("price"), "size": row.get("size")})
+            else:
+                parsed.append(
+                    {
+                        "price": getattr(row, "price", None),
+                        "size": getattr(row, "size", None),
+                    }
+                )
+        return parsed
+
+    return {
+        "token_id": getattr(book, "token_id", None),
+        "condition_id": getattr(book, "condition_id", None),
+        "timestamp": getattr(book, "timestamp", None),
+        "bids": levels(getattr(book, "bids", ())),
+        "asks": levels(getattr(book, "asks", ())),
+        "min_order_size": getattr(book, "min_order_size", None),
+        "tick_size": getattr(book, "tick_size", None),
+        "hash": getattr(book, "hash", None),
+    }
+
+
+def _same_condition(left: str, right: str) -> bool:
+    def norm(value: str) -> str:
+        text = str(value).strip().lower()
+        return text[2:] if text.startswith("0x") else text
+
+    return norm(left) == norm(right)
+
+
+def recovery_book_view(book: Any, *, condition_id: str, token_id: str):
+    """Build a two-leg view from one historical ``get_order_book`` response.
+
+    The requested token is the ``up`` leg even when it is the down outcome.
+    The other leg is an empty placeholder so the view stays well-formed.
+    A mismatched token or condition returns None.
+    """
+    from tyrex_pm.market_data.book_health import ConnectionHealth, SideLiquidity, SyncHealth
+    from tyrex_pm.market_data.book_view import BookView, LegBookSnapshot
+    from tyrex_pm.market_data.executable import ExecutableQuote, book_quote
+
+    payload = _sdk_book_mapping(book)
+    observed_token = str(payload.get("token_id") or "")
+    if observed_token and observed_token != str(token_id):
+        return None
+    observed_condition = str(payload.get("condition_id") or "")
+    if observed_condition and not _same_condition(observed_condition, condition_id):
+        return None
+    try:
+        normalized = normalize_rest_book_payload(payload, token_id=str(token_id))
+    except ValueError:
+        return None
+    captured_at = datetime.now(timezone.utc)
+    age_ms = max(0, int((captured_at - normalized.source_ts).total_seconds() * 1000))
+    quote = book_quote(normalized.book)
+
+    def liquidity(price: Decimal | None) -> SideLiquidity:
+        if price is None:
+            return SideLiquidity.EXPLICITLY_EMPTY
+        return SideLiquidity.AVAILABLE
+
+    active = LegBookSnapshot(
+        token_id=str(token_id),
+        instrument_id=InstrumentId(str(token_id)),
+        book=normalized.book,
+        book_version=1,
+        venue_hash=normalized.venue_hash,
+        sync_health=SyncHealth.READY,
+        connection_health=ConnectionHealth.LIVE,
+        bid_liquidity=liquidity(quote.best_bid),
+        ask_liquidity=liquidity(quote.best_ask),
+        tick_size=normalized.tick_size,
+        min_order_size=normalized.min_order_size,
+        source_ts=normalized.source_ts,
+        receive_ts=captured_at,
+        apply_ts=captured_at,
+        apply_mono_ns=None,
+        data_age_ms=age_ms,
+        quote=quote,
+    )
+    complement_id = f"{token_id}:complement"
+    empty_quote = ExecutableQuote(
+        best_bid=None,
+        best_ask=None,
+        mid=None,
+        spread=None,
+        bid_size_at_touch=Decimal("0"),
+        ask_size_at_touch=Decimal("0"),
+    )
+    complement = LegBookSnapshot(
+        token_id=complement_id,
+        instrument_id=InstrumentId(complement_id),
+        book=None,
+        book_version=0,
+        venue_hash=None,
+        sync_health=SyncHealth.READY,
+        connection_health=ConnectionHealth.LIVE,
+        bid_liquidity=SideLiquidity.EXPLICITLY_EMPTY,
+        ask_liquidity=SideLiquidity.EXPLICITLY_EMPTY,
+        tick_size=None,
+        min_order_size=None,
+        source_ts=captured_at,
+        receive_ts=captured_at,
+        apply_ts=captured_at,
+        apply_mono_ns=None,
+        data_age_ms=0,
+        quote=empty_quote,
+    )
+    return BookView(
+        binding_id=f"recovery:{condition_id}:{token_id}",
+        role_epoch=0,
+        window_slug="",
+        condition_id=str(condition_id),
+        connection_epoch=0,
+        captured_at=captured_at,
+        pair_version=(1, 0),
+        up=active,
+        down=complement,
+    )
+
+
 def fetch_clob_book(
     token_id: str,
     *,
@@ -166,6 +295,7 @@ def bootstrap_token_into_store(
 __all__ = [
     "RestBookPayload",
     "normalize_rest_book_payload",
+    "recovery_book_view",
     "fetch_clob_book",
     "bootstrap_token_into_store",
 ]

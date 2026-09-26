@@ -44,11 +44,11 @@ Protection arms after confirmed exposure using the run-config `protection:` bloc
 
 ## Recovery
 
-On startup, SQLite sessions are replayed. `terminal` (including `MANUAL_INTERVENTION`) is not the same as `safe_to_open_entry`. Restore keeps every session that is not safe to open: MANUAL, confirmed exposure, live owned ids, match-awaiting-confirmation, or an unresolved mutation.
+On startup, SQLite sessions are replayed. `terminal` (including `MANUAL_INTERVENTION`) is not the same as `safe_to_open_entry`. An operational clearance (`CLEARED_FLAT`, `CLEARED_DUST`, or `SETTLEMENT_ONLY`) can make a historical MANUAL session safe without rewriting the original MANUAL row. That clearance is rejected unless its proof events are already in the journal, and a later contradictory position or live order revokes it.
 
-Same-market unsafe sessions are cancelled (session-owned ids only) and, when confirmed exposure remains, flattened through the existing lifecycle/coordinator/reducer path. That recovery EXIT is allowed only while the session is MANUAL and `confirmed_position_shares > 0`. It never posts a BUY. The original `ManualInterventionRequired` row stays in the append-only journal; recovery events do not rewrite MANUAL to `COMPLETED_FLAT`. New trading stays blocked until a **scoped** observation of that session’s own market and token proves no material position, open order, or unresolved mutation.
+The shared startup assessment runs before strategy feeds. It auto-records only proven external disposals, exact terminal no-fill orders, supported settlement, and classified dust. Otherwise it blocks or asks for approval. An approved close resumes that session and sells through the same lifecycle, coordinator, and final gate, using the historical market's binding and book. Recovery EXIT is allowed only while the session is MANUAL and `confirmed_position_shares > 0`. It never posts a BUY. The approved quantity, price floor, token, market, and expiry are checked again inside the coordinator immediately before POST.
 
-A clear snapshot of the newly discovered window does not clear a retained old market. Foreign leftover is inspect-and-block (`block_foreign`); this process does not POST or cancel on the foreign token and cannot bind an old 5m slug.
+A clear snapshot of the newly discovered window does not clear a retained old market. Inventory the bot does not uniquely own is displayed and left untouched.
 
 ## Shutdown drain
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 from uuid import uuid4
@@ -21,13 +22,18 @@ from tyrex_pm.execution.evidence import (
     OrderPrepared,
     OrderRequested,
     PreDispatchStage,
+    SessionOperationalClearanceRecorded,
     SubmissionAttempted,
     SubmissionFailed,
     SubmissionResponseObserved,
     new_envelope,
 )
-from tyrex_pm.execution.orders import OrderSpec, order_spec_to_dict
-from tyrex_pm.execution.reducer import ReducerEffect, reduce_execution_event
+from tyrex_pm.execution.orders import MarketBuyOrderSpec, OrderSide, OrderSpec, order_spec_to_dict
+from tyrex_pm.execution.reducer import (
+    ReducerEffect,
+    assert_clearance_appendable,
+    reduce_execution_event,
+)
 from tyrex_pm.execution.session_state import ExecutionSessionState
 from tyrex_pm.persistence.execution_journal import ExecutionJournal
 
@@ -119,6 +125,47 @@ class AccountExecutionCoordinator:
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    recovery_generation: str | None = None
+    recovery_now: Callable[[], datetime] | None = None
+
+    def _recovery_limit_block(
+        self,
+        session_id: str,
+        spec: OrderSpec,
+        *,
+        historical: bool = False,
+    ) -> str | None:
+        """Recheck an approved recovery immediately before POST."""
+        state = self.states.get(session_id)
+        auth = None if state is None else state.recovery_authorization
+        if auth is None:
+            return "historical_recovery_not_authorized" if historical else None
+        if isinstance(spec, MarketBuyOrderSpec) or getattr(spec, "side", None) is OrderSide.BUY:
+            return "recovery_action_type_mismatch"
+        if auth.action not in {"cancel_and_close", "close"}:
+            return "recovery_action_type_mismatch"
+        now = (
+            datetime.now(timezone.utc)
+            if self.recovery_now is None
+            else self.recovery_now()
+        )
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        if auth.generation != (self.recovery_generation or ""):
+            return "recovery_authorization_generation_mismatch"
+        if now >= auth.expires_at:
+            return "recovery_authorization_expired"
+        if spec.token_id != auth.token_id or spec.market_id != auth.condition_id:
+            return "recovery_authorization_identity_mismatch"
+        shares = getattr(spec, "shares", None)
+        if shares is not None and Decimal(str(shares)) > auth.max_shares:
+            return "recovery_quantity_above_ceiling"
+        price = getattr(spec, "minimum_price", None)
+        if price is None:
+            price = getattr(spec, "limit_price", None)
+        if price is not None and Decimal(str(price)) < auth.min_price:
+            return "recovery_price_below_floor"
+        return None
 
     async def start(self) -> None:
         if self._writer_task is None:
@@ -150,6 +197,9 @@ class AccountExecutionCoordinator:
                 return
             event, future = item
             try:
+                if isinstance(event, SessionOperationalClearanceRecorded):
+                    current = self.states.get(event.session_id) or ExecutionSessionState()
+                    assert_clearance_appendable(current, event)
                 inserted = self.journal.append(event)
                 state = self.states.setdefault(event.session_id, ExecutionSessionState())
                 if inserted:
@@ -174,13 +224,18 @@ class AccountExecutionCoordinator:
         role: ExecutionRole,
         spec: OrderSpec,
         recovery: bool = False,
+        historical_recovery: bool = False,
     ) -> GatewaySubmissionResult:
         """Prepare/sign, revalidate, durably authorize, then POST."""
-        if recovery and role is ExecutionRole.ENTRY:
+        if (recovery or historical_recovery) and role is ExecutionRole.ENTRY:
             raise DispatchBlocked("recovery cannot request a BUY")
         async with self._mutation_lock:
             return await self._submit_locked(
-                session_id=session_id, role=role, spec=spec, recovery=recovery
+                session_id=session_id,
+                role=role,
+                spec=spec,
+                recovery=recovery or historical_recovery,
+                historical_recovery=historical_recovery,
             )
 
     async def _submit_locked(
@@ -190,6 +245,7 @@ class AccountExecutionCoordinator:
         role: ExecutionRole,
         spec: OrderSpec,
         recovery: bool = False,
+        historical_recovery: bool = False,
     ) -> GatewaySubmissionResult:
         await self.apply(
             OrderRequested(
@@ -302,6 +358,13 @@ class AccountExecutionCoordinator:
             )
             await self.gateway.discard_prepared(prepared)
             raise DispatchBlocked(blocked_reason)
+        if recovery or historical_recovery:
+            blocked = self._recovery_limit_block(
+                session_id, dispatch_spec, historical=historical_recovery
+            )
+            if blocked is not None:
+                await self.gateway.discard_prepared(prepared)
+                raise DispatchBlocked(blocked)
         await self.apply(
             DispatchAuthorized(
                 **new_envelope(
@@ -392,6 +455,21 @@ class AccountExecutionCoordinator:
         ids = tuple(str(item) for item in venue_order_ids if str(item).strip())
         if not ids:
             return CancelResult(canceled=(), not_canceled=())
+        state = self.states.get(session_id)
+        auth = None if state is None else state.recovery_authorization
+        if auth is not None:
+            if auth.action not in {"cancel", "cancel_and_close"}:
+                raise DispatchBlocked("recovery_action_type_mismatch")
+            allowed = set(auth.venue_order_ids)
+            if not allowed and state is not None:
+                allowed = {
+                    order.venue_order_id
+                    for order in state.orders.values()
+                    if order.venue_order_id
+                }
+                allowed.update(state.open_venue_order_ids)
+            if any(item not in allowed for item in ids):
+                raise DispatchBlocked("cancel_order_not_owned")
         cancel_orders = getattr(self.gateway, "cancel_orders", None)
         if not callable(cancel_orders):
             raise CancelUnsupported("gateway has no cancel_orders")

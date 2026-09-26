@@ -209,6 +209,20 @@ class TradingRuntime:
     _required_feature_specs: tuple[Any, ...] = ()
     prior_session_risk: bool = False
     reproducibility: dict[str, Any] | None = None
+    startup_outcome: str | None = None
+    startup_report: dict[str, Any] | None = None
+    recovery_sessions: list[dict[str, Any]] = field(default_factory=list)
+    _state_lock: Any = None
+    _recovery_binding_id: str | None = None
+    _recovery_book: Any = None
+    _assessment_valid_until: datetime | None = None
+    _assessment_generation: str | None = None
+    _startup_invalidated_reason: str | None = None
+    _startup_monitor: asyncio.Task[None] | None = None
+    _strategy_started: bool = False
+    _process_mutation_attempts: int | None = None
+    decision_reader: Any = None
+    _startup_wallet: str | None = None
 
     @classmethod
     async def create(
@@ -219,23 +233,58 @@ class TradingRuntime:
         env: dict[str, str],
         gateway: PolymarketAsyncGateway | None = None,
         run_instance_id: str | None = None,
+        live_requested: bool = True,
     ) -> "TradingRuntime":
         output_directory.mkdir(parents=True, exist_ok=True)
+        from tyrex_pm.execution.process_lock import StateDirectoryLock
+
+        state_lock = StateDirectoryLock(config.state_directory)
+        state_lock.acquire()
+        try:
+            return await cls._create_locked(
+                config=config,
+                output_directory=output_directory,
+                env=env,
+                gateway=gateway,
+                run_instance_id=run_instance_id,
+                live_requested=live_requested,
+                state_lock=state_lock,
+            )
+        except BaseException:
+            state_lock.release()
+            raise
+
+    @classmethod
+    async def _create_locked(
+        cls,
+        *,
+        config: TradingRunConfig,
+        output_directory: Path,
+        env: dict[str, str],
+        gateway: PolymarketAsyncGateway | None,
+        run_instance_id: str | None,
+        live_requested: bool,
+        state_lock: Any,
+    ) -> "TradingRuntime":
         active_gateway = gateway or await PolymarketAsyncGateway.from_env(env)
         capabilities = CapabilityController(
-            live_requested=True,
+            live_requested=live_requested,
             kill_switch_active=config.risk.kill_switch_active,
         )
         holder: dict[str, Any] = {"runtime": None}
 
         def capture_book():
             runtime = holder["runtime"]
+            if runtime is not None and runtime._recovery_book is not None:
+                return runtime._recovery_book()
             if runtime is None or runtime.feed_supervisor is None:
                 return None
             return runtime.feed_supervisor.active_view()
 
         def binding_id() -> str | None:
             runtime = holder["runtime"]
+            if runtime is not None and runtime._recovery_binding_id is not None:
+                return runtime._recovery_binding_id
             feed = None if runtime is None else runtime.feed_supervisor
             return None if feed is None or feed.active is None else feed.active.binding.binding_id
 
@@ -394,6 +443,14 @@ class TradingRuntime:
         active_gateway.fill_context = result.lifecycle.fill_context
         final_gate.entry_cutoff_s = effective_entry_cutoff_s(config)
         final_gate.entry_tau_s = result._current_entry_tau_s
+        final_gate.startup_buy_block = result.startup_buy_block
+        final_gate.note_stream_gap = result.note_startup_stream_gap
+        result._state_lock = state_lock
+        result.coordinator.recovery_generation = result.run_instance_id
+        result.capabilities.set_blocker(
+            "STARTUP_CHECK_PENDING",
+            "a fresh account check is required before any new BUY",
+        )
         active_gateway.prepare_budget_ms = config.lifecycle.prepare_budget_ms
         active_gateway.refresh_wait_budget_ms = config.lifecycle.refresh_wait_budget_ms
         active_gateway.evidence_sink = run_recorder.record
@@ -405,7 +462,7 @@ class TradingRuntime:
                 "configured_run_name": config.run_name,
                 "strategy_kind": config.strategy_kind,
                 "output_directory": str(output_directory),
-                "live_requested": True,
+                "live_requested": live_requested,
             },
         )
         return result
@@ -882,18 +939,11 @@ class TradingRuntime:
                 self.capabilities.set_blocker("PRIOR_SESSION_RECONCILIATION_INCOMPLETE")
             elif reconciled.has_exposure and self.selected_instrument is not None:
                 self.capabilities.selected_token_sellable = reconciled.sellable_shares > 0
-                self._enqueue_intent(
-                    FlattenIntent(
-                        intent_id=new_intent_id(),
-                        strategy_id=ready_binding_strategy_id_from_session(restored),
-                        instrument_id=self.selected_instrument.instrument_id,
-                        market_id=market.market_id,
-                        created_at=datetime.now(timezone.utc),
-                        correlation_id=ready_fallback_correlation(),
-                        causation_id=None,
-                        reason_code="CRASH_RECOVERY_FLATTEN",
-                    )
+                self.capabilities.set_blocker(
+                    "STARTUP_ACTION_REQUIRED",
+                    "owned exposure remains after startup assessment",
                 )
+                self.stop_requested = True
             elif reconciled.has_unresolved_mutation_attempt:
                 await self.lifecycle.mark_manual("ambiguous_prior_submission")
                 self.capabilities.set_blocker("AMBIGUOUS_PRIOR_SUBMISSION")
@@ -908,6 +958,35 @@ class TradingRuntime:
             (trade.shares * trade.price for trade in state.trades.values() if trade.side == "BUY"),
             Decimal("0"),
         )
+
+    def note_assessment_validity(self) -> None:
+        """Local validity only. Strategy evaluation does not call the account."""
+        deadline = self._assessment_valid_until
+        if deadline is None or self.time_authority is None:
+            return
+        now = self.time_authority.now_corrected_utc()
+        if now >= deadline:
+            self.capabilities.set_blocker(
+                "STARTUP_ASSESSMENT_EXPIRED",
+                "startup evidence is older than its validity window",
+            )
+
+    def apply_startup_recheck(self, ready: bool) -> None:
+        if ready:
+            self.capabilities.clear_blocker("STARTUP_ASSESSMENT_EXPIRED")
+            self.capabilities.clear_blocker("STARTUP_CHECK_PENDING")
+            if self.time_authority is not None:
+                from datetime import timedelta
+
+                self._assessment_valid_until = (
+                    self.time_authority.now_corrected_utc()
+                    + timedelta(seconds=self.config.startup.monitor_interval_s)
+                )
+        else:
+            self.capabilities.set_blocker(
+                "STARTUP_CHECK_PENDING",
+                "startup recheck is not ready",
+            )
 
     def on_evaluation(self, market_runtime: ZGapMarketRuntime) -> list[dict[str, Any]]:
         ready = market_runtime.prepare_aligned_eval()
@@ -1513,7 +1592,387 @@ class TradingRuntime:
             **snap.__dict__,
         }
 
+    def _release_state_lock(self) -> None:
+        lock = self._state_lock
+        self._state_lock = None
+        if lock is not None:
+            lock.release()
+
+    def startup_buy_block(self) -> str | None:
+        """Local freshness check used only at final BUY authorization."""
+        if self._startup_invalidated_reason:
+            return self._startup_invalidated_reason
+        if self._assessment_generation not in {None, self.run_instance_id}:
+            return "STARTUP_ASSESSMENT_EXPIRED"
+        until = self._assessment_valid_until
+        if until is None:
+            return "STARTUP_ASSESSMENT_EXPIRED"
+        now = (
+            datetime.now(timezone.utc)
+            if self.time_authority is None
+            else self.time_authority.now_corrected_utc()
+        )
+        if now >= until:
+            return "STARTUP_ASSESSMENT_EXPIRED"
+        return None
+
+    def note_startup_stream_gap(self) -> None:
+        self._startup_invalidated_reason = "STARTUP_STREAM_GAP"
+        self._assessment_valid_until = None
+        self.capabilities.set_blocker(
+            "STARTUP_ASSESSMENT_EXPIRED",
+            "the book stream gap invalidated startup readiness",
+        )
+
+    def _mark_startup_fresh(self) -> None:
+        from datetime import timedelta
+
+        self._startup_invalidated_reason = None
+        self._assessment_generation = self.run_instance_id
+        self.capabilities.clear_blocker("STARTUP_ASSESSMENT_EXPIRED")
+        self.capabilities.clear_blocker("STARTUP_CHECK_PENDING")
+        now = (
+            datetime.now(timezone.utc)
+            if self.time_authority is None
+            else self.time_authority.now_corrected_utc()
+        )
+        self._assessment_valid_until = now + timedelta(
+            seconds=self.config.startup.monitor_interval_s
+        )
+
+    async def _startup_monitor_loop(self) -> None:
+        interval = self.config.startup.monitor_interval_s
+        while not self.stop_requested:
+            await asyncio.sleep(interval)
+            if self.stop_requested:
+                return
+            try:
+                assessment = await self._assess_startup(write_report=False)
+            except Exception:
+                self._startup_invalidated_reason = "STARTUP_RECHECK_FAILED"
+                self._assessment_valid_until = None
+                self.capabilities.set_blocker(
+                    "STARTUP_ASSESSMENT_EXPIRED",
+                    "startup recheck failed",
+                )
+                continue
+            if self._recheck_keeps_readiness(assessment):
+                self._mark_startup_fresh()
+            else:
+                self._startup_invalidated_reason = "STARTUP_RECHECK_FAILED"
+                self._assessment_valid_until = None
+                self.capabilities.set_blocker(
+                    "STARTUP_CHECK_PENDING",
+                    "startup recheck is not ready",
+                )
+
+    def _recheck_keeps_readiness(self, assessment: Any) -> bool:
+        if assessment.ready:
+            return True
+        active = self.lifecycle.session_id
+        for issue in assessment.issues:
+            if issue.severity.value == "AUTO":
+                continue
+            if (
+                issue.code in {"OWNED_POSITION", "OWNED_LIVE_ORDER"}
+                and issue.session_id == active
+            ):
+                continue
+            return False
+        return True
+
+    def _sessions_for_inspection(self):
+        """Restored sessions plus anything the running coordinator already owns."""
+        by_id = {}
+        for session in self.restored_sessions:
+            if session.session_id:
+                by_id[session.session_id] = session
+        for session_id, session in self.coordinator.states.items():
+            by_id[session_id] = session
+        return tuple(by_id.values())
+
+    def _merge_inspection_sessions(self, reported):
+        merged = []
+        seen: set[str] = set()
+        for session in reported:
+            current = self.coordinator.states.get(session.session_id or "")
+            chosen = session if current is None else current
+            session_id = chosen.session_id
+            if session_id and session_id in seen:
+                continue
+            if session_id:
+                seen.add(session_id)
+            merged.append(chosen)
+        for session in self._sessions_for_inspection():
+            session_id = session.session_id
+            if session_id and session_id not in seen:
+                merged.append(session)
+                seen.add(session_id)
+        return tuple(merged)
+
+    async def _assess_startup(self, *, write_report: bool = True):
+        from dataclasses import replace
+
+        from tyrex_pm.execution.startup_reconciliation import (
+            AccountIdentity,
+            InspectionFacts,
+            ReadCoverage,
+        )
+        from tyrex_pm.reporting.startup_report import startup_report_payload, write_startup_report
+        from tyrex_pm.runtime.startup_controller import StartupController
+
+        facts = await self._read_startup_facts()
+        owned_sessions = self._sessions_for_inspection()
+        if facts is None:
+            facts = InspectionFacts(
+                identity=None,
+                coverage=ReadCoverage(
+                    complete=False,
+                    positions_complete=False,
+                    orders_complete=False,
+                    activity_complete=False,
+                    reason="startup inspection exceeded its budget",
+                ),
+                sessions=owned_sessions,
+            )
+        else:
+            facts = replace(facts, sessions=self._merge_inspection_sessions(facts.sessions))
+        if facts.identity is None and facts.coverage.complete:
+            facts = replace(
+                facts,
+                identity=AccountIdentity(
+                    chain_id=137, environment="production", wallet="unspecified"
+                ),
+            )
+        self._startup_wallet = None if facts.identity is None else facts.identity.wallet
+        controller = StartupController(
+            coordinator=self.coordinator,
+            generation=self.run_instance_id,
+        )
+        await self.coordinator.start()
+        assessment = await controller.inspect(facts)
+        if write_report:
+            payload = startup_report_payload(
+                assessment,
+                run_name=self.config.run_name,
+                live_requested=self.capabilities.live_requested,
+            )
+            self.startup_report = payload
+            write_startup_report(self.output_directory / "startup_report.json", payload)
+        return assessment
+
+    async def _read_startup_facts(self):
+        import inspect
+
+        reader = getattr(self.gateway, "startup_inspection", None)
+        if reader is None:
+            from tyrex_pm.execution.startup_reconciliation import InspectionFacts, ReadCoverage
+
+            return InspectionFacts(
+                identity=None,
+                coverage=ReadCoverage(
+                    complete=False,
+                    positions_complete=False,
+                    orders_complete=False,
+                    activity_complete=False,
+                    reason="startup reader is not available",
+                ),
+                sessions=self._sessions_for_inspection(),
+            )
+        kwargs: dict[str, Any] = {}
+        parameters = inspect.signature(reader).parameters
+        if "journal" in parameters:
+            kwargs["journal"] = self.coordinator.journal
+        if "sessions" in parameters:
+            kwargs["sessions"] = self._sessions_for_inspection()
+
+        async def _call():
+            result = reader(**kwargs)
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
+
+        try:
+            return await asyncio.wait_for(_call(), timeout=self.config.startup.inspection_budget_s)
+        except TimeoutError:
+            return None
+
+    async def _resolve_startup_action(self, assessment: Any) -> Any:
+        from tyrex_pm.application.startup_interaction import proposal_for, request_decision
+        from tyrex_pm.core.ids import CorrelationId, MarketId, StrategyId
+        from tyrex_pm.runtime.startup_controller import StartupController
+
+        decision = await request_decision(
+            assessment,
+            live=True,
+            reader=self.decision_reader or _tty_decision_reader,
+            timeout_s=self.config.startup.prompt_timeout_s,
+        )
+        proposal = proposal_for(assessment, decision.issue_id)
+        if not decision.approved or proposal is None:
+            return assessment
+        controller = StartupController(
+            coordinator=self.coordinator,
+            generation=self.run_instance_id,
+        )
+        book_provider = getattr(self.gateway, "recovery_book", None)
+        if not callable(book_provider):
+            return assessment
+        if not await controller.authorize(proposal, approved=True, live=True):
+            return assessment
+
+        async def _abort() -> Any:
+            await controller.finish(proposal, "aborted")
+            return assessment
+
+        fresh = await self._read_startup_facts()
+        observed = _recovery_observation(fresh, proposal)
+        if observed is None:
+            return await _abort()
+        observed_shares, lifecycle_status = observed
+        reason = controller.refresh_still_valid(
+            proposal,
+            shares=observed_shares,
+            condition_id=proposal.condition_id,
+            token_id=proposal.token_id,
+            lifecycle_status=lifecycle_status,
+        )
+        if reason is not None:
+            return await _abort()
+        if observed_shares == 0 and proposal.action != "cancel":
+            return await _abort()
+        try:
+            book = await book_provider(proposal.condition_id, proposal.token_id)
+        except Exception:
+            return await _abort()
+        if book is None:
+            return await _abort()
+        self._recovery_book = lambda: book
+        self._recovery_binding_id = book.binding_id
+        saved_reads = self.capabilities.account_reads_ready
+        saved_market = self.capabilities.active_market_ready
+        saved_sellable = self.capabilities.selected_token_sellable
+        try:
+            self.coordinator.recovery_now = (
+                (lambda: datetime.now(timezone.utc))
+                if self.time_authority is None
+                else self.time_authority.now_corrected_utc
+            )
+            if self.lifecycle.session_id is None:
+                self.lifecycle.resume(proposal.session_id)
+            self.capabilities.account_reads_ready = True
+            self.capabilities.active_market_ready = True
+            self.capabilities.selected_token_sellable = True
+            intent = FlattenIntent(
+                intent_id=new_intent_id(),
+                strategy_id=StrategyId(self.config.strategy_kind),
+                instrument_id=InstrumentId(proposal.token_id),
+                market_id=MarketId(proposal.condition_id),
+                created_at=datetime.now(timezone.utc),
+                correlation_id=CorrelationId(proposal.issue_id),
+                causation_id=None,
+                reason_code="APPROVED_RECOVERY",
+            )
+            legs = (getattr(book, "up", None), getattr(book, "down", None))
+            leg = next(
+                (
+                    candidate
+                    for candidate in legs
+                    if getattr(candidate, "token_id", None) == proposal.token_id
+                ),
+                None,
+            )
+            min_size = None if leg is None else getattr(leg, "min_order_size", None)
+            bid = None if leg is None else getattr(getattr(leg, "quote", None), "best_bid", None)
+            if proposal.action != "cancel" and (
+                min_size is None or bid is None or Decimal(str(bid)) < proposal.min_price
+            ):
+                return await _abort()
+            await self.lifecycle.submit_exit(
+                intent,
+                token_id=proposal.token_id,
+            min_order_size=None if min_size is None else Decimal(str(min_size)),
+            last_bid=None if bid is None else Decimal(str(bid)),
+                historical_recovery=True,
+            )
+            await controller.finish(proposal, "submitted")
+            state = self.lifecycle.state
+            self.recovery_sessions.append(
+                {
+                    "session_id": proposal.session_id,
+                    "condition_id": proposal.condition_id,
+                    "action": proposal.action,
+                    "max_shares": str(proposal.max_shares),
+                    "phase": None if state is None else state.phase.value,
+                }
+            )
+            if state is not None and state.safe_to_open_entry:
+                self.lifecycle.release_terminal()
+        finally:
+            self.capabilities.account_reads_ready = saved_reads
+            self.capabilities.active_market_ready = saved_market
+            self.capabilities.selected_token_sellable = saved_sellable
+            self._recovery_book = None
+            self._recovery_binding_id = None
+        return await self._assess_startup()
+
     async def run(self) -> TradingRunResult:
+        try:
+            return await self._run_body()
+        finally:
+            await self._stop_startup_monitor()
+            self._release_state_lock()
+
+    async def _stop_startup_monitor(self) -> None:
+        task = self._startup_monitor
+        self._startup_monitor = None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _run_body(self) -> TradingRunResult:
+        assessment = await self._assess_startup()
+        if self.capabilities.live_requested and any(
+            issue.code == "LEGACY_JOURNAL_UNBOUND" for issue in assessment.issues
+        ):
+            from tyrex_pm.adapters.polymarket.startup_reads import associate_legacy_journal
+            from tyrex_pm.application.startup_interaction import request_legacy_association
+
+            accepted = await request_legacy_association(
+                live=True,
+                reader=self.decision_reader or _tty_decision_reader,
+                timeout_s=self.config.startup.prompt_timeout_s,
+                wallet_display=assessment.wallet_display,
+            )
+            if accepted and self._startup_wallet:
+                associate_legacy_journal(
+                    self.coordinator.journal,
+                    self._startup_wallet,
+                    at=(
+                        datetime.now(timezone.utc)
+                        if self.time_authority is None
+                        else self.time_authority.now_corrected_utc()
+                    ),
+                )
+                assessment = await self._assess_startup()
+        if (
+            assessment.status.value == "ACTION_REQUIRED"
+            and self.capabilities.live_requested
+        ):
+            assessment = await self._resolve_startup_action(assessment)
+        startup_ready = assessment.ready
+        if startup_ready:
+            self._mark_startup_fresh()
+            self._startup_monitor = asyncio.create_task(
+                self._startup_monitor_loop(), name="startup-readiness"
+            )
+        else:
+            self.startup_outcome = (
+                "STARTUP_ACTION_REQUIRED"
+                if assessment.status.value == "ACTION_REQUIRED"
+                else "STARTUP_RECONCILIATION_BLOCKED"
+            )
         runtime = MarketSessionRuntime.create(
             clock=SystemClock(),
             strategy_kind=self.config.strategy_kind,
@@ -1528,9 +1987,12 @@ class TradingRuntime:
         fatal_error: dict[str, Any] | None = None
         reporting_failures: list[str] = []
         run_evidence: tuple[RunEvidenceRecord, ...] = ()
-        self._start_intent_dispatcher()
+        if startup_ready:
+            self._start_intent_dispatcher()
         try:
-            self.market_summary = await run_market_data_runtime(
+            if startup_ready:
+                self._strategy_started = True
+                self.market_summary = await run_market_data_runtime(
                 out_dir=self.output_directory,
                 run_id=self.config.run_name,
                 min_seals=999,
@@ -1581,8 +2043,10 @@ class TradingRuntime:
             mutation_attempts = (
                 0 if state is None else self.coordinator.mutation_attempt_count(state.session_id)
             )
+            self._process_mutation_attempts = self.coordinator.mutation_attempt_count(None)
         except Exception as exc:
             mutation_attempts = None
+            self._process_mutation_attempts = None
             reporting_failures.append(f"mutation_projection:{type(exc).__name__}:{exc}")
         try:
             self.execution_timeline = self._build_execution_timeline(state)
@@ -1639,6 +2103,7 @@ class TradingRuntime:
             fatal_error=fatal_error,
             reporting_failures=reporting_failures,
         )
+        self._release_state_lock()
         if isinstance(fatal_exception, (KeyboardInterrupt, asyncio.CancelledError)):
             raise fatal_exception
         return result
@@ -1787,9 +2252,11 @@ class TradingRuntime:
         source = RunReportInput(
             run_instance_id=self.run_instance_id,
             configured_run_name=self.config.run_name,
-            live_requested=True,
+            live_requested=self.capabilities.live_requested,
             state=state,
             mutation_attempts=mutation_attempts,
+            process_mutation_attempts=self._process_mutation_attempts,
+            strategy_started=self._strategy_started,
             execution_timeline=self.execution_timeline,
             capabilities=capabilities,
             market_data=market_data,
@@ -1799,6 +2266,9 @@ class TradingRuntime:
             reporting_failures=reporting_failures,
             prior_session_risk=self.prior_session_risk,
             reproducibility=self.reproducibility,
+            startup_outcome=self.startup_outcome,
+            startup_reconciliation=self.startup_report,
+            recovery_sessions=tuple(self.recovery_sessions),
         )
         try:
             payload = build_run_report(source)
@@ -1891,3 +2361,69 @@ async def run_trading_runtime(
         )
     runtime.reproducibility = reproducibility
     return await runtime.run()
+
+
+def _recovery_observation(facts: Any, proposal: Any):
+    """Shares and lifecycle from a fresh read. None means the recovery must stop."""
+    from tyrex_pm.execution.startup_reconciliation import _holdings_changed, _orders_changed
+
+    if facts is None or facts.identity is None or not facts.coverage.complete:
+        return None
+    if _holdings_changed(facts.holdings, facts.closing_holdings):
+        return None
+    if _orders_changed(facts.open_orders, facts.closing_open_orders):
+        return None
+    shares = Decimal("0")
+    for holding in facts.holdings:
+        if holding.shares <= 0 or holding.token_id != proposal.token_id:
+            continue
+        if holding.condition_id != proposal.condition_id:
+            return None
+        shares += holding.shares
+    allowed_orders = set(proposal.venue_order_ids)
+    for order in facts.open_orders:
+        if order.token_id != proposal.token_id or str(order.side).upper() != "BUY":
+            continue
+        if order.venue_order_id not in allowed_orders:
+            return None
+    lifecycle = facts.lifecycles.get(proposal.condition_id)
+    status = "" if lifecycle is None else lifecycle.status
+    return shares, status
+
+
+async def _tty_decision_reader(prompt: str) -> str | None:
+    """Read one operator line. A non-TTY or EOF declines; it never approves."""
+    import sys
+
+    if sys.stdin is None or not sys.stdin.isatty():
+        return None
+    try:
+        return await asyncio.to_thread(input, prompt)
+    except EOFError:
+        return None
+
+
+async def run_account_inspection(
+    *,
+    config: TradingRunConfig,
+    output_directory: Path,
+    dotenv: Path | None,
+) -> str:
+    """Same classification as startup, with signing and venue mutations disabled."""
+    output_directory.mkdir(parents=True, exist_ok=True)
+    gateway = await PolymarketAsyncGateway.from_env(env=load_dotenv_values(dotenv))
+    gateway.mutations_enabled = False
+    runtime = await TradingRuntime.create(
+        config=config,
+        output_directory=output_directory,
+        env={},
+        gateway=gateway,
+        live_requested=False,
+    )
+    try:
+        assessment = await runtime._assess_startup()
+        return assessment.status.value
+    finally:
+        await runtime.coordinator.close()
+        await gateway.close()
+        runtime._release_state_lock()

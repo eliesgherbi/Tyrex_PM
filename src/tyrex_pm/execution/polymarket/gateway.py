@@ -204,6 +204,8 @@ class PolymarketAsyncGateway:
     evidence_sink: Callable[[str, Mapping[str, Any]], None] | None = None
     fill_context: Callable[[], tuple[set[str], str | None, dict[str, str]]] | None = None
     warmed_token_ids: set[str] = field(default_factory=set)
+    mutations_enabled: bool = True
+    payout_eth_call: Any = None
     _prepared_specs: dict[str, OrderSpec] = field(default_factory=dict)
     _stream_task: asyncio.Task[None] | None = None
     _stream_handle: Any | None = None
@@ -212,7 +214,15 @@ class PolymarketAsyncGateway:
 
     @classmethod
     async def from_env(cls, env: dict[str, str] | None = None) -> "PolymarketAsyncGateway":
-        return cls(client=await build_async_secure_client(env=env))
+        import os
+
+        from tyrex_pm.adapters.polymarket.polygon_rpc import payout_caller_from_env
+
+        source = env if env is not None else dict(os.environ)
+        return cls(
+            client=await build_async_secure_client(env=env),
+            payout_eth_call=payout_caller_from_env(source),
+        )
 
     async def warm_order_metadata(
         self,
@@ -238,6 +248,7 @@ class PolymarketAsyncGateway:
         if spend > spend_cap:
             spend = spend_cap
 
+        self._refuse_mutation("warm order metadata")
         results: list[OrderMetadataWarmTokenResult] = []
         seen: set[str] = set()
         for token_id in token_ids:
@@ -332,7 +343,12 @@ class PolymarketAsyncGateway:
         self._abandoned_prepares.add(follow)
         follow.add_done_callback(self._abandoned_prepares.discard)
 
+    def _refuse_mutation(self, action: str) -> None:
+        if not self.mutations_enabled:
+            raise RuntimeError(f"inspection gateway cannot {action}")
+
     async def prepare_order(self, spec: OrderSpec) -> PreparedOrder:
+        self._refuse_mutation("prepare or sign")
         requested_price = _protection_price(spec)
         details: dict[str, Any] = {
             "requested_protection_price": requested_price,
@@ -476,6 +492,7 @@ class PolymarketAsyncGateway:
 
     async def cancel_orders(self, order_ids: Sequence[str]) -> CancelResult:
         """Cancel specific session-owned orders. Never calls cancel_all."""
+        self._refuse_mutation("cancel")
         ids = tuple(str(item) for item in order_ids if str(item).strip())
         if not ids:
             return CancelResult(canceled=(), not_canceled=())
@@ -489,6 +506,7 @@ class PolymarketAsyncGateway:
         self, *, token_id: str, market_id: str | None = None
     ) -> CancelResult:
         """Cancel our resting orders on one token. Not cancel_all."""
+        self._refuse_mutation("cancel")
         raw = await self.client.cancel_market_orders(token_id=token_id, market=market_id)
         return cancel_result_from_sdk(raw)
 
@@ -497,6 +515,7 @@ class PolymarketAsyncGateway:
         self._prepared_specs.pop(prepared.digest, None)
 
     async def post_order(self, prepared: PreparedOrder) -> GatewaySubmissionResult:
+        self._refuse_mutation("post")
         try:
             spec = self._prepared_specs.pop(prepared.digest)
         except KeyError as exc:
@@ -686,6 +705,35 @@ class PolymarketAsyncGateway:
             self._stream_task.cancel()
             await asyncio.gather(self._stream_task, return_exceptions=True)
             self._stream_task = None
+
+    async def startup_inspection(self, *, journal: Any = None, sessions: tuple[Any, ...] = ()):
+        """Read-only account inventory. Never prepares, posts, cancels, or redeems."""
+        from tyrex_pm.adapters.polymarket.startup_reads import collect_inspection_facts
+
+        return await collect_inspection_facts(
+            self.client,
+            journal=journal,
+            sessions=sessions,
+            guard=self.client_guard,
+            payout_eth_call=self.payout_eth_call,
+        )
+
+    async def recovery_book(self, condition_id: str, token_id: str):
+        """Historical book for one token. Read-only; does not warm or trade."""
+        from tyrex_pm.adapters.polymarket.rest_book import recovery_book_view
+
+        async def _read():
+            return await self.client.get_order_book(token_id=token_id)
+
+        if self.client_guard is not None and hasattr(self.client_guard, "acquire_sdk_slot"):
+            lease = await self.client_guard.acquire_sdk_slot(active=True)
+            try:
+                raw = await _read()
+            finally:
+                await lease.release()
+        else:
+            raw = await _read()
+        return recovery_book_view(raw, condition_id=condition_id, token_id=token_id)
 
     async def close(self) -> None:
         await self.stop_user_stream()

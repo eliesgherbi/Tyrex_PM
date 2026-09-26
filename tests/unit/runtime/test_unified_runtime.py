@@ -370,6 +370,27 @@ class _Venue:
     async def close(self):
         return None
 
+    def startup_inspection(self):
+        from tyrex_pm.execution.startup_reconciliation import (
+            AccountIdentity,
+            InspectionFacts,
+            ReadCoverage,
+        )
+
+        return InspectionFacts(
+            identity=AccountIdentity(
+                chain_id=137,
+                environment="production",
+                wallet="0x1111111111111111111111111111111111111111",
+            ),
+            coverage=ReadCoverage(
+                complete=True,
+                positions_complete=True,
+                orders_complete=True,
+                activity_complete=True,
+            ),
+        )
+
 
 @pytest.mark.asyncio
 async def test_async_production_shape_runs_entry_and_exit_to_flat() -> None:
@@ -594,7 +615,7 @@ async def test_unified_report_is_written_after_normal_composition_shutdown(
         "strategy_input_blocker_counts": {},
         "last_readiness_blockers": [],
     }
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 5
     assert payload["mutation_attempts"] == 0
     assert payload["run_evidence_summary"]["strategy_reason_counts"] == {"INSUFFICIENT_EDGE": 1}
     assert payload["reporting"]["execution_authority"] == "sqlite.execution_events"

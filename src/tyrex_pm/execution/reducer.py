@@ -16,13 +16,20 @@ from tyrex_pm.execution.evidence import (
     ExecutionEvidence,
     ExecutionRole,
     ExitRequested,
+    ExternalPositionAdjustmentObserved,
     ManualInterventionRequired,
+    MarketSettlementObserved,
+    OrderAttemptResolved,
     OrderPreDispatchFailed,
     OrderPrepared,
     OrderRequested,
     OrderSnapshotObserved,
     ReconciliationObserved,
+    RecoveryActionAuthorized,
+    RecoveryActionFinished,
     SessionOpened,
+    SessionOperationalClearanceRecorded,
+    SessionOperationalClearanceRevoked,
     SubmissionAttempted,
     SubmissionFailed,
     SubmissionResponseObserved,
@@ -35,7 +42,9 @@ from tyrex_pm.execution.session_state import (
     ExecutionPhase,
     ExecutionSessionState,
     KnownDustResidual,
+    OperationalDisposition,
     OrderExecutionState,
+    RecoveryAuthorization,
     SessionIdentity,
     TradeRecord,
 )
@@ -146,6 +155,49 @@ def _apply_confirmed_trade(
         state.phase = ExecutionPhase.POSITION_OPEN
 
 
+def assert_clearance_appendable(state: ExecutionSessionState, event: object) -> None:
+    """Reject a clearance that would poison replay. Does not mutate state."""
+    proof = tuple(getattr(event, "proof_event_ids", ()) or ())
+    disposition_name = str(getattr(event, "disposition", ""))
+    try:
+        disposition = OperationalDisposition(disposition_name)
+    except ValueError as exc:
+        raise ReducerInvariantError("unknown operational disposition") from exc
+    if disposition is OperationalDisposition.UNRESOLVED:
+        raise ReducerInvariantError("clearance cannot record unresolved")
+    if not proof:
+        raise ReducerInvariantError("clearance missing proof events")
+    missing = [event_id for event_id in proof if event_id not in state.applied_event_ids]
+    if missing:
+        raise ReducerInvariantError("clearance missing proof events")
+    if not _clearance_allowed(state, disposition):
+        raise ReducerInvariantError("clearance prerequisites failed")
+
+
+def _clearance_allowed(
+    state: ExecutionSessionState, disposition: OperationalDisposition
+) -> bool:
+    if state.has_unresolved_mutation_attempt or state.entry_match_awaiting_confirmation:
+        return False
+    if state.resting_limit_venue_ids:
+        return False
+    if disposition is OperationalDisposition.SETTLEMENT_ONLY:
+        return state.confirmed_position_shares <= 0 and state.settlement_holding_shares >= 0
+    return state.confirmed_position_shares <= 0
+
+
+def _invalidate_clearance_if_contradicted(state: ExecutionSessionState) -> None:
+    disposition = state.operational_disposition
+    if disposition is OperationalDisposition.UNRESOLVED:
+        return
+    contradicted = state.confirmed_position_shares > 0 or bool(state.resting_limit_venue_ids)
+    if disposition is not OperationalDisposition.SETTLEMENT_ONLY:
+        contradicted = contradicted or state.has_unresolved_mutation_attempt
+    if contradicted:
+        state.operational_disposition = OperationalDisposition.UNRESOLVED
+        state.operational_proof_event_ids = ()
+
+
 def reduce_execution_event(
     state: ExecutionSessionState,
     event: ExecutionEvidence,
@@ -187,6 +239,7 @@ def reduce_execution_event(
             state.baseline_position_shares = Decimal(str(event.baseline_position_shares))
             state.baseline_sellable_shares = Decimal(str(event.baseline_sellable_shares))
             state.baseline_open_order_ids = tuple(event.baseline_open_order_ids)
+            state.opened_at = event.observed_at
             if state.baseline_position_shares < 0 or state.baseline_sellable_shares < 0:
                 raise ReducerInvariantError("session baseline quantities must be non-negative")
             state.phase = ExecutionPhase.FLAT
@@ -526,6 +579,11 @@ def reduce_execution_event(
         sellable = Decimal(str(event.sellable_shares))
         if position < 0 or sellable < 0:
             raise ReducerInvariantError("reconciled quantities must be non-negative")
+        if state.operational_disposition is OperationalDisposition.SETTLEMENT_ONLY:
+            if position <= state.settlement_holding_shares:
+                position = Decimal("0")
+            else:
+                position = position - state.settlement_holding_shares
         state.confirmed_position_shares = position
         state.sellable_shares = sellable
         state.reconciliation_complete = event.complete
@@ -566,6 +624,109 @@ def reduce_execution_event(
             effects.append(ReducerEffect(EffectKind.EXIT_CONFIRMED, "flat_confirmed"))
             effects.append(ReducerEffect(EffectKind.SESSION_TERMINAL, "flat_confirmed"))
 
+    elif isinstance(event, OrderAttemptResolved):
+        order = state.orders.get(event.order_id)
+        if order is None or event.attempt_id not in order.attempt_ids:
+            raise ReducerInvariantError("attempt resolution names an unknown attempt")
+        if event.attempt_id in state.resolved_attempt_ids:
+            pass
+        else:
+            matched = Decimal(str(event.cumulative_matched_shares))
+            if matched < 0:
+                raise ReducerInvariantError("resolved match quantity must be non-negative")
+            order.cumulative_matched_hwm = max(order.cumulative_matched_hwm, matched)
+            order.venue_status = event.terminal_status
+            order.ambiguous = False
+            if order.accepted is None:
+                order.accepted = matched > 0 or event.terminal_status.lower() not in {
+                    "rejected",
+                    "cancelled",
+                    "canceled",
+                    "expired",
+                }
+            if event.venue_order_id:
+                order.venue_order_id = order.venue_order_id or event.venue_order_id
+            state.resolved_attempt_ids.add(event.attempt_id)
+
+    elif isinstance(event, ExternalPositionAdjustmentObserved):
+        if state.identity is not None and event.token_id != state.identity.token_id:
+            raise ReducerInvariantError("external adjustment token does not match session")
+        if event.venue_trade_id and event.venue_trade_id in state.trades:
+            raise ReducerInvariantError("external adjustment duplicates an owned trade")
+        if event.activity_id in state.external_activity_ids:
+            pass
+        else:
+            state.external_activity_ids.add(event.activity_id)
+            state.external_reduction_shares += event.shares
+            state.confirmed_position_shares = max(
+                Decimal("0"), state.confirmed_position_shares - event.shares
+            )
+
+    elif isinstance(event, MarketSettlementObserved):
+        if not event.supported:
+            raise ReducerInvariantError("unsupported settlement proof")
+        if state.identity is not None and (
+            event.token_id != state.identity.token_id
+            or event.condition_id != state.identity.market_id
+        ):
+            raise ReducerInvariantError("settlement identity does not match session")
+        key = f"{event.condition_id}:{event.token_id}:{event.proof_source}"
+        if key not in state.settlement_keys:
+            state.settlement_keys.add(key)
+            state.settlement_holding_shares += event.holding_shares
+            state.settlement_excluded_shares += event.holding_shares
+            state.confirmed_position_shares = max(
+                Decimal("0"), state.confirmed_position_shares - event.holding_shares
+            )
+        state.operational_disposition = OperationalDisposition.SETTLEMENT_ONLY
+        state.operational_proof_event_ids = (event.event_id,)
+
+    elif isinstance(event, SessionOperationalClearanceRecorded):
+        try:
+            disposition = OperationalDisposition(event.disposition)
+        except ValueError as exc:
+            raise ReducerInvariantError("unknown operational disposition") from exc
+        if disposition is OperationalDisposition.UNRESOLVED:
+            raise ReducerInvariantError("clearance cannot record unresolved")
+        if not event.proof_event_ids:
+            raise ReducerInvariantError("clearance missing proof events")
+        missing = [
+            event_id
+            for event_id in event.proof_event_ids
+            if event_id not in state.applied_event_ids
+        ]
+        if missing:
+            raise ReducerInvariantError("clearance missing proof events")
+        if not _clearance_allowed(state, disposition):
+            raise ReducerInvariantError("clearance prerequisites failed")
+        state.operational_disposition = disposition
+        state.operational_proof_event_ids = tuple(event.proof_event_ids)
+
+    elif isinstance(event, SessionOperationalClearanceRevoked):
+        state.operational_disposition = OperationalDisposition.UNRESOLVED
+        state.operational_proof_event_ids = ()
+        state.last_error = event.reason
+
+    elif isinstance(event, RecoveryActionAuthorized):
+        state.recovery_authorization = RecoveryAuthorization(
+            action_id=event.action_id,
+            token_id=event.token_id,
+            condition_id=event.condition_id,
+            max_shares=event.max_shares,
+            min_price=event.min_price,
+            expires_at=event.expires_at,
+            generation=event.generation,
+            action=event.action,
+            venue_order_ids=tuple(event.venue_order_ids),
+        )
+
+    elif isinstance(event, RecoveryActionFinished):
+        if (
+            state.recovery_authorization is not None
+            and state.recovery_authorization.action_id == event.action_id
+        ):
+            state.recovery_authorization = None
+
     elif isinstance(event, ManualInterventionRequired):
         state.phase = ExecutionPhase.MANUAL_INTERVENTION
         state.last_error = event.reason
@@ -591,6 +752,11 @@ def reduce_execution_event(
         state.phase = ExecutionPhase.MANUAL_INTERVENTION
     elif locked_dust:
         state.phase = ExecutionPhase.COMPLETED_FLAT_WITH_DUST
+    if not isinstance(
+        event,
+        (SessionOperationalClearanceRecorded, MarketSettlementObserved),
+    ):
+        _invalidate_clearance_if_contradicted(state)
 
     state.applied_event_ids.add(event.event_id)
     state.event_count += 1

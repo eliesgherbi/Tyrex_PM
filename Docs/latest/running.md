@@ -107,7 +107,7 @@ Every live run writes `run_summary.json` under `--out-dir` (or `report_directory
 - `REPORTING_DEGRADED`: explanatory evidence could not be fully persisted or projected.
 - `RUNTIME_FAILURE`: the composition failed; `run_summary.json` still contains the fatal stage and mutation count.
 
-`run_summary.json` schema version 4 includes `run_evidence_summary`, `no_entry_diagnosis`, `validation_scope`, and `reproducibility`. For no-entry runs, inspect `furthest_stage`, `execution_infrastructure_ready_ever`, `entry_executable_ever`, `strategy_inputs_eligible_ever`, `strategy_input_blocker_counts`, and `last_readiness_blockers`. `NO_ENTRY_RUNTIME_BLOCKED` is reserved for infrastructure that never cleared; model/jump-guard/PTB lockouts with healthy account/stream/books are `NO_ENTRY_STRATEGY_INPUT_BLOCKED`. `COMPLETED_NO_ENTRY_SIGNAL` is reserved for a genuinely eligible economic evaluation. `validation_scope.execution_lifecycle_exercised=false` means the run provides no evidence about BUY, fills, or EXIT. The full ordered `run_evidence` list is persisted incrementally in SQLite and projected into the report.
+`run_summary.json` schema version 5 includes `run_evidence_summary`, `no_entry_diagnosis`, `validation_scope`, `reproducibility`, `startup_reconciliation`, `recovery_sessions`, and `strategy_session`. For no-entry runs, inspect `furthest_stage`, `execution_infrastructure_ready_ever`, `entry_executable_ever`, `strategy_inputs_eligible_ever`, `strategy_input_blocker_counts`, and `last_readiness_blockers`. `NO_ENTRY_RUNTIME_BLOCKED` is reserved for infrastructure that never cleared; model/jump-guard/PTB lockouts with healthy account/stream/books are `NO_ENTRY_STRATEGY_INPUT_BLOCKED`. `COMPLETED_NO_ENTRY_SIGNAL` is reserved for a genuinely eligible economic evaluation. `validation_scope.execution_lifecycle_exercised=false` means the run provides no evidence about BUY, fills, or EXIT. The full ordered `run_evidence` list is persisted incrementally in SQLite and projected into the report.
 
 `reproducibility` is captured **before** runtime/network creation so a composition failure still writes identity. It includes package version, full `sys.version`, listed dependency versions (`polymarket-client`, `PyYAML`, `websockets`), git revision and dirty flag, source-config SHA-256, canonical effective config and its separate SHA-256, config path, permitted CLI flags (`live`, `out_dir`), run instance id, and recovery identifiers. It does not include secrets or environment values. Emergency reports keep those ids/hashes and omit the large `effective_config` dump.
 
@@ -119,21 +119,31 @@ Fill language is not implied from an empty list:
 - `MANUAL_INTERVENTION` never presents empty fills as proven zero.
 - Unknown fees and unclassified residuals stay `null`.
 
-The CLI refuses to start if `--out-dir` (or the stamped default) already contains `run_summary.json`. That check runs before `TradingRuntime.create`.
+The CLI refuses to start if `--out-dir` (or the stamped default) already contains `run_summary.json` or `startup_report.json`. That check runs before `TradingRuntime.create`.
+
+Startup outcomes are not economic no-signal results:
+
+- `STARTUP_RECONCILIATION_BLOCKED`: inspection could not prove the account is clear.
+- `STARTUP_ACTION_REQUIRED`: a bot-owned order or position can be closed only after an explicit `approve`.
+- `ACCOUNT_CHECK_READY`: `--check-account` finished ready and submitted nothing.
+- `OPERATOR_STOP_BEFORE_TRADING`: the operator declined, timed out, or had no terminal at the recovery prompt.
+
+A new process always starts with `STARTUP_CHECK_PENDING`. A clearance stored by an earlier process does not authorize a BUY until this process inspects again.
 
 Never delete the configured SQLite state to make a blocker disappear. Inspect `run_summary.json`, account open orders, balances, and the journal first. Deleting state destroys the evidence required for safe recovery.
 
-## Prior-session recovery
+## Startup reconciliation
 
-Account snapshots read balances for specified tokens and open orders for **one** specified market. They are not wallet-wide. A clear current-window snapshot does not prove an old retained market is flat.
+Every `run --live` inspects the account before strategy feeds start. `run --check-account` performs that same inspection and writes `startup_report.json` without signing, posting, cancelling, or redeeming. `--check-account` together with `--live` is rejected.
 
-| Situation | Host action | Operator |
-|-----------|-------------|----------|
-| Same discovered market + token, confirmed exposure | `resume_flatten` | Next `--live` same `state_directory`. Recovery may POST a SELL. Journal stays MANUAL until scoped evidence is flat. |
-| Same market, live owned order, position 0 | `resume_cancel_then_prove` | Expect cancel, then no-fill proof or flatten of a late fill. |
-| Same market, ambiguous POST or MANUAL leftover | `block_manual` | No new BUY. Resolve on the venue UI against journal attempt ids. |
-| Different market/window than the active bind | `block_foreign` | Do not flatten or cancel the foreign token from this process. Do not select that old window — CLI cannot bind it. Inspect journal + venue UI for that condition_id. |
-| Scoped old-market snapshot fresh, complete, zero position, no open orders, no journal uncertainty | `foreign_inventory_absent` | New entry on the **current** window may proceed. The MANUAL sqlite row remains for audit. |
-| Old market exposed/stale/unavailable, or journal still uncertain, even if the current window is clear | stay blocked | Missing or wrong-market evidence is not clearance. |
+Inspection can append read-derived evidence to the journal. It clears a blocker only when that evidence is complete: an exact terminal no-fill order, a uniquely allocated external sale, transfer, merge, or redeem, a supported payout proof, or classified dust. A zero balance, a missing open-order row, a passed end time, `closed=true`, or an indexer `redeemable` flag is not clearance. Pinned `polymarket-client` 0.5.0 market records do not contain a payout vector. When `TYREX_POLYGON_RPC_URL` is set to a real HTTPS Polygon endpoint, a standard binary market can be settled from `payoutDenominator` and `payoutNumerators` on Conditional Tokens `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` after `eth_chainId` returns 137. The placeholder value `https://your-polygon-rpc-endpoint` is rejected before a connection is opened. The call is read-only, uses the `latest` tag, and stays inside the inspection budget. A timeout, malformed response, wrong chain, zero denominator, or missing token index leaves that market unresolved and blocks startup.
+
+Neg-risk positions also live on Conditional Tokens, and their exchange path is separate. They stay unresolved. The pinned SDK exposes `neg_risk`, `outcome_index`, and yes/no token ids, but not a proven `payoutNumerators` slot for the held token, and not whether that condition is a named outcome, a placeholder, or Other. Price, `closed`, end time, `redeemable`, and UMA text are not used as a payout.
+
+When the only remaining work is a bot-owned order or position, the process prints a proposal and waits for the word `approve`. Decline, EOF, a non-interactive terminal, or the prompt timeout leaves the session untouched. An approved close uses the existing lifecycle, coordinator, and final gate on that historical market. The approved quantity, price floor, identity, and expiry are checked again immediately before POST. A recovery action never places a BUY and does not spend the new strategy's $5 entry budget.
+
+Two processes cannot share one `state_directory`. The lock is released on shutdown and is not a license to delete the journal.
+
+In-run emergency flatten and shutdown drain are unchanged. They are not a substitute for this startup decision.
 
 `--continue` is not a first-release operator step. Discovery is current + next 5m only.
