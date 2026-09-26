@@ -105,10 +105,19 @@ def _context(*, entry_allowed: bool = True, position: Decimal = Decimal("0")) ->
 
 
 def test_ask70_config_loads_from_yaml() -> None:
+    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s, strategy_entry_cutoff_s
+
     cfg = load_trading_run_config(Path("config/runs/ask70_protection_tiny_live.yaml"))
     assert cfg.strategy_kind == "ask70"
     assert isinstance(cfg.strategy, Ask70Config)
     assert cfg.strategy.entry_ask_threshold == Decimal("0.70")
+    assert cfg.strategy.tau_min_s == 105.0
+    assert cfg.lifecycle.mandatory_exit_before_end_s == 90
+    assert cfg.lifecycle.evidence_timeout_s == 15
+    assert cfg.risk.maximum_total_debit == Decimal("5")
+    assert cfg.market.entry_dispatch_margin_s == 1.0
+    assert effective_entry_cutoff_s(cfg) == 105.0
+    assert strategy_entry_cutoff_s(cfg) == 106.0
     assert cfg.protection is not None
     assert cfg.protection.take_profit is not None
     assert cfg.protection.take_profit.absolute == Decimal("0.85")
@@ -138,6 +147,26 @@ def test_ask70_enters_first_leg_at_or_above_threshold() -> None:
     assert isinstance(intent, EnterIntent)
     assert intent.outcome is OutcomeSide.YES
     assert intent.max_price == Decimal("0.73")
+
+
+def test_ask70_does_not_emit_when_strategy_entry_is_closed() -> None:
+    strategy = Ask70Strategy(
+        config=Ask70Config(
+            entry_ask_threshold=Decimal("0.70"),
+            leg_preference="first_hit",
+            max_price_pad=Decimal("0.02"),
+            tau_min_s=105.0,
+            tau_max_s=290.0,
+            max_clock_uncertainty_ms=750.0,
+        )
+    )
+    snap = _snapshot(up_ask=Decimal("0.70"), down_ask=Decimal("0.30"))
+    decision, intents = strategy.on_decision(
+        market_snapshot=snap,
+        context=_context(entry_allowed=False),
+    )
+    assert decision.action is StrategyAction.BLOCKED
+    assert intents == []
 
 
 def test_ask70_waits_when_asks_below_threshold() -> None:

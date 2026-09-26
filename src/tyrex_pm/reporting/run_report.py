@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -123,40 +125,111 @@ def _outcome(
     runtime_errors: Sequence[str],
     run_evidence: Sequence[RunEvidenceRecord],
     startup_outcome: str | None = None,
-) -> tuple[str, bool]:
+    mutation_attempts: int | None = None,
+) -> tuple[str, bool, dict[str, Any] | None]:
     if startup_outcome:
-        return startup_outcome, False
+        return startup_outcome, False, None
     if fatal_error is not None:
-        return "RUNTIME_FAILURE", False
+        return "RUNTIME_FAILURE", False, None
     if reporting_failures:
-        return "REPORTING_DEGRADED", False
+        return "REPORTING_DEGRADED", False, None
     if runtime_errors:
-        return "RUNTIME_DEGRADED", False
+        return "RUNTIME_DEGRADED", False, None
     if state is None:
+        cutoff = _cutoff_only_block(
+            mutation_attempts=mutation_attempts,
+            run_evidence=run_evidence,
+        )
+        if cutoff is not None:
+            return "NO_ENTRY_CUTOFF_BLOCKED", True, cutoff
         diagnosis = _no_entry_diagnosis(run_evidence)
         if diagnosis["intent_emitted_count"]:
-            return "ENTRY_ABORTED_BEFORE_SESSION", False
+            return "ENTRY_ABORTED_BEFORE_SESSION", False, None
         if not diagnosis["execution_infrastructure_ready_ever"]:
-            return "NO_ENTRY_RUNTIME_BLOCKED", False
+            return "NO_ENTRY_RUNTIME_BLOCKED", False, None
         if not diagnosis["strategy_inputs_eligible_ever"]:
-            return "NO_ENTRY_STRATEGY_INPUT_BLOCKED", False
+            return "NO_ENTRY_STRATEGY_INPUT_BLOCKED", False, None
         if diagnosis["strategy_inputs_eligible_ever"]:
-            return "COMPLETED_NO_ENTRY_SIGNAL", True
-        return "NO_ENTRY_RUNTIME_BLOCKED", False  # defensive unreachable fallback
+            return "COMPLETED_NO_ENTRY_SIGNAL", True, None
+        return "NO_ENTRY_RUNTIME_BLOCKED", False, None  # defensive unreachable fallback
     if state.phase is ExecutionPhase.COMPLETED_NO_DISPATCH:
-        return "COMPLETED_NO_DISPATCH", True
+        return "COMPLETED_NO_DISPATCH", True, None
     if state.phase is ExecutionPhase.COMPLETED_NO_FILL:
-        return "COMPLETED_NO_FILL", True
+        return "COMPLETED_NO_FILL", True, None
     if state.phase is ExecutionPhase.COMPLETED_FLAT:
-        return "COMPLETED_FLAT", True
+        return "COMPLETED_FLAT", True, None
     if state.phase is ExecutionPhase.COMPLETED_FLAT_WITH_DUST:
         residual = state.dust_residual
-        return "COMPLETED_FLAT_WITH_DUST", residual is not None
+        return "COMPLETED_FLAT_WITH_DUST", residual is not None, None
     if state.phase is ExecutionPhase.MANUAL_INTERVENTION:
-        return "MANUAL_INTERVENTION_REQUIRED", False
+        return "MANUAL_INTERVENTION_REQUIRED", False, None
     if state.has_exposure:
-        return "OPEN_EXPOSURE", False
-    return "INCOMPLETE", False
+        return "OPEN_EXPOSURE", False, None
+    return "INCOMPLETE", False, None
+
+
+def _cutoff_only_block(
+    *,
+    mutation_attempts: int | None,
+    run_evidence: Sequence[RunEvidenceRecord],
+) -> dict[str, Any] | None:
+    """Benign no-entry only when every emitted entry was rejected at the hard cutoff.
+
+    A missing mutation count is unknown, not zero. Any other block, a session,
+    or a non-entry intent keeps the existing failure classification.
+    """
+    if mutation_attempts != 0:
+        return None
+    emitted: list[str] = []
+    blocks: list[dict[str, Any]] = []
+    for record in run_evidence:
+        if record.event_type == "DISPATCH_BLOCKED":
+            return None
+        if record.event_type == "INTENT_EMITTED":
+            if record.payload.get("intent_type") != "EnterIntent":
+                return None
+            intent_id = record.payload.get("intent_id")
+            if not isinstance(intent_id, str) or not intent_id:
+                return None
+            emitted.append(intent_id)
+        elif record.event_type == "INTENT_BLOCKED":
+            if record.payload.get("reason") != "ENTRY_CUTOFF_PASSED":
+                return None
+            if record.payload.get("intent_type") not in (None, "EnterIntent"):
+                return None
+            parsed = _parse_cutoff_block(record.payload)
+            if parsed is None:
+                return None
+            blocks.append(parsed)
+    if not emitted or not blocks:
+        return None
+    if set(emitted) != {block["intent_id"] for block in blocks}:
+        return None
+    return blocks[-1]
+
+
+def _parse_cutoff_block(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    intent_id = payload.get("intent_id")
+    tau = payload.get("tau_s")
+    cutoff = payload.get("cutoff_s")
+    if not isinstance(intent_id, str) or not intent_id:
+        return None
+    if isinstance(tau, bool) or isinstance(cutoff, bool):
+        return None
+    if not isinstance(tau, (int, float)) or not isinstance(cutoff, (int, float)):
+        return None
+    if not math.isfinite(float(tau)) or not math.isfinite(float(cutoff)):
+        return None
+    missed = float(Decimal(str(cutoff)) - Decimal(str(tau)))
+    if missed <= 0:
+        return None
+    return {
+        "intent_id": intent_id,
+        "tau_s": float(tau),
+        "cutoff_s": float(cutoff),
+        "missed_by_s": missed,
+        "reason": "ENTRY_CUTOFF_PASSED",
+    }
 
 
 def _infrastructure_ready_from_payload(payload: Mapping[str, Any]) -> bool:
@@ -378,13 +451,14 @@ def _fill_completeness(
 
 def build_run_report(source: RunReportInput) -> dict[str, Any]:
     """Build a pure projection; this function never reads a live component."""
-    outcome, ok = _outcome(
+    outcome, ok, cutoff_block = _outcome(
         source.state,
         fatal_error=source.fatal_error,
         reporting_failures=source.reporting_failures,
         runtime_errors=source.runtime_errors,
         run_evidence=source.run_evidence,
         startup_outcome=source.startup_outcome,
+        mutation_attempts=source.mutation_attempts,
     )
     records = tuple(source.run_evidence)
     no_entry = _no_entry_diagnosis(records) if source.state is None else None
@@ -407,6 +481,7 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         ),
         "execution": execution_state_payload(source.state),
         "no_entry_diagnosis": no_entry,
+        "entry_cutoff_block": cutoff_block,
         "startup_reconciliation": (
             None if source.startup_reconciliation is None else dict(source.startup_reconciliation)
         ),
@@ -433,7 +508,7 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
                 and source.state.exit is not None
                 and source.state.exit.attempt_ids
             ),
-            "note": (_validation_note(source.state, execution_stage)),
+            "note": _validation_note(source.state, execution_stage, cutoff_block),
         },
         "execution_timeline": [dict(row) for row in source.execution_timeline],
         "capabilities": dict(source.capabilities),
@@ -473,7 +548,23 @@ def _execution_stage(state: ExecutionSessionState | None) -> str:
     return "SESSION_OPENED"
 
 
-def _validation_note(state: ExecutionSessionState | None, stage: str) -> str:
+def _validation_note(
+    state: ExecutionSessionState | None,
+    stage: str,
+    cutoff_block: Mapping[str, Any] | None = None,
+) -> str:
+    if cutoff_block is not None and state is None:
+        return (
+            "Execution lifecycle was not exercised. "
+            "No BUY, fill, protection, or exit was tested. "
+            "R7 confirmed-entry/exit acceptance remains incomplete. "
+            f"Entry intent {cutoff_block['intent_id']} measured tau_s={cutoff_block['tau_s']} "
+            f"against hard cutoff_s={cutoff_block['cutoff_s']} "
+            f"and missed the cutoff by {cutoff_block['missed_by_s']} seconds. "
+            "Mutation attempts remain zero. "
+            "ok true means the runtime completed safely; it does not satisfy "
+            "R7 confirmed entry and exit."
+        )
     if state is None:
         return "Run stopped before an execution session; BUY/fill/EXIT behavior is untested."
     if not state.mutations_attempted:

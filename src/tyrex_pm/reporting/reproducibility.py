@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tyrex_pm import __version__
+from tyrex_pm.runtime.run_config import effective_entry_cutoff_s, strategy_entry_cutoff_s
 
 _DEPENDENCIES = ("polymarket-client", "PyYAML", "websockets")
 
@@ -82,6 +83,8 @@ def _git_identity() -> tuple[str | None, bool | None, str | None]:
 
 
 def effective_config_payload(config: Any) -> dict[str, Any]:
+    hard_s = effective_entry_cutoff_s(config)
+    margin_s = config.market.entry_dispatch_margin_s
     return {
         "schema_version": config.schema_version,
         "run_name": config.run_name,
@@ -92,6 +95,11 @@ def effective_config_payload(config: Any) -> dict[str, Any]:
         },
         "protection": None if config.protection is None else _jsonable(config.protection),
         "market": _jsonable(config.market),
+        "entry_cutoffs": {
+            "hard_s": hard_s,
+            "dispatch_margin_s": margin_s,
+            "soft_s": strategy_entry_cutoff_s(config),
+        },
         "account": _jsonable(config.account),
         "risk": _jsonable(config.risk),
         "lifecycle": _jsonable(config.lifecycle),

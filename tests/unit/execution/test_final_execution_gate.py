@@ -153,6 +153,34 @@ async def test_d6_buy_gate_refuses_below_effective_cutoff() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hard_cutoff_equality_allows_tau_equal_to_cutoff() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.entry_cutoff_s = 105.0
+    gate.entry_tau_s = lambda: 105.0
+    allowed, reason = await gate(_spec(candidate_monotonic_ns=time.monotonic_ns()))
+    assert allowed
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_hard_cutoff_rejects_observed_ask70_tau() -> None:
+    gate = FinalExecutionGate(
+        capture_book=_view,
+        capabilities=_capabilities(),
+        active_binding_id=lambda: "binding",
+    )
+    gate.entry_cutoff_s = 105.0
+    gate.entry_tau_s = lambda: 104.930171
+    allowed, reason = await gate(_spec(candidate_monotonic_ns=time.monotonic_ns()))
+    assert not allowed
+    assert reason == "ENTRY_CUTOFF_PASSED"
+
+
+@pytest.mark.asyncio
 async def test_d8_sell_ignores_entry_cutoff() -> None:
     gate = FinalExecutionGate(
         capture_book=_view,

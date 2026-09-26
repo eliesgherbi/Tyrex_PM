@@ -17,6 +17,7 @@ from tyrex_pm.application.cli import main
 from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
 from tyrex_pm.core.intents import EnterIntent, ExitIntent, new_intent_id
+from tyrex_pm.execution.account_state import AccountSnapshotStatus
 from tyrex_pm.execution.coordinator import (
     AccountExecutionCoordinator,
     GatewaySubmissionResult,
@@ -25,8 +26,9 @@ from tyrex_pm.execution.coordinator import (
 from tyrex_pm.execution.lifecycle import ExecutionLifecycle, LifecyclePolicy
 from tyrex_pm.execution.planner import ExecutionRiskPolicy, IntentOrderPlanner
 from tyrex_pm.execution.reconciliation import SessionReconciler
-from tyrex_pm.execution.session_state import ExecutionPhase
+from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
 from tyrex_pm.persistence.execution_journal import MemoryExecutionJournal
+from tyrex_pm.persistence.run_evidence_journal import RunEvidenceRecord
 from tyrex_pm.reporting.run_report import RunReportInput, build_run_report
 from tyrex_pm.runtime.capabilities import CapabilityController
 from tyrex_pm.runtime.market_data_runtime import MarketDataSummary
@@ -66,12 +68,18 @@ def _exit() -> ExitIntent:
 
 
 def test_d1_tiny_live_loads_with_effective_cutoff() -> None:
-    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s, host_safety_floor_s
+    from tyrex_pm.runtime.run_config import (
+        effective_entry_cutoff_s,
+        host_safety_floor_s,
+        strategy_entry_cutoff_s,
+    )
 
     cfg = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
     assert host_safety_floor_s(cfg) == 105.0
     assert effective_entry_cutoff_s(cfg) == 105.0
     assert cfg.strategy.entry.tau_min_s == 105.0
+    assert cfg.market.entry_dispatch_margin_s == cfg.market.evaluation_interval_s == 1.0
+    assert strategy_entry_cutoff_s(cfg) == 106.0
 
 
 def test_d2_tau_min_below_host_floor_fails_load(tmp_path: Path) -> None:
@@ -296,6 +304,7 @@ async def test_manual_deadline_is_enforced_with_open_exposure() -> None:
                 manual_deadline_before_end_s=45,
                 evidence_timeout_s=15,
             ),
+            market=SimpleNamespace(entry_dispatch_margin_s=1.0),
             protection=None,
         ),
         capabilities=SimpleNamespace(entry_window_open=False),
@@ -811,7 +820,7 @@ async def test_r2_nonzero_clock_correction_aligns_tick_consume_and_gate() -> Non
         TimeSyncStatus,
     )
     from tyrex_pm.execution.final_gate import FinalExecutionGate
-    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s
+    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s, strategy_entry_cutoff_s
 
     config = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
     event_end = datetime(2026, 9, 20, 12, 5, tzinfo=timezone.utc)
@@ -838,17 +847,19 @@ async def test_r2_nonzero_clock_correction_aligns_tick_consume_and_gate() -> Non
     tau = runtime._current_entry_tau_s()
     uncorrected = (event_end - wall).total_seconds()
     assert tau == pytest.approx(uncorrected - 20.0)
-    cutoff = effective_entry_cutoff_s(config)
-    tick_open = bool(tau is not None and cutoff <= tau <= 290.0)
-    consume_open = bool(tau is not None and tau >= cutoff)
+    hard = effective_entry_cutoff_s(config)
+    soft = strategy_entry_cutoff_s(config)
+    assert soft == hard + config.market.entry_dispatch_margin_s
+    tick_open = bool(tau is not None and soft <= tau <= 290.0)
+    consume_open = bool(tau is not None and tau >= hard)
     assert tick_open is consume_open
-    assert tau < cutoff
+    assert tau < hard
     gate = FinalExecutionGate(
         capture_book=lambda: None,
         capabilities=CapabilityController(live_requested=True, entry_window_open=True),
         active_binding_id=lambda: "b",
     )
-    gate.entry_cutoff_s = cutoff
+    gate.entry_cutoff_s = hard
     gate.entry_tau_s = runtime._current_entry_tau_s
     from tyrex_pm.execution.orders import MarketBuyOrderSpec
 
@@ -865,3 +876,405 @@ async def test_r2_nonzero_clock_correction_aligns_tick_consume_and_gate() -> Non
     allowed, reason = await gate(spec)
     assert allowed is False
     assert reason == "ENTRY_CUTOFF_PASSED"
+
+
+def _window_runtime(
+    *, tau: float, exposed: bool
+) -> tuple[SimpleNamespace, SimpleNamespace, list, Mock]:
+    enqueued: list = []
+    protection = Mock()
+    state = SimpleNamespace(
+        has_exposure=exposed,
+        needs_venue_followup=False,
+        exit_requested_reason=None,
+        session_id="session",
+    )
+    runtime = SimpleNamespace(
+        _bind_pending_market=AsyncMock(),
+        _market_data_ready=lambda: False,
+        active_market=SimpleNamespace(
+            entry_enabled=True,
+            market=SimpleNamespace(
+                event_end=NOW,
+                condition_id="condition",
+                market_id=SimpleNamespace(value="market"),
+            ),
+        ),
+        account_state_authority=SimpleNamespace(current=lambda _market_id: object()),
+        _apply_account_snapshot=Mock(),
+        config=SimpleNamespace(
+            strategy_kind="z_gap",
+            strategy=SimpleNamespace(entry=SimpleNamespace(tau_min_s=105.0, tau_max_s=290.0)),
+            lifecycle=SimpleNamespace(
+                mandatory_exit_before_end_s=90,
+                manual_deadline_before_end_s=45,
+                evidence_timeout_s=15,
+            ),
+            market=SimpleNamespace(entry_dispatch_margin_s=1.0),
+            protection=None,
+        ),
+        capabilities=SimpleNamespace(entry_window_open=False),
+        lifecycle=SimpleNamespace(state=state, mark_manual=AsyncMock()),
+        intent_queue=asyncio.Queue(),
+        _enqueue_intent=lambda intent: enqueued.append(intent),
+        _maybe_arm_protection=Mock(),
+        _maybe_post_resting_take_profit=AsyncMock(),
+        _maybe_emit_protection_exit=protection,
+        _refresh_order_metadata_capability=Mock(),
+        selected_instrument=SimpleNamespace(instrument_id=InstrumentId("yes")),
+        stop_requested=False,
+        time_authority=SimpleNamespace(now_corrected_utc=lambda: NOW),
+        _current_entry_tau_s=lambda: tau,
+    )
+    market_runtime = SimpleNamespace(
+        zgap=SimpleNamespace(strategy_id=StrategyId("z_gap")),
+        prepare_aligned_eval=lambda: SimpleNamespace(snapshot=None),
+    )
+    return runtime, market_runtime, enqueued, protection
+
+
+@pytest.mark.asyncio
+async def test_strategy_window_opens_only_at_or_above_soft_cutoff() -> None:
+    above, market, _enqueued, _protection = _window_runtime(tau=106.0, exposed=False)
+    await TradingRuntime.on_async_tick(above, market)
+    assert above.capabilities.entry_window_open is True
+
+    below, market, _enqueued, _protection = _window_runtime(tau=105.999, exposed=False)
+    await TradingRuntime.on_async_tick(below, market)
+    assert below.capabilities.entry_window_open is False
+
+
+@pytest.mark.asyncio
+async def test_between_soft_and_hard_strategy_window_is_closed() -> None:
+    runtime, market, enqueued, protection = _window_runtime(tau=105.5, exposed=True)
+    await TradingRuntime.on_async_tick(runtime, market)
+    assert runtime.capabilities.entry_window_open is False
+    assert enqueued == []
+    protection.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_mandatory_flatten_and_protection_ignore_entry_cutoffs() -> None:
+    runtime, market, enqueued, protection = _window_runtime(tau=90.0, exposed=True)
+    await TradingRuntime.on_async_tick(runtime, market)
+    assert runtime.capabilities.entry_window_open is False
+    assert [intent.reason_code for intent in enqueued] == ["MANDATORY_FLATTEN"]
+    protection.assert_not_called()
+
+    still_protected, market, enqueued, protection = _window_runtime(tau=100.0, exposed=True)
+    await TradingRuntime.on_async_tick(still_protected, market)
+    assert still_protected.capabilities.entry_window_open is False
+    assert enqueued == []
+    protection.assert_called_once()
+
+
+async def _consume_entry(tau: float) -> tuple[list, list, AsyncMock]:
+    recorded: list[tuple[str, dict]] = []
+    opened: list[dict] = []
+    config = load_trading_run_config(Path("config/runs/ask70_protection_tiny_live.yaml"))
+    intent = _entry()
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(intent)
+    token_state = SimpleNamespace(balance_shares=Decimal("0"), allowance_shares=Decimal("0"))
+    account = SimpleNamespace(
+        status=AccountSnapshotStatus.READY,
+        blockers=(),
+        token=lambda _token_id: token_state,
+        open_order_ids=(),
+    )
+
+    class _Hold:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    async def _open(**kwargs: object) -> None:
+        opened.append(kwargs)
+
+    submit_entry = AsyncMock(
+        return_value=SimpleNamespace(
+            sellable_shares=Decimal("0"),
+            phase=ExecutionPhase.COMPLETED_NO_FILL,
+            terminal=True,
+            working_maker_entry=False,
+        )
+    )
+    runtime = object.__new__(TradingRuntime)
+    runtime.config = config
+    runtime.intent_queue = queue
+    runtime.intent_candidate_monotonic_ns = {}
+    runtime.run_recorder = SimpleNamespace(
+        record=lambda event, payload: recorded.append((event, payload))
+    )
+    runtime._record_runtime_error = Mock()
+    def _select_token(_intent: object) -> tuple[str, SimpleNamespace]:
+        return "tok", SimpleNamespace(instrument_id=getattr(_intent, "instrument_id"))
+
+    runtime._select_token = _select_token
+    runtime.active_market = SimpleNamespace(
+        window_id="window",
+        market=SimpleNamespace(condition_id="cond", market_id=SimpleNamespace(value="market")),
+        entry_enabled=True,
+    )
+    runtime.stream_session_id = "stream"
+    runtime.account_state_authority = SimpleNamespace(
+        current=lambda _mid: account,
+        hold_ready_snapshot=lambda _mid: _Hold(),
+    )
+    runtime._apply_account_snapshot = Mock()
+    runtime._current_entry_tau_s = lambda: tau
+    runtime.lifecycle = SimpleNamespace(
+        open=AsyncMock(side_effect=_open),
+        submit_entry=submit_entry,
+    )
+    runtime.account_state = None
+    runtime.selected_token_id = None
+    runtime.selected_instrument = None
+    runtime.capabilities = SimpleNamespace(selected_token_sellable=False)
+    runtime.stop_requested = False
+    runtime._maybe_arm_protection = Mock()
+    runtime._maybe_post_resting_take_profit = AsyncMock()
+    await TradingRuntime._consume_intent(runtime)
+    runtime._record_runtime_error.assert_not_called()
+    return recorded, opened, submit_entry
+
+
+@pytest.mark.asyncio
+async def test_tau_above_soft_cutoff_consumes_entry() -> None:
+    recorded, opened, submit_entry = await _consume_entry(107.0)
+    assert recorded == []
+    assert len(opened) == 1
+    submit_entry.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tau_equal_to_hard_cutoff_still_consumes_entry() -> None:
+    _recorded, opened, submit_entry = await _consume_entry(105.0)
+    assert len(opened) == 1
+    submit_entry.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tau_between_soft_and_hard_still_consumes_queued_entry() -> None:
+    _recorded, opened, submit_entry = await _consume_entry(105.5)
+    assert len(opened) == 1
+    submit_entry.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_observed_cutoff_tau_is_rejected_before_session_or_mutation() -> None:
+    recorded, opened, submit_entry = await _consume_entry(104.930171)
+    assert opened == []
+    submit_entry.assert_not_awaited()
+    assert recorded == [
+        (
+            "INTENT_BLOCKED",
+            {
+                "intent_id": recorded[0][1]["intent_id"],
+                "intent_type": "EnterIntent",
+                "reason": "ENTRY_CUTOFF_PASSED",
+                "tau_s": 104.930171,
+                "cutoff_s": 105.0,
+            },
+        )
+    ]
+
+
+def _evidence(event_type: str, payload: dict, sequence: int) -> RunEvidenceRecord:
+    return RunEvidenceRecord(
+        sequence=sequence,
+        event_id=f"e{sequence}",
+        run_instance_id="run",
+        event_type=event_type,
+        observed_at=NOW,
+        payload=payload,
+    )
+
+
+def _cutoff_records() -> tuple[RunEvidenceRecord, ...]:
+    return (
+        _evidence(
+            "INTENT_EMITTED",
+            {"intent_id": "entry-1", "intent_type": "EnterIntent"},
+            1,
+        ),
+        _evidence(
+            "INTENT_BLOCKED",
+            {
+                "intent_id": "entry-1",
+                "intent_type": "EnterIntent",
+                "reason": "ENTRY_CUTOFF_PASSED",
+                "tau_s": 104.930171,
+                "cutoff_s": 105.0,
+            },
+            2,
+        ),
+    )
+
+
+def _report(records: tuple[RunEvidenceRecord, ...], **overrides: object) -> dict:
+    fields: dict = {
+        "run_instance_id": "run",
+        "configured_run_name": "ask70_protection_tiny_live",
+        "live_requested": True,
+        "state": None,
+        "mutation_attempts": 0,
+        "process_mutation_attempts": 0,
+        "execution_timeline": (),
+        "capabilities": {},
+        "market_data": None,
+        "run_evidence": records,
+        "runtime_errors": (),
+        "strategy_started": True,
+    }
+    fields.update(overrides)
+    return build_run_report(RunReportInput(**fields))
+
+
+def test_cutoff_only_no_entry_is_a_safe_incomplete_validation() -> None:
+    payload = _report(_cutoff_records(), process_mutation_attempts=4)
+    assert payload["outcome"] == "NO_ENTRY_CUTOFF_BLOCKED"
+    assert payload["ok"] is True
+    assert payload["mutation_attempts"] == 0
+    assert payload["process_mutation_attempts"] == 4
+    assert payload["strategy_session"] is None
+    assert payload["validation_scope"]["execution_lifecycle_exercised"] is False
+    assert payload["validation_scope"]["venue_mutation_attempted"] is False
+    block = payload["entry_cutoff_block"]
+    assert block["intent_id"] == "entry-1"
+    assert block["tau_s"] == pytest.approx(104.930171)
+    assert block["cutoff_s"] == 105.0
+    assert block["missed_by_s"] == pytest.approx(0.069829)
+    assert block["reason"] == "ENTRY_CUTOFF_PASSED"
+    note = payload["validation_scope"]["note"]
+    assert "Execution lifecycle was not exercised" in note
+    assert "No BUY, fill, protection, or exit was tested" in note
+    assert "R7 confirmed-entry/exit acceptance remains incomplete" in note
+    assert "entry-1" in note
+    assert "104.930171" in note
+    assert "105.0" in note
+    assert "Mutation attempts remain zero" in note
+    assert "does not satisfy" in note
+
+
+@pytest.mark.asyncio
+async def test_cutoff_only_runtime_writes_safe_no_entry_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = await _reporting_runtime(tmp_path)
+    runtime.run_recorder.record(
+        "INTENT_EMITTED",
+        {"intent_id": "entry-1", "intent_type": "EnterIntent"},
+    )
+    runtime.run_recorder.record(
+        "INTENT_BLOCKED",
+        {
+            "intent_id": "entry-1",
+            "intent_type": "EnterIntent",
+            "reason": "ENTRY_CUTOFF_PASSED",
+            "tau_s": 104.930171,
+            "cutoff_s": 105.0,
+        },
+    )
+    monkeypatch.setattr(trading_runtime_module, "run_market_data_runtime", _completed_market_data)
+    result = await runtime.run()
+    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert result.outcome == "NO_ENTRY_CUTOFF_BLOCKED"
+    assert result.ok is True
+    assert payload["mutation_attempts"] == 0
+    assert payload["strategy_session"] is None
+    assert payload["validation_scope"]["execution_lifecycle_exercised"] is False
+    assert payload["entry_cutoff_block"]["reason"] == "ENTRY_CUTOFF_PASSED"
+    note = payload["validation_scope"]["note"]
+    assert "R7 confirmed-entry/exit acceptance remains incomplete" in note
+
+
+def test_more_serious_failures_are_not_relabeled_as_cutoff() -> None:
+    records = _cutoff_records()
+    startup = _report(records, startup_outcome="STARTUP_RECONCILIATION_BLOCKED")
+    assert startup["outcome"] == "STARTUP_RECONCILIATION_BLOCKED"
+    assert startup["ok"] is False
+    assert startup["entry_cutoff_block"] is None
+
+    fatal = _report(records, fatal_error={"stage": "interrupt", "error_type": "KeyboardInterrupt"})
+    assert fatal["outcome"] == "RUNTIME_FAILURE"
+    assert fatal["ok"] is False
+
+    degraded = _report(records, runtime_errors=("intent:RuntimeError:prepare failed",))
+    assert degraded["outcome"] == "RUNTIME_DEGRADED"
+
+    reporting = _report(records, reporting_failures=("mutation_projection:OSError:locked",))
+    assert reporting["outcome"] == "REPORTING_DEGRADED"
+
+    posted = _report(
+        records,
+        state=ExecutionSessionState(phase=ExecutionPhase.COMPLETED_NO_DISPATCH),
+        mutation_attempts=0,
+    )
+    assert posted["outcome"] == "COMPLETED_NO_DISPATCH"
+    assert posted["entry_cutoff_block"] is None
+
+    account = _report(
+        (
+            _evidence("INTENT_EMITTED", {"intent_id": "entry-1", "intent_type": "EnterIntent"}, 1),
+            _evidence(
+                "INTENT_BLOCKED",
+                {"intent_id": "entry-1", "reason": "ACCOUNT_STATE_NOT_AUTHORITATIVE"},
+                2,
+            ),
+        )
+    )
+    assert account["outcome"] == "ENTRY_ABORTED_BEFORE_SESSION"
+    assert account["ok"] is False
+
+    mixed = _report(
+        _cutoff_records()
+        + (
+            _evidence(
+                "INTENT_BLOCKED",
+                {"intent_id": "entry-1", "reason": "ACCOUNT_STATE_NOT_AUTHORITATIVE"},
+                3,
+            ),
+        )
+    )
+    assert mixed["outcome"] == "ENTRY_ABORTED_BEFORE_SESSION"
+
+    unknown = _report(_cutoff_records(), mutation_attempts=None)
+    assert unknown["outcome"] == "ENTRY_ABORTED_BEFORE_SESSION"
+
+
+def test_entry_dispatch_margin_must_be_finite_and_non_negative(tmp_path: Path) -> None:
+    from tyrex_pm.runtime.run_config import RunConfigError, strategy_entry_cutoff_s
+
+    text = Path("config/runs/z_gap_tiny_live.yaml").read_text(encoding="utf-8")
+    zero = tmp_path / "zero.yaml"
+    zero.write_text(
+        text.replace(
+            "evaluation_interval_s: 1\n",
+            "evaluation_interval_s: 1\n  entry_dispatch_margin_s: 0\n",
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_trading_run_config(zero)
+    assert loaded.market.entry_dispatch_margin_s == 0.0
+    assert strategy_entry_cutoff_s(loaded) == 105.0
+
+    for raw, match in (
+        ("-1", "finite and >= 0"),
+        ("true", "finite number"),
+        (".nan", "finite and >= 0"),
+        (".inf", "finite and >= 0"),
+        ("200", "strategy-facing entry cutoff"),
+    ):
+        path = tmp_path / f"bad-{raw}.yaml"
+        path.write_text(
+            text.replace(
+                "evaluation_interval_s: 1\n",
+                f"evaluation_interval_s: 1\n  entry_dispatch_margin_s: {raw}\n",
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(RunConfigError, match=match):
+            load_trading_run_config(path)

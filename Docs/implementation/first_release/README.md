@@ -55,13 +55,13 @@ One usable live process on the **existing** host:
 | ID | File | First-release? | Depends | Status |
 |----|------|----------------|---------|--------|
 | R1 | [execution_completion_recovery.md](execution_completion_recovery.md) | **Yes** | — | Implemented (offline). Named F10–F13 / F16 / F18–F19 remain covered by existing maker/cancel/protection tests rather than standalone rows. |
-| R2 | [entry_exit_deadlines.md](entry_exit_deadlines.md) | **Yes** | — | Implemented. Tick, consume, and BUY gate share `TimeAuthority.now_corrected_utc`. |
+| R2 | [entry_exit_deadlines.md](entry_exit_deadlines.md) | **Yes** | — | Implemented. Tick, consume, and BUY gate share `TimeAuthority.now_corrected_utc`. The strategy window closes `entry_dispatch_margin_s` before the hard cutoff; consume and the BUY gate still use the hard cutoff. |
 | R3 | [feature_input_trust.md](feature_input_trust.md) | **Yes** | — | Implemented for z_gap EWMA + book mono age. **F-L2 deferred.** |
 | R4 | [zgap_workflow_proof.md](zgap_workflow_proof.md) | **Yes** | R1–R3 | Implemented: four lab packs + connected evaluate→lifecycle + ZL1. |
 | R5 | [reproducible_operable.md](reproducible_operable.md) | **Yes** | — | Implemented: reproducibility block, P1–P10, fill-completeness. |
 | R5.5 | [automatic_startup_reconciliation.md](automatic_startup_reconciliation.md) | **Yes (new operational requirement)** | R1, R5 | Implemented for standard binary settlement. A copied-state account check on Polygon chain 137 remains blocked: the journal has no wallet binding, one resolved maker session still has execution uncertainty, and two ask70 sessions still have ambiguous exit attempts. Neg-risk stays unresolved. Not ready for a live run. |
 | R6 | [continuous_windows.md](continuous_windows.md) | **No (deferred)** | R1, R5 | Not implemented. |
-| R7 | [release_validation_campaign.md](release_validation_campaign.md) | **Yes** | R1–R5 + R5.5 offline-green for the next candidate | **Pending.** Operator-reported ask70 attempt made zero mutations; no live round trip proven. |
+| R7 | [release_validation_campaign.md](release_validation_campaign.md) | **Yes** | R1–R5 + R5.5 offline-green for the next candidate | **Pending.** The first ask70 live attempt emitted one entry and the host rejected it at the hard cutoff (`NO_ENTRY_CUTOFF_BLOCKED`, `ok: true`, zero mutations). That is a safe no-entry. It does not satisfy R7 confirmed entry and exit. |
 
 ## Suggested PRs (first release)
 

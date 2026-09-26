@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal
@@ -54,6 +55,7 @@ class MarketRuntimeConfig:
     evaluation_interval_s: float
     maximum_book_age_ms: int
     maximum_candidate_age_ms: int
+    entry_dispatch_margin_s: float
 
 
 @dataclass(frozen=True)
@@ -125,8 +127,27 @@ def host_safety_floor_s(config: TradingRunConfig) -> float:
 
 
 def effective_entry_cutoff_s(config: TradingRunConfig) -> float:
+    """Authoritative BUY floor. Consume, the final gate, and POST use this."""
     tau_min_s, _tau_max_s = entry_tau_bounds(config)
     return max(tau_min_s, host_safety_floor_s(config))
+
+
+def strategy_entry_cutoff_s(config: TradingRunConfig) -> float:
+    """Strategy-facing close. Earlier than the hard floor by the dispatch margin.
+
+    This only stops a new entry intent from being emitted too close to the hard
+    boundary. It never authorizes a later BUY.
+    """
+    return effective_entry_cutoff_s(config) + config.market.entry_dispatch_margin_s
+
+
+def _non_negative_finite(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RunConfigError(f"{field} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise RunConfigError(f"{field} must be finite and >= 0")
+    return result
 
 
 def max_clock_uncertainty_ms(config: TradingRunConfig) -> float:
@@ -197,9 +218,19 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "evaluation_interval_s",
             "maximum_book_age_ms",
             "maximum_candidate_age_ms",
+            "entry_dispatch_margin_s",
         },
         "market",
     )
+    evaluation_interval_s = float(market_raw.get("evaluation_interval_s", 1.0))
+    if "entry_dispatch_margin_s" in market_raw:
+        entry_dispatch_margin_s = _non_negative_finite(
+            market_raw["entry_dispatch_margin_s"],
+            "market.entry_dispatch_margin_s",
+        )
+    else:
+        # One evaluation interval, taken from the same config. Not a hidden constant.
+        entry_dispatch_margin_s = evaluation_interval_s
     market = MarketRuntimeConfig(
         family=str(market_raw.get("family", "btc_updown_5m")),
         binance_symbol=str(market_raw.get("binance_symbol", "BTCUSDT")),
@@ -209,9 +240,10 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         ),
         preparation_lead_s=float(market_raw.get("preparation_lead_s", 45.0)),
         maximum_duration_s=float(market_raw.get("maximum_duration_s", 300.0)),
-        evaluation_interval_s=float(market_raw.get("evaluation_interval_s", 1.0)),
+        evaluation_interval_s=evaluation_interval_s,
         maximum_book_age_ms=int(market_raw.get("maximum_book_age_ms", 2_000)),
         maximum_candidate_age_ms=int(market_raw.get("maximum_candidate_age_ms", 5_000)),
+        entry_dispatch_margin_s=entry_dispatch_margin_s,
     )
     try:
         get_market_family(market.family)
@@ -388,6 +420,10 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             f"strategy tau_min_s={tau_min_s} must be >= host safety floor "
             f"{floor_s} (mandatory_exit_before_end_s + evidence_timeout_s)"
         )
-    if tau_max_s <= effective_entry_cutoff_s(config):
-        raise RunConfigError("tau_max_s must be greater than the effective entry cutoff")
+    soft_cutoff_s = strategy_entry_cutoff_s(config)
+    if tau_max_s <= soft_cutoff_s:
+        raise RunConfigError(
+            "tau_max_s must be greater than the strategy-facing entry cutoff "
+            f"{soft_cutoff_s} (effective hard cutoff + entry_dispatch_margin_s)"
+        )
     return config

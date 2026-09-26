@@ -86,6 +86,7 @@ Framework overlay. Arms after confirmed fill. Independent of `evaluate()`. Requi
 | `evaluation_interval_s` | Clamps `EvaluationScheduler` coalesce/timer (overrides contract `coalesce_s`). Does **not** throttle protection. | `runtime/scheduler.py` |
 | `maximum_book_age_ms` | Stale `BookView` is not executable. | `execution/final_gate.py` |
 | `maximum_candidate_age_ms` | Monotonic fuse: intent created → POST. Must be **greater than** `lifecycle.prepare_budget_ms`. | `final_gate.py`, lifecycle |
+| `entry_dispatch_margin_s` | Seconds before the hard BUY cutoff at which the strategy entry window closes. Finite and `>= 0`. Omitted means `evaluation_interval_s`. Does not change consume, the final gate, or POST. | `run_config.py`, `trading_runtime.py` |
 
 ## `account`
 
@@ -129,19 +130,29 @@ Dust / prepare / refresh-wait leaves are **required** (no hidden defaults). `man
 | `prepare_budget_ms` | Abandon create/sign if slower; no POST (`PREPARE_BUDGET_EXCEEDED`). Must be **less than** `market.maximum_candidate_age_ms`. | gateway prepare |
 | `refresh_wait_budget_ms` | If a wallet refresh is in-flight at submit, wait up to this then fail closed (`ACCOUNT_REFRESH_IN_FLIGHT`). `0` = do not wait. | gateway + `account_state.py` |
 
-Shipped YAML sets `tau_min_s: 105` so the plugin band matches the host floor `mandatory_exit_before_end_s + evidence_timeout_s` (90+15). That 105 s cutoff is operational policy: refuse a new BUY once remaining time cannot hold a full evidence timeout **after POST returns** before mandatory flatten. It is not a guarantee that prepare, POST, cancel, or flatten finish inside a reserved margin.
+Shipped YAML sets `tau_min_s: 105` so the plugin band matches the host floor `mandatory_exit_before_end_s + evidence_timeout_s` (90+15). That 105 s figure is the **hard** BUY cutoff: consume, the final gate, and POST refuse a new BUY once remaining time is below it. It is operational policy, not a guarantee that prepare, POST, cancel, or flatten finish inside a reserved margin.
 
-On a 300 s `btc_updown_5m` window with `tau_max_s=290` and cutoff 105:
+The strategy-facing window closes earlier:
+
+```text
+hard cutoff = max(tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)
+soft cutoff = hard cutoff + entry_dispatch_margin_s
+```
+
+Shipped Ask70 sets `entry_dispatch_margin_s: 1.0`, so the hard cutoff stays 105 seconds and the strategy window closes at 106 seconds. `tau == 106` may still emit. `tau == 105` is inside the hard gate and outside the strategy window. A queued BUY with `tau < 105` is rejected before session creation. The margin never permits a later entry.
+
+On a 300 s `btc_updown_5m` window with `tau_max_s=290`, hard cutoff 105, and a 1 s dispatch margin:
 
 | Elapsed from `event_start` | tau | What is allowed |
 |----------------------------|-----|-----------------|
 | 0–10 s | 300–290 | No entry (`tau_max`) |
-| 10–195 s | 290–105 | Entry if strategy + infrastructure are ready |
+| 10–194 s | 290–106 | Entry if strategy + infrastructure are ready |
+| 194–195 s | 106–105 | Strategy window closed. A BUY already queued is still inside the hard gate |
 | 195–210 s | 105–90 | No new BUY. Existing exposure: strategy/protection exits still allowed |
 | 210–255 s | 90–45 | Host `MANDATORY_FLATTEN` / drain. No BUY |
 | 255–300 s | 45–0 | `MANUAL_INTERVENTION` if still exposed |
 
-A stricter plugin `tau_min_s` (for example 120) is the cutoff at evaluate, consume, and the BUY gate.
+A stricter plugin `tau_min_s` (for example 120) raises the hard cutoff at consume and the BUY gate. The strategy window is that hard cutoff plus `entry_dispatch_margin_s`.
 
 ## ask70 parameters
 
@@ -152,7 +163,7 @@ A stricter plugin `tau_min_s` (for example 120) is the cutoff at evaluate, consu
 | `entry_ask_threshold` | Enter if YES or NO best ask ≥ this, in `(0, 1)`. | `strategies/ask70/strategy.py` |
 | `leg_preference` | `first_hit`, `up_then_down`, `down_then_up`. | `ask70/strategy.py` |
 | `max_price_pad` | Taker worst price = ask + pad. Final gate rejects if ask moved above that. | `EnterIntent.max_price` |
-| `tau_min_s` / `tau_max_s` | Seconds remaining in the window. Host: `entry_window_open`. Ask70 also skips outside the band. | plugin `entry_tau_bounds`, `trading_runtime.py` |
+| `tau_min_s` / `tau_max_s` | Seconds remaining in the window. Host strategy window uses the soft cutoff. Ask70 also skips outside its own band. | plugin `entry_tau_bounds`, `trading_runtime.py` |
 | `max_clock_uncertainty_ms` | Clock-sync ceiling. Host reads via `plugin.max_clock_uncertainty_ms`. There is no `market.max_clock_uncertainty_ms`. | plugin, `market_data_runtime.py` |
 | `liquidity_role` | `taker` (FAK market buy) or `maker` (post-only GTC). Default `taker`. | `EnterIntent.liquidity_role` |
 | `maker_limit_price` | Rest price, in `(0, 1)`. Only valid when `liquidity_role: maker`. | `EnterIntent.max_price` |
@@ -261,7 +272,7 @@ Setting one does not set the other.
 
 | Looks similar | Actually |
 |---------------|----------|
-| `tau_min_s` / `tau_max_s` vs `lifecycle.mandatory_exit_before_end_s` vs z_gap `flatten_before_event_end_s` | Tau band = may we **enter**. The host effective BUY cutoff is `max(plugin tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)` (shipped 90+15=105). That 105 s figure is operational policy, not an end-to-end latency SLA. Evidence timeout starts after `post_order` returns. Mandatory = **host** `FlattenIntent`. Z-gap flatten = **strategy** `ExitIntent`. Host flatten wins over strategy time-exit. SELL and protective exits ignore the entry cutoff. |
+| `tau_min_s` / `tau_max_s` vs `lifecycle.mandatory_exit_before_end_s` vs z_gap `flatten_before_event_end_s` vs `market.entry_dispatch_margin_s` | Tau band = may we **enter**. The hard BUY cutoff is `max(plugin tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)` (shipped 90+15=105) at consume, the final gate, and POST. The strategy window closes at hard cutoff + `entry_dispatch_margin_s` (shipped Ask70: 106). That 105 s figure is operational policy, not an end-to-end latency SLA. Evidence timeout starts after `post_order` returns. Mandatory = **host** `FlattenIntent`. Z-gap flatten = **strategy** `ExitIntent`. Host flatten wins over strategy time-exit. SELL and protective exits ignore both entry cutoffs. |
 | `protection.stop_loss` vs z_gap `thesis.p_stop` | Overlay watches held **bid** and FAK-sells. `p_stop` is a model probability for a strategy thesis exit. |
 | `risk.fee_reserve_rate` vs z_gap `friction.fee_curve.fee_rate` | OMS haircut so the $5 cap still covers fees. Model CLOB curve inside z_gap fair value. Planner does not read the model rate. |
 | `risk.target_notional` vs `risk.maximum_total_debit` | Desired vs hard cap. Planner uses `min(target, cap)`. |

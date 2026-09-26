@@ -123,7 +123,7 @@ Normal and failed runs write `run_summary.json` atomically. Identity (`reproduci
 
 Tick, intent consume, and the final BUY gate share the runtime `TimeAuthority.now_corrected_utc` callable. The BUY gate also applies a contract-driven `features_ready` check (z_gap EWMA); SELL and protective flatten do not.
 
-A run with no execution session includes `no_entry_diagnosis`. It is successful only when execution infrastructure was ready, at least one strategy decision had fully eligible inputs, and the strategy selected no economic entry. `NO_ENTRY_RUNTIME_BLOCKED` and `NO_ENTRY_STRATEGY_INPUT_BLOCKED` are explicit non-success outcomes. Every strategy decision retains a deterministic primary reason plus all simultaneous input blockers.
+A run with no execution session includes `no_entry_diagnosis`. It is successful when execution infrastructure was ready, at least one strategy decision had fully eligible inputs, and the strategy selected no economic entry. It is also successful as `NO_ENTRY_CUTOFF_BLOCKED` when the only entry intent was rejected at the hard BUY cutoff, with no session and no mutation. That `ok: true` means a safe shutdown, not a confirmed entry and exit. `NO_ENTRY_RUNTIME_BLOCKED` and `NO_ENTRY_STRATEGY_INPUT_BLOCKED` are explicit non-success outcomes. Every strategy decision retains a deterministic primary reason plus all simultaneous input blockers. The strategy entry window closes `entry_dispatch_margin_s` before the hard cutoff. Consume, the final BUY gate, and POST still enforce the hard cutoff.
 
 ## Not implemented in this release
 

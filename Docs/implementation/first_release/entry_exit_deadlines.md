@@ -60,15 +60,16 @@ host_safety_floor_s = mandatory_exit_before_end_s + evidence_timeout_s
 # shipped numbers: 90 + 15 = 105
 
 effective_entry_cutoff_s = max(plugin_tau_min_s, host_safety_floor_s)
+strategy_entry_cutoff_s = effective_entry_cutoff_s + entry_dispatch_margin_s
 ```
 
-**Same `effective_entry_cutoff_s` at all three sites:**
+The hard cutoff stays authoritative at consume, the final BUY gate, and POST. `entry_dispatch_margin_s` (finite, `>= 0`; omitted means `evaluation_interval_s`) only closes the strategy window earlier. Shipped Ask70 uses `1.0`, so hard is 105 s and the strategy window closes at 106 s. `tau == hard` is still inside the hard gate. `tau < hard` is `ENTRY_CUTOFF_PASSED` before `lifecycle.open`.
 
 | Check | Rule |
 |-------|------|
-| Load | Plugin `tau_min_s >= host_safety_floor_s`. `tau_max_s > tau_min_s`. Fail `RunConfigError`, no silent clamp. After a valid load, `plugin_tau_min_s == effective_entry_cutoff_s` when the plugin is not stricter than the floor; if the plugin is stricter, cutoff is the plugin value. |
-| Tick `entry_window_open` | `entry_enabled and effective_entry_cutoff_s <= tau <= tau_max_s`. `evaluate()` sees this via `entry_allowed` / `entry_executable` (plugins already honor `context.entry_allowed`). |
-| Consume `EnterIntent` | If tau `< effective_entry_cutoff_s`, `INTENT_BLOCKED`, do not `lifecycle.open` / do not POST. |
+| Load | Plugin `tau_min_s >= host_safety_floor_s`. `tau_max_s` greater than the soft cutoff. Fail `RunConfigError`, no silent clamp. After a valid load, `plugin_tau_min_s == effective_entry_cutoff_s` when the plugin is not stricter than the floor; if the plugin is stricter, the hard cutoff is the plugin value. |
+| Tick `entry_window_open` | `entry_enabled and strategy_entry_cutoff_s <= tau <= tau_max_s`. `evaluate()` sees this via `entry_allowed` / `entry_executable` (plugins already honor `context.entry_allowed`). |
+| Consume `EnterIntent` | If tau `< effective_entry_cutoff_s`, `INTENT_BLOCKED` reason `ENTRY_CUTOFF_PASSED`, do not `lifecycle.open` / do not POST. |
 | **Final gate BUY** (market buy **and** limit BUY) | If tau `< effective_entry_cutoff_s` → fail `ENTRY_CUTOFF_PASSED`, `COMPLETED_NO_DISPATCH`, no POST |
 | Final gate SELL (FAK or limit) | **No** entry-cutoff check |
 | `tau <= mandatory_exit_before_end_s` | Host flatten / R1 drain only; never new BUY authorization |
@@ -100,8 +101,9 @@ Do not justify safety using assumed subsecond venue responses.
 | Elapsed from `event_start` | tau | What is allowed |
 |----------------------------|-----|-----------------|
 | 0–10 s | 300–290 | No entry (`tau_max`) |
-| 10–195 s | 290–105 | Entry if strategy+infra ready |
-| 195–210 s | 105–90 | No new BUY (cutoff). Existing exposure: strategy/protection exits still allowed |
+| 10–194 s | 290–106 | Entry if strategy+infra ready (1 s dispatch margin) |
+| 194–195 s | 106–105 | Strategy window closed. Queued BUY still inside the hard gate |
+| 195–210 s | 105–90 | No new BUY (hard cutoff). Existing exposure: strategy/protection exits still allowed |
 | 210–255 s | 90–45 | Host `MANDATORY_FLATTEN` / R1 drain. No BUY |
 | 255–300 s | 45–0 | `MANUAL_INTERVENTION` if still exposed |
 
@@ -114,7 +116,7 @@ Do not change `theta_*` / `z_min` / `z_max`.
 ## Smallest change
 
 1. `host_safety_floor_s` + `effective_entry_cutoff_s(config)` in `run_config.py`; validate plugin bounds.
-2. Tick, consume, and BUY gate all use `effective_entry_cutoff_s`.
+2. Tick uses `strategy_entry_cutoff_s`. Consume and the BUY gate use `effective_entry_cutoff_s`.
 3. `FinalExecutionGate` receives `entry_tau_s: Callable[[], float | None]` (None if no `event_end` → fail closed on BUY). BUY: tau `< cutoff` → `ENTRY_CUTOFF_PASSED`. SELL: skip.
 4. Update shipped YAML `tau_min_s: 105`.
 
@@ -147,7 +149,7 @@ If POST returns so late that flatten margin is gone: R1 completion rules apply; 
 
 ## Acceptance
 
-1. One formula: `effective_entry_cutoff_s = max(plugin_tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)` at evaluate (via `entry_allowed` + plugin tau band), consume, and BUY gate.
+1. Hard formula: `effective_entry_cutoff_s = max(plugin_tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)` at consume and the BUY gate. Evaluate uses that value plus `entry_dispatch_margin_s`.
 2. Incompatible YAML fails at load.
 3. BUY cannot dispatch below the cutoff **after prepare**, including D10.
 4. SELL/flatten not blocked by the entry cutoff (D8/D9).

@@ -89,6 +89,7 @@ from tyrex_pm.runtime.run_config import (
     effective_entry_cutoff_s,
     entry_tau_bounds,
     max_clock_uncertainty_ms,
+    strategy_entry_cutoff_s,
 )
 from tyrex_pm.strategies.context import (
     DecisionContext,
@@ -1533,11 +1534,12 @@ class TradingRuntime:
         if self.active_market is not None and self.active_market.market.event_end is not None:
             tau = self._current_entry_tau_s()
             _tau_min_s, tau_max_s = entry_tau_bounds(self.config)
-            cutoff_s = effective_entry_cutoff_s(self.config)
+            # Soft close only. Consume and the final BUY gate still use the hard cutoff.
+            soft_cutoff_s = strategy_entry_cutoff_s(self.config)
             self.capabilities.entry_window_open = bool(
                 tau is not None
                 and self.active_market.entry_enabled
-                and cutoff_s <= tau <= tau_max_s
+                and soft_cutoff_s <= tau <= tau_max_s
             )
             state = self.lifecycle.state
             remaining = float("-inf") if tau is None else tau

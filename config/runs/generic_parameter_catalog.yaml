@@ -99,6 +99,9 @@ market:
   # Monotonic fuse: intent created → POST must complete inside this, else no dispatch.
   # MUST be > lifecycle.prepare_budget_ms.
   maximum_candidate_age_ms: 5000
+  # Strategy-facing entry closes this many seconds before the hard BUY cutoff.
+  # Omitted → evaluation_interval_s. Zero is allowed. Never loosens the hard floor.
+  entry_dispatch_margin_s: 1.0
 
 # -----------------------------------------------------------------------------
 # account — authenticated wallet observation (execution/account_state.py)

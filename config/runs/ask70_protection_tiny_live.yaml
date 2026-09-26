@@ -32,6 +32,9 @@ market:
   preparation_lead_s: 45
   maximum_duration_s: 300
   evaluation_interval_s: 1
+  # Strategy entry closes this many seconds before the hard BUY cutoff.
+  # Hard cutoff stays max(tau_min_s, mandatory_exit + evidence_timeout) = 105.
+  entry_dispatch_margin_s: 1.0
   maximum_book_age_ms: 2000
   maximum_candidate_age_ms: 5000
 
