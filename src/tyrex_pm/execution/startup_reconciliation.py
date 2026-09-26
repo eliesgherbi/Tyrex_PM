@@ -9,7 +9,11 @@ from enum import Enum
 from typing import Mapping
 
 from tyrex_pm.execution.exit_sizing import classify_dust_leftover
-from tyrex_pm.execution.session_state import ExecutionSessionState, OperationalDisposition
+from tyrex_pm.execution.session_state import (
+    ExecutionPhase,
+    ExecutionSessionState,
+    OperationalDisposition,
+)
 
 
 class AssessmentStatus(str, Enum):
@@ -429,11 +433,14 @@ def _classify_session(
     holding = _holding_for(facts, identity.market_id, identity.token_id)
     balance = Decimal("0") if holding is None else holding.shares
     if session.safe_to_open_entry:
-        explained = (
-            session.settlement_holding_shares
-            if session.operational_disposition is OperationalDisposition.SETTLEMENT_ONLY
-            else Decimal("0")
-        )
+        explained = Decimal("0")
+        if session.operational_disposition is OperationalDisposition.SETTLEMENT_ONLY:
+            explained = session.settlement_holding_shares
+        elif (
+            session.phase is ExecutionPhase.COMPLETED_FLAT_WITH_DUST
+            and session.dust_residual is not None
+        ):
+            explained = session.dust_residual.shares
         if balance > explained:
             return (
                 [

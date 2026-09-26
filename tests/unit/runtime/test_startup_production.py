@@ -1037,6 +1037,69 @@ async def test_ctf_payout_marks_standard_binary_final_and_skips_neg_risk() -> No
 
 
 @pytest.mark.asyncio
+async def test_closed_market_and_closed_position_supply_the_standard_payout_slot() -> None:
+    from tyrex_pm.adapters.polymarket.ctf_payout import CONDITIONAL_TOKENS_ADDRESS
+    from tyrex_pm.execution.session_state import (
+        ExecutionPhase,
+        ExecutionSessionState,
+        SessionIdentity,
+    )
+
+    condition = "0x" + "22" * 32
+    calls: list[str] = []
+
+    async def eth_call(*, to, data):
+        assert to == CONDITIONAL_TOKENS_ADDRESS
+        calls.append(data)
+        if data[2:10] == "dd34de67":
+            return "0x" + "0" * 63 + "2"
+        return "0x" + "0" * 64
+
+    client = _Client()
+    client.condition_id = condition
+    client.position_size = Decimal("0")
+    client.hidden_balance = 2_325
+
+    def list_markets(**kwargs):
+        if kwargs.get("closed") is not True:
+            return _Pages(())
+        state = SimpleNamespace(closed=True, accepting_orders=False, neg_risk=False)
+        return _Pages((SimpleNamespace(state=state, resolution=None),))
+
+    def list_closed_positions(**_kwargs):
+        return _Pages(
+            (
+                SimpleNamespace(
+                    condition_id=condition,
+                    token_id="token",
+                    outcome_index=1,
+                ),
+            )
+        )
+
+    client.list_markets = list_markets
+    client.list_closed_positions = list_closed_positions
+    gateway = PolymarketAsyncGateway(client=client, payout_eth_call=eth_call)
+    session = ExecutionSessionState(
+        identity=SessionIdentity(
+            session_id="s-dust",
+            strategy_id="ask70",
+            market_id=condition,
+            window_id="w",
+            token_id="token",
+        ),
+        phase=ExecutionPhase.MANUAL_INTERVENTION,
+        confirmed_position_shares=Decimal("0.002325"),
+    )
+    facts = await gateway.startup_inspection(journal=MemoryExecutionJournal(), sessions=(session,))
+    assert facts.holdings[0].shares == Decimal("0.002325")
+    assert facts.holdings[0].outcome_index == 1
+    assert facts.lifecycles[condition].status == "RESOLVED_FINAL"
+    assert facts.lifecycles[condition].token_payouts["token"] == Decimal("0")
+    assert calls
+
+
+@pytest.mark.asyncio
 async def test_position_negative_risk_flag_blocks_without_a_payout() -> None:
     client = _Client()
     client.position_size = Decimal("7")

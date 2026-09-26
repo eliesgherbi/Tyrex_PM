@@ -21,6 +21,7 @@ from tyrex_pm.execution.orders import MarketSellOrderSpec
 from tyrex_pm.execution.session_state import (
     ExecutionPhase,
     ExecutionSessionState,
+    KnownDustResidual,
     OperationalDisposition,
     OrderExecutionState,
     SessionIdentity,
@@ -854,6 +855,35 @@ def test_stale_zero_and_reappeared_holding_are_not_ready() -> None:
     )
     assert increased_assessment.status.value == "BLOCKED"
     assert any(issue.code == "UNEXPECTED_HOLDING" for issue in increased_assessment.issues)
+
+
+def test_recorded_dust_matching_the_venue_is_not_a_reappeared_holding() -> None:
+    state = _session(shares=Decimal("6.533332"), phase=ExecutionPhase.COMPLETED_FLAT_WITH_DUST)
+    state.dust_residual = KnownDustResidual(
+        token_id="token",
+        shares=Decimal("0.003332"),
+        market_id="cond",
+        window_id="w",
+        classification="below_dust_abs_shares",
+    )
+    matched = assess(
+        _facts(
+            state,
+            holdings=(
+                Holding(condition_id="cond", token_id="token", shares=Decimal("0.003332")),
+            ),
+        )
+    )
+    assert matched.status.value == "READY"
+    assert not any(issue.code == "HOLDINGS_REAPPEARED" for issue in matched.issues)
+    larger = assess(
+        _facts(
+            state,
+            holdings=(Holding(condition_id="cond", token_id="token", shares=Decimal("6.533332")),),
+        )
+    )
+    assert larger.status.value == "BLOCKED"
+    assert any(issue.code == "HOLDINGS_REAPPEARED" for issue in larger.issues)
 
 
 def test_dust_uses_market_bid_not_the_execution_floor() -> None:

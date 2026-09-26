@@ -9,7 +9,7 @@ A standard-binary payout is read only when the caller supplies an ``eth_call``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
@@ -33,10 +33,82 @@ class PageCoverage:
 
 
 def historical_market_query(*, condition_id: str) -> dict[str, tuple[str, ...]]:
-    """Exact condition mapping. Never pass a condition id to ``get_market(id=)``."""
+    """Exact condition mapping. Never pass a condition id to ``get_market(id=)``.
+
+    Gamma omits closed markets unless ``closed=True`` is also sent. The
+    collector retries with that flag when the open query is empty.
+    """
     if not str(condition_id).strip():
         raise ValueError("condition_id is required")
     return {"condition_ids": (condition_id,)}
+
+
+async def _first_listed_market(client: Any, condition_id: str) -> Any:
+    """Open query first, then closed markets. An empty open page is not UNKNOWN."""
+    query = historical_market_query(condition_id=condition_id)
+    market = await _first_page_item(client.list_markets(**query))
+    if market is not None:
+        return market
+    return await _first_page_item(
+        client.list_markets(**historical_market_query(condition_id=condition_id), closed=True)
+    )
+
+
+async def _first_page_item(source: Any) -> Any:
+    async for item in source:
+        page_items = getattr(item, "items", None)
+        if page_items is None:
+            return item
+        return page_items[0] if page_items else None
+    return None
+
+
+def _outcome_slot(value: Any) -> int | None:
+    if value in (0, 1):
+        return int(value)
+    if value is None or value == "":
+        return None
+    try:
+        slot = int(value)
+    except (TypeError, ValueError):
+        return None
+    return slot if slot in (0, 1) else None
+
+
+async def _attach_closed_outcome_indexes(client: Any, holdings: list[Any]) -> list[Any]:
+    """Copy a data-API outcome slot onto balance-only holdings. Never invent one."""
+    if not hasattr(client, "list_closed_positions"):
+        return holdings
+    missing = {
+        holding.condition_id
+        for holding in holdings
+        if holding.condition_id
+        and holding.shares > 0
+        and _outcome_slot(holding.outcome_index) is None
+    }
+    indexes: dict[tuple[str, str], int] = {}
+    for condition_id in sorted(missing):
+        try:
+            rows, complete, _reason = await drain_paginator(
+                client.list_closed_positions(market=(condition_id,))
+            )
+        except Exception:
+            continue
+        if not complete:
+            continue
+        for row in rows:
+            token_id = str(_field(row, "token_id") or "")
+            slot = _outcome_slot(_field(row, "outcome_index"))
+            if token_id and slot is not None:
+                indexes[(condition_id, token_id)] = slot
+    updated = []
+    for holding in holdings:
+        slot = indexes.get((holding.condition_id, holding.token_id))
+        if _outcome_slot(holding.outcome_index) is None and slot is not None:
+            updated.append(replace(holding, outcome_index=slot))
+        else:
+            updated.append(holding)
+    return updated
 
 
 def position_list_kwargs() -> dict[str, float]:
@@ -480,6 +552,7 @@ async def _collect_inspection_facts(
         holdings, missing_reason = await _with_missing_balances(
             client, holdings, sessions, known_tokens
         )
+        holdings = await _attach_closed_outcome_indexes(client, holdings)
         activities_raw, activity_complete, activity_reason = await drain_paginator(
             client.list_activity()
         )
@@ -517,12 +590,7 @@ async def _collect_inspection_facts(
             if session_identity is not None and session_identity.market_id:
                 condition_ids.add(session_identity.market_id)
         for condition_id in condition_ids:
-            listed = client.list_markets(**historical_market_query(condition_id=condition_id))
-            market = None
-            async for item in listed:
-                page_items = getattr(item, "items", None)
-                market = item if page_items is None else (page_items[0] if page_items else None)
-                break
+            market = await _first_listed_market(client, condition_id)
             if market is not None and _is_neg_risk(market):
                 neg_risk.add(condition_id)
                 lifecycles[condition_id] = MarketLifecycleObservation(
