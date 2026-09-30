@@ -74,13 +74,14 @@ def _prepare_timing_kwargs(source: Any) -> dict[str, Any]:
         if isinstance(source, dict):
             return source.get(key, default)
         return getattr(source, key, default)
+    miss = getter("order_metadata_cache_miss", None)
     return {
         "prepare_queue_wait_ms": getter("prepare_queue_wait_ms"),
         "tick_resolve_ms": getter("tick_resolve_ms"),
         "create_market_order_ms": getter("create_market_order_ms"),
         "refresh_wait_ms": getter("refresh_wait_ms"),
         "refresh_elapsed_ms": getter("refresh_elapsed_ms"),
-        "order_metadata_cache_miss": bool(getter("order_metadata_cache_miss") or False),
+        "order_metadata_cache_miss": None if miss is None else bool(miss),
     }
 
 
@@ -100,6 +101,32 @@ class ExecutionGateway(Protocol):
     async def discard_prepared(self, prepared: PreparedOrder) -> None: ...
     async def post_order(self, prepared: PreparedOrder) -> GatewaySubmissionResult: ...
     async def close(self) -> None: ...
+
+
+class _ReentrantEvidenceGate:
+    """One task may nest applies. Every other task waits until it finishes."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    async def __aenter__(self) -> "_ReentrantEvidenceGate":
+        task = asyncio.current_task()
+        if task is not None and self._owner is task:
+            self._depth += 1
+            return self
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+        return self
+
+    async def __aexit__(self, *_args: object) -> bool:
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+        return False
 
 
 class CancelUnsupported(RuntimeError):
@@ -125,6 +152,9 @@ class AccountExecutionCoordinator:
     _writer_task: asyncio.Task[None] | None = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
     _mutation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    evidence_gate: _ReentrantEvidenceGate = field(
+        default_factory=_ReentrantEvidenceGate, init=False
+    )
     recovery_generation: str | None = None
     recovery_now: Callable[[], datetime] | None = None
 
@@ -183,11 +213,12 @@ class AccountExecutionCoordinator:
     async def apply(self, event: ExecutionEvidence) -> tuple[ReducerEffect, ...]:
         if self._closed:
             raise RuntimeError("execution coordinator is closed")
-        await self.start()
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[tuple[ReducerEffect, ...]] = loop.create_future()
-        await self._queue.put((event, future))
-        return await future
+        async with self.evidence_gate:
+            await self.start()
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[tuple[ReducerEffect, ...]] = loop.create_future()
+            await self._queue.put((event, future))
+            return await future
 
     async def _writer(self) -> None:
         while True:
@@ -331,6 +362,7 @@ class AccountExecutionCoordinator:
                     requested_protection_price=prepared.requested_protection_price,
                     effective_protection_price=prepared.effective_protection_price,
                     tick_size=prepared.tick_size,
+                    **_prepare_timing_kwargs(prepared),
                 )
             )
             await self.gateway.discard_prepared(prepared)
@@ -354,6 +386,7 @@ class AccountExecutionCoordinator:
                     requested_protection_price=prepared.requested_protection_price,
                     effective_protection_price=prepared.effective_protection_price,
                     tick_size=prepared.tick_size,
+                    **_prepare_timing_kwargs(prepared),
                 )
             )
             await self.gateway.discard_prepared(prepared)

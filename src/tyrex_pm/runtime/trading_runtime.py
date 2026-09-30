@@ -117,15 +117,33 @@ def load_dotenv_values(path: Path | None) -> dict[str, str]:
     return values
 
 
-def _prepare_timing_row(event: Any) -> dict[str, Any]:
-    return {
-        "prepare_queue_wait_ms": event.prepare_queue_wait_ms,
-        "tick_resolve_ms": event.tick_resolve_ms,
-        "create_market_order_ms": event.create_market_order_ms,
-        "refresh_wait_ms": event.refresh_wait_ms,
-        "refresh_elapsed_ms": event.refresh_elapsed_ms,
-        "order_metadata_cache_miss": bool(event.order_metadata_cache_miss),
-    }
+_PREPARE_TIMING_FIELDS = (
+    "prepare_queue_wait_ms",
+    "tick_resolve_ms",
+    "create_market_order_ms",
+    "refresh_wait_ms",
+    "refresh_elapsed_ms",
+)
+
+
+def _try_execution_epoch(coordinator: object):
+    from tyrex_pm.execution.inspection_sync import capture_execution_epoch
+
+    try:
+        return capture_execution_epoch(coordinator)
+    except Exception:
+        return None
+
+
+def _merge_prepare_timings(row: dict[str, Any], event: Any) -> None:
+    """Copy a measured field. ``None`` leaves the earlier measurement in place."""
+    for name in _PREPARE_TIMING_FIELDS:
+        incoming = getattr(event, name, None)
+        if incoming is not None:
+            row[name] = incoming
+    miss = getattr(event, "order_metadata_cache_miss", None)
+    if miss is not None:
+        row["order_metadata_cache_miss"] = bool(miss)
 
 
 def _lifecycle_view(
@@ -224,6 +242,7 @@ class TradingRuntime:
     _process_mutation_attempts: int | None = None
     decision_reader: Any = None
     _startup_wallet: str | None = None
+    _last_inspection_publication: str = "discarded"
 
     @classmethod
     async def create(
@@ -981,7 +1000,7 @@ class TradingRuntime:
 
                 self._assessment_valid_until = (
                     self.time_authority.now_corrected_utc()
-                    + timedelta(seconds=self.config.startup.monitor_interval_s)
+                    + timedelta(seconds=self._startup_validity_window_s())
                 )
         else:
             self.capabilities.set_blocker(
@@ -1638,35 +1657,71 @@ class TradingRuntime:
             if self.time_authority is None
             else self.time_authority.now_corrected_utc()
         )
-        self._assessment_valid_until = now + timedelta(
-            seconds=self.config.startup.monitor_interval_s
+        self._assessment_valid_until = now + timedelta(seconds=self._startup_validity_window_s())
+
+    def _startup_validity_window_s(self) -> float:
+        """Keep the previous assessment alive through one inspection budget."""
+        return (
+            self.config.startup.monitor_interval_s + self.config.startup.inspection_budget_s
         )
 
+    def _corrected_now(self) -> datetime:
+        if self.time_authority is None:
+            return datetime.now(timezone.utc)
+        return self.time_authority.now_corrected_utc()
+
+    def _seconds_until_next_inspection(self) -> float:
+        """Start the next read one budget before the current assessment expires."""
+        until = self._assessment_valid_until
+        if until is None:
+            return self.config.startup.monitor_interval_s
+        remaining = (until - self._corrected_now()).total_seconds()
+        if remaining <= 0:
+            return 0.0
+        lead = remaining - self.config.startup.inspection_budget_s
+        if lead > 0:
+            return lead
+        return min(self.config.startup.monitor_interval_s, remaining)
+
     async def _startup_monitor_loop(self) -> None:
-        interval = self.config.startup.monitor_interval_s
         while not self.stop_requested:
-            await asyncio.sleep(interval)
+            delay = self._seconds_until_next_inspection()
+            if delay > 0:
+                await asyncio.sleep(delay)
             if self.stop_requested:
                 return
+            expired = False
+            until = self._assessment_valid_until
+            if until is not None and self._corrected_now() >= until:
+                expired = True
             try:
                 assessment = await self._assess_startup(write_report=False)
             except Exception:
-                self._startup_invalidated_reason = "STARTUP_RECHECK_FAILED"
-                self._assessment_valid_until = None
-                self.capabilities.set_blocker(
+                self._invalidate_startup_recheck(
                     "STARTUP_ASSESSMENT_EXPIRED",
                     "startup recheck failed",
                 )
                 continue
-            if self._recheck_keeps_readiness(assessment):
+            publication = self._last_inspection_publication
+            if publication in {"discarded", "withheld"}:
+                if expired:
+                    self._invalidate_startup_recheck(
+                        "STARTUP_ASSESSMENT_EXPIRED",
+                        "startup recheck could not be published before it expired",
+                    )
+                continue
+            if publication == "accepted" and self._recheck_keeps_readiness(assessment):
                 self._mark_startup_fresh()
             else:
-                self._startup_invalidated_reason = "STARTUP_RECHECK_FAILED"
-                self._assessment_valid_until = None
-                self.capabilities.set_blocker(
+                self._invalidate_startup_recheck(
                     "STARTUP_CHECK_PENDING",
                     "startup recheck is not ready",
                 )
+
+    def _invalidate_startup_recheck(self, blocker: str, message: str) -> None:
+        self._startup_invalidated_reason = "STARTUP_RECHECK_FAILED"
+        self._assessment_valid_until = None
+        self.capabilities.set_blocker(blocker, message)
 
     def _recheck_keeps_readiness(self, assessment: Any) -> bool:
         if assessment.ready:
@@ -1714,15 +1769,24 @@ class TradingRuntime:
 
     async def _assess_startup(self, *, write_report: bool = True):
         from dataclasses import replace
+        from uuid import uuid4
 
+        from tyrex_pm.execution.activity_checkpoint import save_activity_ledger
+        from tyrex_pm.execution.inspection_sync import (
+            authored_publication_holds,
+            publication_decision,
+        )
         from tyrex_pm.execution.startup_reconciliation import (
             AccountIdentity,
             InspectionFacts,
             ReadCoverage,
+            assess,
+            evidence_disposition,
         )
         from tyrex_pm.reporting.startup_report import startup_report_payload, write_startup_report
         from tyrex_pm.runtime.startup_controller import StartupController
 
+        started_epoch = _try_execution_epoch(self.coordinator)
         facts = await self._read_startup_facts()
         owned_sessions = self._sessions_for_inspection()
         if facts is None:
@@ -1752,7 +1816,47 @@ class TradingRuntime:
             generation=self.run_instance_id,
         )
         await self.coordinator.start()
-        assessment = await controller.inspect(facts)
+        async with self.coordinator.evidence_gate:
+            ended_epoch = _try_execution_epoch(self.coordinator)
+            if started_epoch is None or ended_epoch is None:
+                execution = "discarded"
+            else:
+                execution = publication_decision(started_epoch, ended_epoch)
+            evidence = evidence_disposition(facts)
+            publication = execution if execution != "accepted" else evidence
+            checkpoint = "unchanged"
+            if publication != "accepted":
+                assessment = assess(facts)
+            else:
+                before_unresolved = ended_epoch.unresolved_attempt_ids
+                before_sequence = ended_epoch.journal_sequence
+                assessment = await controller.inspect(facts)
+                after_epoch = _try_execution_epoch(self.coordinator)
+                observed = frozenset(
+                    self.coordinator.journal.event_ids_after(before_sequence)
+                )
+                consistent = after_epoch is not None and authored_publication_holds(
+                    before_unresolved=before_unresolved,
+                    after_unresolved=after_epoch.unresolved_attempt_ids,
+                    authored_event_ids=frozenset(controller.published_event_ids),
+                    observed_event_ids=observed,
+                )
+                ledger = facts.activity_ledger
+                if consistent and ledger is not None:
+                    save_activity_ledger(self.coordinator.journal, ledger)
+                    checkpoint = "advanced"
+                elif not consistent:
+                    publication = "discarded"
+        self._last_inspection_publication = publication
+        self._record_inspection_timing(
+            facts,
+            publication,
+            operation_id=str(uuid4()),
+            execution=execution,
+            evidence=evidence,
+            checkpoint=checkpoint,
+            ready=bool(assessment.ready and publication == "accepted"),
+        )
         if write_report:
             payload = startup_report_payload(
                 assessment,
@@ -1762,6 +1866,39 @@ class TradingRuntime:
             self.startup_report = payload
             write_startup_report(self.output_directory / "startup_report.json", payload)
         return assessment
+
+    def _record_inspection_timing(
+        self,
+        facts: Any,
+        publication: str,
+        *,
+        operation_id: str,
+        execution: str,
+        evidence: str,
+        checkpoint: str,
+        ready: bool,
+    ) -> None:
+        coverage = None if facts is None else getattr(facts, "coverage", None)
+        duration_ms = None if facts is None else getattr(facts, "inspection_duration_ms", None)
+        pages = 0 if facts is None else int(getattr(facts, "activity_pages", 0) or 0)
+        mode = "" if facts is None else str(getattr(facts, "activity_mode", "") or "")
+        payload = {
+            "operation_id": operation_id,
+            "duration_ms": duration_ms,
+            "activity_pages": pages,
+            "activity_mode": mode,
+            "execution": execution,
+            "evidence": evidence,
+            "publication": publication,
+            "checkpoint": checkpoint,
+            "ready": ready,
+            "activity_complete": bool(coverage is not None and coverage.activity_complete),
+            "coverage_complete": bool(coverage is not None and coverage.complete),
+        }
+        try:
+            self.run_recorder.record("INSPECTION_TIMING", payload)
+        except Exception:
+            return
 
     async def _read_startup_facts(self):
         import inspect
@@ -1963,7 +2100,9 @@ class TradingRuntime:
             and self.capabilities.live_requested
         ):
             assessment = await self._resolve_startup_action(assessment)
-        startup_ready = assessment.ready
+        startup_ready = (
+            assessment.ready and self._last_inspection_publication == "accepted"
+        )
         if startup_ready:
             self._mark_startup_fresh()
             self._startup_monitor = asyncio.create_task(
@@ -2177,7 +2316,7 @@ class TradingRuntime:
                 elif isinstance(event, OrderPrepared):
                     row["prepared_at"] = event.observed_at.isoformat()
                     row["_prepared_mono"] = event.observed_monotonic_ns
-                    row.update(_prepare_timing_row(event))
+                    _merge_prepare_timings(row, event)
                 elif isinstance(event, OrderPreDispatchFailed):
                     row["pre_dispatch_failed_at"] = event.observed_at.isoformat()
                     row["_pre_dispatch_failed_mono"] = event.observed_monotonic_ns
@@ -2188,7 +2327,7 @@ class TradingRuntime:
                         "error_code": event.error_code,
                         "message": event.message,
                     }
-                    row.update(_prepare_timing_row(event))
+                    _merge_prepare_timings(row, event)
                 elif isinstance(event, DispatchAuthorized):
                     row["dispatch_authorized_at"] = event.observed_at.isoformat()
                     row["_authorized_mono"] = event.observed_monotonic_ns

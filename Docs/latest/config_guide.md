@@ -139,7 +139,9 @@ hard cutoff = max(tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s)
 soft cutoff = hard cutoff + entry_dispatch_margin_s
 ```
 
-Shipped Ask70 sets `entry_dispatch_margin_s: 1.0`, so the hard cutoff stays 105 seconds and the strategy window closes at 106 seconds. `tau == 106` may still emit. `tau == 105` is inside the hard gate and outside the strategy window. A queued BUY with `tau < 105` is rejected before session creation. The margin never permits a later entry.
+Shipped Ask70 (`config/runs/ask70_protection_tiny_live.yaml`) sets `entry_dispatch_margin_s: 1.0`, so the hard cutoff stays 105 seconds and the strategy window closes at 106 seconds. `tau == 106` may still emit. `tau == 105` is inside the hard gate and outside the strategy window. A queued BUY with `tau < 105` is rejected before session creation. The margin never permits a later entry.
+
+`config/runs/ask70_protection_tau30_experimental.yaml` is a separate operator profile: `tau_min_s` 30, mandatory exit 15, manual deadline 5, evidence timeout 15, exit retry budget 10. Its hard cutoff is 30 seconds and its soft cutoff is 31. It does not replace the shipped 105/106 profile.
 
 On a 300 s `btc_updown_5m` window with `tau_max_s=290`, hard cutoff 105, and a 1 s dispatch margin:
 

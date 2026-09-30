@@ -78,12 +78,24 @@ _STATUS_RANK = {
 
 
 def _copy_prepare_timings(order: OrderExecutionState, event: Any) -> None:
-    order.prepare_queue_wait_ms = getattr(event, "prepare_queue_wait_ms", None)
-    order.tick_resolve_ms = getattr(event, "tick_resolve_ms", None)
-    order.create_market_order_ms = getattr(event, "create_market_order_ms", None)
-    order.refresh_wait_ms = getattr(event, "refresh_wait_ms", None)
-    order.refresh_elapsed_ms = getattr(event, "refresh_elapsed_ms", None)
-    order.order_metadata_cache_miss = bool(getattr(event, "order_metadata_cache_miss", False))
+    """Keep an earlier measurement when a later event did not observe that field.
+
+    ``None`` means absent. Zero is a measured duration and replaces the previous
+    value. The cache-miss flag follows the same rule.
+    """
+    for name in (
+        "prepare_queue_wait_ms",
+        "tick_resolve_ms",
+        "create_market_order_ms",
+        "refresh_wait_ms",
+        "refresh_elapsed_ms",
+    ):
+        incoming = getattr(event, name, None)
+        if incoming is not None:
+            setattr(order, name, incoming)
+    miss = getattr(event, "order_metadata_cache_miss", None)
+    if miss is not None:
+        order.order_metadata_cache_miss = bool(miss)
 
 
 def _require_session(state: ExecutionSessionState, session_id: str) -> None:

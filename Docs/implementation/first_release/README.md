@@ -1,6 +1,6 @@
 # First release — implementation plans (revised)
 
-**Status:** R1–R5 are implemented and their offline release gate has passed. R5.5 startup reconciliation reads standard-binary payouts through `TYREX_POLYGON_RPC_URL` when that variable is set. Neg-risk markets stay unresolved because the pinned SDK does not prove the held token's payout slot. It is not live-validated. R6 remains deferred. F-L2 remains deferred until a strategy that depends on L2 is prepared for release. R7 live validation remains pending.
+**Status:** R1–R5 are implemented and their offline release gate has passed. R5.5 startup reconciliation reads standard-binary payouts through `TYREX_POLYGON_RPC_URL` when that variable is set. Neg-risk markets stay unresolved because the pinned SDK does not prove the held token's payout slot. Background inspection, activity checkpoints, and payout re-reads are recorded in [phaseA_report.md](../phaseA_report.md). R7 remains pending: the 27 September 2026 Ask70 sell is matched, not confirmed. R6 remains deferred. F-L2 remains deferred until a strategy that depends on L2 is prepared for release.
 **Operator / developer API:** [`Docs/latest/`](../../latest/README.md).
 **Predecessors:** [grounding_fixes/](../grounding_fixes/README.md), [grounding_framework/](../grounding_framework/grounding_plan.md).
 **No AGENTS.md** in this repo; code, tests, and `Docs/latest/` are authoritative.
@@ -59,9 +59,9 @@ One usable live process on the **existing** host:
 | R3 | [feature_input_trust.md](feature_input_trust.md) | **Yes** | — | Implemented for z_gap EWMA + book mono age. **F-L2 deferred.** |
 | R4 | [zgap_workflow_proof.md](zgap_workflow_proof.md) | **Yes** | R1–R3 | Implemented: four lab packs + connected evaluate→lifecycle + ZL1. |
 | R5 | [reproducible_operable.md](reproducible_operable.md) | **Yes** | — | Implemented: reproducibility block, P1–P10, fill-completeness. |
-| R5.5 | [automatic_startup_reconciliation.md](automatic_startup_reconciliation.md) | **Yes (new operational requirement)** | R1, R5 | Implemented for standard binary settlement. A copied-state account check on Polygon chain 137 remains blocked: the journal has no wallet binding, one resolved maker session still has execution uncertainty, and two ask70 sessions still have ambiguous exit attempts. Neg-risk stays unresolved. Not ready for a live run. |
+| R5.5 | [automatic_startup_reconciliation.md](automatic_startup_reconciliation.md) | **Yes (new operational requirement)** | R1, R5 | Implemented for standard binary settlement. The current execution journal is wallet-bound on chain 137. Two Ask70 sessions ended before POST. One later session bought, sold, and recorded dust; that sell is not confirmed. A 30 September 2026 `--check-account` did not reach the venue. Neg-risk stays unresolved. See [phaseA_report.md](../phaseA_report.md). |
 | R6 | [continuous_windows.md](continuous_windows.md) | **No (deferred)** | R1, R5 | Not implemented. |
-| R7 | [release_validation_campaign.md](release_validation_campaign.md) | **Yes** | R1–R5 + R5.5 offline-green for the next candidate | **Pending.** The first ask70 live attempt emitted one entry and the host rejected it at the hard cutoff (`NO_ENTRY_CUTOFF_BLOCKED`, `ok: true`, zero mutations). That is a safe no-entry. It does not satisfy R7 confirmed entry and exit. |
+| R7 | [release_validation_campaign.md](release_validation_campaign.md) | **Yes** | R1–R5 + R5.5 offline-green for the next candidate | **Pending.** Later Ask70 runs include a safe cutoff block, two pre-POST final-gate rejections, and one buy at 0.73 with a matched stop sell at 0.58. `observed_fills_complete` is false. That is not a confirmed round trip. |
 
 ## Suggested PRs (first release)
 

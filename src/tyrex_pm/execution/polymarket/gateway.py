@@ -190,11 +190,13 @@ class OrderMetadataWarmResult:
 class PolymarketAsyncGateway:
     """AsyncSecureClient adapter.
 
-    The same client and asyncio loop own order preparation, POST, account reads
-    and the authenticated stream.  There is intentionally no sync fallback.
+    Order preparation, POST, account-state refresh, and the authenticated stream
+    share the execution client. Background inspection uses ``inspection_client``,
+    a second SDK instance with its own transports. There is no sync fallback.
     """
 
     client: Any
+    inspection_client: Any | None = None
     tick_size_resolver: TickSizeResolver | None = None
     tick_size_fetcher: TickSizeFetcher | None = None
     client_guard: Any | None = None
@@ -206,6 +208,7 @@ class PolymarketAsyncGateway:
     warmed_token_ids: set[str] = field(default_factory=set)
     mutations_enabled: bool = True
     payout_eth_call: Any = None
+    settlement_cache: Any = None
     _prepared_specs: dict[str, OrderSpec] = field(default_factory=dict)
     _stream_task: asyncio.Task[None] | None = None
     _stream_handle: Any | None = None
@@ -219,9 +222,19 @@ class PolymarketAsyncGateway:
         from tyrex_pm.adapters.polymarket.polygon_rpc import payout_caller_from_env
 
         source = env if env is not None else dict(os.environ)
+        client = await build_async_secure_client(env=env)
+        try:
+            inspection_client = await build_async_secure_client(env=env)
+        except BaseException:
+            await client.close()
+            raise
+        from tyrex_pm.execution.settlement_cache import SettlementCache
+
         return cls(
-            client=await build_async_secure_client(env=env),
+            client=client,
+            inspection_client=inspection_client,
             payout_eth_call=payout_caller_from_env(source),
+            settlement_cache=SettlementCache(),
         )
 
     async def warm_order_metadata(
@@ -706,37 +719,40 @@ class PolymarketAsyncGateway:
             await asyncio.gather(self._stream_task, return_exceptions=True)
             self._stream_task = None
 
+    def _inspection_reader(self) -> Any:
+        if self.inspection_client is not None and self.inspection_client is not self.client:
+            return self.inspection_client
+        return self.client
+
     async def startup_inspection(self, *, journal: Any = None, sessions: tuple[Any, ...] = ()):
         """Read-only account inventory. Never prepares, posts, cancels, or redeems."""
         from tyrex_pm.adapters.polymarket.startup_reads import collect_inspection_facts
+        from tyrex_pm.execution.settlement_cache import SettlementCache
 
+        if self.settlement_cache is None:
+            self.settlement_cache = SettlementCache()
         return await collect_inspection_facts(
-            self.client,
+            self._inspection_reader(),
             journal=journal,
             sessions=sessions,
-            guard=self.client_guard,
             payout_eth_call=self.payout_eth_call,
+            settlement_cache=self.settlement_cache,
         )
 
     async def recovery_book(self, condition_id: str, token_id: str):
         """Historical book for one token. Read-only; does not warm or trade."""
         from tyrex_pm.adapters.polymarket.rest_book import recovery_book_view
 
-        async def _read():
-            return await self.client.get_order_book(token_id=token_id)
-
-        if self.client_guard is not None and hasattr(self.client_guard, "acquire_sdk_slot"):
-            lease = await self.client_guard.acquire_sdk_slot(active=True)
-            try:
-                raw = await _read()
-            finally:
-                await lease.release()
-        else:
-            raw = await _read()
+        raw = await self._inspection_reader().get_order_book(token_id=token_id)
         return recovery_book_view(raw, condition_id=condition_id, token_id=token_id)
 
     async def close(self) -> None:
         await self.stop_user_stream()
         if self._abandoned_prepares:
             await asyncio.gather(*tuple(self._abandoned_prepares), return_exceptions=True)
-        await self.client.close()
+        inspection = self.inspection_client
+        try:
+            await self.client.close()
+        finally:
+            if inspection is not None and inspection is not self.client:
+                await inspection.close()

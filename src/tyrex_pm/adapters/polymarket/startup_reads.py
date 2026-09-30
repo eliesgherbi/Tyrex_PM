@@ -9,6 +9,8 @@ A standard-binary payout is read only when the caller supplies an ``eth_call``.
 
 from __future__ import annotations
 
+import inspect
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -235,6 +237,26 @@ def associate_legacy_journal(journal: Any, wallet: str, *, at: datetime) -> None
     journal.set_meta("account.associated_at", at.astimezone(timezone.utc).isoformat())
 
 
+def _activity_observed_at(observed: Any) -> datetime | None:
+    """Normalize an SDK timestamp. Integers and numeric strings are unix seconds."""
+    if isinstance(observed, datetime):
+        if observed.tzinfo is None:
+            return observed.replace(tzinfo=timezone.utc)
+        return observed
+    if isinstance(observed, bool) or observed is None or observed == "":
+        return None
+    raw: int | None = None
+    if isinstance(observed, (int, float)):
+        raw = int(observed)
+    elif isinstance(observed, str) and observed.isdigit():
+        raw = int(observed)
+    if raw is None or raw < 0:
+        return None
+    if raw > 10_000_000_000:
+        raw //= 1000
+    return datetime.fromtimestamp(raw, tz=timezone.utc)
+
+
 def activity_from_sdk(item: Any) -> Any:
     """Normalize a pinned SDK activity. Quantity is ``shares``; hash is not a trade id."""
     from tyrex_pm.execution.startup_reconciliation import ActivityView
@@ -251,9 +273,7 @@ def activity_from_sdk(item: Any) -> Any:
     if venue_trade_id is None:
         venue_trade_id = _field(item, "venue_trade_id")
     venue_order_id = _field(item, "order_id") or _field(item, "venue_order_id")
-    observed = _field(item, "timestamp")
-    if isinstance(observed, datetime) and observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
+    observed = _activity_observed_at(_field(item, "timestamp"))
     activity_id = _field(item, "id")
     if not activity_id:
         activity_id = (
@@ -326,12 +346,20 @@ def open_order_from_sdk(item: Any) -> Any:
 
 async def drain_paginator(source: Any) -> tuple[list[Any], bool, str]:
     """Walk pages until ``has_more`` is false. Unverified iterators stay incomplete."""
+    items, complete, reason, _pages = await drain_paginator_detailed(source)
+    return items, complete, reason
+
+
+async def drain_paginator_detailed(source: Any) -> tuple[list[Any], bool, str, int]:
+    """Same walk as ``drain_paginator``, plus the number of pages observed."""
     items: list[Any] = []
+    pages = 0
     if hasattr(source, "__aiter__"):
         saw_page = False
         try:
             async for page in source:
                 saw_page = True
+                pages += 1
                 page_items = getattr(page, "items", None)
                 if page_items is None:
                     items.append(page)
@@ -339,16 +367,71 @@ async def drain_paginator(source: Any) -> tuple[list[Any], bool, str]:
                 items.extend(page_items)
                 if getattr(page, "has_more", False):
                     continue
-                return items, True, ""
+                return items, True, "", pages
         except Exception as exc:  # truncated or malformed pagination is incomplete
-            return items, False, f"{type(exc).__name__}:{exc}"
+            return items, False, f"{type(exc).__name__}:{exc}", pages
         if saw_page:
-            return items, False, "pagination_truncated"
+            return items, False, "pagination_truncated", pages
     if hasattr(source, "iter_items"):
         async for item in source.iter_items():
             items.append(item)
-        return items, False, "pagination_unverified"
-    return list(source or ()), True, ""
+            pages += 1
+        return items, False, "pagination_unverified", pages
+    rows = list(source or ())
+    return rows, True, "", 1 if rows else 0
+
+
+async def _collect_activities(
+    client: Any,
+    *,
+    journal: Any,
+    wallet: str,
+    chain_id: int,
+    environment: str,
+) -> tuple[tuple[Any, ...], bool, str, int, str, dict[str, Any] | None]:
+    """Full or incremental activity. The returned ledger is only a proposal."""
+    from tyrex_pm.execution.activity_checkpoint import (
+        ACTIVITY_PAGE_SIZE,
+        activities_from_ledger,
+        collection_mode,
+        incremental_start_unix,
+        load_activity_ledger,
+        propose_activity_ledger,
+    )
+
+    previous = load_activity_ledger(journal)
+    mode = collection_mode(
+        previous, wallet=wallet, chain_id=chain_id, environment=environment
+    )
+    start = incremental_start_unix(
+        previous, wallet=wallet, chain_id=chain_id, environment=environment
+    )
+    kwargs: dict[str, Any] = {
+        "page_size": ACTIVITY_PAGE_SIZE,
+        "sort_by": "TIMESTAMP",
+        "sort_direction": "ASC",
+    }
+    if start is not None:
+        kwargs["start"] = start
+    raw, complete, reason, pages = await drain_paginator_detailed(
+        _call_accepting(client.list_activity, **kwargs)
+    )
+    fetched = tuple(activity_from_sdk(item) for item in raw)
+    observed_unix = int(datetime.now(timezone.utc).timestamp())
+    proposed = propose_activity_ledger(
+        previous,
+        fetched,
+        mode=mode,
+        complete=complete,
+        wallet=wallet,
+        chain_id=chain_id,
+        environment=environment,
+        observed_unix=observed_unix,
+    )
+    if proposed is None:
+        retained = activities_from_ledger(previous)
+        return retained, complete, reason, pages, mode, None
+    return activities_from_ledger(proposed), complete, reason, pages, mode, proposed
 
 
 def _incomplete(reason: str) -> Any:
@@ -428,8 +511,14 @@ async def _merge_ctf_payouts(
     holdings: Sequence[Any],
     neg_risk: set[str],
     eth_call: Any,
+    settlement_cache: Any = None,
 ) -> dict[str, Any]:
-    """Attach a standard-binary CTF payout when every held token is proven."""
+    """Attach a standard-binary CTF payout when every held token is proven.
+
+    ``settlement_cache`` is ignored. A ``latest`` observation is not reusable
+    clearance evidence, so every inspection reads the payout again.
+    """
+    del settlement_cache
     from tyrex_pm.adapters.polymarket.ctf_payout import (
         CONDITIONAL_TOKENS_ADDRESS,
         read_binary_payout,
@@ -488,6 +577,18 @@ async def _merge_ctf_payouts(
     return merged
 
 
+def _call_accepting(method: Any, **kwargs: Any) -> Any:
+    """Pass only parameters the installed client actually accepts."""
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return method(**kwargs)
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return method(**kwargs)
+    names = set(signature.parameters)
+    return method(**{key: value for key, value in kwargs.items() if key in names})
+
+
 async def collect_inspection_facts(
     client: Any,
     *,
@@ -495,25 +596,24 @@ async def collect_inspection_facts(
     sessions: Sequence[Any] = (),
     guard: Any = None,
     payout_eth_call: Any = None,
+    settlement_cache: Any = None,
 ) -> Any:
-    """Read account facts through the shared SDK slot. Never mutates the venue."""
-    if guard is not None and hasattr(guard, "acquire_sdk_slot"):
-        lease = await guard.acquire_sdk_slot(active=True)
-        try:
-            return await _collect_inspection_facts(
-                client,
-                journal=journal,
-                sessions=sessions,
-                payout_eth_call=payout_eth_call,
-            )
-        finally:
-            await lease.release()
-    return await _collect_inspection_facts(
+    """Read account facts on the caller's client. Never takes the execution SDK slot.
+
+    ``guard`` is accepted and ignored. Inspection must not serialize behind
+    order preparation.
+    """
+    del guard
+    started = time.monotonic_ns()
+    facts = await _collect_inspection_facts(
         client,
         journal=journal,
         sessions=sessions,
         payout_eth_call=payout_eth_call,
+        settlement_cache=settlement_cache,
     )
+    elapsed_ms = round((time.monotonic_ns() - started) / 1_000_000, 3)
+    return replace(facts, inspection_duration_ms=elapsed_ms)
 
 
 async def _collect_inspection_facts(
@@ -522,6 +622,7 @@ async def _collect_inspection_facts(
     journal: Any,
     sessions: Sequence[Any],
     payout_eth_call: Any = None,
+    settlement_cache: Any = None,
 ) -> Any:
     from tyrex_pm.execution.startup_reconciliation import (
         AccountIdentity,
@@ -553,10 +654,20 @@ async def _collect_inspection_facts(
             client, holdings, sessions, known_tokens
         )
         holdings = await _attach_closed_outcome_indexes(client, holdings)
-        activities_raw, activity_complete, activity_reason = await drain_paginator(
-            client.list_activity()
+        (
+            activities,
+            activity_complete,
+            activity_reason,
+            activity_pages,
+            activity_mode,
+            activity_ledger,
+        ) = await _collect_activities(
+            client,
+            journal=journal,
+            wallet=str(wallet),
+            chain_id=identity.chain_id,
+            environment=identity.environment,
         )
-        activities = tuple(activity_from_sdk(item) for item in activities_raw)
         lookups: dict[str, OrderLookup] = {}
         for session in sessions:
             for order in getattr(session, "orders", {}).values():
@@ -620,7 +731,11 @@ async def _collect_inspection_facts(
                     )
         if payout_eth_call is not None:
             lifecycles = await _merge_ctf_payouts(
-                lifecycles, holdings, neg_risk, payout_eth_call
+                lifecycles,
+                holdings,
+                neg_risk,
+                payout_eth_call,
+                settlement_cache,
             )
         closing_raw, closing_complete, _closing_reason = await drain_paginator(
             client.list_positions(**position_list_kwargs())
@@ -694,4 +809,7 @@ async def _collect_inspection_facts(
         legacy_unbound=legacy,
         closing_holdings=tuple(closing),
         closing_open_orders=closing_orders,
+        activity_mode=activity_mode,
+        activity_pages=activity_pages,
+        activity_ledger=activity_ledger,
     )

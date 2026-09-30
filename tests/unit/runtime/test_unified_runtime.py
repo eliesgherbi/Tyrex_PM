@@ -398,6 +398,8 @@ class _Venue:
                 orders_complete=True,
                 activity_complete=True,
             ),
+            closing_holdings=(),
+            closing_open_orders=(),
         )
 
 
@@ -968,10 +970,13 @@ async def test_mandatory_flatten_and_protection_ignore_entry_cutoffs() -> None:
     protection.assert_called_once()
 
 
-async def _consume_entry(tau: float) -> tuple[list, list, AsyncMock]:
+async def _consume_entry(
+    tau: float,
+    config_path: str = "config/runs/ask70_protection_tiny_live.yaml",
+) -> tuple[list, list, AsyncMock]:
     recorded: list[tuple[str, dict]] = []
     opened: list[dict] = []
-    config = load_trading_run_config(Path("config/runs/ask70_protection_tiny_live.yaml"))
+    config = load_trading_run_config(Path(config_path))
     intent = _entry()
     queue: asyncio.Queue = asyncio.Queue()
     queue.put_nowait(intent)
@@ -1080,6 +1085,26 @@ async def test_observed_cutoff_tau_is_rejected_before_session_or_mutation() -> N
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_experimental_cutoff_rejects_before_session_or_mutation() -> None:
+    path = "config/runs/ask70_protection_tau30_experimental.yaml"
+    recorded, opened, submit_entry = await _consume_entry(29.5, path)
+    assert opened == []
+    submit_entry.assert_not_awaited()
+    assert recorded[0][0] == "INTENT_BLOCKED"
+    assert recorded[0][1]["reason"] == "ENTRY_CUTOFF_PASSED"
+    assert recorded[0][1]["cutoff_s"] == 30.0
+    assert recorded[0][1]["tau_s"] == 29.5
+
+
+@pytest.mark.asyncio
+async def test_experimental_cutoff_still_consumes_tau_at_the_hard_floor() -> None:
+    path = "config/runs/ask70_protection_tau30_experimental.yaml"
+    _recorded, opened, submit_entry = await _consume_entry(30.0, path)
+    assert len(opened) == 1
+    submit_entry.assert_awaited()
 
 
 def _evidence(event_type: str, payload: dict, sequence: int) -> RunEvidenceRecord:

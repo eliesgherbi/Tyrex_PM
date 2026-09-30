@@ -43,9 +43,11 @@ class StartupController:
         self.generation = generation
         self.authorization_ttl_s = authorization_ttl_s
         self.mutations: list[str] = []
+        self.published_event_ids: list[str] = []
 
     async def inspect(self, facts: InspectionFacts) -> StartupAssessment:
         """Persist read-derived evidence, then classify again. Never submits."""
+        self.published_event_ids = []
         assessment = assess(facts)
         await self._persist_auto(assessment)
         refreshed = self._refresh_sessions(facts)
@@ -135,6 +137,7 @@ class StartupController:
                 if event is None:
                     continue
                 await self.coordinator.apply(event)
+                self.published_event_ids.append(event.event_id)
                 applied_by_session.setdefault(planned.session_id, []).append(event.event_id)
         for issue in assessment.issues:
             if issue.severity is not IssueSeverity.AUTO:
@@ -168,6 +171,7 @@ class StartupController:
                 except ReducerInvariantError:
                     continue
                 await self.coordinator.apply(clearance)
+                self.published_event_ids.append(clearance.event_id)
         await self._revoke_reappeared(assessment)
 
     def _refresh_sessions(self, facts: InspectionFacts) -> InspectionFacts:
@@ -196,6 +200,10 @@ class StartupController:
             minimum_exit_price=facts.minimum_exit_price,
             token_bids=facts.token_bids,
             token_min_order_sizes=facts.token_min_order_sizes,
+            activity_mode=facts.activity_mode,
+            activity_pages=facts.activity_pages,
+            inspection_duration_ms=facts.inspection_duration_ms,
+            activity_ledger=facts.activity_ledger,
         )
 
     async def _revoke_reappeared(self, assessment: StartupAssessment) -> None:
@@ -207,15 +215,15 @@ class StartupController:
             state = self.coordinator.states.get(issue.session_id)
             if state is None or state.operational_disposition.value == "UNRESOLVED":
                 continue
-            await self.coordinator.apply(
-                SessionOperationalClearanceRevoked(
-                    **new_envelope(
-                        session_id=issue.session_id,
-                        dedupe_key=f"clearance-revoked:holdings-reappeared:{issue.session_id}",
-                    ),
-                    reason="HOLDINGS_REAPPEARED",
-                )
+            revoked = SessionOperationalClearanceRevoked(
+                **new_envelope(
+                    session_id=issue.session_id,
+                    dedupe_key=f"clearance-revoked:holdings-reappeared:{issue.session_id}",
+                ),
+                reason="HOLDINGS_REAPPEARED",
             )
+            await self.coordinator.apply(revoked)
+            self.published_event_ids.append(revoked.event_id)
 
 
 _PREREQUISITE_CODES = frozenset(

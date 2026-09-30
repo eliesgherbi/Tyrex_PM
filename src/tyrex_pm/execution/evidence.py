@@ -144,7 +144,7 @@ class OrderPreDispatchFailed(EvidenceEnvelope):
     create_market_order_ms: float | None = None
     refresh_wait_ms: float | None = None
     refresh_elapsed_ms: float | None = None
-    order_metadata_cache_miss: bool = False
+    order_metadata_cache_miss: bool | None = None
 
     def __post_init__(self) -> None:
         EvidenceEnvelope.__post_init__(self)
@@ -164,7 +164,9 @@ class OrderPreDispatchFailed(EvidenceEnvelope):
             "refresh_elapsed_ms",
         ):
             object.__setattr__(self, field_name, _coerce_optional_ms(getattr(self, field_name)))
-        object.__setattr__(self, "order_metadata_cache_miss", bool(self.order_metadata_cache_miss))
+        miss = self.order_metadata_cache_miss
+        if miss is not None:
+            object.__setattr__(self, "order_metadata_cache_miss", bool(miss))
 
 
 @dataclass(frozen=True, kw_only=True)

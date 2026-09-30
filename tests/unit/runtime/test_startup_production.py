@@ -211,7 +211,7 @@ async def test_production_reader_checks_identity_orders_and_missing_tokens() -> 
     gateway = PolymarketAsyncGateway(client=client)
     gateway.client_guard = guard
     facts = await gateway.startup_inspection(journal=journal, sessions=(session,))
-    assert guard.acquires == 1
+    assert guard.acquires == 0
     assert facts.bound_wallet == "0xother"
     assert facts.identity is not None and facts.identity.wallet == WALLET
     blocked = assess(facts)
@@ -313,6 +313,9 @@ class _RecoveryVenue:
             ReadCoverage,
         )
 
+        shares = self.balance
+        holding = Holding(condition_id="cond", token_id="token", shares=shares)
+        holdings = () if shares <= 0 else (holding,)
         return InspectionFacts(
             identity=AccountIdentity(chain_id=137, environment="production", wallet=WALLET),
             coverage=ReadCoverage(
@@ -321,9 +324,9 @@ class _RecoveryVenue:
                 orders_complete=True,
                 activity_complete=True,
             ),
-            holdings=(
-                Holding(condition_id="cond", token_id="token", shares=self.balance),
-            ),
+            holdings=holdings,
+            closing_holdings=holdings,
+            closing_open_orders=(),
             bound_wallet=WALLET,
             lifecycles={
                 "cond": MarketLifecycleObservation(

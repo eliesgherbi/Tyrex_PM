@@ -127,6 +127,21 @@ def test_ask70_config_loads_from_yaml() -> None:
     assert cfg.strategy.liquidity_role == "taker"
 
 
+def test_experimental_ask70_profile_is_explicit() -> None:
+    from tyrex_pm.runtime.run_config import effective_entry_cutoff_s, strategy_entry_cutoff_s
+
+    cfg = load_trading_run_config(Path("config/runs/ask70_protection_tau30_experimental.yaml"))
+    assert cfg.run_name == "ask70_protection_tau30_experimental"
+    assert cfg.strategy.tau_min_s == 30.0
+    assert cfg.lifecycle.mandatory_exit_before_end_s == 15
+    assert cfg.lifecycle.manual_deadline_before_end_s == 5
+    assert cfg.lifecycle.evidence_timeout_s == 15
+    assert cfg.lifecycle.exit_retry_budget_s == 10
+    assert cfg.market.entry_dispatch_margin_s == 1.0
+    assert effective_entry_cutoff_s(cfg) == 30.0
+    assert strategy_entry_cutoff_s(cfg) == 31.0
+
+
 def test_ask70_enters_first_leg_at_or_above_threshold() -> None:
     strategy = Ask70Strategy(
         config=Ask70Config(

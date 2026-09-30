@@ -68,6 +68,14 @@ class MemoryExecutionJournal:
     def sessions(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(event.session_id for event in self._events))
 
+    def tail(self) -> tuple[int, str | None]:
+        if not self._events:
+            return (0, None)
+        return (len(self._events), self._events[-1].event_id)
+
+    def event_ids_after(self, sequence: int) -> tuple[str, ...]:
+        return tuple(event.event_id for event in self._events[sequence:])
+
     def close(self) -> None:
         return None
 
@@ -183,6 +191,23 @@ class SqliteExecutionJournal:
         with self._lock:
             rows = self._db.execute(
                 "SELECT DISTINCT session_id FROM execution_events ORDER BY session_id"
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def tail(self) -> tuple[int, str | None]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT sequence, event_id FROM execution_events ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return (0, None)
+        return (int(row[0]), str(row[1]))
+
+    def event_ids_after(self, sequence: int) -> tuple[str, ...]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT event_id FROM execution_events WHERE sequence > ? ORDER BY sequence ASC",
+                (int(sequence),),
             ).fetchall()
         return tuple(str(row[0]) for row in rows)
 

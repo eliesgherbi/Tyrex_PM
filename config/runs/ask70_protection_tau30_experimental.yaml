@@ -1,0 +1,73 @@
+schema_version: 1
+run_name: ask70_protection_tau30_experimental
+
+# Operator experimental profile for a manually initiated bounded Ask70 run.
+# Hard BUY cutoff is max(tau_min_s, mandatory_exit_before_end_s + evidence_timeout_s) = 30.
+# Soft strategy cutoff is 31 (hard cutoff + entry_dispatch_margin_s).
+# The shipped regression profile remains config/runs/ask70_protection_tiny_live.yaml
+# (hard 105, soft 106). This file does not change that profile.
+
+strategy:
+  kind: ask70
+  parameters:
+    entry_ask_threshold: "0.70"
+    leg_preference: first_hit
+    max_price_pad: "0.08"
+    tau_min_s: 30.0
+    tau_max_s: 290.0
+    max_clock_uncertainty_ms: 750.0
+
+protection:
+  mark: bid
+  size_mode: full
+  take_profit:
+    style: resting_gtd
+    absolute: "0.85"
+  stop_loss:
+    style: stop_market_fak
+    absolute: "0.55"
+  trailing:
+    enabled: false
+    activation: immediate
+    mark: bid
+
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+  preparation_lead_s: 45
+  maximum_duration_s: 300
+  evaluation_interval_s: 1
+  entry_dispatch_margin_s: 1.0
+  maximum_book_age_ms: 2000
+  maximum_candidate_age_ms: 5000
+
+account:
+  refresh_interval_s: 5
+  snapshot_max_age_s: 15
+  read_timeout_s: 4
+  retry_attempts: 3
+  retry_base_delay_s: 0.25
+
+risk:
+  target_notional: "5"
+  maximum_total_debit: "5"
+  fee_reserve_rate: "0.02"
+  kill_switch_active: false
+
+lifecycle:
+  mandatory_exit_before_end_s: 15
+  manual_deadline_before_end_s: 5
+  evidence_timeout_s: 15
+  reconciliation_interval_s: 0.25
+  exit_retry_limit: 3
+  exit_retry_budget_s: 10
+  minimum_exit_price: "0.01"
+  sell_size_increment: "0.01"
+  dust_abs_shares: "0.01"
+  dust_max_notional: "0.05"
+  prepare_budget_ms: 2000
+  refresh_wait_budget_ms: 500
+
+state_directory: var/runtime_state/execution
+report_directory: var/runs/ask70

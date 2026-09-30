@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Mapping
+from typing import Any, Mapping
 
 from tyrex_pm.execution.exit_sizing import classify_dust_leftover
 from tyrex_pm.execution.session_state import (
@@ -164,6 +164,33 @@ class InspectionFacts:
     minimum_exit_price: Decimal = Decimal("0.01")
     token_bids: Mapping[str, Decimal] = field(default_factory=dict)
     token_min_order_sizes: Mapping[str, Decimal] = field(default_factory=dict)
+    activity_mode: str = ""
+    activity_pages: int = 0
+    inspection_duration_ms: float | None = None
+    activity_ledger: Mapping[str, Any] | None = None
+
+
+def evidence_disposition(facts: InspectionFacts) -> str:
+    """Return accepted, incomplete, or inconsistent. This is not trade readiness.
+
+    A complete consistent snapshot can still contain a real trading blocker.
+    Incomplete coverage and an opening/closing mismatch are not that case.
+    """
+    coverage = facts.coverage
+    if (
+        not coverage.complete
+        or not coverage.positions_complete
+        or not coverage.orders_complete
+        or not coverage.activity_complete
+        or facts.closing_holdings is None
+        or facts.closing_open_orders is None
+    ):
+        return "incomplete"
+    if _holdings_changed(facts.holdings, facts.closing_holdings) or _orders_changed(
+        facts.open_orders, facts.closing_open_orders
+    ):
+        return "inconsistent"
+    return "accepted"
 
 
 def assess(facts: InspectionFacts) -> StartupAssessment:
