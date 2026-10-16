@@ -1,0 +1,58 @@
+{
+  "settlement": {
+    "functional_id": "reference_at_close_vs_open",
+    "comparison": "AT_OR_ABOVE_K",
+    "reference_series": "chainlink:btcusd:twap:60",
+    "reference_units": "USD",
+    "timestamp_meaning": "provider_source_time",
+    "provenance_status": "ASSUMED",
+    "evidence": []
+  },
+  "model": {
+    "backend": "twap_proxy_diffusion",
+    "averaging_window_s": 60.0,
+    "spot_input": "binance_spot",
+    "sigma_band": 0.25,
+    "reference_band_bps": 1.0,
+    "tau_floor_s": 1.0
+  },
+  "volatility": {
+    "half_life_s": 30.0,
+    "min_samples_s": 20.0,
+    "jump_threshold_sigma": 4.0,
+    "sample_interval_s": 1.0,
+    "tau_floor_s": 1.0,
+    "sigma_floor": 1e-05,
+    "sigma_scale": 1.0
+  },
+  "entry": {
+    "tau_min_s": 30.0,
+    "tau_max_s": 150.0,
+    "min_edge_per_share": "0.02",
+    "target_mode": "cap_only",
+    "target_profit_usdc": "3",
+    "max_entry_price": "0.97",
+    "limit_buffer_ticks": 1
+  },
+  "sizing": {
+    "max_debit_usdc": "5",
+    "max_loss_usdc": "5",
+    "depth_participation": "1",
+    "max_levels": 32,
+    "share_increment": "0.01",
+    "default_min_order_shares": "5"
+  },
+  "quality": {
+    "accepted_k_qualities": [
+      "CONFIRMED_CANONICAL",
+      "PROVISIONAL"
+    ],
+    "require_verified_settlement_spec": false,
+    "max_clock_uncertainty_ms": 250
+  },
+  "fees": {
+    "rate": "0.07",
+    "exponent": "1",
+    "provenance": "SCENARIO_ASSUMPTION_NOT_VERIFIED"
+  }
+}

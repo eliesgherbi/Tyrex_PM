@@ -2,6 +2,11 @@
 
 Date: 11 October 2026.
 
+**Update, 16 October 2026:** the 94-window v2 A/B/C workflow is now complete. Its
+provisional hold-to-resolution baseline is **TWAP, 2-cent edge, entry with 30–150 seconds
+remaining**. See the [current baseline selection](settlement_value_v2_baseline_selection_2026-10-16.md).
+The figures and ranges below are retained as historical v1 evidence, not the current selection.
+
 **Data:** 45 development windows from two collections (1 October and 6 October 2026, three recording sessions). 18 later windows are held out and **have not been evaluated**.
 
 **Labels:**
