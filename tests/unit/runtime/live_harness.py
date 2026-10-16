@@ -137,6 +137,8 @@ class AccountStub:
             held = venue.balance.get(token_id, Decimal(0))
             return SimpleNamespace(balance_shares=held, allowance_shares=held)
 
+        # A fresh read each time (re-entry requires a snapshot newer than the release).
+        self.observed_at = datetime.now(timezone.utc)
         return SimpleNamespace(
             status=AccountSnapshotStatus.READY, blockers=(), token=token, open_order_ids=(),
             observed_at=self.observed_at, collateral_balance=Decimal("100"),
