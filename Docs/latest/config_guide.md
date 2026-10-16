@@ -173,6 +173,50 @@ A stricter plugin `tau_min_s` (for example 120) raises the hard cutoff at consum
 
 All `settlement.trial` keys are required: there is no default trial budget. In hold mode, `mandatory_exit_before_end_s` and `manual_deadline_before_end_s` still apply to a position whose hold is **not** committed.
 
+### Managed exits, continuous runs, run limits and paper venue
+
+Added 16 October 2026 (settlement_value live readiness). Every feature is off unless the YAML turns it on.
+
+| Key | Role | Module |
+|-----|------|--------|
+| `lifecycle.mode: managed_exit` | Settlement ledger, but a filled position stays open and exitable (strategy exits, `protection:`). Remaining inventory follows the strategy's `exit.residual_policy` at `exit.exit_cutoff_tau_s`, which must exceed `mandatory_exit_before_end_s`. Requires `strategy.parameters.exit.policy: managed_exit`. | `run_config.py`, `trading_runtime.py` |
+| `protection` with `hold_to_resolution` | **Rejected.** A committed hold is never sold. Use `managed_exit` for SL/TP. | `run_config.py` |
+| `market.run_mode` | `single_window` (default; one window per process) or `continuous` (roll through windows until stopped). Continuous requires a settlement lifecycle and explicit `settlement.run_limits`. Without an explicit `maximum_duration_s` a continuous run has no deadline; with one it is a bounded soak. | `run_config.py`, `market_data_runtime.py` |
+| `settlement.run_limits.*` | Account-wide limits computed from the durable ledger (restart-proof). All six keys are required, no defaults: `daily_loss_limit` (realized losses completed on the current **UTC** day + all open worst-case loss + the proposal), `max_open_worst_case_loss`, `max_reserved_debit`, `max_unredeemed_count`, `max_unredeemed_cost`, `max_consecutive_losses` (0 = off; pause until `tyrex-pm settlement ack-loss-pause`). Entries also need available collateral ≥ reserved debit + proposal. | `execution/settlement/governor.py` |
+| `settlement.resolution_poll_interval_s` | Cadence of the automatic resolution/payout worker in continuous runs (needs `TYREX_POLYGON_RPC_URL`). Redemption stays an operator step. | `runtime/settlement_worker.py` |
+| `venue` | `live` (default) or `paper`. Paper: live public data, simulated account/venue (`execution/paper.py`), no credentials read, no signing. `state_directory`, `report_directory` and `settlement.ledger_path` must contain `paper`. CLI: `--paper` instead of `--live`. | `run_config.py`, `execution/paper.py` |
+| `paper.initial_collateral` | Required. Simulated USDC. | `execution/paper.py` |
+| `paper.order_latency_ms`, `paper.participation` | Venue latency before an order meets the live book; share of displayed depth per level. | `execution/paper.py` |
+| `paper.resolution_source` | `chain_read` (public finalized payout of the real market). | `run_config.py` |
+| `paper.auto_redeem_after_s` | Simulated operator redemption delay after payout proof; omit to keep redemption manual. | `execution/paper.py` |
+
+Reporting: daily accounting is UTC; convert to Paris time when presenting (UTC+2 in summer, UTC+1 in winter). A continuous run writes `windows.jsonl` (one summary per window) next to `run_summary.json`.
+
+## settlement_value lifecycle parameters
+
+`strategy.kind: settlement_value`, sections `retry`, `exit`, `reentry` (all optional; defaults reproduce the original single-attempt hold-to-resolution behaviour). Numbers are provisional or hypotheses until researched. Module: `strategies/settlement_value/config.py`.
+
+| Key | Default | Role |
+|-----|---------|------|
+| `retry.enabled` | `false` | Re-arm an entry after an authoritative not-sent or zero-fill outcome. Uncertain outcomes block. |
+| `retry.max_attempts_per_episode` | `3` | Total attempts including the first (provisional user decision, 2026-10-16). |
+| `retry.max_attempts_per_window` | `3` | Window-wide ceiling across episodes. |
+| `retry.max_prepare_failures_per_episode` | `3` | Attempts that failed in local preparation (no POST). |
+| `retry.max_posts_per_episode`, `retry.max_posts_per_window` | `3`, `3` | Venue mutation attempts. |
+| `retry.max_retry_duration_s` | `30` | Hard elapsed budget from the episode's first attempt. |
+| `retry.min_retry_interval_ms` | `500` | Minimum wait before a re-attempt. |
+| `retry.service_backoff_ms`, `retry.service_backoff_max_ms` | `1000`, `8000` | Exponential wait after preparation/service failures. |
+| `exit.policy` | `hold_to_resolution` | Or `managed_exit`. Selected before entry; the run's `lifecycle.mode` must match. |
+| `exit.value_exit_enabled`, `exit.value_exit_margin_per_share`, `exit.value_exit_basis` | `false`, `0.02`, `upper` | Sell when the fee-net executable bid beats the model hold value (upper bound or point) by the margin; never below the walked level. |
+| `exit.thesis_stop_enabled`, `exit.thesis_stop_probability` | `false`, `0.30` | Declared risk rule: exit when the point probability of the held side falls below the threshold. |
+| `exit.exit_cutoff_tau_s`, `exit.residual_policy` | `15`, `hold_to_resolution` | No new strategy exit below this tau; the residual is then committed to resolution. |
+| `exit.min_exit_price`, `exit.max_exit_attempts_per_episode` | `0.01`, `3` | Sale floor; strategy exit submissions per episode. |
+| `reentry.max_trades_per_window` | `1` | Episodes with confirmed exposure per window. `> 1` requires `exit.policy: managed_exit`. |
+| `reentry.rearm`, `reentry.cooldown_s` | `signal_reset`, `10` | After a sale the traded side must first become ineligible (`signal_reset`), plus the cooldown. |
+| `reentry.lock_after_protective_stop`, `reentry.lock_after_thesis_stop` | `true`, `true` | A stop ends entries for the window. |
+| `reentry.same_side_allowed`, `reentry.opposite_side_allowed` | `true`, `false` | Opposite-side re-entry is research-only (refused for live/paper runs). |
+| `reentry.min_extra_edge_per_share`, `reentry.last_entry_tau_s`, `reentry.max_window_debit_usdc` | `0`, `60`, `5` | Extra edge for a re-entry, latest re-entry start, window debit across episodes. |
+
 ## ask70 parameters
 
 `strategy.kind: ask70`. Six core fields are required. Maker fields are optional. After fill, ask70 HOLDs and emits **no exits** — SL/TP/trail must come from `protection:`.

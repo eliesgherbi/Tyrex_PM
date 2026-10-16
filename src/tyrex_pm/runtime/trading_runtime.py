@@ -42,6 +42,7 @@ from tyrex_pm.execution.evidence import (
     SubmissionFailed,
     SubmissionResponseObserved,
 )
+from tyrex_pm.execution.exit_arbitration import admit_exit
 from tyrex_pm.execution.exit_sizing import (
     can_post_exit,
     is_exempt_prior_position_blocker,
@@ -51,6 +52,7 @@ from tyrex_pm.execution.exit_sizing import (
 from tyrex_pm.execution.final_gate import FinalExecutionGate, FinalGatePolicy
 from tyrex_pm.execution.lifecycle import ExecutionLifecycle, LifecyclePolicy
 from tyrex_pm.execution.orders import TimeInForce
+from tyrex_pm.execution.outcome_reasons import classify_reason, classify_reasons
 from tyrex_pm.execution.planner import ExecutionRiskPolicy, IntentOrderPlanner
 from tyrex_pm.execution.polymarket.gateway import PolymarketAsyncGateway
 from tyrex_pm.execution.reconciliation import SessionReconciler
@@ -98,6 +100,17 @@ from tyrex_pm.strategies.context import (
     StrategyLifecycleSnapshot,
     StrategyPositionPhase,
 )
+from tyrex_pm.strategies.outcomes import (
+    EntryOutcome,
+    EntryOutcomeKind,
+    ExitOutcome,
+    ExitOutcomeKind,
+    RetryClass,
+)
+
+# Late-evidence watch of released entry attempts in the current window [s].
+LATE_EVIDENCE_WATCH_S = 60.0
+LATE_EVIDENCE_POLL_S = 5.0
 
 # Soft rewarm before official SDK AsyncOrderMetadataCache TTL (10 minutes).
 _ORDER_METADATA_WARM_TTL_S = 8 * 60
@@ -253,9 +266,16 @@ class TradingRuntime:
     decision_reader: Any = None
     _startup_wallet: str | None = None
     _last_inspection_publication: str = "discarded"
-    # Present only for lifecycle.mode: hold_to_resolution (see runtime/settlement_hooks.py).
+    # Present only for settlement lifecycles (see runtime/settlement_hooks.py).
     settlement_hooks: Any | None = None
     _market_runtime_ref: Any = None
+    # Continuous operation: resolution worker, per-window summaries, stop reason.
+    settlement_worker: Any | None = None
+    window_summaries: list[dict[str, Any]] = field(default_factory=list)
+    run_stop_reason: str | None = None
+    _last_exit_reason: dict[str, str] = field(default_factory=dict)
+    _last_release_at: datetime | None = None
+    _window_started_at: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     async def create(
@@ -497,6 +517,9 @@ class TradingRuntime:
                 "strategy_kind": config.strategy_kind,
                 "output_directory": str(output_directory),
                 "live_requested": live_requested,
+                "venue": getattr(config, "venue", "live"),
+                "run_mode": getattr(config.market, "run_mode", "single_window"),
+                "lifecycle_mode": getattr(config, "lifecycle_mode", None),
             },
         )
         return result
@@ -637,7 +660,9 @@ class TradingRuntime:
 
     def can_promote(self) -> bool:
         state = self.lifecycle.state
-        return state is None or state.safe_to_open_entry
+        if state is not None and not state.safe_to_open_entry:
+            return False
+        return not self.lifecycle.unresolved_window_sessions()
 
     def _current_entry_tau_s(self) -> float | None:
         if self.active_market is None or self.active_market.market.event_end is None:
@@ -674,6 +699,17 @@ class TradingRuntime:
             }
         )
         same_market = identity.market_id == bound_market_id
+        hooks = getattr(self, "settlement_hooks", None)
+        if (
+            not same_market
+            and self.continuous
+            and hooks is not None
+            and (identity.market_id, identity.token_id) in hooks.committed_holds()
+            and not restored.has_journal_uncertainty
+        ):
+            payload["host_action"] = "committed_hold_tracked"
+            self.run_recorder.record("PRIOR_SESSION_INSPECTED", payload)
+            return "foreign_inventory_absent"
         if same_market:
             host_action = "resume_flatten" if restored.has_exposure else (
                 "resume_cancel_then_prove"
@@ -733,9 +769,19 @@ class TradingRuntime:
             self.capabilities.entry_window_open = False
             self.capabilities.set_blocker("STOP_REQUESTED", reason)
             await self._stop_intent_dispatcher(cancel_inflight=False)
+            worker = getattr(self, "settlement_worker", None)
+            if worker is not None:
+                await worker.stop()
+            summarize = getattr(self, "_summarize_window", None)
+            active = getattr(self, "active_market", None)
+            if summarize is not None and active is not None:
+                summarize(active.window_id, f"stop:{reason}")
             if _hold_committed(self):
                 await self._cancel_for_hold()
                 self.run_recorder.record("SHUTDOWN_HOLD_PRESERVED", {"reason": reason})
+                return
+            residual = getattr(self, "_shutdown_residual_hold", None)
+            if residual is not None and await residual(reason):
                 return
             await self.lifecycle.drain_open_session(
                 reason,
@@ -869,6 +915,8 @@ class TradingRuntime:
         state = self.lifecycle.state
         if state is not None and not state.safe_to_open_entry:
             return
+        if not self.can_promote():
+            return
         if state is not None:
             self.lifecycle.release_terminal()
             self.selected_instrument = None
@@ -877,6 +925,9 @@ class TradingRuntime:
         if self.active_market is not None:
             previous_market = self.active_market.market
             previous_market_id = previous_market.condition_id or previous_market.market_id.value
+            self._summarize_window(self.active_market.window_id, "promoted")
+        self.lifecycle.new_window()
+        self.protection_registry = ProtectionRegistry()
         self.pending_market = None
         self.capabilities.active_market_ready = False
         self.capabilities.account_reads_ready = False
@@ -934,6 +985,9 @@ class TradingRuntime:
             if restored is not None
             else f"{self.config.run_name}-{uuid4()}"
         )
+        self.lifecycle.stream_alias = self.stream_session_id
+        self._window_started_at[session.window_id] = self._corrected_now().isoformat()
+        self._seed_driver_from_ledger(session.window_id)
         await self.gateway.start_user_stream(
             session_id=self.stream_session_id,
             markets=(market.condition_id or market.market_id.value,),
@@ -1001,9 +1055,15 @@ class TradingRuntime:
         driver = runtime._strategy_by_window.get(self.active_market.window_id) or runtime.driver
         return getattr(driver, "fee_curve", None)
 
-    async def _settlement_before_entry(self, intent: Any, token_id: str, instrument: Any) -> bool:
-        """Hold profile gate. Returns True when the entry is blocked (and recorded)."""
+    async def _settlement_before_entry(
+        self, intent: Any, token_id: str, instrument: Any, *, account_state: Any = None
+    ) -> tuple[str, ...] | None:
+        """Settlement gate. Returns the blocking reasons (recorded), or None when reserved."""
         assert self.settlement_hooks is not None and self.active_market is not None
+        episode_seq, attempt_seq = self._intent_episode(intent)
+        collateral = None if account_state is None else getattr(
+            account_state, "collateral_balance", None
+        )
         session = self.active_market
         market = session.market
         binding = getattr(session, "binding", None)
@@ -1026,10 +1086,13 @@ class TradingRuntime:
                 tick_size=market.tick_size,
                 min_order_size=market.min_order_size,
                 strategy_fee_curve=self._strategy_fee_curve(),
+                episode_seq=episode_seq,
+                attempt_seq=attempt_seq,
+                available_collateral=collateral,
             )
             if check.allowed:
                 self.run_recorder.record("SETTLEMENT_EPISODE_RESERVED", check.evidence)
-                return False
+                return None
             check_reasons, evidence = check.reasons, check.evidence
         self.run_recorder.record(
             "INTENT_BLOCKED",
@@ -1041,7 +1104,7 @@ class TradingRuntime:
                 **evidence,
             },
         )
-        return True
+        return tuple(check_reasons)
 
     def _position_cost(self, state: ExecutionSessionState | None) -> Decimal:
         if state is None:
@@ -1119,6 +1182,11 @@ class TradingRuntime:
                 sealed_k=None if ready.sealed is None else ready.sealed.ptb_k,
                 trading_reference_raw=ready.binance_raw,
                 chainlink_source_ts=None if ready.dyn is None else ready.dyn.chainlink_source_ts,
+            ),
+            last_exit_reason=(
+                None
+                if ready.session is None
+                else self._last_exit_reason.get(ready.session.window_id)
             ),
         )
         graph = getattr(market_runtime, "indicator_graph", None)
@@ -1305,6 +1373,8 @@ class TradingRuntime:
         )
 
     def _maybe_emit_protection_exit(self, market_runtime: ZGapMarketRuntime) -> None:
+        if _hold_committed(self):
+            return
         state = self.lifecycle.state
         if state is None or not state.has_exposure:
             if state is not None:
@@ -1463,138 +1533,9 @@ class TradingRuntime:
         candidate_monotonic_ns = self.intent_candidate_monotonic_ns.get(intent.intent_id.value)
         try:
             if isinstance(intent, EnterIntent):
-                token_id, instrument = self._select_token(intent)
-                if self.active_market is None or self.stream_session_id is None:
-                    raise RuntimeError("active execution binding is not prepared")
-                market = self.active_market.market
-                market_id = market.condition_id or market.market_id.value
-                account_state = self.account_state_authority.current(market_id)
-                self._apply_account_snapshot(account_state)
-                if account_state.status is not AccountSnapshotStatus.READY:
-                    self.run_recorder.record(
-                        "INTENT_BLOCKED",
-                        {
-                            "intent_id": intent.intent_id.value,
-                            "intent_type": type(intent).__name__,
-                            "reason": "ACCOUNT_STATE_NOT_AUTHORITATIVE",
-                            "account_state_status": account_state.status.value,
-                            "account_state_blockers": list(account_state.blockers),
-                        },
-                    )
-                    return
-                tau = self._current_entry_tau_s()
-                cutoff_s = effective_entry_cutoff_s(self.config)
-                if tau is None or tau < cutoff_s:
-                    self.run_recorder.record(
-                        "INTENT_BLOCKED",
-                        {
-                            "intent_id": intent.intent_id.value,
-                            "intent_type": type(intent).__name__,
-                            "reason": "ENTRY_CUTOFF_PASSED",
-                            "tau_s": tau,
-                            "cutoff_s": cutoff_s,
-                        },
-                    )
-                    return
-                if self.settlement_hooks is not None:
-                    blocked = await self._settlement_before_entry(intent, token_id, instrument)
-                    if blocked:
-                        return
-                baseline = account_state.token(token_id)
-                self.account_state = account_state
-                self.selected_token_id = token_id
-                self.selected_instrument = instrument
-                await self.lifecycle.open(
-                    session_id=self.stream_session_id,
-                    strategy_id=intent.strategy_id.value,
-                    market_id=self.active_market.market.condition_id or intent.market_id.value,
-                    window_id=self.active_market.window_id,
-                    token_id=token_id,
-                    baseline_position_shares=baseline.balance_shares,
-                    baseline_sellable_shares=min(
-                        baseline.balance_shares,
-                        baseline.allowance_shares
-                        if baseline.allowance_shares is not None
-                        else baseline.balance_shares,
-                    ),
-                    baseline_open_order_ids=account_state.open_order_ids,
-                )
-                try:
-                    async with self.account_state_authority.hold_ready_snapshot(market_id):
-                        # Re-apply held READY snapshot so final-gate capabilities
-                        # stay entry_executable for the full prepare window.
-                        self._apply_account_snapshot(
-                            self.account_state_authority.current(market_id)
-                        )
-                        state = await self.lifecycle.submit_entry(
-                            intent,
-                            token_id=token_id,
-                            candidate_monotonic_ns=candidate_monotonic_ns,
-                        )
-                except DispatchBlocked as exc:
-                    self.run_recorder.record(
-                        "DISPATCH_BLOCKED",
-                        {
-                            "role": "ENTRY",
-                            "error_type": type(exc).__name__,
-                            "reason": str(exc),
-                        },
-                    )
-                    state = await self.lifecycle.reconcile()
-                if self.settlement_hooks is not None and self.active_market is not None:
-                    outcome = self.settlement_hooks.after_entry(
-                        window_id=self.active_market.window_id,
-                        state=state,
-                        cost_basis=self._position_cost(state),
-                    )
-                    self.run_recorder.record("SETTLEMENT_ENTRY_OUTCOME", {"outcome": outcome})
-                if state is not None:
-                    self.capabilities.selected_token_sellable = state.sellable_shares > 0
-                    if intent.liquidity_role is LiquidityRole.MAKER and state.working_maker_entry:
-                        self.run_recorder.record(
-                            "MAKER_LIMIT_POSTED",
-                            {
-                                "intent_id": intent.intent_id.value,
-                                "token_id": token_id,
-                                "venue_order_id": (
-                                    None
-                                    if state.entry is None
-                                    else state.entry.venue_order_id
-                                ),
-                            },
-                        )
-                    if (
-                        state.phase is ExecutionPhase.POSITION_OPEN
-                        and self.active_market is not None
-                    ):
-                        self._maybe_arm_protection(self.active_market)
-                        await self._maybe_post_resting_take_profit(self.active_market)
-                    if state.terminal:
-                        self.stop_requested = True
+                await self._consume_entry(intent, candidate_monotonic_ns)
             elif isinstance(intent, (ExitIntent, FlattenIntent)):
-                if self.selected_token_id is None:
-                    raise RuntimeError("exit intent has no selected token")
-                market_id = None
-                if self.active_market is not None:
-                    market = self.active_market.market
-                    market_id = market.condition_id or market.market_id.value
-                async with self.account_state_authority.hold_ready_snapshot(market_id or ""):
-                    if market_id is not None:
-                        self._apply_account_snapshot(
-                            self.account_state_authority.current(market_id)
-                        )
-                    state = await self.lifecycle.submit_exit(
-                        intent,
-                        token_id=self.selected_token_id,
-                        protective=isinstance(intent, FlattenIntent),
-                        candidate_monotonic_ns=candidate_monotonic_ns,
-                        min_order_size=self._held_min_order_size(),
-                        last_bid=self._held_best_bid(self.active_market),
-                    )
-                self._remember_dust(state)
-                self.capabilities.selected_token_sellable = state.sellable_shares > 0
-                if state.terminal:
-                    self.stop_requested = True
+                await self._consume_exit(intent, candidate_monotonic_ns)
             elif isinstance(intent, CancelIntent):
                 state = await self.lifecycle.cancel_intent(intent)
                 self.run_recorder.record(
@@ -1608,29 +1549,7 @@ class TradingRuntime:
                 if state.terminal:
                     self.stop_requested = True
             elif isinstance(intent, HoldToResolutionIntent):
-                committed, detail = (False, "LIFECYCLE_NOT_HOLD_TO_RESOLUTION")
-                if self.settlement_hooks is not None:
-                    committed, detail = await self.settlement_hooks.commit_hold(
-                        window_id=intent.window_id,
-                        state=self.lifecycle.state,
-                        cancel_conflicting=self._cancel_for_hold,
-                    )
-                self.run_recorder.record(
-                    "HOLD_TO_RESOLUTION",
-                    {
-                        "intent_id": intent.intent_id.value,
-                        "reason_code": intent.reason_code,
-                        "market_id": intent.market_id.value,
-                        "instrument_id": intent.instrument_id.value,
-                        "window_id": intent.window_id,
-                        "committed": committed,
-                        "detail": detail,
-                    },
-                )
-                if committed:
-                    # The single episode is complete for this process; the holding now
-                    # waits for resolution under `tyrex-pm settlement`.
-                    self.stop_requested = True
+                await self._consume_hold(intent)
             else:
                 raise TypeError(f"unsupported strategy intent: {type(intent).__name__}")
         except Exception as exc:  # noqa: BLE001 - persisted report owns run failure
@@ -1639,8 +1558,446 @@ class TradingRuntime:
             self.intent_candidate_monotonic_ns.pop(intent.intent_id.value, None)
             self.intent_queue.task_done()
 
+    # -- episode / attempt plumbing ----------------------------------------------------
+
+    @property
+    def continuous(self) -> bool:
+        market = getattr(getattr(self, "config", None), "market", None)
+        return getattr(market, "run_mode", "single_window") == "continuous"
+
+    def _multi_attempt(self) -> bool:
+        """Whether a terminal attempt may be followed by another one in this process."""
+        strategy = getattr(self.config, "strategy", None)
+        retry = getattr(strategy, "retry", None)
+        reentry = getattr(strategy, "reentry", None)
+        return bool(
+            self.continuous
+            or (retry is not None and getattr(retry, "enabled", False))
+            or (reentry is not None and getattr(reentry, "max_trades_per_window", 1) > 1)
+        )
+
+    def _driver_for(self, window_id: str | None) -> Any:
+        runtime = getattr(self, "_market_runtime_ref", None)
+        if runtime is None or not hasattr(runtime, "window_driver"):
+            return None
+        return runtime.window_driver(window_id)
+
+    @staticmethod
+    def _intent_episode(intent: Any) -> tuple[int, int]:
+        evidence = getattr(intent, "evidence", {}) or {}
+        return int(evidence.get("episode_seq") or 1), int(evidence.get("attempt_seq") or 1)
+
+    def _attempt_session_id(self, intent: EnterIntent) -> str:
+        assert self.stream_session_id is not None
+        episode, attempt = self._intent_episode(intent)
+        if episode <= 1 and attempt <= 1:
+            return self.stream_session_id
+        return f"{self.stream_session_id}:e{episode}a{attempt}"
+
+    def _deliver_entry_outcome(self, intent: EnterIntent, outcome: EntryOutcome) -> None:
+        window_id = None if self.active_market is None else self.active_market.window_id
+        payload = {
+            "intent_id": intent.intent_id.value,
+            "window_id": window_id,
+            "episode_seq": self._intent_episode(intent)[0],
+            "attempt_seq": self._intent_episode(intent)[1],
+            "kind": outcome.kind.value,
+            "reason": outcome.reason,
+            "retry_class": outcome.retry_class.value,
+            "posted": outcome.posted,
+            "prepare_failed": outcome.prepare_failed,
+            "confirmed_shares": str(outcome.confirmed_shares),
+        }
+        self.run_recorder.record("ENTRY_OUTCOME", payload)
+        if outcome.retry_class is RetryClass.PAUSE_ENTRIES:
+            self.run_recorder.record(
+                "ENTRIES_PAUSED_FOR_WINDOW",
+                {"window_id": window_id, "reason": outcome.reason},
+            )
+        driver = self._driver_for(window_id)
+        handler = getattr(driver, "on_entry_outcome", None)
+        if handler is not None:
+            handler(outcome)
+
+    def _not_sent(self, intent: EnterIntent, reason: str, *, reasons: tuple[str, ...] = ()) -> None:
+        retry_class = classify_reasons(reasons) if reasons else classify_reason(reason)
+        self._deliver_entry_outcome(
+            intent,
+            EntryOutcome(
+                EntryOutcomeKind.NOT_SENT,
+                intent.intent_id.value,
+                self._corrected_now(),
+                reason=reason if not reasons else ",".join(reasons),
+                retry_class=retry_class,
+            ),
+        )
+
+    def _entry_outcome_from_state(
+        self, intent: EnterIntent, state: ExecutionSessionState | None
+    ) -> EntryOutcome:
+        now = self._corrected_now()
+        intent_id = intent.intent_id.value
+        if state is None:
+            return EntryOutcome(EntryOutcomeKind.UNCERTAIN, intent_id, now,
+                                reason="DISPATCH_UNKNOWN",
+                                retry_class=RetryClass.BLOCK_UNTIL_RECONCILED)
+        entry = getattr(state, "entry", None)
+        posted = bool(entry is not None and entry.attempt_ids)
+        if getattr(state, "confirmed_position_shares", Decimal("0")) > 0:
+            return EntryOutcome(EntryOutcomeKind.FILLED, intent_id, now, posted=True,
+                                confirmed_shares=state.confirmed_position_shares,
+                                cost=self._position_cost(state))
+        if state.phase is ExecutionPhase.COMPLETED_NO_DISPATCH:
+            stage = None if entry is None else entry.pre_dispatch_stage
+            error = (None if entry is None else entry.last_error) or "NO_DISPATCH"
+            if stage == "FINAL_GATE":
+                reason = "FINAL_GATE_REJECTED:" + error.split(":", 1)[-1]
+            else:
+                reason = f"PREPARATION:{error}"
+            return EntryOutcome(EntryOutcomeKind.NOT_SENT, intent_id, now, reason=reason,
+                                retry_class=classify_reason(reason),
+                                prepare_failed=stage != "FINAL_GATE")
+        if state.phase is ExecutionPhase.COMPLETED_NO_FILL:
+            reason = "NO_FILL_CONFIRMED"
+            if entry is not None and entry.accepted is False:
+                reason = "ORDER_REJECTED"
+            return EntryOutcome(EntryOutcomeKind.ZERO_FILL, intent_id, now, reason=reason,
+                                retry_class=classify_reason(reason), posted=posted)
+        return EntryOutcome(EntryOutcomeKind.UNCERTAIN, intent_id, now, reason="DISPATCH_UNKNOWN",
+                            retry_class=RetryClass.BLOCK_UNTIL_RECONCILED, posted=posted)
+
+    def _release_attempt(self, state: ExecutionSessionState | None) -> None:
+        """After a terminal, safe attempt: free the lifecycle for the next attempt."""
+        if state is None or not getattr(state, "safe_to_open_entry", False):
+            return
+        self.lifecycle.release_terminal(keep_for_window=True)
+        self.selected_instrument = None
+        self.selected_token_id = None
+        self._last_release_at = self._corrected_now()
+
+    async def _consume_entry(self, intent: EnterIntent, candidate_monotonic_ns: int | None) -> None:
+        token_id, instrument = self._select_token(intent)
+        if self.active_market is None or self.stream_session_id is None:
+            raise RuntimeError("active execution binding is not prepared")
+        market = self.active_market.market
+        market_id = market.condition_id or market.market_id.value
+        unresolved = getattr(self.lifecycle, "unresolved_window_sessions", lambda: [])()
+        if unresolved or getattr(self.lifecycle, "state", None) is not None:
+            reason = "PRIOR_ATTEMPT_UNRESOLVED"
+            self.run_recorder.record(
+                "INTENT_BLOCKED",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "intent_type": type(intent).__name__,
+                    "reason": reason,
+                    "sessions": [s.session_id for s in unresolved],
+                },
+            )
+            self._not_sent(intent, reason)
+            return
+        account_state = self.account_state_authority.current(market_id)
+        self._apply_account_snapshot(account_state)
+        released_at = getattr(self, "_last_release_at", None)
+        stale_after_release = (
+            released_at is not None
+            and self._intent_episode(intent)[0] > 1
+            and (
+                getattr(account_state, "observed_at", None) is None
+                or account_state.observed_at < released_at
+            )
+        )
+        if account_state.status is not AccountSnapshotStatus.READY or stale_after_release:
+            self.run_recorder.record(
+                "INTENT_BLOCKED",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "intent_type": type(intent).__name__,
+                    "reason": "ACCOUNT_STATE_NOT_AUTHORITATIVE",
+                    "account_state_status": account_state.status.value,
+                    "account_state_blockers": list(account_state.blockers),
+                    "stale_after_release": stale_after_release,
+                },
+            )
+            self._not_sent(intent, "ACCOUNT_STATE_NOT_AUTHORITATIVE")
+            return
+        tau = self._current_entry_tau_s()
+        cutoff_s = effective_entry_cutoff_s(self.config)
+        if tau is None or tau < cutoff_s:
+            self.run_recorder.record(
+                "INTENT_BLOCKED",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "intent_type": type(intent).__name__,
+                    "reason": "ENTRY_CUTOFF_PASSED",
+                    "tau_s": tau,
+                    "cutoff_s": cutoff_s,
+                },
+            )
+            self._not_sent(intent, "ENTRY_CUTOFF_PASSED")
+            return
+        if getattr(self, "settlement_hooks", None) is not None:
+            blocked = await self._settlement_before_entry(
+                intent, token_id, instrument, account_state=account_state
+            )
+            if blocked is not None:
+                self._not_sent(intent, "SETTLEMENT_ENTRY_BLOCKED", reasons=blocked)
+                return
+        baseline = account_state.token(token_id)
+        self.account_state = account_state
+        self.selected_token_id = token_id
+        self.selected_instrument = instrument
+        await self.lifecycle.open(
+            session_id=self._attempt_session_id(intent),
+            strategy_id=intent.strategy_id.value,
+            market_id=self.active_market.market.condition_id or intent.market_id.value,
+            window_id=self.active_market.window_id,
+            token_id=token_id,
+            baseline_position_shares=baseline.balance_shares,
+            baseline_sellable_shares=min(
+                baseline.balance_shares,
+                baseline.allowance_shares
+                if baseline.allowance_shares is not None
+                else baseline.balance_shares,
+            ),
+            baseline_open_order_ids=account_state.open_order_ids,
+        )
+        try:
+            async with self.account_state_authority.hold_ready_snapshot(market_id):
+                # Re-apply held READY snapshot so final-gate capabilities
+                # stay entry_executable for the full prepare window.
+                self._apply_account_snapshot(self.account_state_authority.current(market_id))
+                state = await self.lifecycle.submit_entry(
+                    intent,
+                    token_id=token_id,
+                    candidate_monotonic_ns=candidate_monotonic_ns,
+                )
+        except DispatchBlocked as exc:
+            self.run_recorder.record(
+                "DISPATCH_BLOCKED",
+                {
+                    "role": "ENTRY",
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc),
+                },
+            )
+            state = await self.lifecycle.reconcile()
+        outcome = self._entry_outcome_from_state(intent, state)
+        if getattr(self, "settlement_hooks", None) is not None and self.active_market is not None:
+            episode_seq = self._intent_episode(intent)[0]
+            settlement_outcome = self.settlement_hooks.after_entry(
+                window_id=self.active_market.window_id,
+                state=state,
+                cost_basis=self._position_cost(state),
+                episode_seq=episode_seq,
+                posted=outcome.posted if self._multi_attempt() else None,
+                prepare_failed=outcome.prepare_failed,
+            )
+            self.run_recorder.record("SETTLEMENT_ENTRY_OUTCOME", {"outcome": settlement_outcome})
+        self._deliver_entry_outcome(intent, outcome)
+        if state is not None:
+            self.capabilities.selected_token_sellable = state.sellable_shares > 0
+            if intent.liquidity_role is LiquidityRole.MAKER and state.working_maker_entry:
+                self.run_recorder.record(
+                    "MAKER_LIMIT_POSTED",
+                    {
+                        "intent_id": intent.intent_id.value,
+                        "token_id": token_id,
+                        "venue_order_id": (
+                            None if state.entry is None else state.entry.venue_order_id
+                        ),
+                    },
+                )
+            if state.phase is ExecutionPhase.POSITION_OPEN and self.active_market is not None:
+                self._maybe_arm_protection(self.active_market)
+                await self._maybe_post_resting_take_profit(self.active_market)
+            if state.terminal:
+                if self._multi_attempt() and getattr(state, "safe_to_open_entry", False):
+                    self._release_attempt(state)
+                elif self._multi_attempt():
+                    # Unknown or manual outcome: no further BUY until reconciled.
+                    self.capabilities.set_blocker(
+                        "ENTRY_OUTCOME_UNRESOLVED", f"session {state.session_id}"
+                    )
+                    self.run_stop_reason = "MANUAL_INTERVENTION_REQUIRED"
+                    self.stop_requested = True
+                else:
+                    self.stop_requested = True
+
+    async def _consume_exit(
+        self, intent: ExitIntent | FlattenIntent, candidate_monotonic_ns: int | None
+    ) -> None:
+        window_id = None if self.active_market is None else self.active_market.window_id
+        state = self.lifecycle.state
+        in_flight = None
+        if state is not None and state.phase in (
+            ExecutionPhase.EXIT_PREPARING,
+            ExecutionPhase.EXIT_DISPATCHING,
+        ):
+            in_flight = state.exit_requested_reason or "EXIT"
+        admission = admit_exit(in_flight_reason=in_flight, committed_hold=_hold_committed(self))
+        if not admission.admitted or self.selected_token_id is None:
+            self.run_recorder.record(
+                "EXIT_INTENT_DROPPED",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "reason_code": intent.reason_code,
+                    "dropped": admission.reason
+                    if not admission.admitted
+                    else "NO_SELECTED_TOKEN",
+                },
+            )
+            self._deliver_exit_outcome(
+                intent, ExitOutcomeKind.NOT_SENT, admission.reason, state, None
+            )
+            if self.selected_token_id is None and admission.admitted:
+                raise RuntimeError("exit intent has no selected token")
+            return
+        market_id = None
+        if self.active_market is not None:
+            market = self.active_market.market
+            market_id = market.condition_id or market.market_id.value
+        before = None if state is None else state.confirmed_sell_shares
+        before_trades = set() if state is None else set(state.trades)
+        if window_id is not None:
+            self._last_exit_reason[window_id] = intent.reason_code
+        async with self.account_state_authority.hold_ready_snapshot(market_id or ""):
+            if market_id is not None:
+                self._apply_account_snapshot(self.account_state_authority.current(market_id))
+            state = await self.lifecycle.submit_exit(
+                intent,
+                token_id=self.selected_token_id,
+                protective=isinstance(intent, FlattenIntent),
+                candidate_monotonic_ns=candidate_monotonic_ns,
+                min_order_size=self._held_min_order_size(),
+                last_bid=self._held_best_bid(self.active_market),
+            )
+        self._remember_dust(state)
+        self.capabilities.selected_token_sellable = state.sellable_shares > 0
+        flat = state.phase in (
+            ExecutionPhase.COMPLETED_FLAT,
+            ExecutionPhase.COMPLETED_FLAT_WITH_DUST,
+        )
+        sold = state.confirmed_sell_shares - (before or Decimal("0"))
+        if self.settlement_hooks is not None and window_id is not None:
+            proceeds = Decimal("0")
+            curve = self._strategy_fee_curve()
+            from tyrex_pm.domain.polymarket.fees import phi_taker_fee_per_share
+
+            for trade_id, trade in state.trades.items():
+                if trade_id in before_trades or trade.side != "SELL":
+                    continue
+                fee = Decimal("0") if curve is None else trade.shares * phi_taker_fee_per_share(
+                    trade.price, curve
+                )
+                proceeds += trade.shares * trade.price - fee
+            recorded = self.settlement_hooks.after_exit(
+                window_id=window_id,
+                sold_shares=sold,
+                proceeds=proceeds,
+                flat=flat,
+                exit_key=intent.intent_id.value,
+            )
+            self.run_recorder.record(
+                "SETTLEMENT_EXIT_OUTCOME",
+                {"outcome": recorded, "sold_shares": str(sold), "proceeds_estimated": str(proceeds),
+                 "fee_basis": "strategy_fee_curve_estimate"},
+            )
+        if flat:
+            kind = ExitOutcomeKind.FLAT
+        elif state.phase is ExecutionPhase.MANUAL_INTERVENTION:
+            kind = ExitOutcomeKind.UNCERTAIN
+        elif sold > 0:
+            kind = ExitOutcomeKind.PARTIAL
+        else:
+            kind = ExitOutcomeKind.NO_FILL
+        self._deliver_exit_outcome(intent, kind, None, state, sold)
+        if state.terminal:
+            if flat and self._multi_attempt():
+                self.protection_registry.disarm(state.session_id)
+                self._release_attempt(state)
+            else:
+                self.stop_requested = True
+
+    def _deliver_exit_outcome(
+        self,
+        intent: ExitIntent | FlattenIntent,
+        kind: ExitOutcomeKind,
+        reason: str | None,
+        state: ExecutionSessionState | None,
+        sold: Decimal | None,
+    ) -> None:
+        window_id = None if self.active_market is None else self.active_market.window_id
+        self.run_recorder.record(
+            "EXIT_OUTCOME",
+            {
+                "intent_id": intent.intent_id.value,
+                "reason_code": intent.reason_code,
+                "kind": kind.value,
+                "reason": reason,
+                "sold_shares": None if sold is None else str(sold),
+            },
+        )
+        driver = self._driver_for(window_id)
+        handler = getattr(driver, "on_exit_outcome", None)
+        if handler is not None:
+            handler(
+                ExitOutcome(
+                    kind,
+                    intent.intent_id.value,
+                    self._corrected_now(),
+                    reason=reason,
+                    remaining_shares=Decimal("0")
+                    if state is None
+                    else state.confirmed_position_shares,
+                    sold_shares=sold or Decimal("0"),
+                )
+            )
+
+    async def _consume_hold(self, intent: HoldToResolutionIntent) -> None:
+        committed, detail = (False, "LIFECYCLE_NOT_SETTLEMENT_PROFILE")
+        if self.settlement_hooks is not None:
+            committed, detail = await self.settlement_hooks.commit_hold(
+                window_id=intent.window_id,
+                state=self.lifecycle.state,
+                cancel_conflicting=self._cancel_for_hold,
+            )
+        self.run_recorder.record(
+            "HOLD_TO_RESOLUTION",
+            {
+                "intent_id": intent.intent_id.value,
+                "reason_code": intent.reason_code,
+                "market_id": intent.market_id.value,
+                "instrument_id": intent.instrument_id.value,
+                "window_id": intent.window_id,
+                "committed": committed,
+                "detail": detail,
+            },
+        )
+        if not committed:
+            return
+        state = self.lifecycle.state
+        if state is not None:
+            self.protection_registry.disarm(state.session_id)
+        if self.continuous:
+            # The holding now belongs to the settlement ledger (resolution worker); the
+            # lifecycle is free for the next window.
+            detached = self.lifecycle.detach_committed(reason="hold_committed")
+            self.run_recorder.record(
+                "COMMITTED_HOLD_DETACHED",
+                {"session_id": detached, "window_id": intent.window_id},
+            )
+            self.selected_instrument = None
+            self.selected_token_id = None
+            return
+        # The single episode is complete for this process; the holding now
+        # waits for resolution under `tyrex-pm settlement`.
+        self.stop_requested = True
+
     async def on_async_tick(self, market_runtime: ZGapMarketRuntime) -> None:
         await self._bind_pending_market()
+        worker = getattr(self, "settlement_worker", None)
+        if worker is not None:
+            worker.start()  # idempotent; also covers a restart into a committed window
         if self.active_market is not None:
             market = self.active_market.market
             market_id = market.condition_id or market.market_id.value
@@ -1707,6 +2064,150 @@ class TradingRuntime:
             reconciled = await self.lifecycle.reconcile()
             if reconciled is not None:
                 self.capabilities.selected_token_sellable = reconciled.sellable_shares > 0
+        check_earlier = getattr(self, "_check_earlier_attempts", None)
+        if check_earlier is not None:
+            await check_earlier()
+
+    def _seed_driver_from_ledger(self, window_id: str) -> None:
+        """Restart in the middle of a window: restore its durable attempt counters."""
+        hooks = self.settlement_hooks
+        driver = self._driver_for(window_id)
+        restore = getattr(driver, "restore_window_usage", None)
+        if hooks is None or restore is None:
+            return
+        usage = hooks.ledger.window_usage(window_id)
+        if usage.episodes == 0:
+            return
+        latest = hooks.ledger.by_window(window_id)
+        restore(
+            episodes=usage.episodes,
+            attempts=usage.attempts,
+            posts=usage.posts,
+            filled_episodes=usage.filled_episodes,
+            latest_attempts=0 if latest is None else latest.attempts,
+            latest_state=None if latest is None or latest.state is None else latest.state.value,
+        )
+        self.run_recorder.record(
+            "WINDOW_BUDGET_RESTORED",
+            {"window_id": window_id, "episodes": usage.episodes, "attempts": usage.attempts,
+             "posts": usage.posts},
+        )
+
+    async def _check_earlier_attempts(self) -> None:
+        """Late evidence for an earlier attempt of this window is a real exposure.
+
+        It is attributed to its original session (stream routing), reconciled, and new
+        entries stay blocked (``PRIOR_ATTEMPT_UNRESOLVED``) until it is resolved; a late
+        fill on an attempt the ledger closed as no-fill needs an operator decision.
+        """
+        # Released attempts are polled (throttled) for a while: a fill reported only by
+        # REST must not go unnoticed just because the stream missed it.
+        for session_id in self.lifecycle.sessions_to_watch(
+            watch_s=LATE_EVIDENCE_WATCH_S, interval_s=LATE_EVIDENCE_POLL_S
+        ):
+            try:
+                await self.lifecycle.reconciler.reconcile(self.coordinator, session_id)
+            except Exception as exc:  # noqa: BLE001
+                self._record_runtime_error("earlier_attempt_watch", exc)
+        unresolved = self.lifecycle.unresolved_window_sessions()
+        if not unresolved:
+            self.capabilities.clear_blocker("PRIOR_ATTEMPT_UNRESOLVED")
+            return
+        self.capabilities.set_blocker(
+            "PRIOR_ATTEMPT_UNRESOLVED", ",".join(str(s.session_id) for s in unresolved)
+        )
+        for state in unresolved:
+            if state.session_id is None:
+                continue
+            try:
+                await self.lifecycle.reconciler.reconcile(self.coordinator, state.session_id)
+            except Exception as exc:  # noqa: BLE001
+                self._record_runtime_error("earlier_attempt_reconcile", exc)
+            current = self.coordinator.states.get(state.session_id)
+            if current is not None and current.has_exposure:
+                self.run_recorder.record(
+                    "LATE_FILL_DETECTED",
+                    {"session_id": state.session_id,
+                     "shares": str(current.confirmed_position_shares)},
+                )
+                hooks = self.settlement_hooks
+                if hooks is not None and self.active_market is not None:
+                    episode = hooks.current_episode(self.active_market.window_id)
+                    if episode is not None and episode.state is not None and (
+                        episode.state.value in ("NO_FILL", "NO_DISPATCH")
+                    ):
+                        hooks.ledger.record(
+                            "MANUAL_INTERVENTION",
+                            episode.episode_id,
+                            key=f"MANUAL:late_fill:{state.session_id}",
+                            reason="late_fill_after_no_fill",
+                        )
+
+    async def _shutdown_residual_hold(self, reason: str) -> bool:
+        """managed_exit: at stop, remaining inventory follows the declared residual policy
+        (hold to resolution) instead of an unannounced sale. Falls back to the drain."""
+        if self.config.lifecycle_mode != "managed_exit" or self.settlement_hooks is None:
+            return False
+        state = self.lifecycle.state
+        if state is None or not state.has_exposure or self.active_market is None:
+            return False
+        committed, detail = await self.settlement_hooks.commit_hold(
+            window_id=self.active_market.window_id,
+            state=state,
+            cancel_conflicting=self._cancel_for_hold,
+        )
+        self.run_recorder.record(
+            "SHUTDOWN_RESIDUAL_HOLD",
+            {"reason": reason, "committed": committed, "detail": detail},
+        )
+        return committed
+
+    def _summarize_window(self, window_id: str, reason: str) -> None:
+        if any(row["window_id"] == window_id for row in self.window_summaries):
+            return
+        from tyrex_pm.reporting.timezones import paris_iso
+
+        now = self._corrected_now()
+        summary: dict[str, Any] = {
+            "window_id": window_id,
+            "closed_by": reason,
+            "bound_at": self._window_started_at.get(window_id),
+            "summarized_at": now.isoformat(),
+            "summarized_at_paris": paris_iso(now),
+            "accounting_day_utc": now.date().isoformat(),
+        }
+        hooks = self.settlement_hooks
+        if hooks is not None:
+            usage = hooks.ledger.window_usage(window_id)
+            summary.update(
+                episodes=usage.episodes,
+                filled_episodes=usage.filled_episodes,
+                attempts=usage.attempts,
+                posts=usage.posts,
+                prepare_failures=usage.prepare_failures,
+                states=[
+                    e.state.value if e.state else None
+                    for e in hooks.ledger.window_episodes(window_id)
+                ],
+            )
+        driver = self._driver_for(window_id)
+        episode_state = getattr(driver, "state", None)
+        if episode_state is not None and hasattr(episode_state, "phase"):
+            summary.update(
+                strategy_phase=episode_state.phase.value,
+                strategy_closed_reason=getattr(episode_state, "closed_reason", None),
+                window_attempts=getattr(episode_state, "window_attempts", None),
+            )
+        self.window_summaries.append(summary)
+        self.run_recorder.record("WINDOW_SUMMARY", summary)
+        try:
+            import json
+
+            path = self.output_directory / "windows.jsonl"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(summary, default=str) + "\n")
+        except Exception as exc:  # noqa: BLE001 - reporting must not stop trading
+            self._record_runtime_error("window_summary", exc)
 
     def readiness_dict(self) -> dict[str, Any]:
         state = self.lifecycle.state
@@ -1769,9 +2270,10 @@ class TradingRuntime:
         )
 
     def _corrected_now(self) -> datetime:
-        if self.time_authority is None:
+        authority = getattr(self, "time_authority", None)
+        if authority is None:
             return datetime.now(timezone.utc)
-        return self.time_authority.now_corrected_utc()
+        return authority.now_corrected_utc()
 
     def _seconds_until_next_inspection(self) -> float:
         """Start the next read one budget before the current assessment expires."""
@@ -1914,7 +2416,11 @@ class TradingRuntime:
                 ),
             )
         if self.settlement_hooks is not None:
-            facts = replace(facts, committed_holds=self.settlement_hooks.committed_holds())
+            facts = replace(
+                facts,
+                committed_holds=self.settlement_hooks.committed_holds(),
+                committed_holds_block_entries=not self.continuous,
+            )
         self._startup_wallet = None if facts.identity is None else facts.identity.wallet
         controller = StartupController(
             coordinator=self.coordinator,
@@ -2229,6 +2735,8 @@ class TradingRuntime:
             maximum_trade_age_ms=self.config.market.maximum_book_age_ms,
         )
         self.indicator_graph = runtime.indicator_graph
+        self._market_runtime_ref = runtime
+        self.settlement_worker = self._build_settlement_worker()
         fatal_exception: BaseException | None = None
         fatal_error: dict[str, Any] | None = None
         reporting_failures: list[str] = []
@@ -2242,7 +2750,7 @@ class TradingRuntime:
                 out_dir=self.output_directory,
                 run_id=self.config.run_name,
                 min_seals=999,
-                max_duration_s=self.config.market.maximum_duration_s,
+                max_duration_s=self._max_duration_s(),
                 duration_anchor="prepared_window_start",
                 preparation_timeout_s=self.config.market.preparation_lead_s + 300,
                 prep_lead_s=self.config.market.preparation_lead_s,
@@ -2353,6 +2861,55 @@ class TradingRuntime:
         if isinstance(fatal_exception, (KeyboardInterrupt, asyncio.CancelledError)):
             raise fatal_exception
         return result
+
+    def _max_duration_s(self) -> float | None:
+        market = self.config.market
+        if getattr(market, "run_mode", "single_window") == "continuous":
+            # Until stopped, unless an explicit bounded soak length was configured.
+            return market.maximum_duration_s if market.maximum_duration_explicit else None
+        return market.maximum_duration_s
+
+    def _build_settlement_worker(self) -> Any:
+        """Automatic resolution/payout tracking for continuous runs (None otherwise)."""
+        hooks = self.settlement_hooks
+        settlement = getattr(self.config, "settlement", None)
+        if hooks is None or settlement is None or not self.continuous:
+            return None
+        from tyrex_pm.execution.settlement.resolution import ResolutionManager
+        from tyrex_pm.runtime.settlement_worker import SettlementWorker
+
+        reader = getattr(self.gateway, "payout_reader", None)
+        if reader is None:
+            reader = _chain_payout_reader()
+        if reader is None:
+            self.run_recorder.record(
+                "SETTLEMENT_WORKER_UNAVAILABLE",
+                {"reason": "no Polygon RPC configured (TYREX_POLYGON_RPC_URL)",
+                 "effect": "holdings stay unresolved; unresolved caps pause entries"},
+            )
+            return None
+        paper = getattr(self.config, "paper", None)
+        verifier = getattr(self.gateway, "verify_redemption", None)
+        wallet = getattr(self.gateway, "wallet", None) if paper is not None else (
+            settlement.redemption_wallet
+        )
+        manager = ResolutionManager(
+            hooks.ledger,
+            payout_reader=reader,
+            redemption_verifier=verifier if paper is not None else None,
+            wallet=wallet,
+        )
+        redeemer = None
+        if paper is not None and paper.auto_redeem_after_s is not None:
+            from tyrex_pm.execution.paper import delayed_paper_redeemer
+
+            redeemer = delayed_paper_redeemer(self.gateway, paper.auto_redeem_after_s)
+        return SettlementWorker(
+            manager=manager,
+            interval_s=settlement.resolution_poll_interval_s,
+            record=self.run_recorder.record,
+            paper_redeemer=redeemer,
+        )
 
     def _build_execution_timeline(
         self, state: ExecutionSessionState | None
@@ -2539,6 +3096,22 @@ class TradingRuntime:
         )
 
 
+def _chain_payout_reader():
+    """Read-only finalized payout reader from TYREX_POLYGON_RPC_URL, or None."""
+    try:
+        from tyrex_pm.adapters.polymarket.polygon_rpc import POLYGON_RPC_ENV
+        from tyrex_pm.execution.settlement.chain import (
+            SettlementChainReader,
+            finalized_payout_reader,
+        )
+    except Exception:  # noqa: BLE001 - optional live dependency
+        return None
+    url = os.environ.get(POLYGON_RPC_ENV, "")
+    if not url:
+        return None
+    return finalized_payout_reader(SettlementChainReader(url))
+
+
 def ready_binding_strategy_id(runtime: ZGapMarketRuntime):
     return runtime.zgap.strategy_id
 
@@ -2557,12 +3130,42 @@ def ready_fallback_correlation():
     return new_correlation_id()
 
 
+def build_paper_venue(config: TradingRunConfig) -> Any:
+    """Paper composition: simulated account/venue in the paper state directory.
+
+    Never constructs the authenticated gateway or reads trading credentials.
+    """
+    from tyrex_pm.execution.paper import PaperAccount, PaperVenue
+    from tyrex_pm.strategies.registry import get_strategy_plugin
+
+    paper = config.paper
+    if paper is None:
+        raise ValueError("venue: paper requires a paper block")
+    account = PaperAccount.open(
+        config.state_directory / "paper_account.json",
+        initial_collateral=paper.initial_collateral,
+    )
+    plugin = get_strategy_plugin(config.strategy_kind)
+    driver = plugin.create_driver(config=config.strategy, clock=SystemClock())
+    curve = getattr(driver, "fee_curve", None)
+    if curve is None:
+        raise ValueError("paper venue needs the strategy's fee curve")
+    return PaperVenue(
+        account=account,
+        fee_curve=lambda _token_id: curve,
+        order_latency_ms=paper.order_latency_ms,
+        participation=paper.participation,
+        wallet=f"paper:{config.run_name}",
+    )
+
+
 async def run_trading_runtime(
     *,
     config: TradingRunConfig,
     output_directory: Path,
     dotenv: Path | None,
     config_path: Path | str | None = None,
+    gateway: Any | None = None,
 ) -> TradingRunResult:
     from tyrex_pm.reporting.reproducibility import capture_reproducibility
 
@@ -2575,12 +3178,19 @@ async def run_trading_runtime(
         run_instance_id=run_instance_id,
     )
     try:
+        paper = getattr(config, "venue", "live") == "paper"
+        if paper and gateway is None:
+            gateway = build_paper_venue(config)
         runtime = await TradingRuntime.create(
             config=config,
             output_directory=output_directory,
-            env=load_dotenv_values(dotenv),
+            # Paper runs never read credentials: the environment is not passed on.
+            env={} if paper else load_dotenv_values(dotenv),
+            gateway=gateway,
             run_instance_id=run_instance_id,
         )
+        if paper:
+            runtime.gateway.book_provider = runtime.final_gate._capture_book
     except Exception as exc:
         path = output_directory / "run_summary.json"
         fatal_error = {

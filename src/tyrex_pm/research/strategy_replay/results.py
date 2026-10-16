@@ -51,31 +51,120 @@ def config_hash(strategy_kind: str, config: Any) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+_EXECUTION_SOURCES = (
+    "src/tyrex_pm/execution/planner.py",
+    "src/tyrex_pm/execution/final_gate.py",
+    "src/tyrex_pm/execution/outcome_reasons.py",
+    "src/tyrex_pm/execution/exit_arbitration.py",
+    "src/tyrex_pm/execution/orders.py",
+    "src/tyrex_pm/research/replay/engine.py",
+    "src/tyrex_pm/research/replay/config.py",
+    "src/tyrex_pm/research/strategy_replay/run.py",
+    "src/tyrex_pm/strategies/outcomes.py",
+    "src/tyrex_pm/protection/triggers.py",
+    "src/tyrex_pm/protection/monitor.py",
+    "src/tyrex_pm/protection/state.py",
+)
+_EXECUTION_IDENTITY: dict | None = None
+
+
+def execution_source_identity() -> dict:
+    """Digest of the result-affecting execution/simulator sources (computed once)."""
+    global _EXECUTION_IDENTITY
+    if _EXECUTION_IDENTITY is None:
+        root = Path(__file__).resolve().parents[4]
+        digest = hashlib.sha256()
+        present = []
+        for rel in _EXECUTION_SOURCES:
+            path = root / rel
+            if path.exists():
+                digest.update(rel.encode())
+                digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+                present.append(rel)
+        _EXECUTION_IDENTITY = {"digest": digest.hexdigest(), "files": present}
+    return _EXECUTION_IDENTITY
+
+
+def _dec(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
 def economics(
-    engine_result: dict, orders: list[dict], label: OutcomeLabel, window: WindowData
+    engine_result: dict, attempts: list[dict], label: OutcomeLabel, window: WindowData
 ) -> dict:
+    """Window economics plus per-episode rows.
+
+    Legacy keys keep their v2 meaning for a single-attempt hold run; ``intended_quantity``
+    is the first attempt's estimated shares (the strategy's gross shares under the v2
+    share contract, the planner's spend / limit under the amount contract).
+    P&L = payout of inventory still held at the end + net sale proceeds - entry debit.
+    """
     fills = [e for e in engine_result["ledger"] if e["event"] == "fill"]
-    debit = sum((Decimal(str(f["quantity"])) * Decimal(str(f["price"])) for f in fills), Decimal(0))
-    gross = sum((Decimal(str(f["quantity"])) for f in fills), Decimal(0))
-    net = sum((Decimal(str(f["net_quantity"])) for f in fills), Decimal(0))
+    buys = [f for f in fills if f.get("side", "BUY") == "BUY"]
+    sells = [f for f in fills if f.get("side") == "SELL"]
+    debit = sum((_dec(f["quantity"]) * _dec(f["price"]) for f in buys), Decimal(0))
+    gross = sum((_dec(f["quantity"]) for f in buys), Decimal(0))
+    net = sum((_dec(f["net_quantity"]) for f in buys), Decimal(0))
+    sold = sum((_dec(f["quantity"]) for f in sells), Decimal(0))
+    proceeds = sum(
+        (_dec(f["quantity"]) * _dec(f["price"]) - _dec(f["fee"]) for f in sells), Decimal(0)
+    )
     fee_shares = gross - net
     side = None
-    if fills:
-        side = "UP" if fills[0]["instrument_id"] == window.up_instrument_id else "DOWN"
-    entered = bool(orders)
+    if buys:
+        side = "UP" if buys[0]["instrument_id"] == window.up_instrument_id else "DOWN"
+    entries = [a for a in attempts if a.get("role") == "ENTRY"]
+    exits = [a for a in attempts if a.get("role") == "EXIT"]
+    held: dict[str, Decimal] = {}
+    for f in fills:
+        delta = (
+            _dec(f["net_quantity"]) if f.get("side", "BUY") == "BUY" else -_dec(f["quantity"])
+        )
+        held[f["instrument_id"]] = held.get(f["instrument_id"], Decimal(0)) + delta
     payout: Decimal | None = None
     pnl: Decimal | None = None
     if fills and label.available:
-        payout = net if side == label.winner else Decimal(0)
-        pnl = payout - debit
-    intended = orders[0] if orders else {}
+        payout = Decimal(0)
+        for iid, shares in held.items():
+            iid_side = "UP" if iid == window.up_instrument_id else "DOWN"
+            if iid_side == label.winner and shares > 0:
+                payout += shares
+        pnl = payout + proceeds - debit
+    intended = entries[0] if entries else {}
+    first_filled = next((a for a in entries if a.get("outcome") in ("FILLED", "PARTIAL")), None)
+    fill_ratio = None
+    if first_filled and first_filled.get("estimated_shares"):
+        fill_ratio = _dec(first_filled.get("filled_gross") or 0) / _dec(
+            first_filled["estimated_shares"]
+        )
+    episodes: dict[int, dict] = {}
+    current = 1
+    for a in attempts:
+        if a.get("episode_seq"):
+            current = int(a["episode_seq"])
+        ep = episodes.setdefault(
+            current,
+            {"episode_seq": current, "side": a.get("side"), "entry_attempts": 0,
+             "entry_not_sent": 0, "entry_zero_fill": 0, "posts": 0, "filled": False,
+             "exits": 0, "exit_reasons": []},
+        )
+        if a.get("role") == "ENTRY":
+            ep["entry_attempts"] += 1
+            ep["entry_not_sent"] += int(a.get("outcome") == "NOT_SENT")
+            ep["entry_zero_fill"] += int(a.get("outcome") == "ZERO_FILL")
+            ep["posts"] += int(a.get("outcome") not in (None, "NOT_SENT"))
+            ep["filled"] = ep["filled"] or a.get("outcome") in ("FILLED", "PARTIAL")
+        else:
+            ep["exits"] += 1
+            ep["exit_reasons"].append(a.get("exit_reason"))
     return {
-        "entered": entered,
-        "filled": bool(fills),
+        "entered": bool(entries),
+        "filled": bool(buys),
         "side": side,
-        "intended_quantity": intended.get("quantity"),
+        "intended_quantity": intended.get("estimated_shares"),
         "intended_debit": intended.get("intended_debit"),
         "limit_price": intended.get("limit_price"),
+        "spend_amount": intended.get("spend_amount"),
         "ev_conservative_at_decision": intended.get("ev_conservative"),
         "ev_point_at_decision": intended.get("ev_point"),
         "p_conservative_at_decision": intended.get("p_conservative"),
@@ -85,13 +174,21 @@ def economics(
         "fee_shares": fee_shares,
         "debit": debit,
         "vwap": None if gross == 0 else debit / gross,
+        "sold_shares": sold,
+        "exit_proceeds_net": proceeds,
+        "final_net_shares": sum((s for s in held.values() if s > 0), Decimal(0)),
         "winner": label.winner,
         "label_type": label.label_type,
         "payout": payout,
         "realized_pnl": pnl,
-        "fill_ratio": None
-        if not intended.get("quantity")
-        else gross / Decimal(str(intended["quantity"])),
+        "fill_ratio": fill_ratio,
+        "entry_attempts": len(entries),
+        "entry_not_sent": sum(1 for a in entries if a.get("outcome") == "NOT_SENT"),
+        "entry_zero_fill": sum(1 for a in entries if a.get("outcome") == "ZERO_FILL"),
+        "entry_posts": sum(1 for a in entries if a.get("outcome") not in (None, "NOT_SENT")),
+        "exit_attempts": len(exits),
+        "episodes": sorted(episodes.values(), key=lambda e: e["episode_seq"]),
+        "filled_episodes": sum(1 for e in episodes.values() if e["filled"]),
     }
 
 

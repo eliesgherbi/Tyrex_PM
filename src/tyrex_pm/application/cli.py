@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Authorize venue order submission for this process",
     )
+    run.add_argument(
+        "--paper",
+        action="store_true",
+        help="Run a venue: paper config (live public data, simulated account; no signing)",
+    )
     run.add_argument("--dotenv", type=Path, default=Path(".env"))
     run.add_argument("--out-dir", type=Path, default=None)
     run.add_argument(
@@ -99,6 +104,12 @@ def _config_payload(config) -> dict:  # noqa: ANN001 - dataclass projection
         },
         "state_directory": str(config.state_directory),
         "report_directory": str(config.report_directory),
+        "lifecycle_mode": config.lifecycle_mode,
+        "venue": config.venue,
+        "run_mode": config.market.run_mode,
+        "run_limits": None
+        if config.settlement is None or config.settlement.run_limits is None
+        else {k: str(v) for k, v in config.settlement.run_limits.__dict__.items()},
     }
 
 
@@ -109,7 +120,11 @@ def _run(args: argparse.Namespace) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     if args.validate_config:
-        print(f"config ok strategy={config.strategy_kind} run_name={config.run_name}")
+        print(
+            f"config ok strategy={config.strategy_kind} run_name={config.run_name} "
+            f"venue={config.venue} run_mode={config.market.run_mode} "
+            f"lifecycle={config.lifecycle_mode}"
+        )
         return 0
     if args.show_config:
         print(json.dumps(_config_payload(config), indent=2, default=str))
@@ -119,7 +134,17 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     if args.check_account:
         return _check_account(args, config)
-    if not args.live:
+    if config.venue == "paper":
+        if args.live:
+            print("refusing --live with a venue: paper config", file=sys.stderr)
+            return 2
+        if not args.paper:
+            print("paper run: re-run with --paper after reviewing the config.", file=sys.stderr)
+            return 2
+    elif args.paper:
+        print("--paper requires a config with venue: paper", file=sys.stderr)
+        return 2
+    elif not args.live:
         print(
             "LIVE submission is disabled. Re-run with --live after reviewing the config.",
             file=sys.stderr,
@@ -165,7 +190,8 @@ def _run(args: argparse.Namespace) -> int:
                 "outcome": result.outcome,
                 "ok": result.ok,
                 "report": str(result.report_path).replace("\\", "/"),
-                "live_requested": True,
+                "live_requested": config.venue == "live",
+                "venue": config.venue,
                 "mutation_attempts": result.mutation_attempts,
                 "runtime": "unified_trading_runtime",
             },

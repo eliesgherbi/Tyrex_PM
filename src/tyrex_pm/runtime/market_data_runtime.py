@@ -203,7 +203,7 @@ async def run_market_data_runtime(
     out_dir: Path,
     run_id: str,
     min_seals: int = 3,
-    max_duration_s: float = 1200.0,
+    max_duration_s: float | None = 1200.0,
     duration_anchor: DurationAnchor = "compose_start",
     preparation_timeout_s: float | None = None,
     prep_lead_s: float = 45.0,
@@ -702,9 +702,10 @@ async def run_market_data_runtime(
         if duration_anchor == "prepared_window_start" and runtime.prepared_next is not None
         else None
     )
+    # max_duration_s None: continuous operation, no trading deadline (stop on request).
     trading_deadline = (
         None
-        if target_window_start is None
+        if target_window_start is None or max_duration_s is None
         else target_window_start + timedelta(seconds=max_duration_s)
     )
     summary.duration = {
@@ -720,6 +721,38 @@ async def run_market_data_runtime(
             None if trading_deadline is None else trading_deadline.isoformat()
         ),
     }
+    prepare_retry_interval_s = 5.0
+    prepare_retry_at = [time.monotonic()]
+
+    async def _prepare_following() -> None:
+        try:
+            nxt = await family.prepare_next(discovery)
+            active_id = None if runtime.active is None else runtime.active.window_id
+            if nxt.window_slug == active_id:
+                return
+            if (
+                runtime.prepared_next is None
+                or runtime.prepared_next.window_id != nxt.window_slug
+            ):
+                next_prepared_session = runtime.open_session(
+                    slot=SessionSlot.PREPARED_NEXT,
+                    market=nxt.market,
+                    window_id=nxt.window_slug,
+                    binding=nxt,
+                    publish_as_active=False,
+                )
+                if on_prepared_session is not None:
+                    on_prepared_session(next_prepared_session)
+                nxt_rec = binding_record_from_discovery(
+                    nxt,
+                    role=BindingLifecycleRole.PREPARED_NEXT,
+                    role_epoch=feed_supervisor.role_epoch_counter,
+                )
+                await feed_supervisor.set_prepared(nxt_rec)
+        except Exception as exc:
+            summary.errors.append(f"prepare_next:{type(exc).__name__}:{exc}")
+            notify_runtime_error("prepare_next", exc)
+
     try:
         while True:
             before_tick = auth.now_corrected_utc()
@@ -774,7 +807,7 @@ async def run_market_data_runtime(
                 break
             # For target-anchored LIVE, stop before promoting into a market that
             # is outside this one-shot trading budget.
-            if elapsed >= max_duration_s:
+            if max_duration_s is not None and elapsed >= max_duration_s:
                 summary.gate_notes.append(f"stop: max_duration_s={max_duration_s} trading_elapsed")
                 break
             # Promote when active window ends and we have sealed prepared-next
@@ -819,33 +852,19 @@ async def run_market_data_runtime(
                                 }
                             )
                         # Open / warm next prepared binding (new feed).
-                        try:
-                            nxt = await family.prepare_next(discovery)
-                            if (
-                                runtime.prepared_next is None
-                                or runtime.prepared_next.window_id != nxt.window_slug
-                            ):
-                                next_prepared_session = runtime.open_session(
-                                    slot=SessionSlot.PREPARED_NEXT,
-                                    market=nxt.market,
-                                    window_id=nxt.window_slug,
-                                    binding=nxt,
-                                    publish_as_active=False,
-                                )
-                                if on_prepared_session is not None:
-                                    on_prepared_session(next_prepared_session)
-                                nxt_rec = binding_record_from_discovery(
-                                    nxt,
-                                    role=BindingLifecycleRole.PREPARED_NEXT,
-                                    role_epoch=feed_supervisor.role_epoch_counter,
-                                )
-                                await feed_supervisor.set_prepared(nxt_rec)
-                        except Exception as exc:
-                            summary.errors.append(f"prepare_next:{type(exc).__name__}:{exc}")
-                            notify_runtime_error("prepare_next", exc)
+                        await _prepare_following()
                 except Exception as exc:
                     summary.errors.append(f"promote:{type(exc).__name__}:{exc}")
                     notify_runtime_error("market_promotion", exc)
+            # Next market unavailable at promotion time: retry preparation (bounded rate)
+            # instead of stalling on an ended window.
+            if (
+                runtime.prepared_next is None
+                and runtime.active is not None
+                and time.monotonic() - prepare_retry_at[0] >= prepare_retry_interval_s
+            ):
+                prepare_retry_at[0] = time.monotonic()
+                await _prepare_following()
 
             # Submission and exit callbacks continue while public feeds remain live.
             if stop_when_seals_met and len(summary.seals) >= min_seals:

@@ -77,6 +77,18 @@ class ExecutionLifecycle:
         self.capabilities = capabilities
         self.policy = policy or LifecyclePolicy()
         self.session_id: str | None = None
+        # The user stream stamps evidence with the stream (binding) session id. With
+        # several attempts per window each attempt has its own execution session; the
+        # stream id is an alias routed to the session that owns the order.
+        self.stream_alias: str | None = None
+        # Earlier sessions of the current window (released attempts, sold episodes),
+        # kept for evidence routing, fill attribution and late-fill detection.
+        self.window_sessions: list[str] = []
+        # Sessions holding a committed settlement position from an earlier window.
+        self.detached_sessions: list[str] = []
+        # Event-loop time each window session was released (late-evidence watch).
+        self.released_at: dict[str, float] = {}
+        self._last_watch: dict[str, float] = {}
         self._changed = asyncio.Event()
         self._gap_lock = asyncio.Lock()
         self.coordinator.listeners.append(self._on_state_changed)
@@ -129,19 +141,100 @@ class ExecutionLifecycle:
             raise RuntimeError("execution session was not restored")
         self.session_id = session_id
 
-    def release_terminal(self) -> None:
-        """Release a completed aggregate before binding the next market window."""
+    def release_terminal(self, *, keep_for_window: bool = False) -> None:
+        """Release a completed aggregate (next attempt, next episode or next window)."""
         state = self.state
         if state is None:
             return
         if not state.safe_to_open_entry:
             raise RuntimeError("cannot release a session that is not safe to open entry")
+        if keep_for_window and self.session_id not in self.window_sessions:
+            self.window_sessions.append(self.session_id)
+            self.released_at[self.session_id] = asyncio.get_running_loop().time()
         self.session_id = None
         self._changed.clear()
 
+    def detach_committed(self, *, reason: str) -> str:
+        """Release a session whose remaining inventory is a committed settlement hold.
+
+        Allowed only without live orders, unresolved mutations or unconfirmed matches:
+        the position is then intentional settlement exposure owned by the ledger, not
+        an open trading lifecycle. Returns the detached session id.
+        """
+        state = self.state
+        if state is None or self.session_id is None:
+            raise RuntimeError("no session to detach")
+        if (
+            state.resting_limit_venue_ids
+            or state.has_unresolved_mutation_attempt
+            or state.entry_match_awaiting_confirmation
+            or state.phase is ExecutionPhase.MANUAL_INTERVENTION
+        ):
+            raise RuntimeError(f"cannot detach a session with pending work ({reason})")
+        detached = self.session_id
+        self.detached_sessions.append(detached)
+        self.session_id = None
+        self._changed.clear()
+        return detached
+
+    def new_window(self) -> None:
+        """Forget the previous window's attempt sessions (they are terminal and safe)."""
+        self.window_sessions = []
+        self.released_at = {}
+        self._last_watch = {}
+
+    def sessions_to_watch(self, *, watch_s: float, interval_s: float) -> list[str]:
+        """Released attempt sessions still inside their late-evidence watch, due a poll."""
+        now = asyncio.get_running_loop().time()
+        due = []
+        for session_id in self.window_sessions:
+            released = self.released_at.get(session_id)
+            if released is None or now - released > watch_s:
+                continue
+            if now - self._last_watch.get(session_id, 0.0) < interval_s:
+                continue
+            self._last_watch[session_id] = now
+            due.append(session_id)
+        return due
+
+    def unresolved_window_sessions(self) -> list[ExecutionSessionState]:
+        """Earlier attempt sessions of this window that late evidence made unsafe."""
+        out = []
+        for session_id in self.window_sessions:
+            state = self.coordinator.states.get(session_id)
+            if state is not None and not state.safe_to_open_entry:
+                out.append(state)
+        return out
+
+    def _route(self, evidence) -> str | None:
+        if self.session_id is not None and evidence.session_id == self.session_id:
+            return self.session_id
+        if self.stream_alias is None or evidence.session_id != self.stream_alias:
+            return None
+        venue_id = getattr(evidence, "venue_order_id", None)
+        order_id = getattr(evidence, "order_id", None)
+        candidates = ([self.session_id] if self.session_id else []) + list(
+            reversed(self.window_sessions)
+        )
+        for session_id in candidates:
+            state = self.coordinator.states.get(session_id)
+            if state is None:
+                continue
+            for order in state.orders.values():
+                if (venue_id and order.venue_order_id == venue_id) or (
+                    order_id and order.spec.order_id == order_id
+                ):
+                    return session_id
+        return self.session_id
+
     async def on_stream_evidence(self, evidence) -> None:
-        if self.session_id is None or evidence.session_id != self.session_id:
+        target = self._route(evidence)
+        if target is None:
             return
+        if target != evidence.session_id:
+            import dataclasses
+
+            evidence = dataclasses.replace(evidence, session_id=target)
         await self.coordinator.apply(evidence)
 
     async def on_stream_ready(self) -> None:
@@ -454,16 +547,23 @@ class ExecutionLifecycle:
         return self.coordinator.state(self.session_id)
 
     def fill_context(self) -> tuple[set[str], str | None, dict[str, str]]:
+        """Owned venue orders of the current session and the window's earlier attempts."""
         state = self.state
-        if state is None:
+        sessions = [state] if state is not None else []
+        sessions += [
+            self.coordinator.states[s] for s in self.window_sessions if s in self.coordinator.states
+        ]
+        if not sessions:
             return set(), None, {}
         owned: set[str] = set()
         sides: dict[str, str] = {}
-        for order in state.orders.values():
-            if order.venue_order_id:
-                owned.add(order.venue_order_id)
-                sides[order.venue_order_id] = order.spec.side.value
-        token_id = None if state.identity is None else state.identity.token_id
+        for session in sessions:
+            for order in session.orders.values():
+                if order.venue_order_id:
+                    owned.add(order.venue_order_id)
+                    sides[order.venue_order_id] = order.spec.side.value
+        reference = state or sessions[0]
+        token_id = None if reference.identity is None else reference.identity.token_id
         return owned, token_id, sides
 
     async def drain_open_session(

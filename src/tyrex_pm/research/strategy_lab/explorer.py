@@ -51,6 +51,14 @@ CLOCK_V1_LIMITATION = (
     "rerun as a new experiment for corrected results."
 )
 
+EXECUTION_V2_LIMITATION = (
+    "Produced with replay v2: orders were sent as the strategy's intended gross shares "
+    "with no pre-send final gate and no execution feedback to the strategy. Replay v3 "
+    "follows the live order contract (planner debit cap, fee reserve, amount-denominated "
+    "FAK BUY, dispatch_check at the gate time) and supports retry, exits and re-entry; "
+    "rerun as a new experiment to compare like with like."
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "validation_seed": DatasetSpec(
         key="validation_seed",
@@ -289,6 +297,12 @@ def load_experiment(path: Path | str) -> Dataset:
                 (CLOCK_V1_LIMITATION,)
                 if (record.get("replay") or {}).get("runner", "strategy_closed_loop_v1")
                 == "strategy_closed_loop_v1"
+                else ()
+            ),
+            *(
+                (EXECUTION_V2_LIMITATION,)
+                if (record.get("replay") or {}).get("runner", "strategy_closed_loop_v1")
+                in ("strategy_closed_loop_v1", "strategy_closed_loop_v2")
                 else ()
             ),
         ),

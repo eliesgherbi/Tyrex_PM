@@ -126,6 +126,101 @@ class SettlementFeeConfig:
 
 
 @dataclass(frozen=True, kw_only=True)
+class SettlementRetryConfig:
+    """Safe entry recovery inside one episode (objective 1). Off by default.
+
+    An *attempt* is one newly authorized entry intent. Attempts are re-armed only after an
+    authoritative not-sent or zero-fill outcome; an uncertain outcome blocks. Every
+    attempt recomputes signal, size and price and passes every gate again.
+    """
+
+    enabled: bool = False
+    # Total attempts per episode INCLUDING the first. Provisional default (user decision
+    # 2026-10-16) pending research; not a tuned value.
+    max_attempts_per_episode: int = 3
+    # Window-wide ceiling across episodes, so re-entry cannot multiply requests.
+    max_attempts_per_window: int = 3
+    # Attempts that failed during local preparation (no POST) [count].
+    max_prepare_failures_per_episode: int = 3
+    # Venue mutation attempts (POSTs) per episode and per window [count].
+    max_posts_per_episode: int = 3
+    max_posts_per_window: int = 3
+    # Hard elapsed budget measured from the episode's first attempt [seconds].
+    max_retry_duration_s: float = 30.0
+    # Minimum delay before a re-attempt [milliseconds]. Provisional.
+    min_retry_interval_ms: int = 500
+    # Extra delay after preparation/service failures, doubled per consecutive failure
+    # and capped [milliseconds]. Provisional.
+    service_backoff_ms: int = 1000
+    service_backoff_max_ms: int = 8000
+
+
+EXIT_POLICIES = frozenset({"hold_to_resolution", "managed_exit"})
+EXIT_VALUE_BASES = frozenset({"upper", "point"})
+RESIDUAL_POLICIES = frozenset({"hold_to_resolution"})
+
+
+@dataclass(frozen=True, kw_only=True)
+class SettlementExitConfig:
+    """Lifecycle policy selected before entry (objective 2).
+
+    ``hold_to_resolution`` (default, a valid final choice): a confirmed position is
+    committed to resolution at once. ``managed_exit``: the position stays open and
+    exitable; strategy exits below and the run's protection block (live) / protection
+    spec (replay) may sell it. At ``exit_cutoff_tau_s`` any remaining inventory follows
+    ``residual_policy``. Numeric defaults are hypotheses to research, not tuned values.
+    """
+
+    policy: str = "hold_to_resolution"
+    # Economic exit: sell when the fee-net executable bid per share exceeds the model's
+    # hold value of the held side by at least this margin [USDC/share].
+    value_exit_enabled: bool = False
+    value_exit_margin_per_share: Decimal = Decimal("0.02")
+    # Hold value used by the economic exit: upper interval bound (conservative for a
+    # sale: only sell when the bid beats even the optimistic value) or the point value.
+    value_exit_basis: str = "upper"
+    # Declared risk rule (not an expected-value claim): exit when the point probability
+    # of the held side falls below this [0, 1].
+    thesis_stop_enabled: bool = False
+    thesis_stop_probability: float = 0.30
+    # No new strategy exit is submitted when tau is below this [seconds].
+    exit_cutoff_tau_s: float = 15.0
+    residual_policy: str = "hold_to_resolution"
+    # Never sell below this price per share [USDC/share].
+    min_exit_price: Decimal = Decimal("0.01")
+    # Strategy exit submissions per episode [count].
+    max_exit_attempts_per_episode: int = 3
+
+
+REARM_MODES = frozenset({"signal_reset", "cooldown"})
+
+
+@dataclass(frozen=True, kw_only=True)
+class SettlementReentryConfig:
+    """New episodes after a confirmed complete exit, same window (objective 3).
+
+    ``max_trades_per_window`` counts episodes that acquired confirmed exposure; zero-fill
+    attempts are governed by the retry budgets. One position at a time; no top-up.
+    """
+
+    max_trades_per_window: int = 1
+    # signal_reset: after a close the traded side must first become ineligible again;
+    # cooldown: only the delay applies. The cooldown applies in both modes [seconds].
+    rearm: str = "signal_reset"
+    cooldown_s: float = 10.0
+    lock_after_protective_stop: bool = True
+    lock_after_thesis_stop: bool = True
+    same_side_allowed: bool = True
+    opposite_side_allowed: bool = False
+    # Additional conservative edge a re-entry must clear [USDC/share].
+    min_extra_edge_per_share: Decimal = Decimal("0")
+    # No re-entry episode starts when tau is below this [seconds].
+    last_entry_tau_s: float = 60.0
+    # Total debit across the window's episodes [USDC].
+    max_window_debit_usdc: Decimal = Decimal("5")
+
+
+@dataclass(frozen=True, kw_only=True)
 class SettlementValueConfig:
     settlement: SettlementSpecConfig = SettlementSpecConfig()
     model: SettlementModelConfig = SettlementModelConfig()
@@ -134,6 +229,9 @@ class SettlementValueConfig:
     sizing: SettlementSizingConfig = SettlementSizingConfig()
     quality: SettlementQualityConfig = SettlementQualityConfig()
     fees: SettlementFeeConfig = SettlementFeeConfig()
+    retry: SettlementRetryConfig = SettlementRetryConfig()
+    exit: SettlementExitConfig = SettlementExitConfig()
+    reentry: SettlementReentryConfig = SettlementReentryConfig()
 
     def __post_init__(self) -> None:
         validate_settlement_value_config(self)
@@ -196,3 +294,49 @@ def validate_settlement_value_config(cfg: SettlementValueConfig) -> None:
     f = cfg.fees
     if f.rate < 0 or f.exponent < 0 or not f.provenance.strip():
         raise ValueError("fees.rate/exponent must be >= 0 and provenance is required")
+    r = cfg.retry
+    if min(
+        r.max_attempts_per_episode,
+        r.max_attempts_per_window,
+        r.max_prepare_failures_per_episode,
+        r.max_posts_per_episode,
+        r.max_posts_per_window,
+    ) < 1:
+        raise ValueError("retry ceilings must be >= 1 (1 means a single attempt)")
+    if r.max_retry_duration_s <= 0 or r.min_retry_interval_ms < 0:
+        raise ValueError("retry.max_retry_duration_s must be > 0 and intervals >= 0")
+    if r.service_backoff_ms < 0 or r.service_backoff_max_ms < r.service_backoff_ms:
+        raise ValueError("retry.service_backoff_max_ms must be >= service_backoff_ms >= 0")
+    x = cfg.exit
+    if x.policy not in EXIT_POLICIES:
+        raise ValueError(f"exit.policy must be one of {sorted(EXIT_POLICIES)}")
+    if x.value_exit_basis not in EXIT_VALUE_BASES:
+        raise ValueError(f"exit.value_exit_basis must be one of {sorted(EXIT_VALUE_BASES)}")
+    if x.residual_policy not in RESIDUAL_POLICIES:
+        raise ValueError(f"exit.residual_policy must be one of {sorted(RESIDUAL_POLICIES)}")
+    if x.value_exit_margin_per_share < 0 or not 0 <= x.thesis_stop_probability <= 1:
+        raise ValueError("exit margin must be >= 0 and thesis_stop_probability in [0, 1]")
+    if x.exit_cutoff_tau_s < 0 or not Decimal(0) < x.min_exit_price < Decimal(1):
+        raise ValueError("exit.exit_cutoff_tau_s must be >= 0 and min_exit_price in (0, 1)")
+    if x.max_exit_attempts_per_episode < 1:
+        raise ValueError("exit.max_exit_attempts_per_episode must be >= 1")
+    if x.policy == "hold_to_resolution" and (x.value_exit_enabled or x.thesis_stop_enabled):
+        raise ValueError(
+            "strategy exits require exit.policy: managed_exit (hold_to_resolution never sells)"
+        )
+    n = cfg.reentry
+    if n.max_trades_per_window < 1 or n.rearm not in REARM_MODES:
+        raise ValueError(
+            f"reentry.max_trades_per_window must be >= 1 and rearm one of {sorted(REARM_MODES)}"
+        )
+    if n.cooldown_s < 0 or n.last_entry_tau_s < 0 or n.min_extra_edge_per_share < 0:
+        raise ValueError("reentry cooldown, last_entry_tau_s and extra edge must be >= 0")
+    if n.max_window_debit_usdc <= 0:
+        raise ValueError("reentry.max_window_debit_usdc must be > 0")
+    if n.max_trades_per_window > 1 and x.policy != "managed_exit":
+        raise ValueError(
+            "reentry.max_trades_per_window > 1 requires exit.policy: managed_exit "
+            "(a held-to-resolution position never closes inside the window)"
+        )
+    if n.max_trades_per_window > 1 and not (n.same_side_allowed or n.opposite_side_allowed):
+        raise ValueError("re-entry needs same_side_allowed or opposite_side_allowed")

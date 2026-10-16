@@ -1,0 +1,148 @@
+# settlement_value MANAGED-EXIT PAPER profile (research/paper only; not qualified).
+#
+# Rolls through consecutive BTC 5-minute windows until stopped (Ctrl-C). Every order goes
+# to the paper venue (tyrex_pm.execution.paper): no signing, no credentials, no venue
+# mutation. The rest of the runner is the production path: lifecycle, final gate,
+# settlement ledger, account-wide limits, automatic resolution tracking.
+#
+# Policy: retry + managed exits (strategy thesis stop / value exit and a protective SL)
+# + serial re-entry after a confirmed complete sale. Every exit/re-entry number below
+# is a hypothesis to research in replay first; this profile only exercises mechanics.
+# Paper fills are an operational test, not evidence of real fill quality or profit.
+#
+# Run:  tyrex-pm run --config config/runs/settlement_value_continuous_paper.yaml --paper
+# Resolution tracking reads Polygon (read-only) when TYREX_POLYGON_RPC_URL is set.
+schema_version: 1
+run_name: settlement_value_managed_paper
+venue: paper
+paper:
+  initial_collateral: "100"
+  order_latency_ms: 300
+  participation: "1"
+  resolution_source: chain_read
+  auto_redeem_after_s: 300       # simulated operator redemption 5 min after proof
+strategy:
+  kind: settlement_value
+  parameters:
+    settlement:
+      functional_id: twap60_at_close_vs_open
+      comparison: AT_OR_ABOVE_K
+      reference_series: polymarket_rtds:crypto_prices_chainlink:btc/usd
+      provenance_status: ASSUMED
+    model:
+      backend: twap_proxy_diffusion
+      sigma_band: 0.25
+      reference_band_bps: 1.0
+    volatility:
+      half_life_s: 30.0
+      min_samples_s: 20.0
+      sample_interval_s: 1.0
+      sigma_floor: 0.00001
+    entry:
+      tau_min_s: 30
+      tau_max_s: 240
+      min_edge_per_share: "0.03"
+      target_mode: cap_only
+      max_entry_price: "0.95"
+      limit_buffer_ticks: 1
+    sizing:
+      max_debit_usdc: "5"
+      max_loss_usdc: "5"
+      depth_participation: "1"
+    quality:
+      accepted_k_qualities: [CONFIRMED_CANONICAL, PROVISIONAL]
+      max_clock_uncertainty_ms: 750
+    fees:
+      rate: "0.07"
+      exponent: "1"
+      provenance: MUST_MATCH_PROVIDER_FEE_SCHEDULE
+    retry:
+      enabled: true
+      max_attempts_per_episode: 3     # provisional (includes the first attempt)
+      max_attempts_per_window: 3
+      max_prepare_failures_per_episode: 3
+      max_posts_per_episode: 3
+      max_posts_per_window: 3
+      max_retry_duration_s: 30
+      min_retry_interval_ms: 500
+    exit:
+      policy: managed_exit
+      value_exit_enabled: true
+      value_exit_margin_per_share: "0.03"
+      value_exit_basis: upper
+      thesis_stop_enabled: true
+      thesis_stop_probability: 0.25
+      exit_cutoff_tau_s: 30          # residual inventory is then held to resolution
+      residual_policy: hold_to_resolution
+      min_exit_price: "0.02"
+      max_exit_attempts_per_episode: 3
+    reentry:
+      max_trades_per_window: 2
+      rearm: signal_reset
+      cooldown_s: 15
+      lock_after_protective_stop: true
+      lock_after_thesis_stop: true
+      same_side_allowed: true
+      opposite_side_allowed: false
+      min_extra_edge_per_share: "0.01"
+      last_entry_tau_s: 90
+      max_window_debit_usdc: "5"
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+  run_mode: continuous
+  preparation_lead_s: 45
+  evaluation_interval_s: 1
+  maximum_book_age_ms: 2000
+  maximum_candidate_age_ms: 5000
+account:
+  refresh_interval_s: 5
+  snapshot_max_age_s: 15
+  read_timeout_s: 4
+  retry_attempts: 3
+  retry_base_delay_s: 0.25
+risk:
+  target_notional: "5"
+  maximum_total_debit: "5"
+  fee_reserve_rate: "0.02"
+protection:
+  mark: bid
+  size_mode: full
+  stop_loss:
+    style: stop_market_fak
+    pct_from_entry: "0.5"
+lifecycle:
+  mode: managed_exit
+  mandatory_exit_before_end_s: 20
+  manual_deadline_before_end_s: 5
+  evidence_timeout_s: 15
+  reconciliation_interval_s: 0.25
+  exit_retry_limit: 3
+  exit_retry_budget_s: 10
+  minimum_exit_price: "0.01"
+  sell_size_increment: "0.01"
+  dust_abs_shares: "0.01"
+  dust_max_notional: "0.05"
+  prepare_budget_ms: 2000
+  refresh_wait_budget_ms: 500
+settlement:
+  ledger_path: var/runtime_state/paper/settlement/settlement_value_managed_paper.jsonl
+  hold_commit_budget_s: 10
+  redemption_mode: operator
+  resolution_poll_interval_s: 30
+  trial:
+    max_debit_per_episode: "5"
+    max_episodes: 1000
+    max_unresolved_count: 6
+    max_unresolved_cost: "30"
+    trial_loss_budget: "60"
+  run_limits:                      # paper values; live values must be chosen explicitly
+    daily_loss_limit: "40"
+    max_open_worst_case_loss: "30"
+    max_reserved_debit: "10"
+    max_unredeemed_count: 6
+    max_unredeemed_cost: "60"
+    max_consecutive_losses: 0
+state_directory: var/runtime_state/paper/managed_execution
+report_directory: var/runs/paper/settlement_value_managed

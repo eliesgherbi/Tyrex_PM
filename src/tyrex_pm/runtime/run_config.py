@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
-from tyrex_pm.execution.settlement.governor import TrialLimits
+from tyrex_pm.execution.settlement.governor import RunLimits, TrialLimits
 from tyrex_pm.protection.spec import (
     ProtectionSpec,
     ProtectionSpecError,
@@ -50,6 +50,11 @@ def _boolean(value: Any, field: str) -> bool:
     return value
 
 
+RUN_SINGLE_WINDOW = "single_window"
+RUN_CONTINUOUS = "continuous"
+RUN_MODES = frozenset({RUN_SINGLE_WINDOW, RUN_CONTINUOUS})
+
+
 @dataclass(frozen=True)
 class MarketRuntimeConfig:
     family: str
@@ -61,6 +66,11 @@ class MarketRuntimeConfig:
     maximum_book_age_ms: int
     maximum_candidate_age_ms: int
     entry_dispatch_margin_s: float
+    # single_window: one trading window per process (the S6 trial shape).
+    # continuous: roll through consecutive windows until stopped; maximum_duration_s,
+    # when given explicitly, bounds a soak; it is never an implied "forever".
+    run_mode: str = "single_window"
+    maximum_duration_explicit: bool = True
 
 
 @dataclass(frozen=True)
@@ -105,7 +115,26 @@ class StartupRuntimeConfig:
 
 LIFECYCLE_FLATTEN = "flatten_before_close"
 LIFECYCLE_HOLD = "hold_to_resolution"
-LIFECYCLE_MODES = frozenset({LIFECYCLE_FLATTEN, LIFECYCLE_HOLD})
+LIFECYCLE_MANAGED = "managed_exit"
+LIFECYCLE_MODES = frozenset({LIFECYCLE_FLATTEN, LIFECYCLE_HOLD, LIFECYCLE_MANAGED})
+SETTLEMENT_MODES = frozenset({LIFECYCLE_HOLD, LIFECYCLE_MANAGED})
+VENUES = frozenset({"live", "paper"})
+
+
+@dataclass(frozen=True)
+class PaperRuntimeConfig:
+    """Paper venue: live public data, simulated account/venue, no signing or credentials."""
+
+    initial_collateral: Decimal
+    # Venue latency applied before a simulated order meets the live book [ms].
+    order_latency_ms: int = 300
+    # Fraction of displayed depth a simulated taker order may consume (0, 1].
+    participation: Decimal = Decimal("1")
+    # Resolution of paper holdings: public read-only chain payout of the real market.
+    resolution_source: str = "chain_read"
+    # Simulated operator redemption: credit a proven payout after this delay; None keeps
+    # redemption a manual step as in live.
+    auto_redeem_after_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +146,9 @@ class SettlementRuntimeConfig:
     hold_commit_budget_s: float
     redemption_wallet: str | None
     redemption_mode: str = "operator"
+    run_limits: RunLimits | None = None
+    # Automatic resolution/payout reconciliation cadence of the runner [s].
+    resolution_poll_interval_s: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -135,18 +167,67 @@ class TradingRunConfig:
     startup: StartupRuntimeConfig = StartupRuntimeConfig()
     lifecycle_mode: str = LIFECYCLE_FLATTEN
     settlement: SettlementRuntimeConfig | None = None
+    venue: str = "live"
+    paper: PaperRuntimeConfig | None = None
+
+
+RUN_LIMIT_FIELDS = (
+    "daily_loss_limit",
+    "max_open_worst_case_loss",
+    "max_reserved_debit",
+    "max_unredeemed_count",
+    "max_unredeemed_cost",
+    "max_consecutive_losses",
+)
+
+
+def _run_limits(raw: Any) -> RunLimits | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise RunConfigError("settlement.run_limits must be a mapping")
+    _reject_unknown(raw, set(RUN_LIMIT_FIELDS) | {"accounting_timezone"}, "settlement.run_limits")
+    for key in RUN_LIMIT_FIELDS:
+        if key not in raw:
+            raise RunConfigError(
+                f"settlement.run_limits.{key} is required (monetary limits have no defaults)"
+            )
+    try:
+        return RunLimits(
+            daily_loss_limit=_decimal(raw["daily_loss_limit"], "daily_loss_limit"),
+            max_open_worst_case_loss=_decimal(
+                raw["max_open_worst_case_loss"], "max_open_worst_case_loss"
+            ),
+            max_reserved_debit=_decimal(raw["max_reserved_debit"], "max_reserved_debit"),
+            max_unredeemed_count=int(raw["max_unredeemed_count"]),
+            max_unredeemed_cost=_decimal(raw["max_unredeemed_cost"], "max_unredeemed_cost"),
+            max_consecutive_losses=int(raw["max_consecutive_losses"]),
+            accounting_timezone=str(raw.get("accounting_timezone", "UTC")),
+        )
+    except ValueError as exc:
+        raise RunConfigError(f"settlement.run_limits: {exc}") from exc
 
 
 def _settlement_config(raw: Any, mode: str) -> SettlementRuntimeConfig | None:
-    if mode != LIFECYCLE_HOLD:
+    if mode not in SETTLEMENT_MODES:
         if raw is not None:
-            raise RunConfigError("settlement block requires lifecycle.mode: hold_to_resolution")
+            raise RunConfigError(
+                "settlement block requires lifecycle.mode: hold_to_resolution or managed_exit"
+            )
         return None
     if not isinstance(raw, dict):
-        raise RunConfigError("lifecycle.mode hold_to_resolution requires a settlement block")
+        raise RunConfigError(f"lifecycle.mode {mode} requires a settlement block")
     _reject_unknown(
         raw,
-        {"ledger_path", "trial", "hold_commit_budget_s", "redemption_wallet", "redemption_mode"},
+        {
+            "ledger_path",
+            "trial",
+            "hold_commit_budget_s",
+            "redemption_wallet",
+            "redemption_mode",
+            "run_limits",
+            "resolution_poll_interval_s",
+        },
         "settlement",
     )
     trial_raw = dict(raw.get("trial") or {})
@@ -193,13 +274,59 @@ def _settlement_config(raw: Any, mode: str) -> SettlementRuntimeConfig | None:
         isinstance(wallet, str) and wallet.startswith("0x") and len(wallet) == 42
     ):
         raise RunConfigError("settlement.redemption_wallet must be a 0x-prefixed address")
+    poll = float(raw.get("resolution_poll_interval_s", 30.0))
+    if poll <= 0:
+        raise RunConfigError("settlement.resolution_poll_interval_s must be positive")
     return SettlementRuntimeConfig(
         ledger_path=Path(str(raw.get("ledger_path", "var/runtime_state/settlement/ledger.jsonl"))),
         trial=trial,
         hold_commit_budget_s=budget,
         redemption_wallet=wallet,
         redemption_mode=mode_raw,
+        run_limits=_run_limits(raw.get("run_limits")),
+        resolution_poll_interval_s=poll,
     )
+
+
+def _paper_config(raw: Any) -> PaperRuntimeConfig:
+    if not isinstance(raw, dict):
+        raise RunConfigError("venue: paper requires a paper block")
+    _reject_unknown(
+        raw,
+        {
+            "initial_collateral",
+            "order_latency_ms",
+            "participation",
+            "resolution_source",
+            "auto_redeem_after_s",
+        },
+        "paper",
+    )
+    if "initial_collateral" not in raw:
+        raise RunConfigError("paper.initial_collateral is required")
+    try:
+        paper = PaperRuntimeConfig(
+            initial_collateral=_decimal(raw["initial_collateral"], "paper.initial_collateral"),
+            order_latency_ms=int(raw.get("order_latency_ms", 300)),
+            participation=_decimal(raw.get("participation", "1"), "paper.participation"),
+            resolution_source=str(raw.get("resolution_source", "chain_read")),
+            auto_redeem_after_s=(
+                None
+                if raw.get("auto_redeem_after_s") is None
+                else float(raw["auto_redeem_after_s"])
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunConfigError(f"paper: {exc}") from exc
+    if paper.initial_collateral <= 0 or paper.order_latency_ms < 0:
+        raise RunConfigError("paper.initial_collateral must be > 0 and order_latency_ms >= 0")
+    if not Decimal(0) < paper.participation <= Decimal(1):
+        raise RunConfigError("paper.participation must be in (0, 1]")
+    if paper.resolution_source not in ("chain_read",):
+        raise RunConfigError("paper.resolution_source supports only chain_read")
+    if paper.auto_redeem_after_s is not None and paper.auto_redeem_after_s < 0:
+        raise RunConfigError("paper.auto_redeem_after_s must be >= 0")
+    return paper
 
 
 def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
@@ -209,7 +336,7 @@ def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
 
 def host_safety_floor_s(config: TradingRunConfig) -> float:
     settlement = getattr(config, "settlement", None)
-    if getattr(config, "lifecycle_mode", LIFECYCLE_FLATTEN) == LIFECYCLE_HOLD and settlement:
+    if getattr(config, "lifecycle_mode", LIFECYCLE_FLATTEN) in SETTLEMENT_MODES and settlement:
         # A filled position is committed to resolution instead of sold before close;
         # entry needs time for fill evidence plus the hold commitment.
         return config.lifecycle.evidence_timeout_s + settlement.hold_commit_budget_s
@@ -265,6 +392,8 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "protection",
             "startup",
             "settlement",
+            "venue",
+            "paper",
         },
         "top-level",
     )
@@ -313,6 +442,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "maximum_book_age_ms",
             "maximum_candidate_age_ms",
             "entry_dispatch_margin_s",
+            "run_mode",
         },
         "market",
     )
@@ -334,6 +464,8 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         ),
         preparation_lead_s=float(market_raw.get("preparation_lead_s", 45.0)),
         maximum_duration_s=float(market_raw.get("maximum_duration_s", 300.0)),
+        run_mode=str(market_raw.get("run_mode", RUN_SINGLE_WINDOW)),
+        maximum_duration_explicit="maximum_duration_s" in market_raw,
         evaluation_interval_s=evaluation_interval_s,
         maximum_book_age_ms=int(market_raw.get("maximum_book_age_ms", 2_000)),
         maximum_candidate_age_ms=int(market_raw.get("maximum_candidate_age_ms", 5_000)),
@@ -343,6 +475,8 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         get_market_family(market.family)
     except Exception as exc:  # noqa: BLE001
         raise RunConfigError(str(exc)) from exc
+    if market.run_mode not in RUN_MODES:
+        raise RunConfigError(f"market.run_mode must be one of {sorted(RUN_MODES)}")
     if (
         min(
             market.preparation_lead_s,
@@ -443,6 +577,27 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             f"not {lifecycle_mode!r}"
         )
     settlement = _settlement_config(raw.get("settlement"), lifecycle_mode)
+    if protection is not None and lifecycle_mode == LIFECYCLE_HOLD:
+        raise RunConfigError(
+            "protection cannot be combined with lifecycle.mode: hold_to_resolution: a "
+            "committed hold is never sold; use lifecycle.mode: managed_exit for SL/TP"
+        )
+    venue = str(raw.get("venue", "live"))
+    if venue not in VENUES:
+        raise RunConfigError(f"venue must be one of {sorted(VENUES)}")
+    if venue != "paper" and raw.get("paper") is not None:
+        raise RunConfigError("a paper block requires venue: paper")
+    paper = _paper_config(raw.get("paper")) if venue == "paper" else None
+    if market.run_mode == RUN_CONTINUOUS:
+        if lifecycle_mode not in SETTLEMENT_MODES or settlement is None:
+            raise RunConfigError(
+                "market.run_mode: continuous requires lifecycle.mode hold_to_resolution or "
+                "managed_exit with a settlement block"
+            )
+        if settlement.run_limits is None:
+            raise RunConfigError(
+                "market.run_mode: continuous requires explicit settlement.run_limits"
+            )
     for required in (
         "sell_size_increment",
         "dust_abs_shares",
@@ -519,7 +674,28 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         startup=startup,
         lifecycle_mode=lifecycle_mode,
         settlement=settlement,
+        venue=venue,
+        paper=paper,
     )
+    if venue == "paper":
+        for label, path in (
+            ("state_directory", config.state_directory),
+            ("settlement.ledger_path", None if settlement is None else settlement.ledger_path),
+            ("report_directory", config.report_directory),
+        ):
+            if path is not None and "paper" not in path.as_posix().lower():
+                raise RunConfigError(
+                    f"venue: paper requires a separate {label} whose path contains 'paper'"
+                )
+    if lifecycle_mode == LIFECYCLE_MANAGED:
+        exit_cfg = getattr(strategy, "exit", None)
+        cutoff = getattr(exit_cfg, "exit_cutoff_tau_s", None)
+        if cutoff is not None and cutoff <= lifecycle.mandatory_exit_before_end_s:
+            raise RunConfigError(
+                "managed_exit: strategy exit.exit_cutoff_tau_s must exceed "
+                "lifecycle.mandatory_exit_before_end_s so the declared residual policy "
+                "applies before the host's pre-commit flatten"
+            )
     if (
         settlement is not None
         and settlement.trial.max_debit_per_episode > risk.maximum_total_debit

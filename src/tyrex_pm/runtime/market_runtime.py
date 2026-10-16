@@ -403,6 +403,26 @@ class MarketSessionRuntime:
                 configure(state.ptb_snapshot)
         return sealed
 
+    def window_driver(self, window_id: str | None = None) -> Any:
+        """The strategy driver bound to ``window_id`` (default: the active window)."""
+        if window_id is None:
+            window_id = None if self.active is None else self.active.window_id
+        if window_id is None:
+            return self.driver
+        return self._strategy_by_window.get(window_id) or self.driver
+
+    def capture_active_view(self) -> BookView | None:
+        """The current two-leg BookView of the active session (no evaluation)."""
+        sess = self.active
+        if sess is None or self.book_store is None:
+            return None
+        binding_rec = self.active_binding_record
+        if binding_rec is None and sess.binding is not None:
+            binding_rec = binding_record_from_discovery(sess.binding)
+        if binding_rec is None:
+            return None
+        return self.book_store.capture_pair(binding_rec)
+
     def promote_prepared_next(self, *, at: datetime | None = None) -> MarketSession:
         if self.prepared_next is None:
             raise ValueError("no prepared_next session")

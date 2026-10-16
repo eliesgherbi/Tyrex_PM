@@ -41,15 +41,20 @@ def decision_context(
     position_cost_total: Decimal = Decimal("0"),
     position_instrument: InstrumentId | None = None,
     pending: bool = False,
+    exit_pending: bool = False,
+    last_exit_reason: str | None = None,
 ) -> DecisionContext:
     """Context from the host's aligned evaluation and an execution-derived position view."""
     held = position_quantity > 0
-    if pending:
+    if exit_pending:
+        phase = StrategyPositionPhase.EXIT_PENDING
+    elif pending:
         phase = StrategyPositionPhase.ENTRY_PENDING
     elif held:
         phase = StrategyPositionPhase.ACTIVE
     else:
         phase = StrategyPositionPhase.FLAT
+    busy = pending or exit_pending
     return DecisionContext(
         run_id=RunId(run_id),
         snapshot=ready.snapshot,
@@ -58,9 +63,10 @@ def decision_context(
         position_quantity=position_quantity,
         position_cost_total=position_cost_total,
         now=ready.snapshot.observed_at,
-        entry_allowed=not pending and not held,
-        entry_block_reason="pending_order" if pending else None,
+        entry_allowed=not busy and not held,
+        entry_block_reason="pending_order" if busy else None,
         references=reference_facts(ready),
+        last_exit_reason=last_exit_reason,
     )
 
 

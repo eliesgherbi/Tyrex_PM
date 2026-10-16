@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import asdict, dataclass
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
 from typing import Any
 
 from tyrex_pm.data_warehouse.contracts import exact
@@ -98,7 +98,10 @@ class Engine:
             self.invalid_reasons.add("invalid_book_at_action")
             self.reject(intent, "invalid_book")
             return
-        limit, quantity = exact(intent.limit_price), exact(intent.quantity)
+        limit = exact(intent.limit_price)
+        spend = exact(intent.spend_amount) if intent.spend_amount else None
+        # Amount BUYs are checked against the shares the spend buys at the limit.
+        quantity = spend / limit if spend is not None else exact(intent.quantity)
         if self.scenario.fee_policy.mode == "recorded" and intent.instrument_id not in self.curves:
             self.invalid_reasons.add("recorded_fee_curve_unavailable")
             self.reject(intent, "recorded_fee_curve_unavailable")
@@ -121,6 +124,9 @@ class Engine:
         )
         if intent.action == "BUY" and quantity * reserve_unit > self.cash - reserved:
             self.reject(intent, "insufficient_available_cash")
+            return
+        if spend is not None:
+            self._submit_spend_buy(intent, book, spend, limit, tick)
             return
         if intent.action == "SELL" and quantity > self.inventory.get(
             intent.instrument_id, Decimal(0)
@@ -176,6 +182,56 @@ class Engine:
                     "unfilled_cancelled", order_id=intent.order_id, quantity=order.remaining
                 )
 
+    def _submit_spend_buy(
+        self, intent: Intent, book: Any, spend: Decimal, limit: Decimal, tick: Decimal | None
+    ) -> None:
+        """Venue market BUY: walk asks spending ``spend`` collateral, never above limit.
+
+        Each level fills at most its participating depth; the share quantity per level is
+        rounded down to ``amount_buy_share_quantum``. Unspent collateral is cancelled
+        (FAK). Taker fees follow the scenario fee policy exactly as share orders do.
+        """
+        adverse = Decimal(0)
+        if self.scenario.adverse_price_ticks:
+            if tick is None:
+                self.reject(intent, "adverse_ticks_without_tick")
+                return
+            adverse = tick * self.scenario.adverse_price_ticks
+        quantum = exact(self.scenario.amount_buy_share_quantum)
+        prices = sorted(book.asks)
+        eligible = [p for p in prices if p + adverse <= limit]
+        order = Order(intent, spend / limit, self.now)
+        self.orders[intent.order_id] = order
+        self.record("arrived", order_id=intent.order_id, intent=asdict(intent))
+        remaining = spend
+        for price in eligible:
+            key = (book.epoch_id, "BUY", price)
+            capacity = max(
+                Decimal(0),
+                book.asks[price] * self.participation - self.consumed.get(key, Decimal(0)),
+            )
+            paid = price + adverse
+            take = min(capacity, remaining / paid)
+            take = (take / quantum).to_integral_value(rounding=ROUND_DOWN) * quantum
+            if take <= 0:
+                continue
+            self.fill(order, take, paid, maker=False)
+            remaining -= take * paid
+            self.consumed[key] = self.consumed.get(key, Decimal(0)) + take
+            if remaining < quantum * paid:
+                break
+        order.active = False
+        order.remaining = Decimal(0)
+        # A remainder that cannot buy one share quantum at the limit is rounding, not an
+        # unfilled part of the order.
+        if remaining >= quantum * limit:
+            self.record(
+                "unfilled_cancelled",
+                order_id=intent.order_id,
+                quantity=remaining / limit,
+                unspent_amount=remaining,
+            )
+
     def fill(self, order: Order, quantity: Decimal, price: Decimal, *, maker: bool) -> None:
         curve = self.curves.get(order.intent.instrument_id, self.curve)
         fee = Decimal(0) if maker else (quantity * phi_taker_fee_per_share(price, curve))
@@ -204,9 +260,10 @@ class Engine:
             self.inventory[iid] = held - quantity
             self.cost_basis[iid] = basis - released_basis
             self.realized += cost - fee - released_basis
-        order.remaining -= quantity
-        if order.remaining == 0:
-            order.active = False
+        if not order.intent.spend_amount:
+            order.remaining -= quantity
+            if order.remaining == 0:
+                order.active = False
         self.fees_paid += fee
         self.record(
             "fill",

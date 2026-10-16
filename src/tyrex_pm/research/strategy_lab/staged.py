@@ -57,6 +57,10 @@ CODE_TREES = (
     "src/tyrex_pm/runtime",
     "src/tyrex_pm/indicators",
     "src/tyrex_pm/core",
+    # v3: the replay uses the live planner, dispatch gate, outcome table, exit
+    # arbitration and protection triggers; they are result-affecting sources.
+    "src/tyrex_pm/execution",
+    "src/tyrex_pm/protection",
     "config/research/scenarios",
 )
 # Evidence-labelled settings: shown with their provenance, never search knobs.
@@ -452,10 +456,16 @@ class Experiment:
 
 
 def replay_identity() -> dict:
-    """Replay semantics an experiment is frozen under (runner and clock policy)."""
+    """Replay semantics an experiment is frozen under (runner, clock policy and, from v3,
+    the execution contract). Older records carry only the first two fields."""
     from tyrex_pm.research.strategy_replay.clock_sync import CLOCK_POLICY
+    from tyrex_pm.research.strategy_replay.run import EXECUTION_CONTRACT_VERSION
 
-    return {"runner": RUNNER_VERSION, "clock_policy": CLOCK_POLICY}
+    return {
+        "runner": RUNNER_VERSION,
+        "clock_policy": CLOCK_POLICY,
+        "execution_contract": EXECUTION_CONTRACT_VERSION,
+    }
 
 
 def experiment_replay(exp: "Experiment") -> dict:

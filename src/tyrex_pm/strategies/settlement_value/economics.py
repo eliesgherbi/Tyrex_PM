@@ -283,6 +283,86 @@ def buffered_limit(
     return limit, bound
 
 
+@dataclass(frozen=True, kw_only=True)
+class ExitCandidate:
+    """Economic sale of held inventory, walked over bids (managed exits only)."""
+
+    feasible: bool
+    reason: str
+    hold_value_per_share: Decimal | None
+    best_bid: Decimal | None
+    sell_shares: Decimal = _ZERO
+    proceeds_net: Decimal = _ZERO
+    worst_price: Decimal | None = None
+    first_level_gain: Decimal | None = None
+    levels_used: int = 0
+
+
+def exit_walk(
+    bids: Iterable[BookLevel],
+    *,
+    held_shares: Decimal,
+    hold_value: float | None,
+    margin: Decimal,
+    fee_curve: FeeCurveParams,
+    min_order_shares: Decimal,
+    min_price: Decimal,
+    share_increment: Decimal,
+    max_levels: int,
+) -> ExitCandidate:
+    """Walk bids while the fee-net sale value of one share beats holding it by ``margin``.
+
+    A sold share at price p yields ``p - phi(p)`` (sell fees in collateral). Holding it
+    is worth ``hold_value`` (the model probability of the held side). Entry cost is sunk
+    and plays no part in this choice. Never sells below ``min_price``.
+    """
+    levels = sorted(bids, key=lambda lv: lv.price, reverse=True)[:max_levels]
+    best = levels[0].price if levels else None
+    if hold_value is None:
+        return ExitCandidate(
+            feasible=False, reason="MODEL_NOT_READY", hold_value_per_share=None, best_bid=best
+        )
+    value = _prob(hold_value)
+    remaining = _floor(held_shares, share_increment)
+    sold = proceeds = _ZERO
+    worst: Decimal | None = None
+    first_gain: Decimal | None = None
+    used = 0
+    for level in levels:
+        price = level.price
+        if remaining <= 0 or price < min_price or price <= 0 or price >= 1:
+            break
+        gain = price - phi_taker_fee_per_share(price, fee_curve) - value
+        if first_gain is None:
+            first_gain = gain
+        if gain < margin:
+            break
+        take = _floor(min(level.quantity, remaining), share_increment)
+        if take <= 0:
+            break
+        sold += take
+        proceeds += take * (price - phi_taker_fee_per_share(price, fee_curve))
+        remaining -= take
+        worst = price
+        used += 1
+    common = dict(
+        hold_value_per_share=value,
+        best_bid=best,
+        sell_shares=sold,
+        proceeds_net=proceeds,
+        worst_price=worst,
+        first_level_gain=first_gain,
+        levels_used=used,
+    )
+    if not levels:
+        return ExitCandidate(feasible=False, reason="NO_EXIT_BID", **common)
+    if sold <= 0:
+        return ExitCandidate(feasible=False, reason="HOLD_VALUE_ABOVE_BID", **common)
+    if sold < min_order_shares:
+        return ExitCandidate(feasible=False, reason="EXIT_BELOW_MINIMUM_SIZE", **common)
+    return ExitCandidate(feasible=True, reason="BID_ABOVE_HOLD_VALUE", **common)
+
+
 def choose_side(up: SideCandidate, down: SideCandidate) -> SideCandidate | None:
     """Deterministic best feasible side: higher conservative EV, then lower debit, then Up."""
     feasible = [c for c in (up, down) if c.feasible]

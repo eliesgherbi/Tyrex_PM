@@ -9,9 +9,12 @@ from typing import Any, Mapping
 from tyrex_pm.runtime.config_error import ConfigError
 from tyrex_pm.strategies.settlement_value.config import (
     SettlementEntryConfig,
+    SettlementExitConfig,
     SettlementFeeConfig,
     SettlementModelConfig,
     SettlementQualityConfig,
+    SettlementReentryConfig,
+    SettlementRetryConfig,
     SettlementSizingConfig,
     SettlementSpecConfig,
     SettlementValueConfig,
@@ -26,7 +29,13 @@ _SECTIONS: dict[str, type] = {
     "sizing": SettlementSizingConfig,
     "quality": SettlementQualityConfig,
     "fees": SettlementFeeConfig,
+    "retry": SettlementRetryConfig,
+    "exit": SettlementExitConfig,
+    "reentry": SettlementReentryConfig,
 }
+# Lifecycle sections added with strategy_closed_loop_v3. A configuration that leaves them
+# at their defaults serializes exactly as before, so a v2 parameter set keeps its hash.
+_LIFECYCLE_SECTIONS = ("retry", "exit", "reentry")
 
 
 def _coerce(sample: Any, value: Any, *, path: str, file: str | None) -> Any:
@@ -104,6 +113,8 @@ def settlement_value_config_as_parameters(cfg: SettlementValueConfig) -> dict[st
     out: dict[str, Any] = {}
     for name in _SECTIONS:
         section = getattr(cfg, name)
+        if name in _LIFECYCLE_SECTIONS and section == type(section)():
+            continue
         values: dict[str, Any] = {}
         for f in dataclasses.fields(section):
             value = getattr(section, f.name)

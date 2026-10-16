@@ -1,8 +1,133 @@
 # settlement_value: implementation plan for retry, continuous operation, exits and re-entry
 
-Date: 16 October 2026. Revision 2: simplified reader's map and review corrections incorporated. Status: **plan only; implementation progress is not assessed by this document.** This revision edits the plan only; it does not change code, config, notebooks or experiments, start/restart collection, or launch trading.
+Date: 16 October 2026. Revision 3: implementation status added (see [Implementation status](#implementation-status-16-october-2026)). The code lives in the isolated worktree `E:\polymarket\Tyrex_PM-live`, branch `feature/settlement-live-readiness` (not merged, not committed). **Nothing is enabled for real money.**
 
 Source: [next-steps proposal](settlement_value_next_steps_2026-10-15.md). This is the implementation checklist for that proposal; use the reader's map below for scope and the P0–P8 sections for detailed tasks. Companions: [research-to-live plan](research_to_live_plan.md), [operator runbook](settlement_value_operator_runbook.md).
+
+## Implementation status (16 October 2026)
+
+Status words: **implemented** = code and automated tests exist; **researched** = evaluated on development data with a written conclusion; **qualified** = frozen and checked on reserved data, providers, observation and paper; **enabled** = switched on in a profile used for real money. A passing test is never "qualified" and an existing switch is never "enabled".
+
+| Phase / objective | Implemented | Researched | Qualified | Enabled |
+|---|---|---|---|---|
+| P0 isolation, baseline identity, reference set, reserved evaluation sets | yes | n/a | n/a | n/a |
+| P1 v2 baseline review | no (user's research track; stage A/B/C still running) | no | no | n/a |
+| P2 replay/live order contract, shared `dispatch_check`, attempt trace, protection+hold rejection | yes | mechanics only (reference set) | no | v3 is the replay default for new experiments |
+| P3 episode/attempt model, outcome contract, reason table, ledger schema 2, governor, restart seeding | yes | regression anchor passed | no | feature-off by default |
+| P4 safe entry retry (objective 1) | yes | mechanics only; numbers provisional | no | no (`retry.enabled: false` in the trial profile; on in the paper profile) |
+| P5 continuous runner, run limits, resolution worker, paper venue, ordered-window capital simulation (objective 4) | yes | capital simulation implemented, not yet run on a grid | no (paper soak not run) | no (live template refuses to validate) |
+| P6 managed exits: strategy thesis/value exits, protection in replay and live, early-sale accounting, exit arbitration (objective 2) | yes | mechanics only | no | no |
+| P7 serial re-entry after confirmed sale (objective 3) | yes | mechanics only | no | no |
+| P8 freeze, fresh-data evaluation, provider checks, observation, paper soak, supervised live | no | no | no | no |
+
+### What was built, by objective
+
+**Objective 1 — do not lose a window to a recoverable entry problem (P2–P4).**
+- Strategy episode state machine (`strategies/settlement_value/state.py`, `driver.py`): `IDLE → PENDING → {REARMABLE | UNCERTAIN | POSITION | CLOSED}`. Pending starts when the intent is created. The legacy single-attempt behaviour is reproduced exactly when retry is off.
+- Outcome contract `strategies/outcomes.py` (`NOT_SENT`, `ZERO_FILL`, `PARTIAL`, `FILLED`, `UNCERTAIN`) and one reason → retry-class table `execution/outcome_reasons.py` (unknown reasons pause entries; they are never fast-retried).
+- `retry` config section. User default: 3 attempts per episode including the first, provisional. It also has ceilings for preparation failures, POSTs per episode and per window, window-wide attempts and elapsed time, a minimum interval and exponential service backoff. Every attempt re-runs the full evaluation (signal, size, price, all gates). The side stays fixed within an episode. A partial fill becomes a position, with no top-up.
+- Live host (`runtime/trading_runtime.py`):
+  - one execution session per attempt (`stream:e<ep>a<att>`); user-stream evidence is routed to the session that owns the order (`execution/lifecycle.py`);
+  - the outcome is delivered to the driver;
+  - a terminal safe attempt is released, while uncertain or manual outcomes stop the runner with `MANUAL_INTERVENTION_REQUIRED`;
+  - released attempts are watched for late REST evidence; a late fill blocks entries, and a ledger no-fill becomes `MANUAL_INTERVENTION`.
+- Durable budgets: ledger schema 2 (`ATTEMPT_REARMED`, attempt-scoped dedupe keys, per-episode POST and preparation counters) and `WindowBudget` in the governor, so a restart cannot reset counts. The driver is re-seeded from the ledger when a window is re-bound after a restart.
+
+**Objective 2 — sell before resolution (P6).**
+- `exit.policy` is selected before entry:
+  - `hold_to_resolution` is the default and a valid final choice;
+  - `managed_exit` is matched by `lifecycle.mode: managed_exit`.
+- Strategy exits (`economics.exit_walk`):
+  - an economic value exit, taken when the fee-net bid exceeds the model hold value plus a margin;
+  - a declared thesis stop;
+  - an exit cutoff with a residual hold-to-resolution policy.
+- Protection (SL/TP/trailing) runs in replay through the same pure trigger functions as live.
+- One exit owner (`execution/exit_arbitration.py`), with precedence mandatory > SL/trail > thesis > TP/value. A committed hold is never sold by anything.
+- `protection:` combined with `hold_to_resolution` is rejected.
+- At stop, a managed position follows its residual policy (commit to hold) before any drain.
+- The ledger handles early sales:
+  - `EXIT_FILL_CONFIRMED` reduces cost basis proportionally;
+  - `EPISODE_SOLD` records realized P&L = proceeds − total cost;
+  - loss already locked in by a partial sale stays in open risk.
+
+**Objective 3 — another trade after a complete exit (P7).**
+- The `reentry` section:
+  - `max_trades_per_window` counts episodes with confirmed exposure;
+  - re-arming requires `signal_reset` or a `cooldown`;
+  - SL/thesis lockouts;
+  - same/opposite-side rules (opposite side is research-only);
+  - an extra-edge requirement;
+  - a last re-entry tau;
+  - a window debit cap.
+- A new episode requires a confirmed sale (`SOLD`), and in live a fresh account snapshot taken after release.
+- The ledger allows a second episode only when no episode of the window is open, within the window cap.
+
+**Objective 4 — run continuously across BTC 5-minute windows (P5).**
+- `market.run_mode: continuous`: no deadline unless `maximum_duration_s` is set explicitly (a bounded soak).
+- No stop after a hold or a no-fill.
+- Committed holds are detached into the ledger, so the next window binds. Startup and rollover treat ledger-committed holds as tracked, not blocking (continuous only).
+- Next-market preparation is retried when unavailable.
+- `settlement.run_limits` are required, with no defaults:
+  - a daily UTC loss limit that includes all open worst-case loss, so midnight never erases risk;
+  - open worst-case loss and reserved-debit caps;
+  - unredeemed count and cost caps;
+  - collateral ≥ reservations + proposal;
+  - consecutive-loss pause with operator acknowledgement (`tyrex-pm settlement ack-loss-pause`).
+- Automatic resolution/payout tracking (`runtime/settlement_worker.py`); redemption stays an operator step.
+- Paper venue (`execution/paper.py`):
+  - one coherent simulated account (collateral, balances, trades, redemptions), restart-safe JSON journal;
+  - fills against live public books;
+  - no credentials read and no signing.
+  - Paper state paths must contain `paper`.
+- `windows.jsonl` per-window summaries, with Paris-time presentation of UTC accounting.
+- Ordered-window capital simulation for research: `research/strategy_replay/sequence.py`.
+
+### Replay result changes (development reference set, 23 windows × {friction, favorable})
+
+| Comparison | Result |
+|---|---|
+| v2 (experiment checkout source) vs v3 with the v2 contract (`legacy_v2`) | **46 / 46 identical**: every decision, fill and economics field. Also pinned by `tests/integration/test_replay_v3_mechanics.py` against a saved v2 fixture. |
+| v2 vs v3 aligned (live order contract), decisions | 23 / 23 identical decision sequences in each scenario: the strategy's decisions do not change. |
+| v2 vs v3 aligned, economics | Fills happen in the same windows (friction 10/10, favorable 10/10). Each fill is smaller, because the planner spends ≤ capped notional / 1.02, rounded to 0.01 USDC, instead of the strategy's gross shares at walk prices. Total debit: friction 47.16 → 45.58, favorable 49.98 → 48.91 USDC. Total proxy-labelled P&L: friction 27.27 → 25.27, favorable 32.28 → 31.66 USDC. No final-gate refusals occurred with the shipped delays. |
+| v3 retry on (provisional numbers) | Same fills, debit and P&L as v3 aligned. The only zero fill (friction, `btc-updown-5m-1792077600`) was not re-sent: the episode's side lost eligibility at the next evaluation, so pursuit stopped (`RETRY_SIDE_NOT_ELIGIBLE`) as specified. 22/23 friction decision sequences are unchanged. On this small set retry recovers nothing; P1's no-fill inventory must size the real opportunity. |
+
+These are development-window mechanics checks, not strategy evaluations. The stage A/B/C conclusions must be re-derived under v3 as new experiments (the experiment id now includes the execution-contract version).
+
+### Tests
+
+- Full suite in the worktree: 768 passed, 2 skipped (ipywidgets not installed), including the recorded-window integration tests. Ruff is clean on all changed and new files.
+- New test modules:
+  - `tests/unit/strategies/settlement_value/test_episode_lifecycle.py` (retry, uncertain blocking, ceilings, backoff, side lock, partial, managed exits, re-entry, lockouts, restart seeding);
+  - `tests/unit/runtime/test_live_retry_and_continuity.py` (fake-backed live path: zero fill → fill, preparation failure → recovery, POST timeout with no duplicate BUY, durable budget across restart, cutoff, late fill, stream routing, continuous detach, managed sale + re-entry, committed hold never sold);
+  - `tests/unit/execution/test_settlement_ledger_v2.py`;
+  - `tests/unit/execution/test_outcome_reasons.py`;
+  - `tests/unit/execution/test_paper_venue.py`;
+  - `tests/unit/research/replay/test_engine_amount_buy.py`;
+  - `tests/unit/research/strategy_replay/test_sequence_capital.py`;
+  - `tests/unit/runtime/test_run_config_lifecycles.py`;
+  - `tests/integration/test_replay_v3_mechanics.py`.
+
+### Remaining live-readiness blockers
+
+1. **P1 research:** finish and review v2 A/B/C, then rerun the shortlist under v3. Size the retry opportunity from the no-fill inventory, and derive exit hypotheses. The numeric retry, exit and re-entry settings stay provisional until then.
+2. **Retry/exit/re-entry research:** compare retry-off vs on and hold vs managed exits on development windows. Run the ordered-window capital simulation on the grid (`sequence.run_sequence`).
+3. **Provider qualification (P8):**
+   - actual resolution rule, K and ties;
+   - live reference feed vs recorded (RTDS → PolyBolt);
+   - real fee schedule;
+   - buy-fee-in-shares assumption;
+   - the venue's amount rounding for market BUYs (replay assumes 0.01 USDC spend and 0.01 share precision);
+   - sell-fee charging (early-sale proceeds are estimated with the strategy fee curve);
+   - order/confirmation latency.
+4. **Observation and paper soak:** at least 24 h continuous paper run on live feeds with a restart, every boundary accounted for, and no accounting divergence. Not run.
+5. **Explicit live monetary limits:** the live continuous template fails validation until the operator sets every `run_limits` value. Also set `settlement.redemption_wallet` and `TYREX_POLYGON_RPC_URL` (resolution worker).
+6. **Known limitations to resolve or accept before any live use:**
+   - opposite-side re-entry is refused live (fill attribution is scoped to one token per window);
+   - resting TP orders are not supported by the paper venue;
+   - an uncertain entry outcome stops the continuous runner for operator review instead of auto-resolving;
+   - after a restart inside a window the retry elapsed-time budget restarts (attempt/POST ceilings still hold).
+7. **Fresh evaluation data:** M1 (retry+hold) uses the S2 holdout. M2 (exits/re-entry) needs a new collection recorded after 2026-10-16 (see `var/research/reference/evaluation_reservations.json` in the worktree). The collector was not restarted by this work.
+8. **Merge:** the worktree branch must be reviewed and merged into the experiment checkout only between experiments. The changed `staged.CODE_TREES` and replay identity start new experiments, as intended.
 
 ## Reader's map: the four objectives remain the same
 
@@ -404,16 +529,16 @@ Evaluation: the gain over the selected P6 policy after fees, compared window by 
 
 ## 3. Decisions to make (owner: user)
 
-| Id | Decision | When | Planning default |
+| Id | Decision | When | User decision (16 Oct 2026) / status |
 |---|---|---|---|
-| D1 | Retry numeric settings | end of P1 / P4 | none until measured |
-| D2 | Top-up after a partial fill | P4 | no |
-| D3 | Trials with retry+hold before exits (G1) | after P5 | open |
-| D4 | Automatic redemption | before long unattended runs | operator redemption plus capital caps |
-| D5 | Loss-limit period and timezone | P5 | daily, UTC |
-| D6 | Exit policy to freeze (G2) | after P6 | open |
-| D7 | Re-entry on/off and opposite side (G3) | after P7 | off; opposite side off |
-| D8 | Capital allocated to continuous runs | before G1/G4 | open |
+| D1 | Retry numeric settings | end of P1 / P4 | Provisional default 3 attempts per episode including the first; preparation, POST, elapsed and window ceilings bounded. Re-derive after P1. |
+| D2 | Top-up after a partial fill | P4 | No automatic top-up; manage the quantity received. Retries after confirmed zero fills and new episodes after complete exits remain allowed. |
+| D3 | Trials with retry+hold before exits (G1) | after P5 | Allowed after research, provider, accounting and paper checks pass; exits need not be enabled first. Not authorized yet (implementation only). |
+| D4 | Automatic redemption | before long unattended runs | Automatic resolution/payout tracking; manual redemption with capital caps; automatic redemption is a later extension. |
+| D5 | Loss-limit period and timezone | P5 | Daily UTC accounting, Paris-time reporting; limits persist across restarts and midnight never erases open risk. |
+| D6 | Exit policy to freeze (G2) | after P6 | Hold-to-resolution and managed exits are both configurable final choices; selection awaits research. |
+| D7 | Re-entry on/off and opposite side (G3) | after P7 | Mechanics built; off by default; opposite side research-only. |
+| D8 | Capital allocated to continuous runs | before G1/G4 | Open: monetary limits must be explicit before live activation (the live template refuses to validate). |
 
 ## 4. Main risks
 
@@ -438,3 +563,10 @@ Evaluation: the gain over the selected P6 policy after fees, compared window by 
 - Added ordered-window capital validation and failure-driven soak acceptance; paper results remain operational evidence.
 - Assigned separate untouched evaluation evidence to policy milestones and clarified G1/G2 decisions.
 - No implementation, experiment, collection restart or trading was performed by this revision.
+
+## Revision 3 change record (16 October 2026)
+
+- Implemented P0 and P2–P7 in the isolated worktree (`E:\polymarket\Tyrex_PM-live`, branch `feature/settlement-live-readiness`, branched from 49e1db1 whose fingerprinted sources equal the running experiment's `f60ef585…`). Recordings and the S2 split were copied read-only into the worktree; the experiment checkout, its kernel, outputs and runtime state were not touched (verified: clean git status, unchanged experiment folders).
+- Integrated the user's decisions (retry default 3 incl. first; no top-up; explicit hold vs managed-exit policy; bounded supervised trials allowed later without exits; automatic resolution tracking with manual redemption and capital caps; daily UTC limits with Paris-time reporting, persistent and explicit).
+- Replay semantics version `strategy_closed_loop_v3` with `replay_execution_contract_v1`; `staged.CODE_TREES` now also fingerprints `execution/` and `protection/`; v2 results are labelled as superseded by the explorer.
+- Status table, replay-result changes and remaining blockers added at the top. P1 and P8 are not done; nothing is qualified or enabled.

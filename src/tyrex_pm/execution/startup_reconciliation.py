@@ -171,6 +171,9 @@ class InspectionFacts:
     # (condition_id, token_id) holdings committed to resolution in the settlement
     # ledger: intentional settlement exposure, never a position to close.
     committed_holds: frozenset[tuple[str, str]] = frozenset()
+    # Continuous operation tracks committed holdings in the settlement ledger under
+    # account-wide caps; they then do not block new entries (they are still reported).
+    committed_holds_block_entries: bool = True
 
 
 def evidence_disposition(facts: InspectionFacts) -> str:
@@ -809,7 +812,11 @@ def _classify_session(
         issues.append(
             StartupIssue(
                 issue_id=f"committed-hold:{session_id}",
-                severity=IssueSeverity.BLOCKED,
+                severity=(
+                    IssueSeverity.BLOCKED
+                    if facts.committed_holds_block_entries
+                    else IssueSeverity.AUTO
+                ),
                 code="COMMITTED_HOLD_AWAITING_RESOLUTION",
                 summary=(
                     "This holding is committed to resolution in the settlement ledger. "

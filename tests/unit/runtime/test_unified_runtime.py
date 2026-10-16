@@ -1049,7 +1049,9 @@ async def _consume_entry(
 @pytest.mark.asyncio
 async def test_tau_above_soft_cutoff_consumes_entry() -> None:
     recorded, opened, submit_entry = await _consume_entry(107.0)
-    assert recorded == []
+    assert [r for r in recorded if r[0] != "ENTRY_OUTCOME"] == []
+    outcome = next(payload for event, payload in recorded if event == "ENTRY_OUTCOME")
+    assert outcome["kind"] == "ZERO_FILL" and outcome["retry_class"] == "RETRY_AFTER_ZERO_FILL"
     assert len(opened) == 1
     submit_entry.assert_awaited()
 
@@ -1073,6 +1075,11 @@ async def test_observed_cutoff_tau_is_rejected_before_session_or_mutation() -> N
     recorded, opened, submit_entry = await _consume_entry(104.930171)
     assert opened == []
     submit_entry.assert_not_awaited()
+    outcomes = [payload for event, payload in recorded if event == "ENTRY_OUTCOME"]
+    assert [(o["kind"], o["reason"], o["retry_class"]) for o in outcomes] == [
+        ("NOT_SENT", "ENTRY_CUTOFF_PASSED", "END_EPISODE")
+    ]
+    recorded = [r for r in recorded if r[0] != "ENTRY_OUTCOME"]
     assert recorded == [
         (
             "INTENT_BLOCKED",

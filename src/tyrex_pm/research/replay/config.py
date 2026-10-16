@@ -49,6 +49,15 @@ class Scenario:
     feedback_delay_ms: int = 0
     adverse_price_ticks: int = 0
     timer_interval_ms: int = 1000
+    # Time from decision (after decision_delay_ms) to the pre-send final gate, i.e. the
+    # local preparation/signing time. The gate reads the strategy-visible book at that
+    # instant. Must not exceed order_delay_ms (gate happens before venue arrival).
+    final_gate_delay_ms: int = 0
+    # Share precision of an amount-denominated (spend) BUY fill [shares]. Assumption.
+    amount_buy_share_quantum: str = "0.01"
+    # The planner's spend is rounded down to this collateral precision before it is sent
+    # (venue amount precision) [USDC]. Assumption, to verify against the SDK rounding.
+    amount_buy_spend_quantum: str = "0.01"
 
     def validate(self) -> None:
         if self.schema_version != 1 or self.adapter not in ADAPTERS:
@@ -59,6 +68,10 @@ class Scenario:
             raise ValueError("feedback delay and adverse ticks apply to closed-loop replay only")
         if self.adverse_price_ticks < 0 or self.timer_interval_ms <= 0:
             raise ValueError("adverse_price_ticks must be >= 0 and timer_interval_ms > 0")
+        if self.final_gate_delay_ms < 0 or self.final_gate_delay_ms > self.order_delay_ms:
+            raise ValueError("final_gate_delay_ms must be in [0, order_delay_ms]")
+        if exact(self.amount_buy_share_quantum) <= 0 or exact(self.amount_buy_spend_quantum) <= 0:
+            raise ValueError("amount quanta must be positive")
         if self.quality_predicate not in ("valid_books_at_actions", "strategy_ready"):
             raise ValueError("unknown quality predicate")
         if self.maker_model not in ("no_fill", "queue_trade_assumption_v1"):
@@ -108,14 +121,24 @@ class Intent:
     limit_price: str = "0"
     lifetime: str = "FAK"
     post_only: bool = False
+    # Amount-denominated BUY (venue market BUY): spend this much collateral walking asks
+    # up to limit_price. Empty means share-denominated ``quantity``.
+    spend_amount: str = ""
 
     def validate(self) -> None:
         if self.action not in ("BUY", "SELL", "CANCEL"):
             raise ValueError("unknown intent action")
         if self.at_ns < 0 or not self.order_id:
             raise ValueError("intent requires stable identity and nonnegative timestamp")
+        if self.spend_amount:
+            if self.action != "BUY" or self.lifetime != "FAK" or self.post_only:
+                raise ValueError("spend_amount applies to taker FAK BUY orders only")
+            if exact(self.spend_amount) <= 0:
+                raise ValueError("spend_amount must be positive")
         if self.action != "CANCEL":
-            if exact(self.quantity) <= 0 or not Decimal(0) < exact(self.limit_price) < Decimal(1):
+            if not Decimal(0) < exact(self.limit_price) < Decimal(1):
+                raise ValueError("invalid order quantity or probability price")
+            if not self.spend_amount and exact(self.quantity) <= 0:
                 raise ValueError("invalid order quantity or probability price")
             if self.lifetime not in ("FAK", "FOK", "GTC"):
                 raise ValueError("unsupported order lifetime")

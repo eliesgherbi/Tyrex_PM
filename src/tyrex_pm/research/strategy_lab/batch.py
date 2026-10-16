@@ -189,7 +189,16 @@ def execution_events(result: dict) -> dict:
     orders = [
         {
             k: o.get(k)
-            for k in ("order_id", "decided_at_ns", "arrival_ns", "side", "quantity", "limit_price")
+            for k in (
+                "order_id",
+                "decided_at_ns",
+                "arrival_ns",
+                "side",
+                "quantity",
+                "limit_price",
+                "action",
+                "spend_amount",
+            )
         }
         for o in result.get("orders", [])
     ]

@@ -37,6 +37,7 @@ SETTLEMENT_VALUE_INPUT_CONTRACT = InputContract(
 )
 
 HOLD_TO_RESOLUTION = "hold_to_resolution"
+MANAGED_EXIT = "managed_exit"
 
 
 def _load_config(parameters: Mapping[str, Any], file: str) -> SettlementValueConfig:
@@ -59,11 +60,18 @@ def _validate_run_config(config: SettlementValueConfig) -> None:
             "settlement_value live runs require entry.target_mode: cap_only; sizing is "
             "budget-constrained and the $3 objective stays a research target"
         )
+    if config.reentry.max_trades_per_window > 1 and config.reentry.opposite_side_allowed:
+        raise ValueError(
+            "reentry.opposite_side_allowed is research-only: live fill attribution is "
+            "scoped to one token per window"
+        )
 
 
 def _lifecycle_modes(config: SettlementValueConfig) -> frozenset[str]:
-    # A forced pre-expiry sale must never run under this strategy's name.
-    del config
+    # The host lifecycle follows the strategy's declared exit policy, chosen before
+    # entry: a forced pre-expiry sale never runs under hold_to_resolution.
+    if config.exit.policy == MANAGED_EXIT:
+        return frozenset({MANAGED_EXIT})
     return frozenset({HOLD_TO_RESOLUTION})
 
 

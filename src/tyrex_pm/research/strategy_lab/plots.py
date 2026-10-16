@@ -85,7 +85,10 @@ def plot_window(result: dict, *, title: str | None = None):
         color = BLUE if order["side"] == "UP" else ORANGE
         ax.scatter([t], [float(order["limit_price"])], s=64, color=color, edgecolor="white",
                    linewidth=2, zorder=5)
-        ax.annotate(f"BUY {order['side']} {order['quantity']} @≤{float(order['limit_price']):.3f}",
+        action = order.get("action", "BUY")
+        bound = "≤" if action == "BUY" else "≥"
+        ax.annotate(f"{action} {order['side']} {order['quantity']} @{bound}"
+                    f"{float(order['limit_price']):.3f}",
                     (t, float(order["limit_price"])), xytext=(6, 6), textcoords="offset points",
                     fontsize=8, color=INK)
     ax.set_ylim(0, 1)

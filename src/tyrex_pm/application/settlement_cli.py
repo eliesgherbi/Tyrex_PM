@@ -1,6 +1,6 @@
 """``tyrex-pm settlement`` — operator commands over the durable settlement ledger.
 
-Offline:  status, worklist, mark-manual
+Offline:  status, worklist, mark-manual, ack-loss-pause
 Chain (read-only, ``--connect-chain`` + ``TYREX_POLYGON_RPC_URL``): reconcile,
 confirm-redemption. Nothing here signs, redeems, transfers or submits orders; the
 operator redeems in the venue UI and then proves it with the transaction hash.
@@ -37,6 +37,11 @@ def add_parser(commands: Any) -> None:
     manual = sub.add_parser("mark-manual", help="Record operator intervention for an episode")
     manual.add_argument("--episode", required=True)
     manual.add_argument("--reason", required=True)
+    ack = sub.add_parser(
+        "ack-loss-pause",
+        help="Acknowledge a consecutive-loss pause (losses before this no longer count)",
+    )
+    ack.add_argument("--reason", required=True)
 
 
 def _ledger(config: Any) -> SettlementLedger:
@@ -64,7 +69,27 @@ def _status(ledger: SettlementLedger, config: Any) -> dict:
         ],
         "totals": {k: str(v) for k, v in totals.__dict__.items()},
         "trial_limits": {k: str(v) for k, v in trial.__dict__.items()},
+        "run_limits": None
+        if config.settlement.run_limits is None
+        else {k: str(v) for k, v in config.settlement.run_limits.__dict__.items()},
+        "consecutive_losses": ledger.consecutive_losses(),
+        **_daily(ledger),
         "loss_budget_used": str(totals.realized_losses + totals.open_worst_case_loss),
+    }
+
+
+def _daily(ledger: SettlementLedger) -> dict:
+    """UTC accounting day (authoritative) with its Paris-time presentation."""
+    from datetime import datetime, timezone
+
+    from tyrex_pm.reporting.timezones import paris_iso
+
+    now = datetime.now(timezone.utc)
+    return {
+        "accounting_day_utc": now.date().isoformat(),
+        "reported_at_utc": now.isoformat(),
+        "reported_at_paris": paris_iso(now),
+        "realized_losses_today_utc": str(ledger.realized_losses_on(now.date())),
     }
 
 
@@ -118,6 +143,17 @@ def run(args: argparse.Namespace) -> int:
             "MANUAL_INTERVENTION", args.episode, key=f"MANUAL:{args.episode}", reason=args.reason
         )
         print(f"episode {args.episode} marked MANUAL_INTERVENTION (blocks new entries)")
+        return 0
+    if command == "ack-loss-pause":
+        from datetime import datetime, timezone
+
+        from tyrex_pm.execution.settlement.ledger import OPERATOR_SCOPE
+
+        before = ledger.consecutive_losses()
+        stamp = datetime.now(timezone.utc).isoformat()
+        ledger.record("LOSS_PAUSE_ACKNOWLEDGED", OPERATOR_SCOPE, key=f"LOSS_ACK:{stamp}",
+                      reason=args.reason, losses_acknowledged=before)
+        print(json.dumps({"acknowledged_losses": before, "reason": args.reason}))
         return 0
     if not getattr(args, "connect_chain", False):
         print(f"`{command}` reads Polygon; re-run with --connect-chain", file=sys.stderr)

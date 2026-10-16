@@ -268,3 +268,37 @@ def test_settlement_cli_offline_commands_and_chain_guard(tmp_path: Path, capsys)
     ledger = SettlementLedger(tmp_path / "l.jsonl")
     assert ledger.episodes["e1"].state is EpisodeState.MANUAL_INTERVENTION
     assert main(["settlement", "--config", str(LEGACY), "status"]) == 2
+
+
+def test_continuous_startup_tracks_committed_holds_without_blocking() -> None:
+    from tyrex_pm.execution.startup_reconciliation import (
+        AccountIdentity,
+        AssessmentStatus,
+        Holding,
+        InspectionFacts,
+        IssueSeverity,
+        ReadCoverage,
+        assess,
+    )
+
+    session = SimpleNamespace(
+        identity=SimpleNamespace(market_id="0xc", token_id="tok", window_id="w1"),
+        session_id="s1", safe_to_open_entry=False, orders={}, resolved_attempt_ids=set(),
+        confirmed_position_shares=Decimal("10"), external_activity_ids=set(), trades={},
+        opened_at=None, resting_limit_venue_ids=(), has_journal_uncertainty=False,
+        has_unresolved_mutation_attempt=False, entry_match_awaiting_confirmation=False,
+        has_confirmed_buy=True, external_reduction_shares=Decimal(0), dust_residual=None,
+        operational_disposition=None,
+    )
+    holding = Holding(condition_id="0xc", token_id="tok", shares=Decimal("10"))
+    facts = InspectionFacts(
+        identity=AccountIdentity(chain_id=137, environment="production", wallet="0x1"),
+        coverage=ReadCoverage(complete=True, positions_complete=True, orders_complete=True,
+                              activity_complete=True),
+        sessions=(session,), holdings=(holding,), committed_holds=frozenset({("0xc", "tok")}),
+        committed_holds_block_entries=False,
+    )
+    tracked = assess(facts)
+    issue = next(i for i in tracked.issues if i.code == "COMMITTED_HOLD_AWAITING_RESOLUTION")
+    assert issue.severity is IssueSeverity.AUTO and not tracked.proposals
+    assert tracked.status is AssessmentStatus.READY

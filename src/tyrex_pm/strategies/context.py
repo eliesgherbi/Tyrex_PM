@@ -85,3 +85,6 @@ class DecisionContext:
     ponr_reached: bool = False
     # Host-filled from AlignedEvalReady for every plugin; unused fields stay None.
     references: ReferenceFacts = ReferenceFacts()
+    # Reason of the host's most recent exit for this window (strategy, protective or
+    # mandatory), so a strategy can apply re-entry lockouts. None when none happened.
+    last_exit_reason: str | None = None

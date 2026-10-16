@@ -1,26 +1,36 @@
-"""Hold-to-resolution hooks for the trading runtime (``lifecycle.mode: hold_to_resolution``).
+"""Settlement-ledger hooks for the trading runtime (``lifecycle.mode: hold_to_resolution``
+and ``managed_exit``).
 
 The trading runtime calls these at fixed points; legacy profiles never construct them.
 
 * ``before_entry`` — immediately before an entry reaches the dispatch path: verified
   current constraints (fees from provider metadata matching the strategy's curve, tick,
-  minimum size), then the trial budget over the durable settlement ledger (pending,
-  uncertain, unresolved and realized, plus the proposed order), then a durable
-  ``EPISODE_RESERVED`` record. Any failure blocks the entry with stable reasons.
-* ``after_entry`` — records the authoritative dispatch outcome: filled (reservation
-  becomes spent capital once), no fill / no dispatch (released) or unknown (kept).
+  minimum size), then the trial/run budget over the durable settlement ledger (pending,
+  uncertain, unresolved and realized, plus the proposed order) and the durable window
+  budget (episodes, attempts, POSTs), then a durable ``EPISODE_RESERVED`` record — or,
+  for a retry inside the same episode, ``ATTEMPT_REARMED``. Any failure blocks the
+  entry with stable reasons.
+* ``after_entry`` — records the authoritative dispatch outcome of that attempt: filled
+  (reservation becomes spent capital once), no fill / no dispatch (released) or unknown
+  (kept). Whether the attempt reached a POST or failed in preparation is recorded too.
+* ``after_exit`` — records a confirmed early sale (managed exits): partial sales reduce
+  the episode's shares and cost basis; a complete sale closes the episode (``SOLD``).
 * ``commit_hold`` — requires confirmed inventory, no unresolved mutation and no live
   resting order (cancelled first by the caller, proof required), then
   ``HOLD_REQUESTED`` and ``HOLD_COMMITTED``. Only a committed holding is exempt from
-  mandatory flatten, the manual-deadline stop and the shutdown sale.
+  mandatory flatten, the manual-deadline stop, protection and the shutdown sale.
 * ``committed_holds`` — (condition, token) pairs that startup reconciliation must treat
   as intentional settlement exposure, never as positions to close.
+
+Episode identity: the first episode of a window keeps the schema-1 id
+``run_name:window_id``; later episodes are ``run_name:window_id:e<seq>``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -30,8 +40,11 @@ from tyrex_pm.execution.settlement.constraints import (
     gamma_fee_schedule,
     verify_constraints,
 )
-from tyrex_pm.execution.settlement.governor import check_entry
-from tyrex_pm.execution.settlement.ledger import EpisodeState, SettlementLedger
+from tyrex_pm.execution.settlement.governor import WindowBudget, check_entry
+from tyrex_pm.execution.settlement.ledger import (
+    EpisodeState,
+    SettlementLedger,
+)
 
 S = EpisodeState
 
@@ -41,23 +54,59 @@ class EntryCheck:
     allowed: bool
     reasons: tuple[str, ...]
     evidence: dict[str, Any] = field(default_factory=dict)
+    episode_id: str | None = None
+    attempt: int = 1
+
+
+def window_budget_for(strategy: Any) -> WindowBudget:
+    """Durable window ceilings from a strategy's retry/re-entry policy (default: one)."""
+    retry = getattr(strategy, "retry", None)
+    reentry = getattr(strategy, "reentry", None)
+    episodes = int(getattr(reentry, "max_trades_per_window", 1) or 1)
+    if retry is None or not getattr(retry, "enabled", False):
+        return WindowBudget(
+            max_episodes=episodes,
+            max_attempts=episodes,
+            max_posts=episodes,
+        )
+    return WindowBudget(
+        max_episodes=episodes,
+        max_attempts=int(retry.max_attempts_per_window),
+        max_posts=int(retry.max_posts_per_window),
+        max_attempts_per_episode=int(retry.max_attempts_per_episode),
+        max_posts_per_episode=int(retry.max_posts_per_episode),
+        max_prepare_failures_per_episode=int(retry.max_prepare_failures_per_episode),
+    )
 
 
 @dataclass
 class SettlementHooks:
-    config: Any  # TradingRunConfig with lifecycle_mode == hold_to_resolution
+    config: Any  # TradingRunConfig with a settlement block
     ledger: SettlementLedger
     fee_schedule_source: FeeScheduleSource = gamma_fee_schedule
 
     @classmethod
     def from_config(cls, config: Any, **kwargs: Any) -> SettlementHooks | None:
         settlement = getattr(config, "settlement", None)
-        if getattr(config, "lifecycle_mode", None) != "hold_to_resolution" or settlement is None:
+        if getattr(config, "lifecycle_mode", None) not in (
+            "hold_to_resolution",
+            "managed_exit",
+        ) or settlement is None:
             return None
         return cls(config=config, ledger=SettlementLedger(settlement.ledger_path), **kwargs)
 
-    def episode_id(self, window_id: str) -> str:
-        return f"{self.config.run_name}:{window_id}"
+    def episode_id(self, window_id: str, seq: int = 1) -> str:
+        base = f"{self.config.run_name}:{window_id}"
+        return base if seq <= 1 else f"{base}:e{seq}"
+
+    def current_episode(self, window_id: str | None):
+        if window_id is None:
+            return None
+        return self.ledger.by_window(window_id)
+
+    @property
+    def window_budget(self) -> WindowBudget:
+        return window_budget_for(getattr(self.config, "strategy", None))
 
     # -- startup ---------------------------------------------------------------------
 
@@ -76,9 +125,13 @@ class SettlementHooks:
             )
         )
 
-    def startup_blockers(self) -> tuple[str, ...]:
-        """Episodes a crash left between reservation and a known outcome block entries."""
-        stuck = [ep.episode_id for ep in self.ledger.needs_reconciliation()]
+    def startup_blockers(self, *, window_id: str | None = None) -> tuple[str, ...]:
+        """Episodes left between reservation and a known outcome block entries.
+
+        ``window_id`` excludes the window currently being traded: its open episode is
+        owned by this process and is handled by its own lifecycle.
+        """
+        stuck = [ep.episode_id for ep in self.ledger.needs_reconciliation(exclude_window=window_id)]
         return ("SETTLEMENT_EPISODE_NEEDS_RECONCILIATION",) if stuck else ()
 
     # -- entry -----------------------------------------------------------------------
@@ -96,6 +149,10 @@ class SettlementHooks:
         tick_size: Decimal | None,
         min_order_size: Decimal | None,
         strategy_fee_curve: Any,
+        episode_seq: int = 1,
+        attempt_seq: int = 1,
+        available_collateral: Decimal | None = None,
+        today: date | None = None,
     ) -> EntryCheck:
         reasons: list[str] = list(self.startup_blockers())
         try:
@@ -116,15 +173,35 @@ class SettlementHooks:
         # fee reserve, and taker buy fees are charged in shares, so the worst-case cash
         # debit of this order is the capped desired notional.
         proposed = min(target_notional, cap)
+        episode_id = self.episode_id(window_id, episode_seq)
+        existing = self.ledger.episodes.get(episode_id)
+        rearm = (
+            existing is not None
+            and attempt_seq > 1
+            and existing.state in (S.NO_DISPATCH, S.NO_FILL)
+        )
+        if existing is not None and not rearm:
+            reasons.append(
+                "EPISODE_ALREADY_EXISTS_FOR_WINDOW" if attempt_seq <= 1
+                else "OPEN_EPISODE_EXISTS_FOR_WINDOW"
+            )
+        settlement = self.config.settlement
         budget = check_entry(
             self.ledger,
-            self.config.settlement.trial,
+            settlement.trial,
             window_id=window_id,
             proposed_debit=proposed,
             proposed_fees=Decimal(0),
+            rearm_episode=episode_id if rearm else None,
+            window_budget=self.window_budget,
+            run_limits=getattr(settlement, "run_limits", None),
+            available_collateral=available_collateral,
+            today=today,
         )
         reasons.extend(budget.reasons)
         evidence = {
+            "episode_id": episode_id,
+            "attempt": attempt_seq,
             "constraints": {
                 "ok": constraints.ok,
                 "tick_size": str(tick_size),
@@ -140,42 +217,140 @@ class SettlementHooks:
                 "open_worst_case": str(budget.open_worst_case_loss),
                 "proposed": str(budget.proposed_worst_case),
                 "unresolved_cost_after": str(budget.unresolved_cost_after),
+                "daily_loss_used_after": None
+                if budget.daily_loss_used_after is None
+                else str(budget.daily_loss_used_after),
             },
         }
         if reasons:
-            return EntryCheck(False, tuple(dict.fromkeys(reasons)), evidence)
-        self.ledger.record(
-            "EPISODE_RESERVED",
-            self.episode_id(window_id),
-            window_id=window_id,
-            market_id=market_id,
-            condition_id=condition_id,
-            token_id=token_id,
-            outcome_index=outcome_index,
-            max_debit=str(proposed),
-            max_fees="0",
-        )
-        return EntryCheck(True, (), evidence)
+            return EntryCheck(False, tuple(dict.fromkeys(reasons)), evidence, episode_id,
+                              attempt_seq)
+        if rearm:
+            assert existing is not None
+            self.ledger.record(
+                "ATTEMPT_REARMED",
+                episode_id,
+                key=SettlementLedger.attempt_key("ATTEMPT_REARMED", episode_id, attempt_seq),
+                attempt=existing.attempts + 1,
+                max_debit=str(proposed),
+                max_fees="0",
+            )
+        else:
+            self.ledger.record(
+                "EPISODE_RESERVED",
+                episode_id,
+                window_id=window_id,
+                market_id=market_id,
+                condition_id=condition_id,
+                token_id=token_id,
+                outcome_index=outcome_index,
+                max_debit=str(proposed),
+                max_fees="0",
+                **(
+                    {}
+                    if episode_seq <= 1
+                    else {
+                        "episode_seq": episode_seq,
+                        "window_episode_cap": self.window_budget.max_episodes,
+                    }
+                ),
+            )
+        return EntryCheck(True, (), evidence, episode_id, attempt_seq)
 
-    def after_entry(self, *, window_id: str, state: Any, cost_basis: Decimal) -> str:
-        episode = self.episode_id(window_id)
-        if episode not in self.ledger.episodes:
+    def after_entry(
+        self,
+        *,
+        window_id: str,
+        state: Any,
+        cost_basis: Decimal,
+        episode_seq: int = 1,
+        posted: bool | None = None,
+        prepare_failed: bool = False,
+    ) -> str:
+        episode = self.episode_id(window_id, episode_seq)
+        ep = self.ledger.episodes.get(episode)
+        if ep is None:
             return "NO_EPISODE"
+        attempt = ep.attempts
         phase = None if state is None else state.phase
         shares = Decimal(0) if state is None else state.confirmed_position_shares
+        extra: dict[str, Any] = {}
+        if posted is not None and (posted or prepare_failed or attempt > 1):
+            extra = {"posted": posted, "prepare_failed": prepare_failed, "attempt": attempt}
+
+        def key(event: str) -> str:
+            return SettlementLedger.attempt_key(event, episode, attempt)
+
         if shares > 0:
-            self.ledger.record("FILL_CONFIRMED", episode, net_shares=str(shares),
-                               cost_basis=str(cost_basis))
+            self.ledger.record("FILL_CONFIRMED", episode, key=key("FILL_CONFIRMED"),
+                               net_shares=str(shares), cost_basis=str(cost_basis), **extra)
             return "FILL_CONFIRMED"
         if phase is ExecutionPhase.COMPLETED_NO_DISPATCH:
-            self.ledger.record("DISPATCH_NOT_SENT", episode)
+            self.ledger.record("DISPATCH_NOT_SENT", episode, key=key("DISPATCH_NOT_SENT"),
+                               **extra)
             return "DISPATCH_NOT_SENT"
         if phase is ExecutionPhase.COMPLETED_NO_FILL:
-            self.ledger.record("DISPATCH_NO_FILL", episode)
+            self.ledger.record("DISPATCH_NO_FILL", episode, key=key("DISPATCH_NO_FILL"),
+                               **extra)
             return "DISPATCH_NO_FILL"
-        self.ledger.record("DISPATCH_UNKNOWN", episode,
-                           phase=None if phase is None else phase.value)
+        self.ledger.record("DISPATCH_UNKNOWN", episode, key=key("DISPATCH_UNKNOWN"),
+                           phase=None if phase is None else phase.value, **extra)
         return "DISPATCH_UNKNOWN"
+
+    def resolve_unknown(
+        self, *, window_id: str, state: Any, cost_basis: Decimal, episode_seq: int = 1
+    ) -> str | None:
+        """Record the authoritative outcome of a DISPATCH_UNKNOWN attempt once known."""
+        episode = self.episode_id(window_id, episode_seq)
+        ep = self.ledger.episodes.get(episode)
+        if ep is None or ep.state is not S.DISPATCH_UNKNOWN or state is None:
+            return None
+        key = SettlementLedger.attempt_key
+        if state.confirmed_position_shares > 0:
+            self.ledger.record("FILL_CONFIRMED", episode,
+                               key=key("FILL_CONFIRMED", episode, ep.attempts),
+                               net_shares=str(state.confirmed_position_shares),
+                               cost_basis=str(cost_basis))
+            return "FILL_CONFIRMED"
+        if state.phase in (ExecutionPhase.COMPLETED_NO_FILL, ExecutionPhase.COMPLETED_NO_DISPATCH):
+            self.ledger.record("DISPATCH_NO_FILL", episode,
+                               key=key("DISPATCH_NO_FILL", episode, ep.attempts))
+            return "DISPATCH_NO_FILL"
+        return None
+
+    # -- exits -----------------------------------------------------------------------
+
+    def after_exit(
+        self,
+        *,
+        window_id: str,
+        sold_shares: Decimal,
+        proceeds: Decimal,
+        flat: bool,
+        exit_key: str,
+        episode_seq: int | None = None,
+    ) -> str:
+        """Record a confirmed early sale. ``exit_key`` identifies the sale (dedupe)."""
+        ep = (
+            self.ledger.episodes.get(self.episode_id(window_id, episode_seq))
+            if episode_seq is not None
+            else self.ledger.by_window(window_id)
+        )
+        if ep is None or ep.state is not S.FILLED:
+            return "NO_OPEN_EPISODE"
+        if sold_shares > 0:
+            self.ledger.record(
+                "EXIT_FILL_CONFIRMED",
+                ep.episode_id,
+                key=f"EXIT_FILL_CONFIRMED:{ep.episode_id}:{exit_key}",
+                sold_shares=str(min(sold_shares, ep.net_shares)),
+                proceeds=str(proceeds),
+            )
+        if flat:
+            self.ledger.record("EPISODE_SOLD", ep.episode_id,
+                               dust_shares=str(ep.net_shares))
+            return "EPISODE_SOLD"
+        return "EXIT_FILL_CONFIRMED" if sold_shares > 0 else "NO_SALE"
 
     # -- hold ------------------------------------------------------------------------
 
@@ -186,10 +361,10 @@ class SettlementHooks:
         state: Any,
         cancel_conflicting: Callable[[], Awaitable[Any]],
     ) -> tuple[bool, str]:
-        episode = self.episode_id(window_id)
-        ep = self.ledger.episodes.get(episode)
+        ep = self.ledger.by_window(window_id)
         if ep is None:
             return False, "NO_EPISODE"
+        episode = ep.episode_id
         if ep.state is S.HOLD_COMMITTED:
             return True, "ALREADY_COMMITTED"
         if ep.state is not S.FILLED or state is None or state.confirmed_position_shares <= 0:
@@ -210,5 +385,5 @@ class SettlementHooks:
     def is_committed(self, window_id: str | None) -> bool:
         if window_id is None:
             return False
-        ep = self.ledger.episodes.get(self.episode_id(window_id))
+        ep = self.ledger.by_window(window_id)
         return ep is not None and ep.state is S.HOLD_COMMITTED
