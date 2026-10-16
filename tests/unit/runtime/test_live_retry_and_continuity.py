@@ -257,3 +257,19 @@ async def test_a_committed_hold_is_never_sold(tmp_path: Path) -> None:
         assert venue.posts == ["BUY"]
     finally:
         await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_resolution_worker_uses_the_rpc_url_from_the_run_env(tmp_path: Path) -> None:
+    runtime, _driver = await make_runtime(tmp_path, ScriptedVenue([]), run_mode="continuous")
+    try:
+        runtime.polygon_rpc_url = None
+        import os
+
+        if not os.environ.get("TYREX_POLYGON_RPC_URL"):
+            assert runtime._build_settlement_worker() is None
+        runtime.polygon_rpc_url = "https://polygon.example.invalid"
+        worker = runtime._build_settlement_worker()
+        assert worker is not None and worker.interval_s > 0
+    finally:
+        await close(runtime)

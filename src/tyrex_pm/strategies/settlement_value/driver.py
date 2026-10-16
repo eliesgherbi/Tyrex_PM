@@ -534,6 +534,7 @@ class SettlementValueDriver:
         }
         blockers: list[str] = []
         intents: list[Any] = []
+        obs: _Observation | None = None
 
         def finish(
             action: StrategyAction, reason: str, *, model_ready: bool = False
@@ -541,6 +542,10 @@ class SettlementValueDriver:
             row["action"] = action.value
             row["reason"] = reason
             row["blockers"] = list(dict.fromkeys(blockers))
+            # Model readiness describes the strategy's inputs, never the host's entry
+            # permission: the host gates entries on it, so tying it to entry_allowed
+            # would deadlock (host waits for a ready model, model waits for permission).
+            model_ready = model_ready or _observed_ready(obs)
             row.update(
                 episode_seq=st.episode_seq,
                 attempt_seq=st.attempt_seq,
@@ -987,6 +992,13 @@ class SettlementValueDriver:
         st.last_exit_reason = exit_reason
         row.update(exit_intent_id=intent.intent_id.value, exit_min_price=str(min_price))
         return finish(StrategyAction.EXIT, exit_reason, model_ready=True)
+
+
+def _observed_ready(obs: _Observation | None) -> bool:
+    """Probability and both executable books are available for this evaluation."""
+    return bool(
+        obs is not None and obs.prob is not None and obs.prob.ready and obs.candidates is not None
+    )
 
 
 def _top(book: BookSnapshot | None) -> tuple[Decimal | None, Decimal | None]:

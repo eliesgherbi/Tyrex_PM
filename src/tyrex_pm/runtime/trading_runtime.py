@@ -276,6 +276,8 @@ class TradingRuntime:
     _last_exit_reason: dict[str, str] = field(default_factory=dict)
     _last_release_at: datetime | None = None
     _window_started_at: dict[str, str] = field(default_factory=dict)
+    # Read-only Polygon RPC for payout tracking, from the process env or the run's .env.
+    polygon_rpc_url: str | None = None
 
     @classmethod
     async def create(
@@ -493,6 +495,9 @@ class TradingRuntime:
         )
         holder["runtime"] = result
         result.settlement_hooks = SettlementHooks.from_config(config)
+        result.polygon_rpc_url = env.get("TYREX_POLYGON_RPC_URL") or os.environ.get(
+            "TYREX_POLYGON_RPC_URL"
+        )
         active_gateway.client_guard = result.account_state_authority
         active_gateway.fill_context = result.lifecycle.fill_context
         final_gate.entry_cutoff_s = effective_entry_cutoff_s(config)
@@ -2880,7 +2885,7 @@ class TradingRuntime:
 
         reader = getattr(self.gateway, "payout_reader", None)
         if reader is None:
-            reader = _chain_payout_reader()
+            reader = _chain_payout_reader(self.polygon_rpc_url)
         if reader is None:
             self.run_recorder.record(
                 "SETTLEMENT_WORKER_UNAVAILABLE",
@@ -3096,8 +3101,8 @@ class TradingRuntime:
         )
 
 
-def _chain_payout_reader():
-    """Read-only finalized payout reader from TYREX_POLYGON_RPC_URL, or None."""
+def _chain_payout_reader(url: str | None = None):
+    """Read-only finalized payout reader for ``url`` (TYREX_POLYGON_RPC_URL), or None."""
     try:
         from tyrex_pm.adapters.polymarket.polygon_rpc import POLYGON_RPC_ENV
         from tyrex_pm.execution.settlement.chain import (
@@ -3106,7 +3111,7 @@ def _chain_payout_reader():
         )
     except Exception:  # noqa: BLE001 - optional live dependency
         return None
-    url = os.environ.get(POLYGON_RPC_ENV, "")
+    url = url or os.environ.get(POLYGON_RPC_ENV, "")
     if not url:
         return None
     return finalized_payout_reader(SettlementChainReader(url))

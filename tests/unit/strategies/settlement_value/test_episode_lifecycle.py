@@ -223,6 +223,17 @@ def test_restart_restores_window_counters_from_the_ledger() -> None:
     assert run(off, AT).decision.reason_code == R.EPISODE_CONSUMED
 
 
+def test_model_readiness_does_not_depend_on_entry_permission() -> None:
+    # The live host only allows entries once the model is ready: reporting "not ready"
+    # while entries are blocked would deadlock the run (found in the first live run).
+    blocked = run(driver(), AT, ctx_kwargs={"allowed": False})
+    assert blocked.decision.reason_code == R.ENTRY_NOT_ALLOWED and not blocked.intents
+    assert blocked.eligibility.model_ready is True
+    not_ready = run(driver(), AT, ctx_kwargs={"allowed": False},
+                    features=__import__("test_settlement_value").vol(ready=False))
+    assert not_ready.eligibility.model_ready is False
+
+
 # -- managed exits ---------------------------------------------------------------------
 
 MANAGED = {
