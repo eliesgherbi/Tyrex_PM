@@ -45,6 +45,7 @@ class ScriptedVenue:
         self.price = Decimal(price)
         self.prepare_failures = 0
         self.fail_prepare_next = 0
+        self.trade_status = "CONFIRMED"
 
     async def prepare_order(self, spec):  # noqa: ANN001
         if self.fail_prepare_next:
@@ -79,7 +80,7 @@ class ScriptedVenue:
     def trade(self, venue_id: str, side: str, shares: Decimal, token: str) -> SimpleNamespace:
         trade = SimpleNamespace(
             id=f"t-{len(self.trades) + 1}", taker_order_id=venue_id, maker_orders=(),
-            status="CONFIRMED", side=side, size=shares,
+            status=self.trade_status, side=side, size=shares,
             price=self.price if side == "BUY" else Decimal("0.45"), asset_id=token,
             updated_at=NOW,
         )

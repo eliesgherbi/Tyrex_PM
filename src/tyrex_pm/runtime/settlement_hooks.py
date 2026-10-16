@@ -47,6 +47,16 @@ from tyrex_pm.execution.settlement.ledger import (
 )
 
 S = EpisodeState
+COMMITTED_STATES = frozenset(
+    {
+        S.HOLD_COMMITTED,
+        S.RESOLUTION_UNCERTAIN,
+        S.PAYOUT_PROVEN,
+        S.REDEMPTION_PENDING_OPERATOR,
+        S.CASH_CONFIRMED,
+        S.COMPLETED,
+    }
+)
 
 
 @dataclass
@@ -365,7 +375,7 @@ class SettlementHooks:
         if ep is None:
             return False, "NO_EPISODE"
         episode = ep.episode_id
-        if ep.state is S.HOLD_COMMITTED:
+        if ep.state in COMMITTED_STATES:
             return True, "ALREADY_COMMITTED"
         if ep.state is not S.FILLED or state is None or state.confirmed_position_shares <= 0:
             return False, "NO_CONFIRMED_INVENTORY"
@@ -386,4 +396,6 @@ class SettlementHooks:
         if window_id is None:
             return False
         ep = self.ledger.by_window(window_id)
-        return ep is not None and ep.state is S.HOLD_COMMITTED
+        # Resolution tracking moves a committed hold on (uncertain, proven, redemption,
+        # completed); it never stops being a hold the host must not sell.
+        return ep is not None and ep.state in COMMITTED_STATES

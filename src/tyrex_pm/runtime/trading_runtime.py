@@ -276,6 +276,8 @@ class TradingRuntime:
     _last_exit_reason: dict[str, str] = field(default_factory=dict)
     _last_release_at: datetime | None = None
     _window_started_at: dict[str, str] = field(default_factory=dict)
+    # Window whose committed hold still waits for trade confirmation before detaching.
+    _pending_detach: str | None = None
     # Read-only Polygon RPC for payout tracking, from the process env or the run's .env.
     polygon_rpc_url: str | None = None
 
@@ -1985,20 +1987,45 @@ class TradingRuntime:
             self.protection_registry.disarm(state.session_id)
         if self.continuous:
             # The holding now belongs to the settlement ledger (resolution worker); the
-            # lifecycle is free for the next window.
-            detached = self.lifecycle.detach_committed(reason="hold_committed")
-            self.run_recorder.record(
-                "COMMITTED_HOLD_DETACHED",
-                {"session_id": detached, "window_id": intent.window_id},
-            )
-            self.selected_instrument = None
-            self.selected_token_id = None
+            # lifecycle is freed for the next window once its trades are confirmed.
+            self._pending_detach = intent.window_id
+            await self._try_detach()
             return
         # The single episode is complete for this process; the holding now
         # waits for resolution under `tyrex-pm settlement`.
         self.stop_requested = True
 
+    async def _try_detach(self) -> bool:
+        """Detach a committed hold once nothing about it is pending (e.g. a matched trade
+        still awaiting venue confirmation). Retried every tick; until then the window
+        cannot be promoted, and the hold stays protected from any sale."""
+        window = getattr(self, "_pending_detach", None)
+        if window is None or self.lifecycle.state is None:
+            self._pending_detach = None
+            return True
+        state = await self.lifecycle.reconcile()
+        try:
+            detached = self.lifecycle.detach_committed(reason="hold_committed")
+        except RuntimeError as exc:
+            if getattr(self, "_detach_noted", None) != (window, str(exc)):
+                self._detach_noted = (window, str(exc))
+                self.run_recorder.record(
+                    "COMMITTED_HOLD_DETACH_PENDING",
+                    {"window_id": window, "reason": str(exc),
+                     "phase": None if state is None else state.phase.value},
+                )
+            return False
+        self.run_recorder.record(
+            "COMMITTED_HOLD_DETACHED", {"session_id": detached, "window_id": window}
+        )
+        self._pending_detach = None
+        self.selected_instrument = None
+        self.selected_token_id = None
+        return True
+
     async def on_async_tick(self, market_runtime: ZGapMarketRuntime) -> None:
+        if getattr(self, "_pending_detach", None) is not None:
+            await self._try_detach()
         await self._bind_pending_market()
         worker = getattr(self, "settlement_worker", None)
         if worker is not None:

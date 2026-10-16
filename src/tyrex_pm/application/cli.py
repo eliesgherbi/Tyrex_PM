@@ -85,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     from tyrex_pm.application.settlement_cli import add_parser as add_settlement_parser
 
     add_settlement_parser(commands)
+    from tyrex_pm.application.watch_run import add_parser as add_watch_parser
+
+    add_watch_parser(commands)
     return parser
 
 
@@ -318,6 +321,10 @@ def main(argv: list[str] | None = None) -> int:
         from tyrex_pm.application.settlement_cli import run as run_settlement
 
         return run_settlement(args)
+    if args.command == "watch-run":
+        from tyrex_pm.application.watch_run import run as run_watch
+
+        return run_watch(args)
     parser.print_help()
     return 0
 

@@ -273,3 +273,51 @@ async def test_resolution_worker_uses_the_rpc_url_from_the_run_env(tmp_path: Pat
         assert worker is not None and worker.interval_s > 0
     finally:
         await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_detach_waits_for_trade_confirmation_and_hold_stays_protected(
+    tmp_path: Path,
+) -> None:
+    # First live run: the buy was matched but not yet CONFIRMED when the hold was
+    # committed; detaching must wait (not fail), and the hold must never be sold.
+    venue = ScriptedVenue(["fill"])
+    venue.trade_status = "MATCHED"
+    runtime, driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    try:
+        await runtime._consume_entry(entry(runtime), None)
+        await runtime._consume_hold(hold_intent(runtime))
+        assert runtime._pending_detach == "w1" and runtime.lifecycle.state is not None
+        assert not runtime.can_promote()
+        # The resolution worker relabels the hold; it is still a committed hold.
+        ep = episode(runtime)
+        runtime.settlement_hooks.ledger.record(
+            "RESOLUTION_UNCERTAIN", ep.episode_id, key="ru", reason="unresolved", source="t")
+        assert runtime.settlement_hooks.is_committed("w1")
+        await runtime._consume_exit(exit_intent(runtime, "MANDATORY_FLATTEN"), None)
+        assert driver.exit_outcomes[-1].kind is ExitOutcomeKind.NOT_SENT
+        assert venue.posts == ["BUY"]
+        for trade in venue.trades:
+            trade.status = "CONFIRMED"
+        assert await runtime._try_detach()
+        assert runtime.lifecycle.state is None and runtime.can_promote()
+    finally:
+        await close(runtime)
+
+
+def test_startup_controller_keeps_the_continuous_hold_flag() -> None:
+    from tyrex_pm.execution.startup_reconciliation import InspectionFacts, ReadCoverage
+    from tyrex_pm.runtime.startup_controller import StartupController
+
+    facts = InspectionFacts(
+        identity=None,
+        coverage=ReadCoverage(complete=True, positions_complete=True, orders_complete=True,
+                              activity_complete=True),
+        committed_holds=frozenset({("0xc", "t")}),
+        committed_holds_block_entries=False,
+    )
+    controller = StartupController.__new__(StartupController)
+    controller.coordinator = type("C", (), {"states": {}})()
+    refreshed = StartupController._refresh_sessions(controller, facts)
+    assert refreshed.committed_holds_block_entries is False
+    assert refreshed.committed_holds == facts.committed_holds

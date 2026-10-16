@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Awaitable, Callable
@@ -179,33 +180,8 @@ class StartupController:
         for session in facts.sessions:
             current = self.coordinator.states.get(session.session_id or "")
             sessions.append(session if current is None else current)
-        return InspectionFacts(
-            identity=facts.identity,
-            coverage=facts.coverage,
-            sessions=tuple(sessions),
-            holdings=facts.holdings,
-            open_orders=facts.open_orders,
-            activities=facts.activities,
-            order_lookups=facts.order_lookups,
-            lifecycles=facts.lifecycles,
-            bound_wallet=facts.bound_wallet,
-            legacy_unbound=facts.legacy_unbound,
-            collateral=facts.collateral,
-            closing_holdings=facts.closing_holdings,
-            closing_open_orders=facts.closing_open_orders,
-            dust_abs_shares=facts.dust_abs_shares,
-            dust_max_notional=facts.dust_max_notional,
-            sell_size_increment=facts.sell_size_increment,
-            min_order_size=facts.min_order_size,
-            minimum_exit_price=facts.minimum_exit_price,
-            committed_holds=facts.committed_holds,
-            token_bids=facts.token_bids,
-            token_min_order_sizes=facts.token_min_order_sizes,
-            activity_mode=facts.activity_mode,
-            activity_pages=facts.activity_pages,
-            inspection_duration_ms=facts.inspection_duration_ms,
-            activity_ledger=facts.activity_ledger,
-        )
+        # replace() keeps every other fact, including ones added later.
+        return dataclasses.replace(facts, sessions=tuple(sessions))
 
     async def _revoke_reappeared(self, assessment: StartupAssessment) -> None:
         if _prerequisite_blocked(assessment):
