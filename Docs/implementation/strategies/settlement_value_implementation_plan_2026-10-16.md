@@ -1,6 +1,6 @@
 # settlement_value: implementation plan for retry, continuous operation, exits and re-entry
 
-Date: 16 October 2026. Revision 3: implementation status added (see [Implementation status](#implementation-status-16-october-2026)). The code lives in the isolated worktree `E:\polymarket\Tyrex_PM-live`, branch `feature/settlement-live-readiness` (not merged, not committed). **Nothing is enabled for real money.**
+Date: 16 October 2026. Revision 4: merged into `rest_project` after the v2 reference commit (tag `settlement-v2-reference`); the temporary worktree was removed. Research continues in notebook `05_staged_settlement_research_v3.ipynb`; notebook 04 is the completed v2 reference. **Nothing is enabled for real money.**
 
 Source: [next-steps proposal](settlement_value_next_steps_2026-10-15.md). This is the implementation checklist for that proposal; use the reader's map below for scope and the P0–P8 sections for detailed tasks. Companions: [research-to-live plan](research_to_live_plan.md), [operator runbook](settlement_value_operator_runbook.md).
 
@@ -126,8 +126,8 @@ These are development-window mechanics checks, not strategy evaluations. The sta
    - resting TP orders are not supported by the paper venue;
    - an uncertain entry outcome stops the continuous runner for operator review instead of auto-resolving;
    - after a restart inside a window the retry elapsed-time budget restarts (attempt/POST ceilings still hold).
-7. **Fresh evaluation data:** M1 (retry+hold) uses the S2 holdout. M2 (exits/re-entry) needs a new collection recorded after 2026-10-16 (see `var/research/reference/evaluation_reservations.json` in the worktree). The collector was not restarted by this work.
-8. **Merge:** the worktree branch must be reviewed and merged into the experiment checkout only between experiments. The changed `staged.CODE_TREES` and replay identity start new experiments, as intended.
+7. **Fresh evaluation data:** M1 (retry+hold) uses the frozen holdout (39 windows including the split extension). M2 (exits/re-entry) needs a new collection recorded after 2026-10-16 (see `var/research/reference/evaluation_reservations.json`). The collector was not restarted by this work.
+8. **v3 verification of the two frozen candidates** (notebook 05 section 2, about 50 minutes at 4 workers): run before trusting v3 numbers for them.
 
 ## Reader's map: the four objectives remain the same
 
@@ -570,3 +570,9 @@ Evaluation: the gain over the selected P6 policy after fees, compared window by 
 - Integrated the user's decisions (retry default 3 incl. first; no top-up; explicit hold vs managed-exit policy; bounded supervised trials allowed later without exits; automatic resolution tracking with manual redemption and capital caps; daily UTC limits with Paris-time reporting, persistent and explicit).
 - Replay semantics version `strategy_closed_loop_v3` with `replay_execution_contract_v1`; `staged.CODE_TREES` now also fingerprints `execution/` and `protection/`; v2 results are labelled as superseded by the explorer.
 - Status table, replay-result changes and remaining blockers added at the top. P1 and P8 are not done; nothing is qualified or enabled.
+
+## Revision 4 change record (16 October 2026)
+
+- v2 frozen: commit `4a10212` (tag `settlement-v2-reference`) holds notebook 04, the baseline selection, the two hold candidates and their paper/live run configs.
+- Live-readiness work merged (`a39a504`, fast-forward). The worktree and its copied recordings were removed; reference evidence now lives in `var/research/reference/`.
+- Notebook 05 and `research/strategy_lab/v3.py`: frozen candidates (identities equal to v2), run-config agreement check, verification experiment on the 94 frozen windows, v2-vs-v3 tables, optional feature runs (retry, managed exits + SL, re-entry) and shared-account replay, each behind its own switch. Batch runs accept a replay execution policy (protection) and summaries carry v3 counters.

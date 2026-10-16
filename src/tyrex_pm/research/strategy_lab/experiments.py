@@ -139,10 +139,14 @@ class Lab:
         scenario: str = "favorable",
         scenario_overrides: Mapping[str, Any] | None = None,
         save: bool = False,
+        execution_policy: Mapping[str, Any] | None = None,
     ) -> dict:
         params = merge(RESEARCH_BASE_PARAMETERS, parameters or {})
         config = settlement_value_config_from_parameters(params, file="notebook")
         window = self.window(market_id)
+        kwargs = {}
+        if execution_policy:
+            kwargs["execution_policy"] = replay_execution_policy(execution_policy)
         result = run_window(
             window,
             strategy_config=config,
@@ -150,12 +154,31 @@ class Lab:
             clock_observations=self.catalog.clock_observations_for(
                 window.range_start_ns, window.range_end_ns
             ),
+            **kwargs,
         )
         result["parameters"] = params
         result["decision_digest"] = decision_digest(result)
         if save:
             result["saved_to"] = str(write_result(result, RESULTS / self.collection))
         return result
+
+
+def replay_execution_policy(raw: Mapping[str, Any]):
+    """``ReplayExecutionPolicy`` from plain values (a ``protection`` mapping is parsed
+    with the live run-config parser, so replay and live read the same SL/TP block)."""
+    from decimal import Decimal
+
+    from tyrex_pm.protection.spec import protection_spec_from_mapping
+    from tyrex_pm.research.strategy_replay.run import ReplayExecutionPolicy
+
+    values = dict(raw)
+    if values.get("protection") is not None:
+        values["protection"] = protection_spec_from_mapping(dict(values["protection"]))
+    for key in ("fee_reserve_rate", "maximum_total_debit", "minimum_entry_depth_shares",
+                "minimum_exit_price", "sell_size_increment"):
+        if values.get(key) is not None:
+            values[key] = Decimal(str(values[key]))
+    return ReplayExecutionPolicy(**values)
 
 
 def grid(axes: Mapping[str, Iterable[Any]]) -> list[dict[str, Any]]:

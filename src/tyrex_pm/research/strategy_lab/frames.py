@@ -77,6 +77,17 @@ def summary(result: dict) -> dict[str, Any]:
         "ev_conservative": _f(econ["ev_conservative_at_decision"]),
         "ev_point": _f(econ["ev_point_at_decision"]),
         "realized_pnl": _f(econ["realized_pnl"]),
+        # v3 execution and lifecycle counters (absent in v2 bundles).
+        "entry_attempts": econ.get("entry_attempts"),
+        "entry_not_sent": econ.get("entry_not_sent"),
+        "entry_zero_fill": econ.get("entry_zero_fill"),
+        "entry_posts": econ.get("entry_posts"),
+        "exit_attempts": econ.get("exit_attempts"),
+        "filled_episodes": econ.get("filled_episodes"),
+        "sold_shares": _f(econ.get("sold_shares")),
+        "exit_proceeds_net": _f(econ.get("exit_proceeds_net")),
+        "final_net_shares": _f(econ.get("final_net_shares")),
+        "spend_amount": _f(econ.get("spend_amount")),
         "limitations": ",".join(result["engine"]["limitations"]),
         "digest": result.get("decision_digest"),
     }

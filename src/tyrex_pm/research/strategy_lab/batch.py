@@ -60,6 +60,8 @@ class RunSpec:
     scenario: str = "favorable"
     scenario_overrides: Mapping[str, Any] = field(default_factory=dict)
     tag: str = ""
+    # Replay execution policy (v3): e.g. a protection SL/TP block. Empty = defaults.
+    execution_policy: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def config_label(self) -> str:
@@ -128,6 +130,7 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
             parameters=spec.parameters,
             scenario=spec.scenario,
             scenario_overrides=dict(spec.scenario_overrides) or None,
+            execution_policy=dict(spec.execution_policy) or None,
         )
         row = summary(result)
         row.update(
