@@ -1,0 +1,25 @@
+# Explicit sensitivity scenario. These are not verified historical fee/latency estimates.
+schema_version: 1
+adapter: scripted_v1
+initial_cash: '100'
+feed_delay_ms: 0
+decision_delay_ms: 1
+order_delay_ms: 300
+cancel_delay_ms: 300
+quality_predicate: valid_books_at_actions
+maker_model: no_fill
+maker_queue_multiplier: '2'
+participation: '0.1'
+gap_policy: invalidate_path
+tie_policy: observations_before_actions
+seed: 0
+settlement_release_delay_ms: 60000
+fee_policy:
+  version: explicit_scenario_v1
+  rate: '0.07'
+  exponent: 1
+  quantum: '0.00001'
+  buy_fee_unit: shares
+  maker_rate: '0'
+  provenance: SCENARIO_ASSUMPTION_NOT_VERIFIED_HISTORICAL_FEES
+intents_file: replay_intents.example.json

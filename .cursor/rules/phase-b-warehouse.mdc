@@ -1,0 +1,15 @@
+---
+description: Phase B warehouse status so later edits do not reopen finished work or treat a short capture as qualification
+globs: src/tyrex_pm/data_warehouse/**/*.py,src/tyrex_pm/research/**/*.py,Docs/implementation/pm_data_warhouse/**/*.md,Docs/latest/data_warehouse.md,tests/**/data_warehouse/**/*.py,tests/**/research/**/*.py
+alwaysApply: false
+---
+
+# Phase B warehouse
+
+Before changing this module or calling it unfinished, read `Docs/implementation/pm_data_warhouse/completion_status.md` and `operator_validation.md`.
+
+The offline collector, reader, export, quality publication, and scripted replay are implemented. That includes the review fixes: one shared readiness predicate, export seeds kept for later book updates, payout labels by instrument identity, restart coverage closed at the last confirmed evidence, contradictory resolutions retained, and compaction streamed in bounded batches. Extend that behavior. Do not rebuild it as if it were absent.
+
+Qualification is still an operator record. Capture smoke on 1 Oct 2026 succeeded: `var/warehouse_phase_b_45_test`, collection `7af1f9df48ee46f5aa3e049342185af2`, 2,907,353 messages fsynced, five finished windows after warm-up (08:00–08:25 UTC) have both outcome books, and reference and Binance trades have no gap over 30 seconds. The quality worker fell behind (last publication about 17 minutes before stop), so those mid-run GAP reports are not the final window score. Still open: a finished quality/verify pass on that collection, a restart, a 24-hour soak, an attested rule and official threshold, and a benchmark of this writer. The earlier `var/warehouse_phase_b_quick` run is only a 5-minute connectivity sample. Semantic readiness stays `UNSUPPORTED` until `provider_policy.json` attests the rule, threshold, and fingerprint.
+
+Do not invent a BTC threshold, fee formula, terminal status, or payout unit. Do not import execution, runtime, or strategies. Do not print credential values or disable TLS verification.

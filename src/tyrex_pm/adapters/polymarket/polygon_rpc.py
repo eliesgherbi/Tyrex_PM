@@ -47,6 +47,9 @@ def payout_caller_from_env(env: Mapping[str, str] | None) -> Callable[..., Await
 class PolygonRpcReader:
     """Small bounded reader. One chain check, then ``eth_call`` at ``latest``."""
 
+    # Subclasses with a wider read-only surface override this set explicitly.
+    allowed_methods: frozenset[str] = _ALLOWED_METHODS
+
     def __init__(
         self,
         url: str,
@@ -89,7 +92,7 @@ class PolygonRpcReader:
         self._chain_ok = True
 
     async def _rpc(self, method: str, params: list[Any]) -> Any:
-        if method not in _ALLOWED_METHODS:
+        if method not in self.allowed_methods:
             raise PolygonRpcError("polygon_rpc_method")
         last = "polygon_rpc_exhausted"
         for attempt in range(self.attempts):

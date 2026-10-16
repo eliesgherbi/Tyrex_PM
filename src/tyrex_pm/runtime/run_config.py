@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
+from tyrex_pm.execution.settlement.governor import TrialLimits
 from tyrex_pm.protection.spec import (
     ProtectionSpec,
     ProtectionSpecError,
@@ -16,7 +17,11 @@ from tyrex_pm.protection.spec import (
 )
 from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.yaml_loading import load_yaml_mapping
-from tyrex_pm.strategies.registry import get_strategy_plugin, plugin_requires_protection
+from tyrex_pm.strategies.registry import (
+    get_strategy_plugin,
+    plugin_lifecycle_modes,
+    plugin_requires_protection,
+)
 
 
 class RunConfigError(ValueError):
@@ -98,6 +103,22 @@ class StartupRuntimeConfig:
     monitor_interval_s: float = 15
 
 
+LIFECYCLE_FLATTEN = "flatten_before_close"
+LIFECYCLE_HOLD = "hold_to_resolution"
+LIFECYCLE_MODES = frozenset({LIFECYCLE_FLATTEN, LIFECYCLE_HOLD})
+
+
+@dataclass(frozen=True)
+class SettlementRuntimeConfig:
+    """Hold-to-resolution profile: durable ledger, trial limits, operator redemption."""
+
+    ledger_path: Path
+    trial: TrialLimits
+    hold_commit_budget_s: float
+    redemption_wallet: str | None
+    redemption_mode: str = "operator"
+
+
 @dataclass(frozen=True)
 class TradingRunConfig:
     schema_version: int
@@ -112,6 +133,73 @@ class TradingRunConfig:
     report_directory: Path
     protection: ProtectionSpec | None
     startup: StartupRuntimeConfig = StartupRuntimeConfig()
+    lifecycle_mode: str = LIFECYCLE_FLATTEN
+    settlement: SettlementRuntimeConfig | None = None
+
+
+def _settlement_config(raw: Any, mode: str) -> SettlementRuntimeConfig | None:
+    if mode != LIFECYCLE_HOLD:
+        if raw is not None:
+            raise RunConfigError("settlement block requires lifecycle.mode: hold_to_resolution")
+        return None
+    if not isinstance(raw, dict):
+        raise RunConfigError("lifecycle.mode hold_to_resolution requires a settlement block")
+    _reject_unknown(
+        raw,
+        {"ledger_path", "trial", "hold_commit_budget_s", "redemption_wallet", "redemption_mode"},
+        "settlement",
+    )
+    trial_raw = dict(raw.get("trial") or {})
+    _reject_unknown(
+        trial_raw,
+        {
+            "max_debit_per_episode",
+            "max_episodes",
+            "max_unresolved_count",
+            "max_unresolved_cost",
+            "trial_loss_budget",
+        },
+        "settlement.trial",
+    )
+    for key in (
+        "max_debit_per_episode",
+        "max_episodes",
+        "max_unresolved_count",
+        "max_unresolved_cost",
+        "trial_loss_budget",
+    ):
+        if key not in trial_raw:
+            raise RunConfigError(f"settlement.trial.{key} is required (no default trial budget)")
+    try:
+        trial = TrialLimits(
+            max_debit_per_episode=_decimal(trial_raw["max_debit_per_episode"], "max_debit"),
+            max_episodes=int(trial_raw["max_episodes"]),
+            max_unresolved_count=int(trial_raw["max_unresolved_count"]),
+            max_unresolved_cost=_decimal(trial_raw["max_unresolved_cost"], "max_unresolved_cost"),
+            trial_loss_budget=_decimal(trial_raw["trial_loss_budget"], "trial_loss_budget"),
+        )
+    except ValueError as exc:
+        raise RunConfigError(f"settlement.trial: {exc}") from exc
+    mode_raw = str(raw.get("redemption_mode", "operator"))
+    if mode_raw != "operator":
+        raise RunConfigError(
+            "settlement.redemption_mode supports only 'operator' (unattended deferred)"
+        )
+    budget = float(raw.get("hold_commit_budget_s", 10.0))
+    if budget <= 0:
+        raise RunConfigError("settlement.hold_commit_budget_s must be positive")
+    wallet = raw.get("redemption_wallet")
+    if wallet is not None and not (
+        isinstance(wallet, str) and wallet.startswith("0x") and len(wallet) == 42
+    ):
+        raise RunConfigError("settlement.redemption_wallet must be a 0x-prefixed address")
+    return SettlementRuntimeConfig(
+        ledger_path=Path(str(raw.get("ledger_path", "var/runtime_state/settlement/ledger.jsonl"))),
+        trial=trial,
+        hold_commit_budget_s=budget,
+        redemption_wallet=wallet,
+        redemption_mode=mode_raw,
+    )
 
 
 def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
@@ -120,6 +208,11 @@ def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
 
 
 def host_safety_floor_s(config: TradingRunConfig) -> float:
+    settlement = getattr(config, "settlement", None)
+    if getattr(config, "lifecycle_mode", LIFECYCLE_FLATTEN) == LIFECYCLE_HOLD and settlement:
+        # A filled position is committed to resolution instead of sold before close;
+        # entry needs time for fill evidence plus the hold commitment.
+        return config.lifecycle.evidence_timeout_s + settlement.hold_commit_budget_s
     return (
         config.lifecycle.mandatory_exit_before_end_s
         + config.lifecycle.evidence_timeout_s
@@ -171,6 +264,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "report_directory",
             "protection",
             "startup",
+            "settlement",
         },
         "top-level",
     )
@@ -335,9 +429,20 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "dust_max_notional",
             "prepare_budget_ms",
             "refresh_wait_budget_ms",
+            "mode",
         },
         "lifecycle",
     )
+    lifecycle_mode = str(life_raw.pop("mode", LIFECYCLE_FLATTEN))
+    if lifecycle_mode not in LIFECYCLE_MODES:
+        raise RunConfigError(f"lifecycle.mode must be one of {sorted(LIFECYCLE_MODES)}")
+    supported_modes = plugin_lifecycle_modes(plugin, strategy)
+    if lifecycle_mode not in supported_modes:
+        raise RunConfigError(
+            f"strategy {strategy_kind} supports lifecycle.mode {sorted(supported_modes)}, "
+            f"not {lifecycle_mode!r}"
+        )
+    settlement = _settlement_config(raw.get("settlement"), lifecycle_mode)
     for required in (
         "sell_size_increment",
         "dust_abs_shares",
@@ -412,7 +517,16 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         report_directory=Path(raw.get("report_directory", "var/runs/z_gap")),
         protection=protection,
         startup=startup,
+        lifecycle_mode=lifecycle_mode,
+        settlement=settlement,
     )
+    if (
+        settlement is not None
+        and settlement.trial.max_debit_per_episode > risk.maximum_total_debit
+    ):
+        raise RunConfigError(
+            "settlement.trial.max_debit_per_episode exceeds risk.maximum_total_debit"
+        )
     tau_min_s, tau_max_s = entry_tau_bounds(config)
     floor_s = host_safety_floor_s(config)
     if tau_min_s < floor_s:

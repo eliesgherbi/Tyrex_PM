@@ -156,6 +156,23 @@ On a 300 s `btc_updown_5m` window with `tau_max_s=290`, hard cutoff 105, and a 1
 
 A stricter plugin `tau_min_s` (for example 120) raises the hard cutoff at consume and the BUY gate. The strategy window is that hard cutoff plus `entry_dispatch_margin_s`.
 
+### Hold-to-resolution keys
+
+| Key | Role | Module |
+|-----|------|--------|
+| `lifecycle.mode` | `flatten_before_close` (default, legacy) or `hold_to_resolution`. The plugin must declare the mode (`StrategyPlugin.lifecycle_modes`). | `runtime/run_config.py` |
+| `settlement.ledger_path` | Durable cross-window settlement ledger (JSONL, fsynced, event-sourced). | `execution/settlement/ledger.py` |
+| `settlement.hold_commit_budget_s` | Replaces the mandatory-exit term of the host BUY floor in hold mode: hard cutoff = `max(tau_min_s, evidence_timeout_s + hold_commit_budget_s)`. | `run_config.py` |
+| `settlement.redemption_mode` | `operator` only; unattended redemption is deferred. | `run_config.py` |
+| `settlement.redemption_wallet` | Public funder/proxy address whose `PayoutRedemption` logs prove cash. | `execution/settlement/chain.py` |
+| `settlement.trial.max_debit_per_episode` | ≤ 5 USDC and ≤ `risk.maximum_total_debit`. | `execution/settlement/governor.py` |
+| `settlement.trial.max_episodes` | Attempted episodes per trial ledger. | `governor.py` |
+| `settlement.trial.max_unresolved_count` | Pending plus unresolved episodes allowed at once. | `governor.py` |
+| `settlement.trial.max_unresolved_cost` | Spent cost basis plus reservations plus the proposed debit. | `governor.py` |
+| `settlement.trial.trial_loss_budget` | Realized losses + worst-case open loss (holdings, pending, dispatch-unknown) + proposed debit. | `governor.py` |
+
+All `settlement.trial` keys are required: there is no default trial budget. In hold mode, `mandatory_exit_before_end_s` and `manual_deadline_before_end_s` still apply to a position whose hold is **not** committed.
+
 ## ask70 parameters
 
 `strategy.kind: ask70`. Six core fields are required. Maker fields are optional. After fill, ask70 HOLDs and emits **no exits** — SL/TP/trail must come from `protection:`.

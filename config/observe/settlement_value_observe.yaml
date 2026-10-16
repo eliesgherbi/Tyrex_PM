@@ -1,0 +1,34 @@
+# Signal-only live observation of settlement_value (S4). NO ORDERS: recommendations are
+# recorded, never planned, signed or submitted. Public feeds only; no credentials used.
+# Run (operator action, connects to public Polymarket/Binance/RTDS feeds):
+#   tyrex-pm observe --config config/observe/settlement_value_observe.yaml --connect-public-feeds
+schema_version: 1
+mode: observe
+run_name: settlement_value_observe
+strategy:
+  kind: settlement_value
+  parameters:
+    # Live K is sealed from RTDS without SSR attestation here -> PROVISIONAL; accepted for
+    # observation only, so signals can be compared with offline replays.
+    quality:
+      accepted_k_qualities: [CONFIRMED_CANONICAL, PROVISIONAL]
+    model:
+      backend: endpoint_diffusion   # twap_proxy_diffusion is recorded alongside every time
+    entry:
+      tau_min_s: 30
+      tau_max_s: 240
+      min_edge_per_share: "0.02"
+      target_mode: cap_only
+    sizing:
+      max_debit_usdc: "5"
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+observation:
+  max_windows: 12          # stop after this many rollovers (~1 hour)
+  max_duration_s: 3900
+  evaluation_interval_s: 1.0
+  basis_ewma_half_life_s: 30.0
+output:
+  directory: var/observation

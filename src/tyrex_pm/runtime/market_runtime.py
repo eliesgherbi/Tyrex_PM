@@ -199,6 +199,7 @@ class MarketSessionRuntime:
         require_ssr_price_match: bool = True,
         target_notional: Decimal | None = None,
         maximum_trade_age_ms: float | None = None,
+        freshness_clock: Clock | None = None,
     ) -> "MarketSessionRuntime":
         clock = clock or FakeClock(_wall=datetime(2026, 7, 20, 21, 15, 0, tzinfo=timezone.utc))
         if time_authority is not None:
@@ -245,6 +246,8 @@ class MarketSessionRuntime:
                 max_trade_age_ms=(
                     2000.0 if maximum_trade_age_ms is None else float(maximum_trade_age_ms)
                 ),
+                # None keeps host monotonic freshness (live); replay passes virtual time.
+                clock=freshness_clock,
             ),
         )
 

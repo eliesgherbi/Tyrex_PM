@@ -168,6 +168,9 @@ class InspectionFacts:
     activity_pages: int = 0
     inspection_duration_ms: float | None = None
     activity_ledger: Mapping[str, Any] | None = None
+    # (condition_id, token_id) holdings committed to resolution in the settlement
+    # ledger: intentional settlement exposure, never a position to close.
+    committed_holds: frozenset[tuple[str, str]] = frozenset()
 
 
 def evidence_disposition(facts: InspectionFacts) -> str:
@@ -798,6 +801,20 @@ def _classify_session(
                 severity=IssueSeverity.ACTION,
                 code="OWNED_LIVE_ORDER",
                 summary="A bot order is still live. Cancelling it needs explicit approval.",
+                session_id=session.session_id,
+            )
+        )
+        return issues, proposals
+    if obligation > 0 and (identity.market_id, identity.token_id) in facts.committed_holds:
+        issues.append(
+            StartupIssue(
+                issue_id=f"committed-hold:{session_id}",
+                severity=IssueSeverity.BLOCKED,
+                code="COMMITTED_HOLD_AWAITING_RESOLUTION",
+                summary=(
+                    "This holding is committed to resolution in the settlement ledger. "
+                    "It is not offered for closing; run `tyrex-pm settlement reconcile`."
+                ),
                 session_id=session.session_id,
             )
         )

@@ -17,6 +17,7 @@ from tyrex_pm.core.book_events import (
     BookSnapshotReceived,
     TickSizeChanged,
 )
+from tyrex_pm.core.clock import Clock
 from tyrex_pm.core.events import BookUpdated, EventSource
 from tyrex_pm.core.ids import InstrumentId, new_event_id
 from tyrex_pm.core.snapshots import BookLevel, BookSnapshot
@@ -75,7 +76,14 @@ class BookState:
 class MarketStateStore:
     """Owns reconstructed books; applies snapshot/delta/tick-size events."""
 
-    def __init__(self, dispatcher: EventDispatcher | None = None) -> None:
+    def __init__(
+        self,
+        dispatcher: EventDispatcher | None = None,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
+        # None keeps host time; replay injects a virtual clock for freshness/staleness.
+        self._clock = clock
         self._books: dict[InstrumentId, BookState] = {}
         self._dispatcher = dispatcher
         self._lock = threading.RLock()
@@ -84,6 +92,12 @@ class MarketStateStore:
         self._min_connection_epoch: int = 0
         self._stale_after_ms: int = 30_000
         self._last_desync_log_mono_ns: dict[str, int] = {}
+
+    def _mono_ns(self) -> int:
+        return time.monotonic_ns() if self._clock is None else self._clock.monotonic_ns()
+
+    def _now_utc(self) -> datetime:
+        return datetime.now(timezone.utc) if self._clock is None else self._clock.now_utc()
 
     def attach(self, dispatcher: EventDispatcher) -> None:
         self._dispatcher = dispatcher
@@ -114,7 +128,7 @@ class MarketStateStore:
 
         Validates the snapshot (including non-crossed top) before restoring READY.
         """
-        received = ts_received or datetime.now(timezone.utc)
+        received = ts_received or self._now_utc()
         try:
             # Re-construct to enforce BookSnapshot invariants (crossed book raises).
             validated = BookSnapshot(
@@ -246,7 +260,7 @@ class MarketStateStore:
             counters.snapshots_decoded += 1
             counters.snapshots_matched += 1
             prev = self._books.get(event.book.instrument_id, BookState())
-            mono = time.monotonic_ns()
+            mono = self._mono_ns()
             now = event.ts_received
             state = BookState(
                 book=event.book,
@@ -308,7 +322,7 @@ class MarketStateStore:
                 # Newer healthy WS state won the race against late REST.
                 counters.rest_failures += 1
                 return False
-            mono = time.monotonic_ns()
+            mono = self._mono_ns()
             health = SyncHealth.READY if mark_ready else SyncHealth.SYNCING
             state = BookState(
                 book=book,
@@ -419,7 +433,7 @@ class MarketStateStore:
                 for key in before:
                     if key not in after:
                         counters.levels_deleted += 1
-                mono = time.monotonic_ns()
+                mono = self._mono_ns()
                 new_state = BookState(
                     book=book,
                     last_ts_event=event.ts_event,
@@ -484,7 +498,7 @@ class MarketStateStore:
             self._books[instrument_id] = state
 
     def mark_stale_if_aged(self, *, now_mono_ns: int | None = None) -> None:
-        mono = time.monotonic_ns() if now_mono_ns is None else now_mono_ns
+        mono = self._mono_ns() if now_mono_ns is None else now_mono_ns
         threshold_ns = self._stale_after_ms * 1_000_000
         with self._lock:
             for iid, state in list(self._books.items()):
@@ -507,7 +521,7 @@ class MarketStateStore:
     ) -> BookView:
         """Atomic immutable two-leg view under the store lock."""
         self.mark_stale_if_aged()
-        at = captured_at or datetime.now(timezone.utc)
+        at = captured_at or self._now_utc()
         with self._lock:
             up = self._leg_snapshot(
                 binding.up_instrument_id,
@@ -544,7 +558,7 @@ class MarketStateStore:
         state = self._books.get(instrument_id, BookState())
         age_ms = None
         if state.last_apply_mono_ns is not None:
-            age_ms = int((time.monotonic_ns() - state.last_apply_mono_ns) / 1e6)
+            age_ms = int((self._mono_ns() - state.last_apply_mono_ns) / 1e6)
         elif state.last_apply_ts is not None:
             age_ms = int((now - state.last_apply_ts).total_seconds() * 1000)
         return LegBookSnapshot(

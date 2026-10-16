@@ -23,6 +23,9 @@ class StrategyPlugin:
     requires_protection: bool | Callable[[Any], bool] = False
     validate_run_config: Callable[[Any], None] | None = None
     indicator_specs: Callable[[Any], tuple[IndicatorSpec, ...]] | None = None
+    # Run-config lifecycle modes the plugin's behavior is valid under. None means the
+    # legacy host lifecycle only (flatten before close).
+    lifecycle_modes: Callable[[Any], frozenset[str]] | None = None
 
 
 def register_strategy(plugin: StrategyPlugin) -> None:
@@ -39,10 +42,12 @@ def ensure_strategies_registered() -> None:
         return
     from tyrex_pm.strategies.ask70.plugin import ASK70_PLUGIN
     from tyrex_pm.strategies.feature_probe.plugin import FEATURE_PROBE_PLUGIN
+    from tyrex_pm.strategies.settlement_value.plugin import SETTLEMENT_VALUE_PLUGIN
     from tyrex_pm.strategies.z_gap.plugin import ZGAP_PLUGIN
 
     register_strategy(ASK70_PLUGIN)
     register_strategy(FEATURE_PROBE_PLUGIN)
+    register_strategy(SETTLEMENT_VALUE_PLUGIN)
     register_strategy(ZGAP_PLUGIN)
 
 
@@ -65,6 +70,12 @@ def plugin_indicator_specs(plugin: StrategyPlugin, config: Any) -> tuple[Indicat
     if plugin.indicator_specs is None:
         return plugin.input_contract.indicators
     return plugin.indicator_specs(config)
+
+
+def plugin_lifecycle_modes(plugin: StrategyPlugin, config: Any) -> frozenset[str]:
+    if plugin.lifecycle_modes is None:
+        return frozenset({"flatten_before_close"})
+    return frozenset(plugin.lifecycle_modes(config))
 
 
 def plugin_requires_protection(plugin: StrategyPlugin, config: Any) -> bool:

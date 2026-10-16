@@ -85,7 +85,12 @@ def test_plugins_expose_reference_contracts() -> None:
     assert feature_probe.input_contract is FEATURE_PROBE_INPUT_CONTRACT
     assert ask70.requires_protection is True
     assert z_gap.requires_protection is False
-    assert registered_strategy_kinds() == ("ask70", "feature_probe", "z_gap")
+    assert registered_strategy_kinds() == (
+        "ask70",
+        "feature_probe",
+        "settlement_value",
+        "z_gap",
+    )
 
 
 def test_z_gap_plugin_indicator_specs_carry_yaml_volatility() -> None:

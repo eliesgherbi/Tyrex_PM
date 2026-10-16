@@ -198,6 +198,7 @@ class StartupController:
             sell_size_increment=facts.sell_size_increment,
             min_order_size=facts.min_order_size,
             minimum_exit_price=facts.minimum_exit_price,
+            committed_holds=facts.committed_holds,
             token_bids=facts.token_bids,
             token_min_order_sizes=facts.token_min_order_sizes,
             activity_mode=facts.activity_mode,

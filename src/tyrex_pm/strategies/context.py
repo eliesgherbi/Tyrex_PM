@@ -46,6 +46,11 @@ class ReferenceFacts:
     chainlink_raw: Decimal | None = None
     chainlink_fresh: bool = False
     sealed_k: Decimal | None = None
+    # Latest raw trading-reference print (Binance spot) used by the aligned estimate.
+    # Optional; None when the host has no trading reference for this contract.
+    trading_reference_raw: Decimal | None = None
+    # Provider source time of ``chainlink_raw`` (the latest accepted settlement report).
+    chainlink_source_ts: datetime | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

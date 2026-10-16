@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "live_payloads": false,
+  "qualification": "NONE: synthetic protocol regression examples, not provider attestation",
+  "files": [
+    {
+      "path": "protocol_examples.json",
+      "sha256": "a0daec0aca5e18f2a030fab712ba726c699a8028b7a786474841646367799cc4",
+      "classification": "synthetic",
+      "cases": [
+        "gamma_market",
+        "gamma_keyset",
+        "book_1",
+        "book_2",
+        "book_changes",
+        "trade",
+        "quote",
+        "tick_change",
+        "clob_time",
+        "reference_live",
+        "reference_history",
+        "binance_trade",
+        "binance_snapshot",
+        "binance_delta",
+        "resolution"
+      ]
+    }
+  ],
+  "reference_documents": [
+    "https://docs.polymarket.com/api-reference/wss/market",
+    "https://docs.polymarket.com/api-reference/live-data/overview",
+    "https://docs.polymarket.com/api-reference/markets/list-markets-keyset-pagination",
+    "https://docs.polymarket.com/api-reference/markets/get-resolution-state",
+    "https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md"
+  ],
+  "unverified": [
+    "official threshold",
+    "payoff functional",
+    "payout units and terminal enums",
+    "live timestamp units",
+    "chain id",
+    "fees and order constraints"
+  ]
+}

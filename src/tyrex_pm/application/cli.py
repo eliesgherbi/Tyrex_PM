@@ -63,6 +63,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rejected: eval never submits orders",
     )
     ev.add_argument("--out", type=Path, default=None, help="Optional JSON output path")
+    obs = commands.add_parser(
+        "observe", help="Signal-only live observation over successive windows (no orders)"
+    )
+    obs.add_argument("--config", type=Path, required=True, help="Observation YAML (mode: observe)")
+    obs.add_argument("--out-dir", type=Path, default=None)
+    obs.add_argument(
+        "--validate-config", action="store_true", help="Validate and exit without network access"
+    )
+    obs.add_argument(
+        "--connect-public-feeds",
+        action="store_true",
+        help="Required to start: connects to public market-data feeds (never submits orders)",
+    )
+    obs.add_argument("--live", action="store_true", help="Rejected: observe never submits orders")
+    from tyrex_pm.application.settlement_cli import add_parser as add_settlement_parser
+
+    add_settlement_parser(commands)
     return parser
 
 
@@ -223,6 +240,42 @@ def _eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def _observe(args: argparse.Namespace) -> int:
+    if args.live:
+        print("observe refuses --live; it never plans, signs or submits orders.", file=sys.stderr)
+        return 2
+    from tyrex_pm.runtime.observation import (
+        ObservationConfigError,
+        load_observation_config,
+        run_observation_sync,
+    )
+
+    try:
+        config = load_observation_config(args.config)
+    except (ObservationConfigError, OSError, ValueError) as exc:
+        print(f"observe config error: {exc}", file=sys.stderr)
+        return 2
+    if args.validate_config:
+        print(
+            f"observe config ok strategy={config.strategy_kind} run_name={config.run_name} "
+            f"max_windows={config.max_windows}"
+        )
+        return 0
+    if not args.connect_public_feeds:
+        print(
+            "observe connects to public feeds; re-run with --connect-public-feeds to start.",
+            file=sys.stderr,
+        )
+        return 2
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = args.out_dir or config.output_directory / f"{config.run_name}_{stamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = run_observation_sync(config, out_dir=out_dir)
+    print(json.dumps({k: summary[k] for k in ("evaluations", "recommendations", "rollovers")}))
+    print(f"records: {out_dir}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -233,6 +286,12 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     if args.command == "eval":
         return _eval(args)
+    if args.command == "observe":
+        return _observe(args)
+    if args.command == "settlement":
+        from tyrex_pm.application.settlement_cli import run as run_settlement
+
+        return run_settlement(args)
     parser.print_help()
     return 0
 

@@ -69,6 +69,17 @@ class FakeClock:
     def set_utc(self, value: datetime) -> None:
         self._wall = require_utc(value, field_name="FakeClock.set_utc")
 
+    def set_monotonic_ns(self, value: int) -> None:
+        if value < self._mono_ns:
+            raise ValueError("FakeClock monotonic time cannot move backwards")
+        self._mono_ns = int(value)
+
+    def advance_to_epoch_ns(self, epoch_ns: int) -> None:
+        """Virtual replay time: wall and monotonic both follow recorded nanoseconds."""
+        self.set_utc(datetime.fromtimestamp(epoch_ns // 1_000_000_000, tz=timezone.utc)
+                     + timedelta(microseconds=(epoch_ns % 1_000_000_000) // 1_000))
+        self.set_monotonic_ns(epoch_ns)
+
     def advance(self, *, wall: timedelta | None = None, mono_ns: int = 0) -> None:
         if wall is not None:
             self._wall = self._wall + wall

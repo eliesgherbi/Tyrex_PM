@@ -91,6 +91,7 @@ from tyrex_pm.runtime.run_config import (
     max_clock_uncertainty_ms,
     strategy_entry_cutoff_s,
 )
+from tyrex_pm.runtime.settlement_hooks import SettlementHooks
 from tyrex_pm.strategies.context import (
     DecisionContext,
     ReferenceFacts,
@@ -185,6 +186,15 @@ class TradingRunResult:
     state: ExecutionSessionState | None
 
 
+def _hold_committed(runtime: Any) -> bool:
+    """True only for a hold-profile run whose active window's holding is committed."""
+    hooks = getattr(runtime, "settlement_hooks", None)
+    session = getattr(runtime, "active_market", None)
+    if hooks is None or session is None:
+        return False
+    return hooks.is_committed(session.window_id)
+
+
 @dataclass
 class TradingRuntime:
     config: TradingRunConfig
@@ -243,6 +253,9 @@ class TradingRuntime:
     decision_reader: Any = None
     _startup_wallet: str | None = None
     _last_inspection_publication: str = "discarded"
+    # Present only for lifecycle.mode: hold_to_resolution (see runtime/settlement_hooks.py).
+    settlement_hooks: Any | None = None
+    _market_runtime_ref: Any = None
 
     @classmethod
     async def create(
@@ -459,6 +472,7 @@ class TradingRuntime:
             ),
         )
         holder["runtime"] = result
+        result.settlement_hooks = SettlementHooks.from_config(config)
         active_gateway.client_guard = result.account_state_authority
         active_gateway.fill_context = result.lifecycle.fill_context
         final_gate.entry_cutoff_s = effective_entry_cutoff_s(config)
@@ -719,6 +733,10 @@ class TradingRuntime:
             self.capabilities.entry_window_open = False
             self.capabilities.set_blocker("STOP_REQUESTED", reason)
             await self._stop_intent_dispatcher(cancel_inflight=False)
+            if _hold_committed(self):
+                await self._cancel_for_hold()
+                self.run_recorder.record("SHUTDOWN_HOLD_PRESERVED", {"reason": reason})
+                return
             await self.lifecycle.drain_open_session(
                 reason,
                 min_order_size=self._held_min_order_size(),
@@ -971,6 +989,60 @@ class TradingRuntime:
             else:
                 self.stop_requested = bool(reconciled is not None and reconciled.terminal)
 
+    async def _cancel_for_hold(self) -> Any:
+        """Cancel owned resting orders and return the reconciled state (no sells)."""
+        await self.lifecycle._cancel_open_orders(reason="hold_to_resolution")
+        return await self.lifecycle.reconcile()
+
+    def _strategy_fee_curve(self) -> Any:
+        runtime = self._market_runtime_ref
+        if runtime is None or self.active_market is None:
+            return None
+        driver = runtime._strategy_by_window.get(self.active_market.window_id) or runtime.driver
+        return getattr(driver, "fee_curve", None)
+
+    async def _settlement_before_entry(self, intent: Any, token_id: str, instrument: Any) -> bool:
+        """Hold profile gate. Returns True when the entry is blocked (and recorded)."""
+        assert self.settlement_hooks is not None and self.active_market is not None
+        session = self.active_market
+        market = session.market
+        binding = getattr(session, "binding", None)
+        outcome_index = None
+        for leg in () if binding is None else binding.outcomes.legs:
+            if leg.token_id.value == token_id:
+                outcome_index = leg.outcome_index
+        if outcome_index is None:
+            check_reasons: tuple[str, ...] = ("OUTCOME_INDEX_UNKNOWN",)
+            evidence: dict[str, Any] = {}
+        else:
+            check = await self.settlement_hooks.before_entry(
+                window_id=session.window_id,
+                window_slug=session.window_id,
+                market_id=market.market_id.value,
+                condition_id=market.condition_id,
+                token_id=token_id,
+                outcome_index=outcome_index,
+                target_notional=intent.target_notional,
+                tick_size=market.tick_size,
+                min_order_size=market.min_order_size,
+                strategy_fee_curve=self._strategy_fee_curve(),
+            )
+            if check.allowed:
+                self.run_recorder.record("SETTLEMENT_EPISODE_RESERVED", check.evidence)
+                return False
+            check_reasons, evidence = check.reasons, check.evidence
+        self.run_recorder.record(
+            "INTENT_BLOCKED",
+            {
+                "intent_id": intent.intent_id.value,
+                "intent_type": type(intent).__name__,
+                "reason": "SETTLEMENT_ENTRY_BLOCKED",
+                "settlement_reasons": list(check_reasons),
+                **evidence,
+            },
+        )
+        return True
+
     def _position_cost(self, state: ExecutionSessionState | None) -> Decimal:
         if state is None:
             return Decimal("0")
@@ -1009,6 +1081,7 @@ class TradingRuntime:
             )
 
     def on_evaluation(self, market_runtime: ZGapMarketRuntime) -> list[dict[str, Any]]:
+        self._market_runtime_ref = market_runtime
         ready = market_runtime.prepare_aligned_eval()
         if not ready.ok or ready.snapshot is None or ready.binding is None:
             self.capabilities.model_ready = False
@@ -1044,6 +1117,8 @@ class TradingRuntime:
                 chainlink_raw=None if ready.dyn is None else ready.dyn.chainlink_raw,
                 chainlink_fresh=ready.dyn is not None and ready.dyn.chainlink_raw is not None,
                 sealed_k=None if ready.sealed is None else ready.sealed.ptb_k,
+                trading_reference_raw=ready.binance_raw,
+                chainlink_source_ts=None if ready.dyn is None else ready.dyn.chainlink_source_ts,
             ),
         )
         graph = getattr(market_runtime, "indicator_graph", None)
@@ -1421,6 +1496,10 @@ class TradingRuntime:
                         },
                     )
                     return
+                if self.settlement_hooks is not None:
+                    blocked = await self._settlement_before_entry(intent, token_id, instrument)
+                    if blocked:
+                        return
                 baseline = account_state.token(token_id)
                 self.account_state = account_state
                 self.selected_token_id = token_id
@@ -1462,6 +1541,13 @@ class TradingRuntime:
                         },
                     )
                     state = await self.lifecycle.reconcile()
+                if self.settlement_hooks is not None and self.active_market is not None:
+                    outcome = self.settlement_hooks.after_entry(
+                        window_id=self.active_market.window_id,
+                        state=state,
+                        cost_basis=self._position_cost(state),
+                    )
+                    self.run_recorder.record("SETTLEMENT_ENTRY_OUTCOME", {"outcome": outcome})
                 if state is not None:
                     self.capabilities.selected_token_sellable = state.sellable_shares > 0
                     if intent.liquidity_role is LiquidityRole.MAKER and state.working_maker_entry:
@@ -1522,6 +1608,13 @@ class TradingRuntime:
                 if state.terminal:
                     self.stop_requested = True
             elif isinstance(intent, HoldToResolutionIntent):
+                committed, detail = (False, "LIFECYCLE_NOT_HOLD_TO_RESOLUTION")
+                if self.settlement_hooks is not None:
+                    committed, detail = await self.settlement_hooks.commit_hold(
+                        window_id=intent.window_id,
+                        state=self.lifecycle.state,
+                        cancel_conflicting=self._cancel_for_hold,
+                    )
                 self.run_recorder.record(
                     "HOLD_TO_RESOLUTION",
                     {
@@ -1530,8 +1623,14 @@ class TradingRuntime:
                         "market_id": intent.market_id.value,
                         "instrument_id": intent.instrument_id.value,
                         "window_id": intent.window_id,
+                        "committed": committed,
+                        "detail": detail,
                     },
                 )
+                if committed:
+                    # The single episode is complete for this process; the holding now
+                    # waits for resolution under `tyrex-pm settlement`.
+                    self.stop_requested = True
             else:
                 raise TypeError(f"unsupported strategy intent: {type(intent).__name__}")
         except Exception as exc:  # noqa: BLE001 - persisted report owns run failure
@@ -1562,6 +1661,10 @@ class TradingRuntime:
             )
             state = self.lifecycle.state
             remaining = float("-inf") if tau is None else tau
+            if _hold_committed(self):
+                # Committed to resolution: never sold before close by the host.
+                self._refresh_order_metadata_capability()
+                return
             if (
                 state is not None
                 and state.has_exposure
@@ -1810,6 +1913,8 @@ class TradingRuntime:
                     chain_id=137, environment="production", wallet="unspecified"
                 ),
             )
+        if self.settlement_hooks is not None:
+            facts = replace(facts, committed_holds=self.settlement_hooks.committed_holds())
         self._startup_wallet = None if facts.identity is None else facts.identity.wallet
         controller = StartupController(
             coordinator=self.coordinator,

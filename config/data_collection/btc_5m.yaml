@@ -1,0 +1,20 @@
+schema_version: 1
+profile_id: btc-5m
+profile_version: 1
+family: recurring_price_window
+selector:
+  venue: polymarket
+  asset: BTC
+  duration_s: 300
+  slug_pattern: '^btc-updown-5m-[0-9]+$'
+reference:
+  required: true
+  supported_feed: chainlink_btcusd_twap_60s
+  credentials_env_prefix: TYREX_DATA_PM
+external:
+  binance_spot:
+    required: true
+    symbol: BTCUSDT
+    trades: individual
+    depth: diff_100ms
+    bootstrap_levels: 5000

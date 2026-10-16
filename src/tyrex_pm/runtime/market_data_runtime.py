@@ -30,11 +30,9 @@ from tyrex_pm.core.clock import SystemClock
 from tyrex_pm.core.events import ReferencePriceUpdated, SettlementReferenceUpdated
 from tyrex_pm.core.snapshots import BookSnapshot
 from tyrex_pm.core.time_authority import SnapshotTimeAuthority
-from tyrex_pm.domain.polymarket.boundary_candidates import BoundaryTickView
 from tyrex_pm.domain.polymarket.ptb_attestation import AttestationResult
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.facts import ids as F
-from tyrex_pm.indicators.causal_pairing import PriceTickView, TradingReferenceIdentity
 from tyrex_pm.market_data.binding_record import (
     BindingLifecycleRole,
     binding_record_from_discovery,
@@ -42,6 +40,10 @@ from tyrex_pm.market_data.binding_record import (
 from tyrex_pm.market_data.book_feed import BookFeedSupervisor
 from tyrex_pm.market_data.book_store import MarketStateStore
 from tyrex_pm.runtime.composition import starts_adapter
+from tyrex_pm.runtime.market_event_router import (
+    route_settlement_reference,
+    route_trading_reference,
+)
 from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.market_runtime import (
     MarketSessionRuntime,
@@ -591,46 +593,15 @@ async def run_market_data_runtime(
 
     def on_cl(e: SettlementReferenceUpdated) -> None:
         counts["chainlink"] += 1
-        meta = e.ingress
-        tick = BoundaryTickView(
-            value=e.settlement.price,
-            source_ts=e.ts_event,
-            receive_wall_raw_utc=e.ts_received,
-            receive_wall_corrected_utc=(None if meta is None else meta.receive_wall_corrected_utc),
-            receive_monotonic_ns=0 if meta is None else meta.receive_monotonic_ns,
-            ingress=meta,
-            raw_fingerprint=None if meta is None else meta.raw_fingerprint,
-        )
-        for sess in (runtime.active, runtime.prepared_next):
-            if sess is None:
-                continue
-            runtime.ingest_chainlink(
-                window_id=sess.window_id,
-                market_id=sess.market_id,
-                tick=tick,
-            )
+        for window_id in route_settlement_reference(runtime, e):
             if contract.includes(F.PTB_SEALED):
-                _try_seal(sess.window_id)
+                _try_seal(window_id)
         _maybe_evaluate(F.CHAINLINK_TWAP)
 
     def on_bn(e: ReferencePriceUpdated) -> None:
-        if e.source.value != "binance":
+        if not route_trading_reference(runtime, e):
             return
         counts["binance"] += 1
-        meta = e.ingress
-        runtime.ingest_binance(
-            PriceTickView(
-                value=e.reference.price,
-                source_ts=e.ts_event,
-                receive_wall_raw_utc=e.ts_received,
-                receive_wall_corrected_utc=(
-                    None if meta is None else meta.receive_wall_corrected_utc
-                ),
-                receive_monotonic_ns=0 if meta is None else meta.receive_monotonic_ns,
-                identity=TradingReferenceIdentity.BINANCE_SPOT,
-                ingress=meta,
-            )
-        )
         _maybe_evaluate(F.BINANCE_SPOT_TRADES)
 
     def on_book_snap(e: BookSnapshotReceived) -> None:
@@ -849,7 +820,7 @@ async def run_market_data_runtime(
                             )
                         # Open / warm next prepared binding (new feed).
                         try:
-                            nxt = await discovery.prepare_next_btc_5m()
+                            nxt = await family.prepare_next(discovery)
                             if (
                                 runtime.prepared_next is None
                                 or runtime.prepared_next.window_id != nxt.window_slug

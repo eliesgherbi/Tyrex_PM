@@ -1,0 +1,311 @@
+[
+  {
+    "name": "gamma_market",
+    "provenance": "synthetic",
+    "source": "gamma",
+    "payload": {
+      "id": "fictional",
+      "conditionId": "fixture",
+      "slug": "btc-updown-5m-1780000200",
+      "outcomes": [
+        "Down",
+        "Up"
+      ],
+      "clobTokenIds": [
+        "2",
+        "1"
+      ],
+      "description": "Fictional BTC contract: no verified official threshold."
+    },
+    "expected_datasets": [
+      "markets",
+      "instruments",
+      "metadata_versions"
+    ]
+  },
+  {
+    "name": "gamma_keyset",
+    "provenance": "synthetic",
+    "source": "gamma",
+    "payload": {
+      "markets": [
+        {
+          "id": "fictional",
+          "conditionId": "fixture",
+          "slug": "btc-updown-5m-1780000200",
+          "outcomes": [
+            "Down",
+            "Up"
+          ],
+          "clobTokenIds": [
+            "2",
+            "1"
+          ],
+          "description": "Fictional BTC contract: no verified official threshold."
+        }
+      ],
+      "next_cursor": "fictional-next"
+    },
+    "expected_datasets": [
+      "markets"
+    ],
+    "endpoint": "gamma_keyset",
+    "transport": "http"
+  },
+  {
+    "name": "book_1",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": {
+      "event_type": "book",
+      "asset_id": "1",
+      "market": "fixture",
+      "timestamp": "1780000200000",
+      "bids": [
+        {
+          "price": "0.49",
+          "size": "10"
+        }
+      ],
+      "asks": [
+        {
+          "price": "0.51",
+          "size": "10"
+        }
+      ]
+    },
+    "expected_datasets": [
+      "book_snapshots"
+    ]
+  },
+  {
+    "name": "book_2",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": {
+      "event_type": "book",
+      "asset_id": "2",
+      "market": "fixture",
+      "timestamp": "1780000200000",
+      "bids": [
+        {
+          "price": "0.49",
+          "size": "10"
+        }
+      ],
+      "asks": [
+        {
+          "price": "0.51",
+          "size": "10"
+        }
+      ]
+    },
+    "expected_datasets": [
+      "book_snapshots"
+    ]
+  },
+  {
+    "name": "book_changes",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": {
+      "event_type": "price_change",
+      "market": "fixture",
+      "price_changes": [
+        {
+          "asset_id": "1",
+          "side": "BUY",
+          "price": "0.49",
+          "size": "12"
+        },
+        {
+          "asset_id": "2",
+          "side": "SELL",
+          "price": "0.51",
+          "size": "0"
+        }
+      ]
+    },
+    "expected_datasets": [
+      "book_updates"
+    ]
+  },
+  {
+    "name": "trade",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": {
+      "event_type": "last_trade_price",
+      "asset_id": "1",
+      "price": "0.50",
+      "size": "2",
+      "side": "BUY"
+    },
+    "expected_datasets": [
+      "trade_prints"
+    ]
+  },
+  {
+    "name": "quote",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": {
+      "event_type": "best_bid_ask",
+      "asset_id": "1",
+      "best_bid": "0.49",
+      "best_ask": "0.51",
+      "spread": "0.02"
+    },
+    "expected_datasets": [
+      "quote_observations"
+    ]
+  },
+  {
+    "name": "tick_change",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": {
+      "event_type": "tick_size_change",
+      "asset_id": "1",
+      "old_tick_size": "0.01",
+      "new_tick_size": "0.001"
+    },
+    "expected_datasets": [
+      "market_changes"
+    ]
+  },
+  {
+    "name": "clob_time",
+    "provenance": "synthetic",
+    "source": "clob",
+    "payload": 1780000200,
+    "expected_datasets": [],
+    "endpoint": "clob_time",
+    "transport": "http"
+  },
+  {
+    "name": "reference_live",
+    "provenance": "synthetic",
+    "source": "polybolt",
+    "payload": {
+      "channel": "price.crypto.twap",
+      "seq": 2,
+      "payload": {
+        "symbol": "btcusd",
+        "source": "chainlink",
+        "timestamp": 1780000200000,
+        "full_accuracy_value": "60000.12345678901234567890123456789"
+      }
+    },
+    "expected_datasets": [
+      "reference_observations"
+    ]
+  },
+  {
+    "name": "reference_history",
+    "provenance": "synthetic",
+    "source": "polybolt",
+    "payload": {
+      "channel": "price.crypto.twap",
+      "seq": 1,
+      "snapshot": true,
+      "payload": {
+        "symbol": "btcusd",
+        "source": "chainlink",
+        "data": [
+          {
+            "symbol": "btcusd",
+            "source": "chainlink",
+            "timestamp": 1780000200000,
+            "full_accuracy_value": "60000.12345678901234567890123456789"
+          }
+        ]
+      }
+    },
+    "expected_datasets": [
+      "reference_observations"
+    ]
+  },
+  {
+    "name": "binance_trade",
+    "provenance": "synthetic",
+    "source": "binance",
+    "payload": {
+      "e": "trade",
+      "t": 100,
+      "T": 1780000200000,
+      "p": "60000.12",
+      "q": "0.001",
+      "m": false
+    },
+    "expected_datasets": [
+      "trade_prints"
+    ]
+  },
+  {
+    "name": "binance_snapshot",
+    "provenance": "synthetic",
+    "source": "binance",
+    "payload": {
+      "lastUpdateId": 100,
+      "bids": [
+        [
+          "60000",
+          "1"
+        ]
+      ],
+      "asks": [
+        [
+          "60001",
+          "1"
+        ]
+      ]
+    },
+    "expected_datasets": [
+      "book_snapshots"
+    ],
+    "transport": "http",
+    "endpoint": "binance_depth"
+  },
+  {
+    "name": "binance_delta",
+    "provenance": "synthetic",
+    "source": "binance",
+    "payload": {
+      "e": "depthUpdate",
+      "E": 1780000200000,
+      "U": 101,
+      "u": 102,
+      "b": [
+        [
+          "60000",
+          "2"
+        ]
+      ],
+      "a": []
+    },
+    "expected_datasets": [
+      "book_updates"
+    ]
+  },
+  {
+    "name": "resolution",
+    "provenance": "synthetic",
+    "source": "resolution",
+    "payload": {
+      "data": [
+        {
+          "condition_id": "fixture",
+          "status": "TEST_TERMINAL",
+          "payouts": [
+            "0.5",
+            "0.5"
+          ]
+        }
+      ]
+    },
+    "expected_datasets": [
+      "resolution_observations"
+    ]
+  }
+]

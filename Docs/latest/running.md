@@ -148,3 +148,69 @@ Two processes cannot share one `state_directory`. The lock is released on shutdo
 In-run emergency flatten and shutdown drain are unchanged. They are not a substitute for this startup decision.
 
 `--continue` is not a first-release operator step. Discovery is current + next 5m only.
+
+## Signal-only observation (`settlement_value`)
+
+`tyrex-pm observe` runs a strategy plugin on live **public** feeds over successive windows and records its decisions and recommendations. It never plans, signs or submits an order. The observation module's import closure contains no `tyrex_pm.execution` module (tested). Recommendations never become positions or fills.
+
+```bash
+tyrex-pm observe --config config/observe/settlement_value_observe.yaml --validate-config
+tyrex-pm observe --config config/observe/settlement_value_observe.yaml --connect-public-feeds
+```
+
+The command refuses `--live`. Without `--connect-public-feeds` it exits without connecting. A run stops after `observation.max_windows` rollovers or `max_duration_s`. It writes the following to `var/observation/<run>_<UTC>/`:
+
+- `decisions.jsonl` — schema `settlement_decision_record_v1`, the same schema as the offline replay;
+- `recommendations.jsonl` — hypothetical, with the top 10 book levels at decision time;
+- `windows.jsonl` — rollovers;
+- `observation_manifest.json`;
+- `observation_summary.json` — evaluation counts and evaluate-time p50/p99.
+
+Observation validates indicator warm-up, reference/K alignment, signal frequency, local decision latency and quote staleness at decision time. It does not validate fills, venue latency, fees actually charged, hold commitment, resolution or redemption.
+
+## Hold-to-resolution trials (`lifecycle.mode: hold_to_resolution`)
+
+Only plugins that declare the mode accept it. `settlement_value` accepts only this mode; `z_gap`, `ask70` and `feature_probe` do not. The profile requires a `settlement:` block with explicit trial limits (see the config guide). Legacy profiles are unchanged.
+
+**Per run (one entry episode per process):**
+
+1. Before an entry reaches the dispatch path, the host blocks it unless all of these hold:
+   - the market's current fee schedule is read from Gamma `feeSchedule` and parsed;
+   - that schedule equals the strategy's fee curve;
+   - tick and minimum size are known;
+   - the trial budget over the durable ledger (`settlement.ledger_path`) has room.
+
+   The budget counts realized losses, unresolved holdings, every pending or dispatch-unknown reservation, and the proposed order. A blocked entry records `INTENT_BLOCKED` / `SETTLEMENT_ENTRY_BLOCKED` with reasons. Otherwise `EPISODE_RESERVED` is fsynced before dispatch.
+2. The fill outcome is recorded as one of:
+   - `FILL_CONFIRMED` — the reservation becomes spent capital once;
+   - `DISPATCH_NO_FILL` / `DISPATCH_NOT_SENT` — released;
+   - `DISPATCH_UNKNOWN` — kept, and it blocks later entries until resolved by the operator.
+3. On the strategy's hold intent, the host commits the hold:
+   - it requires confirmed inventory, no unresolved mutation, and owned resting orders cancelled with proof;
+   - it then records `HOLD_REQUESTED` and `HOLD_COMMITTED`.
+
+   A committed holding is exempt from mandatory flatten, the manual-deadline stop and the shutdown sale. An uncommitted position is still flattened (the pre-commit fallback). The process then stops.
+4. Startup with a committed holding:
+   - while the market is still tradable, it reports `COMMITTED_HOLD_AWAITING_RESOLUTION` and never proposes a close;
+   - after close, `AWAITING_RESOLUTION` blocks the next run until a payout is proven.
+
+   Trials therefore run one holding at a time.
+
+**Settlement operator commands** (read-only; they never sign or redeem):
+
+```bash
+tyrex-pm settlement --config config/runs/settlement_value_trial.yaml status
+tyrex-pm settlement --config config/runs/settlement_value_trial.yaml reconcile --connect-chain
+tyrex-pm settlement --config config/runs/settlement_value_trial.yaml worklist
+# redeem in the venue UI, then prove it:
+tyrex-pm settlement --config config/runs/settlement_value_trial.yaml confirm-redemption \
+    --episode settlement_value_trial:<window_slug> --tx-hash 0x... --connect-chain
+tyrex-pm settlement --config config/runs/settlement_value_trial.yaml mark-manual \
+    --episode <id> --reason "<text>"
+```
+
+**`reconcile`** reads `payoutNumerators/payoutDenominator` at the **finalized** block. With a zero payout the episode completes; with a positive payout it moves to the redemption worklist (`REDEMPTION_PENDING_OPERATOR`). Proceeds stay a receivable, not cash.
+
+**`confirm-redemption`** accepts only a successful, finalized receipt containing a Conditional Tokens `PayoutRedemption` log for this wallet (`settlement.redemption_wallet`), this condition and this outcome's index set. Its payout must match the receivable. A balance increase is never proof.
+
+All chain commands need `TYREX_POLYGON_RPC_URL`.

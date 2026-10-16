@@ -2,8 +2,8 @@
 
 from tyrex_pm.strategies.registry import (
     get_strategy_plugin,
-    registered_strategy_kinds,
     register_strategy,
+    registered_strategy_kinds,
 )
 
 __all__ = [

@@ -23,7 +23,9 @@ evaluate(
 ) -> StrategyEvaluation
 ```
 
-Last Chainlink / sealed K, when aligned-eval has them, live on `DecisionContext.references` (`ReferenceFacts`). They are not `evaluate()` kwargs.
+Last Chainlink / sealed K, when aligned-eval has them, live on `DecisionContext.references` (`ReferenceFacts`). They are not `evaluate()` kwargs. `ReferenceFacts.trading_reference_raw` carries the latest raw Binance spot print behind the aligned estimate (`None` without a trading reference); `DecisionSnapshot.reference` stays the aligned estimate.
+
+**Offline check of a new plugin.** Besides the fixture lab, a plugin can run on recorded warehouse windows through `research.strategy_replay.run_window`: recorded rows feed the real `MarketSessionRuntime` / `MarketStateStore` / `IndicatorGraph` through the shared `runtime/market_event_router.py`, on virtual time (`FakeClock` injected into freshness paths), and intents become orders in the replay engine's closed-loop timeline under a named `strategy_closed_loop_v1` scenario. `settlement_value` is the first plugin wired this way. Intent translation (in `strategy_replay/run.py`) covers TAKER `EnterIntent` (FAK BUY at `max_price` for the intent's `intended_gross_shares`) and `HoldToResolutionIntent` (no order; held to the label). Other intents are counted as unsupported, never dropped silently.
 
 ## Checklist (new strategy)
 

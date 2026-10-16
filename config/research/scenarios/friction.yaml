@@ -1,0 +1,31 @@
+# Closed-loop strategy replay: FRICTION execution assumptions.
+# Configurable, uncalibrated friction: delays, worse prices and less depth. Values are
+# starting points for sensitivity work, not measured latencies. Research use only.
+schema_version: 1
+adapter: strategy_closed_loop_v1
+name: friction
+initial_cash: '100'
+feed_delay_ms: 100        # information delay: recorded row -> strategy view
+decision_delay_ms: 0      # compute time
+order_delay_ms: 300       # submission -> venue arrival
+cancel_delay_ms: 300
+feedback_delay_ms: 300    # venue result -> strategy context
+adverse_price_ticks: 1    # each fill one tick worse than displayed, capped at the limit
+participation: '0.25'     # a quarter of displayed depth is available
+timer_interval_ms: 1000
+quality_predicate: valid_books_at_actions
+maker_model: no_fill
+maker_queue_multiplier: '2'
+gap_policy: invalidate_path
+tie_policy: observations_before_actions
+seed: 0
+settlement_release_delay_ms: 60000
+fee_policy:
+  version: explicit_scenario_v1
+  mode: scenario
+  rate: '0.07'
+  exponent: 1
+  quantum: '0.00001'
+  buy_fee_unit: shares
+  maker_rate: '0'
+  provenance: SCENARIO_ASSUMPTION_NOT_VERIFIED_HISTORICAL_FEES

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
+from tyrex_pm.core.clock import Clock, SystemClock
 from tyrex_pm.core.ids import InstrumentId
 from tyrex_pm.indicators.depth import DepthSnapshot, DepthStore
 from tyrex_pm.indicators.ewma_volatility import (
@@ -20,6 +20,7 @@ from tyrex_pm.indicators.imbalance import imbalance, microprice_gap_bps
 from tyrex_pm.indicators.ofi import RollingOfi
 from tyrex_pm.indicators.realized_vol import RollingRealizedVol
 from tyrex_pm.indicators.spec import IndicatorSpec
+from tyrex_pm.indicators.spot_path import RollingSpotPath, SpotPathSnapshot, empty_spot_path
 from tyrex_pm.indicators.trade_imbalance import RollingTradeImbalance, TradePrint
 
 _KNOWN_NAMES = frozenset(
@@ -32,6 +33,7 @@ _KNOWN_NAMES = frozenset(
         "microprice_gap",
         "momentum",
         "basis",
+        "spot_path",
     }
 )
 
@@ -96,17 +98,21 @@ class IndicatorGraph:
         specs: tuple[IndicatorSpec, ...],
         *,
         max_trade_age_ms: float = 2000.0,
+        clock: Clock | None = None,
     ) -> None:
         unknown = sorted({spec.name for spec in specs} - _KNOWN_NAMES)
         if unknown:
             raise ValueError(f"unknown indicator name(s): {unknown}")
         self.specs = specs
+        # Freshness clock: host monotonic time live, virtual recorded time in replay.
+        self._clock: Clock = clock or SystemClock()
         self.depth = DepthStore()
         self._bundle = FeatureBundle()
         self._ofi: dict[str, RollingOfi] = {}
         self._ti: dict[str, RollingTradeImbalance] = {}
         self._rv: dict[str, RollingRealizedVol] = {}
         self._ewma: dict[str, EwmaVolatilityEstimator] = {}
+        self._paths: dict[str, RollingSpotPath] = {}
         self._mids: dict[str, Decimal] = {}
         self._source_generation: dict[str, int] = {}
         self._last_trade_mono_ns: dict[str, int] = {}
@@ -132,15 +138,18 @@ class IndicatorGraph:
                     sigma_config_from_spec(spec)
                 )
                 self._bundle.values[spec.instance_id] = empty_volatility_snapshot()
+            elif spec.name == "spot_path":
+                self._paths[spec.instance_id] = _spot_path_from_spec(spec)
+                self._bundle.values[spec.instance_id] = empty_spot_path()
 
     def snapshot(self) -> FeatureBundle:
-        now_mono = time.monotonic_ns()
+        now_mono = self._clock.monotonic_ns()
         values = dict(self._bundle.values)
         for spec in self.specs:
-            if spec.name != "ewma_vol":
+            if spec.name not in ("ewma_vol", "spot_path"):
                 continue
             snap = values.get(spec.instance_id)
-            if not isinstance(snap, VolatilitySnapshot) or not snap.ready:
+            if not isinstance(snap, (VolatilitySnapshot, SpotPathSnapshot)) or not snap.ready:
                 continue
             last = self._last_trade_mono_ns.get(spec.source)
             if last is None or (now_mono - last) / 1e6 > self.max_trade_age_ms:
@@ -162,6 +171,13 @@ class IndicatorGraph:
             self._bundle.values[spec.instance_id] = empty_volatility_snapshot(
                 reject_reason="source_invalidated"
             )
+        for spec in self.specs:
+            if spec.source == source and spec.name == "spot_path":
+                # A reconnect breaks the sampled path; history restarts from the new tape.
+                self._paths[spec.instance_id] = _spot_path_from_spec(spec)
+                self._bundle.values[spec.instance_id] = empty_spot_path(
+                    reject_reason="source_invalidated"
+                )
 
     def on_depth(
         self,
@@ -225,7 +241,7 @@ class IndicatorGraph:
             elif generation > current:
                 self.invalidate_source(source)
                 self._source_generation[source] = generation
-        self._last_trade_mono_ns[source] = time.monotonic_ns()
+        self._last_trade_mono_ns[source] = self._clock.monotonic_ns()
         for spec in self.specs:
             if spec.source != source:
                 continue
@@ -233,6 +249,10 @@ class IndicatorGraph:
                 est = self._ewma[spec.instance_id]
                 snap = est.update(price, ts_event)
                 self._bundle.values[spec.instance_id] = snap
+            elif spec.name == "spot_path":
+                self._bundle.values[spec.instance_id] = self._paths[spec.instance_id].update(
+                    price, ts_event
+                )
             elif spec.name == "realized_vol":
                 for horizon in spec.horizons_ms or (10000,):
                     key = f"{spec.instance_id}|{horizon}"
@@ -272,6 +292,17 @@ class IndicatorGraph:
         self._bundle.values[spec.instance_id] = Decimal("10000") * Decimal(
             str(log(float(perp / spot)))
         )
+
+
+def _spot_path_from_spec(spec: IndicatorSpec) -> RollingSpotPath:
+    mapping = spec.param_map
+    extra = sorted(set(mapping) - {"window_s", "sample_interval_s"})
+    if extra or "window_s" not in mapping:
+        raise ValueError(f"spot_path requires window_s (optional sample_interval_s); got {extra}")
+    return RollingSpotPath(
+        window_s=float(mapping["window_s"]),
+        sample_interval_s=float(mapping.get("sample_interval_s", "1")),
+    )
 
 
 def _mid_fact(source: str) -> str:

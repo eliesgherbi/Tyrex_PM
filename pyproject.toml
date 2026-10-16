@@ -23,9 +23,29 @@ dev = [
 live = [
   "eth-account>=0.10.0",
 ]
+warehouse = [
+  "httpx==0.28.1",
+  "pyarrow==23.0.1",
+  "duckdb==1.5.6",
+  "zstandard==0.25.0",
+]
+research = [
+  "numpy>=1.26,<3",
+  "pandas>=2.2,<4",
+  "matplotlib>=3.8,<4",
+  "scikit-learn>=1.5,<2",
+  "nbformat>=5.10,<6",
+  "nbclient>=0.10,<1",
+  "ipykernel>=6.29,<8",
+  "ipywidgets>=8.1,<9",
+  "jupyterlab>=4.2,<5",
+]
 
 [project.scripts]
 tyrex-pm = "tyrex_pm.application.cli:main"
+run_data_collection_live = "tyrex_pm.data_warehouse.cli:live_main"
+tyrex-data = "tyrex_pm.data_warehouse.cli:main"
+tyrex-research = "tyrex_pm.research.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -34,6 +54,8 @@ exclude = ["old*", "tests*", "Docs*", "config*", "scripts*", "var*"]
 
 [tool.setuptools.package-data]
 tyrex_pm = ["py.typed"]
+"tyrex_pm.data_warehouse" = ["profiles/*.yaml"]
+"tyrex_pm.research.tuto_btc5m" = ["*.ipynb", "*.json", "*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,6 +72,10 @@ extend-exclude = ["old", "var"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Notebook setup locates the checkout before importing its research helpers.
+"src/tyrex_pm/research/tuto_btc5m/*.ipynb" = ["E402"]
 
 [tool.coverage.run]
 source = ["tyrex_pm"]

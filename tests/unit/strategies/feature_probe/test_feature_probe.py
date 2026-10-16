@@ -159,8 +159,13 @@ def test_feature_probe_kind_loads_and_unknown_still_fails(tmp_path: Path) -> Non
         load_trading_run_config(tmp)
 
 
-def test_registered_kinds_are_ask70_feature_probe_z_gap() -> None:
-    assert registered_strategy_kinds() == ("ask70", "feature_probe", "z_gap")
+def test_registered_kinds_are_ask70_feature_probe_settlement_value_z_gap() -> None:
+    assert registered_strategy_kinds() == (
+        "ask70",
+        "feature_probe",
+        "settlement_value",
+        "z_gap",
+    )
     assert "q_edge" not in registered_strategy_kinds()
 
 
