@@ -1,0 +1,80 @@
+# Signal-only observation (never submits orders) of the baseline 2c / 30-150 s candidate.
+# Strategy parameters are copied verbatim from settlement_value_baseline_2c_150s_live;
+# only the reference feed changed (crypto_prices_twap_sixty). Used to confirm sealed
+# opening prices against Polymarket's priceToBeat and to review fresh decisions.
+schema_version: 1
+mode: observe
+run_name: settlement_value_baseline_2c_150s_observe_twap60
+strategy:
+  kind: settlement_value
+  parameters:
+    settlement:
+      functional_id: twap60_at_close_vs_open
+      comparison: AT_OR_ABOVE_K
+      reference_series: polymarket_rtds:crypto_prices_twap_sixty:btc/usd
+      provenance_status: ASSUMED
+    model:
+      backend: twap_proxy_diffusion
+      averaging_window_s: 60.0
+      spot_input: binance_spot
+      sigma_band: 0.25
+      reference_band_bps: 1.0
+      tau_floor_s: 1.0
+    volatility:
+      half_life_s: 30.0
+      min_samples_s: 20.0
+      jump_threshold_sigma: 4.0
+      sample_interval_s: 1.0
+      tau_floor_s: 1.0
+      sigma_floor: 1.0e-05
+      sigma_scale: 1.0
+    entry:
+      tau_min_s: 30.0
+      tau_max_s: 150
+      min_edge_per_share: '0.02'
+      target_mode: cap_only
+      target_profit_usdc: '3'
+      max_entry_price: '0.97'
+      limit_buffer_ticks: 1
+    sizing:
+      max_debit_usdc: '5'
+      max_loss_usdc: '5'
+      depth_participation: '1'
+      max_levels: 32
+      share_increment: '0.01'
+      default_min_order_shares: '5'
+    quality:
+      accepted_k_qualities:
+      - CONFIRMED_CANONICAL
+      - PROVISIONAL
+      require_verified_settlement_spec: false
+      max_clock_uncertainty_ms: 250
+    fees:
+      rate: '0.07'
+      exponent: '1'
+      provenance: MUST_MATCH_PROVIDER_FEE_SCHEDULE
+    retry:
+      enabled: false
+      max_attempts_per_episode: 1
+      max_attempts_per_window: 1
+      max_prepare_failures_per_episode: 1
+      max_posts_per_episode: 1
+      max_posts_per_window: 1
+    exit:
+      policy: hold_to_resolution
+      value_exit_enabled: false
+      thesis_stop_enabled: false
+    reentry:
+      max_trades_per_window: 1
+      opposite_side_allowed: false
+      max_window_debit_usdc: '5'
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+observation:
+  max_windows: 7
+  max_duration_s: 2400
+  evaluation_interval_s: 1
+output:
+  directory: var/observation/settlement_value_baseline_2c_150s_twap60

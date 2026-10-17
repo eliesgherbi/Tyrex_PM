@@ -17,7 +17,7 @@ strategy:
     settlement:
       functional_id: twap60_at_close_vs_open
       comparison: AT_OR_ABOVE_K
-      reference_series: polymarket_rtds:crypto_prices_chainlink:btc/usd
+      reference_series: polymarket_rtds:crypto_prices_twap_sixty:btc/usd
       provenance_status: ASSUMED
     model:
       backend: twap_proxy_diffusion

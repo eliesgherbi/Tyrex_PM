@@ -607,7 +607,7 @@ async def run_market_data_runtime(
         for kind, payload in reference_watchdog.on_tick(
             source_ts=e.ts_event, receive_mono_s=time.monotonic()
         ):
-            emit_feed_event(kind, {"series": "rtds_chainlink_btc", **payload})
+            emit_feed_event(kind, {"series": "rtds_twap_sixty_btc", **payload})
         for window_id in route_settlement_reference(runtime, e):
             if contract.includes(F.PTB_SEALED):
                 _try_seal(window_id)
@@ -797,7 +797,7 @@ async def run_market_data_runtime(
                     summary.errors.append(f"async_tick:{type(exc).__name__}:{exc}")
                     notify_runtime_error("async_tick", exc)
             for kind, payload in reference_watchdog.check(time.monotonic()):
-                emit_feed_event(kind, {"series": "rtds_chainlink_btc", **payload})
+                emit_feed_event(kind, {"series": "rtds_twap_sixty_btc", **payload})
             timer_mono = clock.monotonic_ns() / 1e9
             if scheduler.should_evaluate_timer(mono_s=timer_mono):
                 _maybe_evaluate(timer=True)

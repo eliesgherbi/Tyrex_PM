@@ -1,6 +1,8 @@
 """Polymarket RTDS WebSocket adapters (read-only, N2).
 
-- Chainlink ``crypto_prices_chainlink`` / ``btc/usd`` → settlement reference ticks
+- Chainlink ``crypto_prices_twap_sixty`` / ``btc/usd`` (60 s TWAP) → settlement reference
+  ticks: the series the BTC 5-minute markets settle on (spot ``crypto_prices_chainlink``
+  is a different series and is not used for the opening price or the model)
 - Optional Binance ``crypto_prices`` → comparison/fallback only
 """
 
@@ -17,10 +19,11 @@ from tyrex_pm.adapters.polymarket.rtds_normalize import (
     RTDS_URL,
     SYMBOL_BINANCE_BTC,
     SYMBOL_CHAINLINK_BTC,
+    TOPIC_TWAP_SIXTY,
     binance_subscribe_message,
-    chainlink_subscribe_message,
     normalize_chainlink_tick,
     normalize_rtds_binance_tick,
+    twap_sixty_subscribe_message,
 )
 from tyrex_pm.core.ids import CorrelationId, new_correlation_id
 from tyrex_pm.core.ingress import ConnectionGeneration, IngressSequencer
@@ -87,7 +90,7 @@ class RtdsChainlinkAdapter:
 
     def _health(self, status: str, **extra: object) -> None:
         if self._on_health:
-            self._on_health(status, {"adapter": "rtds_chainlink", **extra})
+            self._on_health(status, {"adapter": "rtds_twap_sixty", **extra})
 
     async def run(self, dispatcher: EventDispatcher) -> None:
         if self._connect is None:
@@ -114,12 +117,12 @@ class RtdsChainlinkAdapter:
                 async with connect(self._url, **connect_kwargs) as ws:
                     self._ws = ws
                     gen = self._conn_gen.bump()
-                    sub = chainlink_subscribe_message(filters="")
+                    sub = twap_sixty_subscribe_message(symbol=self._symbol)
                     await ws.send(json.dumps(sub))
                     self._health(
                         "subscribed",
                         generation=gen,
-                        topic="crypto_prices_chainlink",
+                        topic=TOPIC_TWAP_SIXTY,
                         symbol=self._symbol,
                     )
                     self._last_msg_mono = time.monotonic()

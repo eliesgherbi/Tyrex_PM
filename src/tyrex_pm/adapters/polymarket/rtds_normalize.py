@@ -5,6 +5,7 @@ No Z-Gap thresholds or PTB selection — ticks only.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
@@ -20,9 +21,27 @@ from tyrex_pm.core.snapshots import ReferencePriceSnapshot, SettlementReferenceS
 
 RTDS_URL = "wss://ws-live-data.polymarket.com"
 TOPIC_CHAINLINK = "crypto_prices_chainlink"
+# Chainlink BTC/USD 60-second TWAP stream: the series Polymarket's BTC 5-minute markets
+# settle on (their priceToBeat/finalPrice) and the "reported TWAP" the settlement
+# model expects. crypto_prices_chainlink is the spot stream and is NOT interchangeable.
+TOPIC_TWAP_SIXTY = "crypto_prices_twap_sixty"
 TOPIC_BINANCE = "crypto_prices"
 SYMBOL_CHAINLINK_BTC = "btc/usd"
 SYMBOL_BINANCE_BTC = "btcusdt"
+
+
+def twap_sixty_subscribe_message(*, symbol: str = SYMBOL_CHAINLINK_BTC) -> dict[str, Any]:
+    """RTDS 60-second TWAP subscription filtered to one symbol."""
+    return {
+        "action": "subscribe",
+        "subscriptions": [
+            {
+                "topic": TOPIC_TWAP_SIXTY,
+                "type": "*",
+                "filters": json.dumps({"symbol": symbol}, separators=(",", ":")),
+            }
+        ],
+    }
 
 
 def chainlink_subscribe_message(*, filters: str = "") -> dict[str, Any]:
@@ -67,7 +86,7 @@ def parse_rtds_price_payload(
 ) -> tuple[str, str, Decimal, datetime, Any] | None:
     """Return (topic, symbol, value, source_ts, provider_seq) or None if not a price tick."""
     topic = str(msg.get("topic") or "")
-    if topic not in (TOPIC_CHAINLINK, TOPIC_BINANCE):
+    if topic not in (TOPIC_CHAINLINK, TOPIC_TWAP_SIXTY, TOPIC_BINANCE):
         return None
     payload = msg.get("payload") or {}
     if not isinstance(payload, Mapping):
@@ -81,12 +100,29 @@ def parse_rtds_price_payload(
     value = payload.get("value")
     if value is None:
         return None
+    exact = _full_accuracy(payload.get("full_accuracy_value"))
     ts = payload.get("timestamp")
     if ts is None:
         ts = msg.get("timestamp")
     source_ts = _ms_to_utc(ts)
     provider_seq = msg.get("timestamp")
-    return topic, symbol, Decimal(str(value)), source_ts, provider_seq
+    price = exact if exact is not None else Decimal(str(value))
+    return topic, symbol, price, source_ts, provider_seq
+
+
+def _full_accuracy(raw: Any) -> Decimal | None:
+    """Exact value from ``full_accuracy_value`` (RTDS sends a 1e18-scaled integer)."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        if "." in text:
+            return Decimal(text)
+        return Decimal(text).scaleb(-18)
+    except ArithmeticError:
+        return None
 
 
 def normalize_chainlink_tick(
@@ -102,12 +138,13 @@ def normalize_chainlink_tick(
     last_source_ts_ms: int | None = None,
     time_view: Any | None = None,
     clock_snapshot_id: str | None = None,
+    expected_topic: str = TOPIC_TWAP_SIXTY,
 ) -> SettlementReferenceUpdated | None:
     parsed = parse_rtds_price_payload(msg)
     if parsed is None:
         return None
     topic, symbol, value, source_ts, provider_seq = parsed
-    if topic != TOPIC_CHAINLINK:
+    if topic != expected_topic:
         return None
     if symbol != expected_symbol.lower():
         return None
@@ -125,7 +162,11 @@ def normalize_chainlink_tick(
         raw_fingerprint=fingerprint_payload(msg),
         late_or_out_of_order=ooo,
         role=FeedRole.SETTLEMENT_REFERENCE,
-        subscription_mode="chainlink_empty_filters",
+        subscription_mode=(
+            "twap_sixty_symbol_filter"
+            if topic == TOPIC_TWAP_SIXTY
+            else "chainlink_empty_filters"
+        ),
         clock_snapshot_id=clock_snapshot_id
         or (getattr(time_view, "clock_snapshot_id", None) if time_view else None),
     )
@@ -152,7 +193,11 @@ def normalize_chainlink_tick(
         symbol=symbol,
         price=value,
         ts_event=source_ts,
-        venue="polymarket_rtds_chainlink",
+        venue=(
+            "polymarket_rtds_twap_sixty"
+            if topic == TOPIC_TWAP_SIXTY
+            else "polymarket_rtds_chainlink"
+        ),
         provider="chainlink",
     )
     return SettlementReferenceUpdated(

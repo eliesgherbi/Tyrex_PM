@@ -45,7 +45,7 @@ from tyrex_pm.runtime.decision_records import (
 from tyrex_pm.strategies.registry import get_strategy_plugin
 
 OBSERVATION_MODE = "observe"
-LIVE_REFERENCE_SERIES = "polymarket_rtds:crypto_prices_chainlink:btc/usd"
+LIVE_REFERENCE_SERIES = "polymarket_rtds:crypto_prices_twap_sixty:btc/usd"
 
 
 class ObservationConfigError(ValueError):

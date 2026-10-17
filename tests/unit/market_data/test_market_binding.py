@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -161,7 +162,7 @@ def test_adapter_cannot_pass_corrected_as_ts_received() -> None:
 
 
 def test_chainlink_normalize_includes_timing_fields() -> None:
-    msg = json.loads((FIXTURES / "rtds_chainlink_tick.json").read_text(encoding="utf-8"))
+    msg = json.loads((FIXTURES / "rtds_twap_sixty_tick.json").read_text(encoding="utf-8"))
     raw = datetime(2026, 7, 20, 21, 15, 5, tzinfo=timezone.utc)
     clock = FakeClock(_wall=raw)
     auth = SnapshotTimeAuthority(clock=clock, max_uncertainty_ms=5000)
@@ -220,3 +221,31 @@ def test_label_map_never_positional() -> None:
     om = map_up_down_outcomes(["Down", "Up"], ["d", "u"])
     assert om.mapping_method == "label_index_only"
     assert om.token_for(NormalizedLeg.UP).value == "u"
+
+
+def test_settlement_reference_is_the_twap_sixty_series_with_exact_value() -> None:
+    # The BTC 5-minute markets settle on Chainlink's 60 s TWAP stream; the boundary tick
+    # equals the official priceToBeat. The spot stream is a different series.
+    from tyrex_pm.adapters.polymarket.rtds_normalize import (
+        TOPIC_TWAP_SIXTY,
+        twap_sixty_subscribe_message,
+    )
+
+    twap = json.loads((FIXTURES / "rtds_twap_sixty_tick.json").read_text(encoding="utf-8"))
+    spot = json.loads((FIXTURES / "rtds_chainlink_tick.json").read_text(encoding="utf-8"))
+    raw = datetime(2026, 10, 17, 9, 25, 0, tzinfo=timezone.utc)
+    kwargs = dict(ts_received=raw, receive_monotonic_ns=1, ingress_sequence=1,
+                  connection_generation=1, clock_uncertainty_ms=None)
+    evt = normalize_chainlink_tick(twap, **kwargs)
+    assert evt is not None
+    assert evt.settlement.price == Decimal("81471.005883689865314304")  # full accuracy
+    assert evt.settlement.venue == "polymarket_rtds_twap_sixty"
+    assert evt.ts_event == datetime(2026, 10, 17, 14, 45, 0, tzinfo=timezone.utc)
+    assert normalize_chainlink_tick(spot, **kwargs) is None  # spot is not the reference
+    sub = twap_sixty_subscribe_message()["subscriptions"][0]
+    assert sub["topic"] == TOPIC_TWAP_SIXTY and json.loads(sub["filters"]) == {
+        "symbol": "btc/usd"}
+    # History snapshots are not live ticks (bounded recovery is a separate policy).
+    snapshot = {"topic": TOPIC_TWAP_SIXTY, "type": "subscribe",
+                "payload": {"symbol": "btc/usd", "data": [twap["payload"]]}}
+    assert normalize_chainlink_tick(snapshot, **kwargs) is None
