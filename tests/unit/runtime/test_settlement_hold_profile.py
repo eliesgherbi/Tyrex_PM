@@ -300,6 +300,6 @@ def test_continuous_startup_tracks_committed_holds_without_blocking() -> None:
         committed_holds_block_entries=False,
     )
     tracked = assess(facts)
-    issue = next(i for i in tracked.issues if i.code == "COMMITTED_HOLD_AWAITING_RESOLUTION")
+    issue = next(i for i in tracked.issues if i.code == "COMMITTED_HOLD_TRACKED")
     assert issue.severity is IssueSeverity.AUTO and not tracked.proposals
     assert tracked.status is AssessmentStatus.READY

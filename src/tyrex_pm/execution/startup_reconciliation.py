@@ -493,6 +493,34 @@ def _classify_session(
         return [], []
     issues: list[StartupIssue] = []
     proposals: list[RecoveryProposal] = []
+    if (
+        not facts.committed_holds_block_entries
+        and (identity.market_id, identity.token_id) in facts.committed_holds
+        and not session.resting_limit_venue_ids
+        and not session.has_unresolved_mutation_attempt
+        and not session.entry_match_awaiting_confirmation
+        and not getattr(session, "has_pending_trades", False)
+    ):
+        # Continuous runs: the settlement ledger owns this holding until it resolves
+        # (resolution worker, operator redemption) and account-wide limits cap it. Its
+        # balance may lag or the market may not be final yet; neither is a reason to
+        # stop new entries in other windows. Live orders or uncertain submissions still
+        # take the normal path below.
+        return (
+            [
+                StartupIssue(
+                    issue_id=f"committed-hold:{session_id}",
+                    severity=IssueSeverity.AUTO,
+                    code="COMMITTED_HOLD_TRACKED",
+                    summary=(
+                        "Committed to resolution and tracked by the settlement ledger; "
+                        "it does not block entries in other windows."
+                    ),
+                    session_id=session.session_id,
+                )
+            ],
+            [],
+        )
     owners = [
         item
         for item in facts.sessions

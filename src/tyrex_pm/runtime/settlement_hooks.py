@@ -120,19 +120,27 @@ class SettlementHooks:
 
     # -- startup ---------------------------------------------------------------------
 
-    def committed_holds(self) -> frozenset[tuple[str, str]]:
+    def committed_holds(self, *, include_settled: bool = False) -> frozenset[tuple[str, str]]:
+        """(condition, token) pairs the ledger owns as settlement exposure.
+
+        ``include_settled`` (continuous runs) also returns holdings whose episode already
+        completed (payout proven and redeemed, or zero payout): the ledger proves how the
+        tokens left (or why worthless ones remain), so they are never positions to close.
+        """
+        states = {
+            S.FILLED,
+            S.HOLD_REQUESTED,
+            S.HOLD_COMMITTED,
+            S.RESOLUTION_UNCERTAIN,
+            S.PAYOUT_PROVEN,
+            S.REDEMPTION_PENDING_OPERATOR,
+        }
+        if include_settled:
+            states |= {S.CASH_CONFIRMED, S.COMPLETED}
         return frozenset(
             (ep.condition_id, ep.token_id)
             for ep in self.ledger.episodes.values()
-            if ep.state
-            in (
-                S.FILLED,
-                S.HOLD_REQUESTED,
-                S.HOLD_COMMITTED,
-                S.RESOLUTION_UNCERTAIN,
-                S.PAYOUT_PROVEN,
-                S.REDEMPTION_PENDING_OPERATOR,
-            )
+            if ep.state in states
         )
 
     def startup_blockers(self, *, window_id: str | None = None) -> tuple[str, ...]:

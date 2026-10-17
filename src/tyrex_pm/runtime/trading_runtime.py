@@ -790,7 +790,8 @@ class TradingRuntime:
             not same_market
             and self.continuous
             and hooks is not None
-            and (identity.market_id, identity.token_id) in hooks.committed_holds()
+            and (identity.market_id, identity.token_id)
+            in hooks.committed_holds(include_settled=True)
             and not restored.has_journal_uncertainty
         ):
             payload["host_action"] = "committed_hold_tracked"
@@ -2083,6 +2084,10 @@ class TradingRuntime:
             self._pending_detach = None
             return True
         state = await self.lifecycle.reconcile()
+        # The tick and the strategy path both retry the detach; the other one may have
+        # finished it while this one awaited the reconciliation.
+        if getattr(self, "_pending_detach", None) != window or self.lifecycle.state is None:
+            return True
         try:
             detached = self.lifecycle.detach_committed(reason="hold_committed")
         except RuntimeError as exc:
@@ -2564,7 +2569,9 @@ class TradingRuntime:
         if self.settlement_hooks is not None:
             facts = replace(
                 facts,
-                committed_holds=self.settlement_hooks.committed_holds(),
+                committed_holds=self.settlement_hooks.committed_holds(
+                    include_settled=self.continuous
+                ),
                 committed_holds_block_entries=not self.continuous,
             )
         self._startup_wallet = None if facts.identity is None else facts.identity.wallet
@@ -2939,15 +2946,33 @@ class TradingRuntime:
             self._order_metadata_warm_tasks.clear()
 
         state = self.lifecycle.state
+        run_session_ids = list(getattr(self.lifecycle, "run_sessions", ()))
         try:
-            mutation_attempts = (
-                0 if state is None else self.coordinator.mutation_attempt_count(state.session_id)
-            )
+            if self.continuous and run_session_ids:
+                # Every attempt of every window, including detached committed holds.
+                mutation_attempts = sum(
+                    self.coordinator.mutation_attempt_count(sid) for sid in run_session_ids
+                )
+            else:
+                mutation_attempts = (
+                    0
+                    if state is None
+                    else self.coordinator.mutation_attempt_count(state.session_id)
+                )
             self._process_mutation_attempts = self.coordinator.mutation_attempt_count(None)
         except Exception as exc:
             mutation_attempts = None
             self._process_mutation_attempts = None
             reporting_failures.append(f"mutation_projection:{type(exc).__name__}:{exc}")
+        self._run_session_states = (
+            tuple(
+                self.coordinator.states[sid]
+                for sid in run_session_ids
+                if sid in self.coordinator.states
+            )
+            if self.continuous
+            else ()
+        )
         try:
             self.execution_timeline = self._build_execution_timeline(state)
         except Exception as exc:  # execution projection failure is report degradation
@@ -3218,6 +3243,10 @@ class TradingRuntime:
             startup_outcome=self.startup_outcome,
             startup_reconciliation=self.startup_report,
             recovery_sessions=tuple(self.recovery_sessions),
+            run_sessions=getattr(self, "_run_session_states", ()),
+            committed_session_ids=frozenset(
+                getattr(self.lifecycle, "detached_sessions", ())
+            ),
         )
         try:
             payload = build_run_report(source)

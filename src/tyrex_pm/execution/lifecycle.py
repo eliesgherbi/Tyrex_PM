@@ -86,6 +86,8 @@ class ExecutionLifecycle:
         self.window_sessions: list[str] = []
         # Sessions holding a committed settlement position from an earlier window.
         self.detached_sessions: list[str] = []
+        # Every session this process opened or resumed, in order (run reporting).
+        self.run_sessions: list[str] = []
         # Event-loop time each window session was released (late-evidence watch).
         self.released_at: dict[str, float] = {}
         self._last_watch: dict[str, float] = {}
@@ -118,6 +120,7 @@ class ExecutionLifecycle:
         if self.session_id is not None:
             raise RuntimeError("execution lifecycle is already open")
         self.session_id = session_id
+        self.run_sessions.append(session_id)
         await self.coordinator.apply(
             SessionOpened(
                 **new_envelope(
@@ -140,6 +143,8 @@ class ExecutionLifecycle:
         if session_id not in self.coordinator.states:
             raise RuntimeError("execution session was not restored")
         self.session_id = session_id
+        if session_id not in self.run_sessions:
+            self.run_sessions.append(session_id)
 
     def release_terminal(self, *, keep_for_window: bool = False) -> None:
         """Release a completed aggregate (next attempt, next episode or next window)."""
@@ -635,10 +640,12 @@ class ExecutionLifecycle:
         return state
 
     async def reconcile(self) -> ExecutionSessionState | None:
-        if self.session_id is None:
+        session_id = self.session_id
+        if session_id is None:
             return None
-        await self.reconciler.reconcile(self.coordinator, self.session_id)
-        return self.coordinator.state(self.session_id)
+        await self.reconciler.reconcile(self.coordinator, session_id)
+        # Another task may have detached or released the session during the await.
+        return self.coordinator.states.get(session_id)
 
     async def mark_manual(self, reason: str) -> ExecutionSessionState:
         if self.session_id is None:

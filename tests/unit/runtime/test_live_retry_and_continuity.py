@@ -321,3 +321,99 @@ def test_startup_controller_keeps_the_continuous_hold_flag() -> None:
     refreshed = StartupController._refresh_sessions(controller, facts)
     assert refreshed.committed_holds_block_entries is False
     assert refreshed.committed_holds == facts.committed_holds
+
+
+async def _detached_hold(tmp_path: Path):
+    venue = ScriptedVenue(["fill"])
+    runtime, driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    await runtime._consume_entry(entry(runtime), None)
+    await runtime._consume_hold(hold_intent(runtime))
+    assert runtime.lifecycle.detached_sessions
+    return runtime, venue
+
+
+@pytest.mark.parametrize("continuous", [True, False])
+@pytest.mark.asyncio
+async def test_detached_committed_hold_does_not_fail_the_continuous_recheck(
+    tmp_path: Path, continuous: bool
+) -> None:
+    # Latest live run: the account balance lagged the confirmed buy, then the market
+    # awaited resolution; each failed the recheck and paused entries for the rest of
+    # the run. A ledger-tracked committed hold is AUTO in continuous mode only.
+    from tyrex_pm.execution.startup_reconciliation import (
+        AccountIdentity,
+        InspectionFacts,
+        ReadCoverage,
+        assess,
+    )
+
+    runtime, _venue = await _detached_hold(tmp_path)
+    try:
+        state = runtime.coordinator.states[runtime.lifecycle.detached_sessions[0]]
+        facts = InspectionFacts(
+            identity=AccountIdentity(chain_id=137, environment="test", wallet="0xw"),
+            coverage=ReadCoverage(complete=True, positions_complete=True,
+                                  orders_complete=True, activity_complete=True),
+            sessions=(state,),
+            committed_holds=runtime.settlement_hooks.committed_holds(include_settled=True),
+            committed_holds_block_entries=not continuous,
+        )
+        assessment = assess(facts)
+        if continuous:
+            assert assessment.ready, assessment.issues
+            assert [i.code for i in assessment.issues] == ["COMMITTED_HOLD_TRACKED"]
+            assert not runtime._recheck_blocking_issues(assessment)
+        else:
+            assert not assessment.ready
+    finally:
+        await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_detach_attempts_detach_once_without_error(tmp_path: Path) -> None:
+    # Latest live run: the tick and the strategy path both retried the detach; one
+    # finished while the other awaited reconcile() -> KeyError: None (RUNTIME_DEGRADED).
+    import asyncio
+
+    venue = ScriptedVenue(["fill"])
+    venue.trade_status = "MATCHED"
+    runtime, _driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    try:
+        await runtime._consume_entry(entry(runtime), None)
+        await runtime._consume_hold(hold_intent(runtime))
+        assert runtime._pending_detach == "w1"
+        for trade in venue.trades:
+            trade.status = "CONFIRMED"
+        reconciler = runtime.lifecycle.reconciler
+        original = reconciler.reconcile
+
+        async def slow_reconcile(*args, **kwargs):
+            await asyncio.sleep(0)
+            result = await original(*args, **kwargs)
+            await asyncio.sleep(0)
+            return result
+
+        reconciler.reconcile = slow_reconcile
+        results = await asyncio.gather(runtime._try_detach(), runtime._try_detach())
+        assert results == [True, True]
+        assert len(runtime.lifecycle.detached_sessions) == 1
+        assert runtime.lifecycle.state is None and not runtime.runtime_errors
+    finally:
+        await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_continuous_report_counts_every_session_and_fill(tmp_path: Path) -> None:
+    from tyrex_pm.reporting.run_report import _continuous_outcome, _run_sessions_payload
+
+    runtime, venue = await _detached_hold(tmp_path)
+    try:
+        sessions = tuple(runtime.coordinator.states[s] for s in runtime.lifecycle.run_sessions)
+        committed = frozenset(runtime.lifecycle.detached_sessions)
+        payload = _run_sessions_payload(sessions, committed)
+        assert payload["session_count"] == 1 and payload["entry_posts"] == 1
+        assert payload["committed_holds"] == 1 and payload["confirmed_fills"] >= 1
+        assert _continuous_outcome(sessions, committed)[:2] == ("COMPLETED_CONTINUOUS", True)
+        assert _continuous_outcome(sessions, frozenset())[0] == "OPEN_EXPOSURE"
+    finally:
+        await close(runtime)

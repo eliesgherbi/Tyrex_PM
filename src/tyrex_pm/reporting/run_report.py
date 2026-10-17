@@ -126,6 +126,8 @@ def _outcome(
     run_evidence: Sequence[RunEvidenceRecord],
     startup_outcome: str | None = None,
     mutation_attempts: int | None = None,
+    run_sessions: Sequence[ExecutionSessionState] = (),
+    committed_session_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, bool, dict[str, Any] | None]:
     if startup_outcome:
         return startup_outcome, False, None
@@ -135,6 +137,8 @@ def _outcome(
         return "REPORTING_DEGRADED", False, None
     if runtime_errors:
         return "RUNTIME_DEGRADED", False, None
+    if state is None and run_sessions:
+        return _continuous_outcome(run_sessions, committed_session_ids)
     if state is None:
         cutoff = _cutoff_only_block(
             mutation_attempts=mutation_attempts,
@@ -242,6 +246,59 @@ def _infrastructure_ready_from_payload(payload: Mapping[str, Any]) -> bool:
     # Legacy readiness conflated model lockouts with infrastructure. If the
     # only recorded blockers are strategy-input codes, infrastructure was up.
     return bool(blockers) and blockers.issubset(_STRATEGY_INPUT_BLOCKERS)
+
+
+def _continuous_outcome(
+    sessions: Sequence[ExecutionSessionState], committed: frozenset[str]
+) -> tuple[str, bool, None]:
+    """Outcome of a continuous run whose sessions were all released or detached."""
+    if any(s.phase is ExecutionPhase.MANUAL_INTERVENTION for s in sessions):
+        return "MANUAL_INTERVENTION_REQUIRED", False, None
+    if any(s.has_exposure and s.session_id not in committed for s in sessions):
+        return "OPEN_EXPOSURE", False, None
+    return "COMPLETED_CONTINUOUS", True, None
+
+
+def _confirmed_fills(state: ExecutionSessionState) -> list[dict[str, Any]]:
+    return [
+        {
+            "session_id": state.session_id,
+            "venue_trade_id": trade.venue_trade_id,
+            "side": trade.side,
+            "shares": str(trade.shares),
+            "price": str(trade.price),
+        }
+        for trade in state.trades.values()
+        if trade.status is TradeStatus.CONFIRMED
+    ]
+
+
+def _run_sessions_payload(
+    sessions: Sequence[ExecutionSessionState], committed: frozenset[str]
+) -> dict[str, Any] | None:
+    if not sessions:
+        return None
+    rows = [
+        {
+            "session_id": s.session_id,
+            "window_id": None if s.identity is None else s.identity.window_id,
+            "phase": s.phase.value,
+            "committed_hold": s.session_id in committed,
+            "entry_posts": 0 if s.entry is None else len(s.entry.attempt_ids),
+            "exit_posts": 0 if s.exit is None else len(s.exit.attempt_ids),
+            "confirmed_position_shares": str(s.confirmed_position_shares),
+            "confirmed_fills": len(_confirmed_fills(s)),
+        }
+        for s in sessions
+    ]
+    return {
+        "session_count": len(rows),
+        "entry_posts": sum(r["entry_posts"] for r in rows),
+        "exit_posts": sum(r["exit_posts"] for r in rows),
+        "confirmed_fills": sum(r["confirmed_fills"] for r in rows),
+        "committed_holds": sum(r["committed_hold"] for r in rows),
+        "sessions": rows,
+    }
 
 
 def _no_entry_diagnosis(records: Sequence[RunEvidenceRecord]) -> dict[str, Any]:
@@ -361,6 +418,10 @@ class RunReportInput:
     recovery_sessions: Sequence[Mapping[str, Any]] = ()
     process_mutation_attempts: int | None = None
     strategy_started: bool = True
+    # Continuous runs: every session the run opened (all windows, attempts, detached
+    # committed holds) and the ids of those committed to resolution (ledger-owned).
+    run_sessions: Sequence[ExecutionSessionState] = ()
+    committed_session_ids: frozenset[str] = frozenset()
 
 
 def _fill_completeness(
@@ -459,10 +520,30 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         run_evidence=source.run_evidence,
         startup_outcome=source.startup_outcome,
         mutation_attempts=source.mutation_attempts,
+        run_sessions=source.run_sessions,
+        committed_session_ids=source.committed_session_ids,
     )
     records = tuple(source.run_evidence)
-    no_entry = _no_entry_diagnosis(records) if source.state is None else None
-    execution_stage = _execution_stage(source.state)
+    sessions = tuple(source.run_sessions)
+    no_entry = (
+        _no_entry_diagnosis(records) if source.state is None and not sessions else None
+    )
+    execution_stage = (
+        "CONTINUOUS_SESSIONS_RELEASED"
+        if source.state is None and sessions
+        else _execution_stage(source.state)
+    )
+    summary = _fill_completeness(
+        source.state,
+        prior_session_risk=source.prior_session_risk,
+        projection_failed=source.projection_failed,
+    )
+    if source.state is None and sessions and not source.projection_failed:
+        summary = {
+            **summary,
+            "observed_fills": [f for s in sessions for f in _confirmed_fills(s)],
+            "reconciliation_complete": all(s.reconciliation_complete for s in sessions),
+        }
     return {
         "schema_version": 5,
         "generated_at": _utc_now_text(),
@@ -486,27 +567,26 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
             None if source.startup_reconciliation is None else dict(source.startup_reconciliation)
         ),
         "recovery_sessions": [dict(item) for item in source.recovery_sessions],
+        "run_sessions": _run_sessions_payload(sessions, source.committed_session_ids),
         "strategy_session": (
             None
             if not source.strategy_started or source.state is None
             else source.state.session_id
         ),
         "validation_scope": {
-            "execution_lifecycle_exercised": source.state is not None,
+            "execution_lifecycle_exercised": source.state is not None or bool(sessions),
             "furthest_execution_stage": execution_stage,
             "entry_intent_observed": any(
                 record.event_type == "INTENT_EMITTED" for record in records
             ),
             "venue_mutation_attempted": bool(source.mutation_attempts),
-            "entry_http_post_attempted": bool(
-                source.state is not None
-                and source.state.entry is not None
-                and source.state.entry.attempt_ids
+            "entry_http_post_attempted": any(
+                s.entry is not None and bool(s.entry.attempt_ids)
+                for s in ((source.state,) if source.state is not None else sessions)
             ),
-            "exit_http_post_attempted": bool(
-                source.state is not None
-                and source.state.exit is not None
-                and source.state.exit.attempt_ids
+            "exit_http_post_attempted": any(
+                s.exit is not None and bool(s.exit.attempt_ids)
+                for s in ((source.state,) if source.state is not None else sessions)
             ),
             "note": _validation_note(source.state, execution_stage, cutoff_block),
         },
@@ -517,11 +597,7 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         "run_evidence": [record.to_dict() for record in records],
         "runtime_errors": list(source.runtime_errors),
         "fatal_error": None if source.fatal_error is None else dict(source.fatal_error),
-        "summary": _fill_completeness(
-            source.state,
-            prior_session_risk=source.prior_session_risk,
-            projection_failed=source.projection_failed,
-        ),
+        "summary": summary,
         "reproducibility": None if source.reproducibility is None else dict(source.reproducibility),
         "reporting": {
             "degraded": bool(source.reporting_failures),
@@ -564,6 +640,11 @@ def _validation_note(
             "Mutation attempts remain zero. "
             "ok true means the runtime completed safely; it does not satisfy "
             "R7 confirmed entry and exit."
+        )
+    if state is None and stage == "CONTINUOUS_SESSIONS_RELEASED":
+        return (
+            "Continuous run: every window session was released or detached; "
+            "see run_sessions and windows.jsonl for per-window outcomes."
         )
     if state is None:
         return "Run stopped before an execution session; BUY/fill/EXIT behavior is untested."
