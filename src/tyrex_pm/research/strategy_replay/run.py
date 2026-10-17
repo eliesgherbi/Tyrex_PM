@@ -39,6 +39,10 @@ from tyrex_pm.core.intents import (
     HoldToResolutionIntent,
 )
 from tyrex_pm.core.time_authority import FakeTimeAuthority, TimeSyncStatus
+from tyrex_pm.domain.polymarket.reference_availability import (
+    POLICY_LEGACY,
+    ReferenceAvailabilityPolicy,
+)
 from tyrex_pm.execution.exit_arbitration import admit_exit, pick_exit
 from tyrex_pm.execution.final_gate import (
     DISPATCH_CHECK_VERSION,
@@ -119,12 +123,23 @@ class ReplayExecutionPolicy:
     minimum_exit_price: Decimal = Decimal("0.01")
     sell_size_increment: Decimal = Decimal("0.01")
     protection: Any | None = None  # tyrex_pm.protection.ProtectionSpec
+    # Settlement-reference availability (domain.polymarket.reference_availability):
+    # "legacy" reproduces earlier research (every row live, no arrival bound);
+    # "reference_availability_v1" is the live rule (history rows only recover an exact
+    # boundary tick at their actual arrival, within the recovery deadline).
+    reference_availability: str = "legacy"
 
     def __post_init__(self) -> None:
         if self.order_contract not in ("planner_amount", "strategy_shares"):
             raise ValueError("order_contract must be planner_amount or strategy_shares")
         if self.fee_reserve_rate < 0 or self.sell_size_increment <= 0:
             raise ValueError("fee_reserve_rate must be >= 0 and sell_size_increment > 0")
+        self.reference_policy()  # validates the policy id
+
+    def reference_policy(self) -> ReferenceAvailabilityPolicy:
+        if self.reference_availability == POLICY_LEGACY:
+            return ReferenceAvailabilityPolicy.legacy()
+        return ReferenceAvailabilityPolicy(policy_id=self.reference_availability)
 
     @classmethod
     def legacy_v2(cls) -> "ReplayExecutionPolicy":
@@ -815,6 +830,7 @@ def run_window(
         raise ValueError("depth_levels must cover the strategy's sizing.max_levels")
     feed = StrategyFeed.create(window, runtime, clock, depth_levels=depth_levels)
     feed.eager_books = eager_books
+    feed.reference_policy = policy.reference_policy()
     tick, minimum = _initial_constraints(window)
     feed.seed_constraints(tick, None)
     scheduler = EvaluationScheduler(

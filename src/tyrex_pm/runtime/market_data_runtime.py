@@ -10,7 +10,7 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +31,11 @@ from tyrex_pm.core.events import ReferencePriceUpdated, SettlementReferenceUpdat
 from tyrex_pm.core.snapshots import BookSnapshot
 from tyrex_pm.core.time_authority import SnapshotTimeAuthority
 from tyrex_pm.domain.polymarket.ptb_attestation import AttestationResult
+from tyrex_pm.domain.polymarket.reference_availability import (
+    ReferenceAvailabilityPolicy,
+    is_history,
+    selected_boundary_tick,
+)
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.facts import ids as F
 from tyrex_pm.market_data.binding_record import (
@@ -42,6 +47,7 @@ from tyrex_pm.market_data.book_store import MarketStateStore
 from tyrex_pm.runtime.composition import starts_adapter
 from tyrex_pm.runtime.feed_diagnostics import ReferenceFreshnessWatchdog
 from tyrex_pm.runtime.market_event_router import (
+    route_boundary_history,
     route_settlement_reference,
     route_trading_reference,
 )
@@ -88,6 +94,11 @@ class SealRecord:
     source_timestamp_exact: bool = False
     arrival_within_policy: bool = False
     maximum_arrival_lag_ms: int | None = None
+    # Provenance of the tick the opening price was sealed from.
+    recovered_from_history: bool = False
+    candidate_delivery_kind: str = "live"
+    candidate_connection_generation: int | None = None
+    availability_policy: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -114,6 +125,10 @@ class SealRecord:
             "source_timestamp_exact": self.source_timestamp_exact,
             "arrival_within_policy": self.arrival_within_policy,
             "maximum_arrival_lag_ms": self.maximum_arrival_lag_ms,
+            "recovered_from_history": self.recovered_from_history,
+            "candidate_delivery_kind": self.candidate_delivery_kind,
+            "candidate_connection_generation": self.candidate_connection_generation,
+            "availability_policy": self.availability_policy,
         }
 
 
@@ -386,6 +401,7 @@ async def run_market_data_runtime(
     sealed_windows: set[str] = set()
     seal_fail_logged: set[str] = set()
     reference_watchdog = ReferenceFreshnessWatchdog()
+    reference_policy = ReferenceAvailabilityPolicy()
     last_eval_mono: float = 0.0
     contract = runtime.input_contract
     scheduler = EvaluationScheduler(
@@ -513,14 +529,21 @@ async def run_market_data_runtime(
         ptb_quality = getattr(getattr(runtime.driver, "config", None), "ptb_time_quality", None)
         if ptb_quality is not None:
             maximum_ptb_lag_ms = ptb_quality.max_ptb_lag_ms
-        lag_ok = (
-            sealed.boundary_lag_ms is not None
-            and sealed.boundary_lag_ms <= maximum_ptb_lag_ms
+        policy = replace(
+            reference_policy,
+            max_live_arrival_lag_ms=int(maximum_ptb_lag_ms),
+            history_recovery_deadline_ms=max(
+                reference_policy.history_recovery_deadline_ms, int(maximum_ptb_lag_ms)
+            ),
+        )
+        boundary = selected_boundary_tick(state)
+        recovered = is_history(None if boundary is None else boundary.ingress)
+        bound_ms = policy.bound_ms(recovered_from_history=recovered)
+        lag_ok = policy.arrival_ok(
+            lag_ms=sealed.boundary_lag_ms, recovered_from_history=recovered
         )
         if not lag_ok:
-            entry_blockers.append(
-                f"ptb_lag_exceeded:{sealed.boundary_lag_ms}>{maximum_ptb_lag_ms}"
-            )
+            entry_blockers.append(f"ptb_lag_exceeded:{sealed.boundary_lag_ms}>{bound_ms}")
         exact_source_timestamp = sealed.boundary_rule_id.value == "EXACT_AT_START"
         if not exact_source_timestamp:
             entry_blockers.append(f"ptb_boundary_rule:{sealed.boundary_rule_id.value}")
@@ -586,7 +609,19 @@ async def run_market_data_runtime(
             ptb_ready=ptb_ready,
             source_timestamp_exact=exact_source_timestamp,
             arrival_within_policy=lag_ok,
-            maximum_arrival_lag_ms=maximum_ptb_lag_ms,
+            maximum_arrival_lag_ms=bound_ms,
+            recovered_from_history=recovered,
+            candidate_delivery_kind=(
+                "live"
+                if boundary is None or boundary.ingress is None
+                else boundary.ingress.delivery_kind
+            ),
+            candidate_connection_generation=(
+                None
+                if boundary is None or boundary.ingress is None
+                else boundary.ingress.connection_generation
+            ),
+            availability_policy=policy.policy_id,
         )
         summary.seals.append(rec.to_dict())
         sealed_windows.add(window_id)
@@ -603,6 +638,25 @@ async def run_market_data_runtime(
             pass
 
     def on_cl(e: SettlementReferenceUpdated) -> None:
+        if is_history(e.ingress):
+            # History after a (re)subscription: bounded opening-price recovery only.
+            # Never the latest price, never freshness, never an evaluation trigger.
+            for window_id in route_boundary_history(runtime, e, reference_policy):
+                emit_feed_event(
+                    "REFERENCE_BOUNDARY_RECOVERED_FROM_HISTORY",
+                    {
+                        "window_id": window_id,
+                        "source_ts": e.ts_event.isoformat(),
+                        "received_at": e.ts_received.isoformat(),
+                        "connection_generation": None
+                        if e.ingress is None
+                        else e.ingress.connection_generation,
+                        "policy": reference_policy.policy_id,
+                    },
+                )
+                if contract.includes(F.PTB_SEALED):
+                    _try_seal(window_id)
+            return
         counts["chainlink"] += 1
         for kind, payload in reference_watchdog.on_tick(
             source_ts=e.ts_event, receive_mono_s=time.monotonic()

@@ -23,6 +23,7 @@ from tyrex_pm.adapters.polymarket.rtds_normalize import (
     binance_subscribe_message,
     normalize_chainlink_tick,
     normalize_rtds_binance_tick,
+    normalize_twap_history,
     twap_sixty_subscribe_message,
 )
 from tyrex_pm.core.ids import CorrelationId, new_correlation_id
@@ -201,6 +202,24 @@ class RtdsChainlinkAdapter:
         wall = datetime.now(timezone.utc)
         mono = time.perf_counter_ns()
         time_view = self._time_authority.view() if self._time_authority is not None else None
+        history = normalize_twap_history(
+            msg,
+            ts_received=wall,
+            receive_monotonic_ns=mono,
+            next_sequence=self._sequencer.next,
+            connection_generation=generation,
+            clock_uncertainty_ms=self._clock_uncertainty_ms,
+            correlation_id=self._correlation_id,
+            expected_symbol=self._symbol,
+            time_view=time_view,
+        )
+        if history:
+            # Recent ticks after a (re)subscription: published as history so the host
+            # can only use them for bounded opening-price recovery; they never move
+            # the live ordering watermark.
+            for event in history:
+                dispatcher.publish(event)
+            return
         event = normalize_chainlink_tick(
             msg,
             ts_received=wall,

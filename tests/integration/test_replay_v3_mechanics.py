@@ -153,3 +153,23 @@ def test_protection_take_profit_runs_through_exit_arbitration(loaded) -> None:
     assert result["decisions"][-1]["reason"] == "MAX_TRADES_PER_WINDOW"
     with pytest.raises(ValueError, match="managed_exit"):
         replay(loaded, config(), scenario("favorable"), ReplayExecutionPolicy(protection=spec))
+
+
+def test_reference_availability_v1_matches_legacy_when_the_boundary_is_live(loaded) -> None:
+    # reference_availability_v1 applies the live arrival rules: a boundary tick pushed
+    # live within 5 s seals exactly as before; history rows only recover an exact
+    # boundary at their recorded arrival. The seal records the policy and provenance.
+    from tyrex_pm.research.strategy_replay.run import ReplayExecutionPolicy
+
+    legacy = replay(loaded, config(), scenario("favorable"))
+    v1 = replay(loaded, config(), scenario("favorable"),
+                ReplayExecutionPolicy(reference_availability="reference_availability_v1"))
+    (seal_legacy,) = legacy["seals"]
+    (seal_v1,) = v1["seals"]
+    assert seal_v1["k"] == seal_legacy["k"] and seal_v1["boundary_lag_ms"] <= 5_000
+    assert seal_v1["availability_policy"] == "reference_availability_v1"
+    assert seal_v1["recovered_from_history"] is False
+    assert seal_legacy["availability_policy"] == "legacy"
+    assert outcomes(v1) == outcomes(legacy)
+    assert v1["provenance"]["execution_policy"]["reference_availability"] == (
+        "reference_availability_v1")

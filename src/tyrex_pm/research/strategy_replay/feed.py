@@ -37,6 +37,12 @@ from tyrex_pm.core.snapshots import (
 from tyrex_pm.data_warehouse.contracts import decode
 from tyrex_pm.data_warehouse.reconstruction.books import Books
 from tyrex_pm.domain.polymarket.market import BinaryMarket
+from tyrex_pm.domain.polymarket.reference_availability import (
+    DELIVERY_LIVE,
+    ReferenceAvailabilityPolicy,
+    is_history,
+    selected_boundary_tick,
+)
 from tyrex_pm.facts import ids as F
 from tyrex_pm.market_data.binding_record import (
     BindingLifecycleRole,
@@ -45,6 +51,7 @@ from tyrex_pm.market_data.binding_record import (
 )
 from tyrex_pm.market_data.book_store import MarketStateStore
 from tyrex_pm.runtime.market_event_router import (
+    route_boundary_history,
     route_settlement_reference,
     route_trading_reference,
 )
@@ -138,6 +145,10 @@ class StrategyFeed:
     store_clock: "PointClock" = field(default_factory=lambda: PointClock(0))
     # Latest recorded clock offset (collector host -> reference clock); zero when uncorrected.
     clock_offset: timedelta = field(default_factory=timedelta)
+    reference_policy: ReferenceAvailabilityPolicy = field(
+        default_factory=ReferenceAvailabilityPolicy.legacy
+    )
+    _arrival_refused: set[str] = field(default_factory=set)
     # True publishes every book change immediately (reference mode for equivalence tests).
     eager_books: bool = False
     _pending: dict[str, tuple[str, dict, bool]] = field(default_factory=dict)
@@ -205,6 +216,7 @@ class StrategyFeed:
             clock_status="REPLAY_RECORDED_RECEIVE_TIME",
             raw_fingerprint=str(row.get("record_id") or ""),
             role=role,
+            delivery_kind=str(row.get("delivery_kind") or DELIVERY_LIVE),
         )
 
     def _bump(self, key: str) -> None:
@@ -390,6 +402,15 @@ class StrategyFeed:
             ),
             ingress=self._ingress(row, FeedRole.SETTLEMENT_REFERENCE),
         )
+        policy = self.reference_policy
+        if not policy.is_legacy and is_history(event.ingress):
+            # Same rule as live: history only recovers an exact boundary tick, at its
+            # recorded arrival; it is never the latest reference nor a fact update.
+            for window_id in route_boundary_history(self.runtime, event, policy):
+                self._bump("reference_boundary_recovered_from_history")
+                self._seal_without_attestation(window_id)
+            self._bump("reference_history_ticks")
+            return None
         for window_id in route_settlement_reference(self.runtime, event):
             self._seal_without_attestation(window_id)
         self._bump("reference_ticks")
@@ -402,6 +423,31 @@ class StrategyFeed:
             return
         state = self.runtime.ptb_engine.get_window(sess.market_id, window_id)
         if state is None or state.selected_candidate is None:
+            return
+        if window_id in self._arrival_refused:
+            return
+        policy = self.reference_policy
+        boundary = selected_boundary_tick(state)
+        recovered = is_history(None if boundary is None else boundary.ingress)
+        lag_ms = (
+            None
+            if boundary is None
+            else (boundary.receive_wall_raw_utc - state.event_start).total_seconds() * 1000.0
+        )
+        if not policy.arrival_ok(lag_ms=lag_ms, recovered_from_history=recovered):
+            # Live seals such a window with ptb_ready false (entries blocked for the
+            # window); replay leaves it unsealed for the same effect.
+            self._arrival_refused.add(window_id)
+            self.seals.append(
+                {
+                    "window_id": window_id,
+                    "refused": "ptb_lag_exceeded",
+                    "boundary_lag_ms": lag_ms,
+                    "bound_ms": policy.bound_ms(recovered_from_history=recovered),
+                    "recovered_from_history": recovered,
+                    "availability_policy": policy.policy_id,
+                }
+            )
             return
         sealed = self.runtime.attest_and_seal(
             market_id=sess.market_id,
@@ -422,5 +468,7 @@ class StrategyFeed:
                 "quality": None if snap is None else snap.quality.value,
                 "attestation": "SKIPPED_NO_ATTESTATION_SOURCE_IN_REPLAY",
                 "reference_series": REPLAYED_REFERENCE_SERIES,
+                "recovered_from_history": recovered,
+                "availability_policy": policy.policy_id,
             }
         )

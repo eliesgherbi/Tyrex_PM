@@ -139,6 +139,7 @@ def normalize_chainlink_tick(
     time_view: Any | None = None,
     clock_snapshot_id: str | None = None,
     expected_topic: str = TOPIC_TWAP_SIXTY,
+    delivery_kind: str = "live",
 ) -> SettlementReferenceUpdated | None:
     parsed = parse_rtds_price_payload(msg)
     if parsed is None:
@@ -169,6 +170,7 @@ def normalize_chainlink_tick(
         ),
         clock_snapshot_id=clock_snapshot_id
         or (getattr(time_view, "clock_snapshot_id", None) if time_view else None),
+        delivery_kind=delivery_kind,
     )
     if time_view is None and clock_uncertainty_ms is not None:
         from tyrex_pm.core.ingress import IngressMeta
@@ -188,6 +190,7 @@ def normalize_chainlink_tick(
             late_or_out_of_order=meta.late_or_out_of_order,
             role=meta.role,
             subscription_mode=meta.subscription_mode,
+            delivery_kind=meta.delivery_kind,
         )
     snap = SettlementReferenceSnapshot(
         symbol=symbol,
@@ -210,6 +213,59 @@ def normalize_chainlink_tick(
         settlement=snap,
         ingress=meta,
     )
+
+
+def normalize_twap_history(
+    msg: Mapping[str, Any],
+    *,
+    ts_received: datetime,
+    receive_monotonic_ns: int,
+    next_sequence: Any,
+    connection_generation: int,
+    clock_uncertainty_ms: int | None,
+    correlation_id: CorrelationId | None = None,
+    expected_symbol: str = SYMBOL_CHAINLINK_BTC,
+    time_view: Any | None = None,
+) -> list[SettlementReferenceUpdated]:
+    """Ticks of a TWAP history snapshot, flagged ``subscription_history``.
+
+    Each keeps its own source timestamp and the snapshot's actual receipt time and
+    connection generation; availability is the receipt, never the source timestamp.
+    ``next_sequence`` is called once per emitted tick (ingress ordering).
+    """
+    if str(msg.get("topic") or "") != TOPIC_TWAP_SIXTY:
+        return []
+    payload = msg.get("payload") or {}
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
+        return []
+    symbol = str(payload.get("symbol") or "").strip().lower()
+    if symbol != expected_symbol.lower():
+        return []
+    events: list[SettlementReferenceUpdated] = []
+    for point in payload["data"]:
+        if not isinstance(point, Mapping) or point.get("timestamp") is None:
+            continue
+        tick = {
+            "topic": TOPIC_TWAP_SIXTY,
+            "type": "history",
+            "timestamp": msg.get("timestamp"),
+            "payload": {"symbol": symbol, **point},
+        }
+        event = normalize_chainlink_tick(
+            tick,
+            ts_received=ts_received,
+            receive_monotonic_ns=receive_monotonic_ns,
+            ingress_sequence=next_sequence(),
+            connection_generation=connection_generation,
+            clock_uncertainty_ms=clock_uncertainty_ms,
+            correlation_id=correlation_id,
+            expected_symbol=expected_symbol,
+            time_view=time_view,
+            delivery_kind="subscription_history",
+        )
+        if event is not None:
+            events.append(event)
+    return events
 
 
 def normalize_rtds_binance_tick(

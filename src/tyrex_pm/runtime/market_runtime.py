@@ -334,6 +334,15 @@ class MarketSessionRuntime:
             update_accepted_from_current_pair=False,
         )
 
+    def ingest_boundary_history(
+        self, *, window_id: str, market_id: MarketId, tick: BoundaryTickView
+    ) -> None:
+        """Recovered boundary tick (history): opening-price evidence only.
+
+        Never becomes the latest reference, never updates the basis estimate.
+        """
+        self.ptb_engine.ingest_chainlink(market_id=market_id, window_id=window_id, tick=tick)
+
     def ingest_chainlink(
         self,
         *,

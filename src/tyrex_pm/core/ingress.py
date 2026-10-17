@@ -59,6 +59,9 @@ class IngressMeta:
     late_or_out_of_order: str | None = None
     role: FeedRole = FeedRole.TRADING_REFERENCE
     subscription_mode: str | None = None
+    # "live" or "subscription_history" (ticks replayed by the provider after a
+    # (re)subscription: past source timestamps, available only at receipt).
+    delivery_kind: str = "live"
 
     def __post_init__(self) -> None:
         if self.ingress_sequence < 1:
@@ -99,6 +102,7 @@ def build_ingress_timing(
     role: FeedRole = FeedRole.TRADING_REFERENCE,
     subscription_mode: str | None = None,
     clock_snapshot_id: str | None = None,
+    delivery_kind: str = "live",
 ) -> IngressMeta:
     """Build IngressMeta with explicit raw vs corrected receive walls.
 
@@ -126,6 +130,7 @@ def build_ingress_timing(
             late_or_out_of_order=late_or_out_of_order,
             role=role,
             subscription_mode=subscription_mode,
+            delivery_kind=delivery_kind,
         )
     offset = float(getattr(time_view, "estimated_offset_ms", 0.0) or 0.0)
     corrected = raw + timedelta(milliseconds=offset)
@@ -147,6 +152,7 @@ def build_ingress_timing(
         late_or_out_of_order=late_or_out_of_order,
         role=role,
         subscription_mode=subscription_mode,
+        delivery_kind=delivery_kind,
     )
 
 
