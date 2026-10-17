@@ -1133,6 +1133,10 @@ class TradingRuntime:
 
     async def _cancel_for_hold(self) -> Any:
         """Cancel owned resting orders and return the reconciled state (no sells)."""
+        if self.lifecycle.session_id is None:
+            # The committed hold was already detached (continuous run): no session and no
+            # resting order remain; the settlement ledger owns the position.
+            return None
         await self.lifecycle._cancel_open_orders(reason="hold_to_resolution")
         return await self.lifecycle.reconcile()
 

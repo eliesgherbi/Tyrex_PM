@@ -491,3 +491,20 @@ async def test_report_counts_separate_attempts_refusals_posts_and_history(
         assert counts["journal_lifetime_venue_posts"] == 7
     finally:
         await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_after_a_detached_hold_is_clean(tmp_path: Path) -> None:
+    # Live run 5167e639: the run stopped with a detached committed hold in the last
+    # window; shutdown asserted on the missing session (RUNTIME_DEGRADED).
+    venue = ScriptedVenue(["fill"])
+    runtime, _driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    try:
+        await runtime._consume_entry(entry(runtime), None)
+        await runtime._consume_hold(hold_intent(runtime))
+        assert runtime.lifecycle.session_id is None
+        assert await runtime._cancel_for_hold() is None
+        await runtime._shutdown_execution("stop: max_duration_s")
+        assert not runtime.runtime_errors and venue.posts == ["BUY"]
+    finally:
+        await close(runtime)
