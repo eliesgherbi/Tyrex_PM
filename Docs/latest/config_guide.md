@@ -95,10 +95,11 @@ Authenticated wallet observation. A failed read is never converted to a zero bal
 | Key | Role | Module |
 |-----|------|--------|
 | `refresh_interval_s` | Background collateral / token / open-order cycle. | `execution/account_state.py` |
-| `snapshot_max_age_s` | Older snapshot is `STALE` (entry blocked). Last-good is kept until then. | `account_state.py` |
+| `snapshot_max_age_s` | Older snapshot is `STALE` (entry blocked). Last-good is kept until then. Age counts from the **start of the snapshot's earliest read**, and a snapshot held during a submit is also `STALE` past this limit. | `account_state.py` |
 | `read_timeout_s` | Diagnostic “slow read” threshold. Does **not** cancel SDK HTTP/2. | `account_state.slow_read_threshold_s` |
 | `retry_attempts` | Account-read retry count. | `account_state.py` |
 | `retry_base_delay_s` | Backoff between those retries. | `account_state.py` |
+| `isolated_read_clients` | Default `true`. Account refreshes and session reconciliation each use their own SDK client, so their reads never share a connection with order signing/POST/cancel and an entry never waits for a refresh (`lifecycle.refresh_wait_budget_ms` / `refresh_revalidate_after_ms` then have no effect). `false` restores the shared client with the refresh wait (rollback). The entry budget subtracts fills recorded after the snapshot's cash read started, so a late read never restores spent money. | gateway + `account_state.py` |
 
 ## `risk`
 

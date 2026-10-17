@@ -228,10 +228,12 @@ async def test_last_good_snapshot_expires_to_explicit_stale_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hold_ready_snapshot_keeps_ready_during_submit_critical_section() -> None:
+async def test_held_snapshot_is_never_accepted_beyond_its_freshness_limit() -> None:
+    # A submit holds the snapshot so a refresh cannot flip capabilities mid prepare,
+    # but holding must not make stale account information acceptable indefinitely.
     authority = AccountStateAuthority(
         _AccountGateway(),
-        policy=_policy(snapshot_max_age_s=0.01, refresh_interval_s=0.05),
+        policy=_policy(snapshot_max_age_s=0.2, refresh_interval_s=0.05),
     )
     authority.prepare(
         market_id="condition",
@@ -241,11 +243,14 @@ async def test_hold_ready_snapshot_keeps_ready_during_submit_critical_section() 
     )
     await _wait_for_status(authority, AccountSnapshotStatus.READY)
     async with authority.hold_ready_snapshot("condition"):
-        await asyncio.sleep(0.03)
+        first = authority.current("condition")
+        assert first.status is AccountSnapshotStatus.READY
+        await asyncio.sleep(0.1)
         held = authority.current("condition")
-        assert held.status is AccountSnapshotStatus.READY
-        assert held.read_complete
-    await asyncio.sleep(0.02)
-    aged = authority.current("condition")
-    assert aged.status in {AccountSnapshotStatus.STALE, AccountSnapshotStatus.READY}
+        assert held.status is AccountSnapshotStatus.READY  # within the limit
+        assert held.observed_monotonic_s == first.observed_monotonic_s  # not replaced
+        await asyncio.sleep(0.25)
+        aged = authority.current("condition")
+        assert aged.status is AccountSnapshotStatus.STALE  # held, but too old
+        assert "ACCOUNT_SNAPSHOT_STALE" in aged.blockers
     await authority.close()

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -170,6 +170,7 @@ class SettlementHooks:
         episode_seq: int = 1,
         attempt_seq: int = 1,
         available_collateral: Decimal | None = None,
+        collateral_read_started_at: datetime | None = None,
         today: date | None = None,
     ) -> EntryCheck:
         reasons: list[str] = list(self.startup_blockers())
@@ -204,6 +205,15 @@ class SettlementHooks:
                 else "OPEN_EPISODE_EXISTS_FOR_WINDOW"
             )
         settlement = self.config.settlement
+        # A late account read must never restore spent money: subtract fills the
+        # ledger recorded after this collateral read started.
+        spent_after_read = (
+            Decimal(0)
+            if available_collateral is None
+            else self.ledger.spent_since(collateral_read_started_at)
+        )
+        if available_collateral is not None:
+            available_collateral = available_collateral - spent_after_read
         budget = check_entry(
             self.ledger,
             settlement.trial,
@@ -227,6 +237,15 @@ class SettlementHooks:
                 "fee_curve": None
                 if constraints.fee_curve is None
                 else [str(constraints.fee_curve.fee_rate), str(constraints.fee_curve.exponent)],
+            },
+            "available_collateral": {
+                "after_fills_since_read": None
+                if available_collateral is None
+                else str(available_collateral),
+                "spent_since_read": str(spent_after_read),
+                "collateral_read_started_at": None
+                if collateral_read_started_at is None
+                else collateral_read_started_at.isoformat(),
             },
             "budget": {
                 "loss_budget": str(budget.loss_budget),

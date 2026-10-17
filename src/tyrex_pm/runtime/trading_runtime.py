@@ -333,7 +333,16 @@ class TradingRuntime:
         live_requested: bool,
         state_lock: Any,
     ) -> "TradingRuntime":
-        active_gateway = gateway or await PolymarketAsyncGateway.from_env(env)
+        active_gateway = gateway or await PolymarketAsyncGateway.from_env(
+            env, isolated_reads=config.account.isolated_read_clients
+        )
+        reads_isolated = bool(getattr(active_gateway, "reads_isolated", False))
+        account_reads = (
+            active_gateway.account_reads() if reads_isolated else active_gateway
+        )
+        reconciliation_reads = (
+            active_gateway.reconciliation_reads() if reads_isolated else active_gateway
+        )
         capabilities = CapabilityController(
             live_requested=live_requested,
             kill_switch_active=config.risk.kill_switch_active,
@@ -458,7 +467,7 @@ class TradingRuntime:
                 restored_sessions.append(restored)
         lifecycle = ExecutionLifecycle(
             coordinator=coordinator,
-            reconciler=SessionReconciler(active_gateway),
+            reconciler=SessionReconciler(reconciliation_reads),
             planner=IntentOrderPlanner(
                 ExecutionRiskPolicy(
                     maximum_total_debit=config.risk.maximum_total_debit,
@@ -485,7 +494,7 @@ class TradingRuntime:
             coordinator=coordinator,
             lifecycle=lifecycle,
             account_state_authority=AccountStateAuthority(
-                active_gateway,
+                account_reads,
                 policy=AccountStatePolicy(
                     refresh_interval_s=config.account.refresh_interval_s,
                     snapshot_max_age_s=config.account.snapshot_max_age_s,
@@ -510,7 +519,15 @@ class TradingRuntime:
         result.polygon_rpc_url = env.get("TYREX_POLYGON_RPC_URL") or os.environ.get(
             "TYREX_POLYGON_RPC_URL"
         )
-        active_gateway.client_guard = result.account_state_authority
+        # Shared client only: signing waits for an in-flight refresh and serializes
+        # with account reads. With isolated read clients nothing is shared, so the
+        # order path never waits for background account work.
+        active_gateway.client_guard = None if reads_isolated else result.account_state_authority
+        result.run_recorder.record(
+            "ACCOUNT_READ_ISOLATION",
+            {"isolated_read_clients": reads_isolated,
+             "configured": config.account.isolated_read_clients},
+        )
         active_gateway.fill_context = result.lifecycle.fill_context
         final_gate.entry_cutoff_s = effective_entry_cutoff_s(config)
         final_gate.entry_tau_s = result._current_entry_tau_s
@@ -1181,6 +1198,9 @@ class TradingRuntime:
                 episode_seq=episode_seq,
                 attempt_seq=attempt_seq,
                 available_collateral=collateral,
+                collateral_read_started_at=None
+                if account_state is None
+                else getattr(account_state, "collateral_read_started_at", None),
             )
             if check.allowed:
                 self.run_recorder.record("SETTLEMENT_EPISODE_RESERVED", check.evidence)
@@ -1706,6 +1726,20 @@ class TradingRuntime:
                         "tick_resolve_ms", "create_market_order_ms",
                         "pre_dispatch_stage", "pre_dispatch_error_code"):
                 latency[key] = getattr(order, key, None)
+            # prepare/sign, final gate, durable authorization and the POST itself.
+            stages = getattr(getattr(self, "coordinator", None), "submit_timings", {}).get(
+                getattr(order.spec, "order_id", None), {}
+            )
+            for key in ("prepare_ms", "final_gate_ms", "authorize_ms", "post_ms"):
+                latency[key] = stages.get(key)
+        monitor = getattr(self, "loop_lag_monitor", None)
+        latency["event_loop_lag_recent_max_ms"] = (
+            None if monitor is None else monitor.recent_max_ms()
+        )
+        gateway = getattr(self, "gateway", None)
+        latency["account_reads_isolated"] = (
+            None if gateway is None else getattr(gateway, "client_guard", None) is None
+        )
         return latency
 
     def _deliver_entry_outcome(
@@ -2940,6 +2974,10 @@ class TradingRuntime:
         run_evidence: tuple[RunEvidenceRecord, ...] = ()
         if startup_ready:
             self._start_intent_dispatcher()
+        from tyrex_pm.runtime.feed_diagnostics import EventLoopLagMonitor
+
+        self.loop_lag_monitor = EventLoopLagMonitor(on_report=self.run_recorder.record)
+        self.loop_lag_monitor.start()
         try:
             if startup_ready:
                 self._strategy_started = True
@@ -2983,6 +3021,9 @@ class TradingRuntime:
             self._record_runtime_error("market_data_runtime", exc)
         finally:
             await self._stop_intent_dispatcher()
+            monitor = getattr(self, "loop_lag_monitor", None)
+            if monitor is not None:
+                await monitor.stop()
             warm_tasks = tuple(self._order_metadata_warm_tasks)
             for task in warm_tasks:
                 task.cancel()

@@ -9,9 +9,12 @@ can be tuned from evidence instead of guessed.
 
 from __future__ import annotations
 
+import asyncio
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -63,3 +66,58 @@ class ReferenceFreshnessWatchdog:
                 },
             )
         ]
+
+
+@dataclass
+class EventLoopLagMonitor:
+    """Measures how late the event loop wakes a periodic task (local scheduling delay).
+
+    Separate network clients still share one process: if the loop is busy, every
+    client waits. Lag here separates that from exchange or network latency.
+    """
+
+    interval_s: float = 0.1
+    report_above_ms: float = 250.0
+    report_every_s: float = 5.0
+    on_report: Callable[[str, dict], None] | None = None
+    _samples: deque = field(default_factory=lambda: deque(maxlen=600), init=False)
+    _task: asyncio.Task | None = field(default=None, init=False)
+    _last_report_s: float = field(default=0.0, init=False)
+    max_lag_ms: float = field(default=0.0, init=False)
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run(), name="event-loop-lag")
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+            self._task = None
+
+    def record(self, lag_ms: float, now_s: float) -> None:
+        self._samples.append((now_s, lag_ms))
+        self.max_lag_ms = max(self.max_lag_ms, lag_ms)
+        if (
+            lag_ms > self.report_above_ms
+            and self.on_report is not None
+            and now_s - self._last_report_s >= self.report_every_s
+        ):
+            self._last_report_s = now_s
+            try:
+                self.on_report("EVENT_LOOP_LAG", {"lag_ms": round(lag_ms, 1),
+                                                  "recent_max_ms": self.recent_max_ms(now_s)})
+            except Exception:  # noqa: BLE001, S110 - diagnostics never stop trading
+                pass
+
+    def recent_max_ms(self, now_s: float | None = None, window_s: float = 10.0) -> float:
+        now = time.monotonic() if now_s is None else now_s
+        recent = [lag for at, lag in self._samples if now - at <= window_s]
+        return round(max(recent, default=0.0), 1)
+
+    async def _run(self) -> None:
+        while True:
+            expected = time.monotonic() + self.interval_s
+            await asyncio.sleep(self.interval_s)
+            now = time.monotonic()
+            self.record(max(0.0, (now - expected) * 1_000), now)

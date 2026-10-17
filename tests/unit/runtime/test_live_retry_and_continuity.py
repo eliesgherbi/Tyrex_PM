@@ -508,3 +508,79 @@ async def test_shutdown_after_a_detached_hold_is_clean(tmp_path: Path) -> None:
         assert not runtime.runtime_errors and venue.posts == ["BUY"]
     finally:
         await close(runtime)
+
+
+
+@pytest.mark.asyncio
+async def test_a_fill_during_a_slow_cash_read_is_not_counted_twice(tmp_path: Path) -> None:
+    # A cash read that started before a fill does not reflect it, while the fill has
+    # already released its reservation: the budget must subtract that spending.
+    from datetime import datetime, timedelta, timezone
+
+    from live_harness import CURVE
+
+    venue = ScriptedVenue(["fill"])
+    runtime, _driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    try:
+        before_fill = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await runtime._consume_entry(entry(runtime), None)
+        await runtime._consume_hold(hold_intent(runtime))
+        ep = episode(runtime)
+        assert ep.state is S.HOLD_COMMITTED and ep.filled_at is not None
+        hooks = runtime.settlement_hooks
+        cost = ep.total_cost
+        assert hooks.ledger.spent_since(before_fill) == cost
+        assert hooks.ledger.spent_since(datetime.now(timezone.utc)) == 0
+        kwargs = dict(window_id="w2", window_slug="w2", market_id="m2", condition_id="0xc2",
+                      token_id="t2", outcome_index=0, target_notional=Decimal("4"),
+                      tick_size=Decimal("0.01"), min_order_size=Decimal("5"),
+                      strategy_fee_curve=CURVE)
+        cash = cost + Decimal("3.9")  # enough only if the fill is already reflected
+        stale = await hooks.before_entry(**kwargs, available_collateral=cash,
+                                         collateral_read_started_at=before_fill)
+        assert "AVAILABLE_COLLATERAL_INSUFFICIENT" in stale.reasons
+        fresh = await hooks.before_entry(**kwargs, available_collateral=cash,
+                                         collateral_read_started_at=datetime.now(timezone.utc))
+        assert "AVAILABLE_COLLATERAL_INSUFFICIENT" not in fresh.reasons
+    finally:
+        await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_entry_evidence_splits_prepare_gate_authorize_and_post(tmp_path: Path) -> None:
+    import time
+
+    venue = ScriptedVenue(["fill"])
+    runtime, _driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    try:
+        intent = entry(runtime)
+        runtime.intent_candidate_monotonic_ns[intent.intent_id.value] = time.monotonic_ns()
+        recorded = []
+        original = runtime.run_recorder.record
+        runtime.run_recorder.record = lambda kind, payload: (
+            recorded.append((kind, payload)), original(kind, payload))[-1]
+        await runtime._consume_entry(intent, None)
+        (payload,) = [p for k, p in recorded if k == "ENTRY_OUTCOME"]
+        latency = payload["latency"]
+        for key in ("prepare_ms", "final_gate_ms", "authorize_ms", "post_ms"):
+            assert latency[key] is not None and latency[key] >= 0, key
+        assert "event_loop_lag_recent_max_ms" in latency
+        assert "account_reads_isolated" in latency
+    finally:
+        await close(runtime)
+
+
+def test_event_loop_lag_monitor_reports_once_per_interval() -> None:
+    from tyrex_pm.runtime.feed_diagnostics import EventLoopLagMonitor
+
+    reports = []
+    monitor = EventLoopLagMonitor(report_above_ms=250, report_every_s=5,
+                                  on_report=lambda kind, payload: reports.append(payload))
+    monitor.record(10.0, 100.0)
+    monitor.record(900.0, 101.0)
+    monitor.record(800.0, 102.0)  # within 5 s of the last report
+    monitor.record(700.0, 107.0)
+    assert [r["lag_ms"] for r in reports] == [900.0, 700.0]
+    assert monitor.recent_max_ms(now_s=107.0, window_s=10.0) == 900.0
+    assert monitor.recent_max_ms(now_s=115.0, window_s=10.0) == 700.0
+    assert monitor.recent_max_ms(now_s=130.0, window_s=10.0) == 0.0

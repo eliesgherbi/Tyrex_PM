@@ -140,6 +140,8 @@ class Episode:
     credited: Decimal = Decimal(0)
     opened_at: str | None = None
     completed_at: str | None = None
+    # Ledger time the fill was recorded (cash left the account at about this time).
+    filled_at: str | None = None
     evidence: list[dict] = field(default_factory=list)
     history: list[str] = field(default_factory=list)
 
@@ -354,6 +356,7 @@ class SettlementLedger:
             ep.net_shares = _dec(payload["net_shares"])
             ep.cost_basis = ep.total_cost = _dec(payload["cost_basis"])
             ep.reserved_debit = ep.reserved_fees = Decimal(0)
+            ep.filled_at = at
         elif event == "EXIT_FILL_CONFIRMED":
             sold = _dec(payload["sold_shares"])
             released = ep.cost_basis * sold / ep.net_shares
@@ -459,6 +462,30 @@ class SettlementLedger:
                 break
             count += 1
         return count
+
+    def spent_since(self, since: datetime | None) -> Decimal:
+        """Cash spent by fills recorded at or after ``since``.
+
+        A collateral read that started before such a fill does not reflect it yet,
+        while the fill already released its reservation: without this correction the
+        same money would count as available twice. ``since=None`` (time unknown) counts
+        every fill of open episodes, the conservative choice.
+        """
+        total = Decimal(0)
+        for ep in self.episodes.values():
+            if ep.filled_at is None or ep.state in (S.NO_DISPATCH, S.NO_FILL):
+                continue
+            if since is not None:
+                try:
+                    filled = datetime.fromisoformat(ep.filled_at)
+                except ValueError:
+                    filled = None
+                if filled is not None and filled < since:
+                    continue
+            elif ep.state not in SPENT_STATES:
+                continue
+            total += ep.total_cost
+        return total
 
     def totals(self) -> LedgerTotals:
         eps = list(self.episodes.values())

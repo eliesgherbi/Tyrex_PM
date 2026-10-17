@@ -42,6 +42,9 @@ class TokenAccountState:
 
 @dataclass(frozen=True)
 class AccountStateSnapshot:
+    """One account read. ``observed_at`` / ``observed_monotonic_s`` are the START of
+    its earliest read: a value is only as fresh as the oldest read behind it."""
+
     market_id: str
     token_ids: tuple[str, ...]
     status: AccountSnapshotStatus
@@ -58,6 +61,9 @@ class AccountStateSnapshot:
     refresh_elapsed_ms: float = 0.0
     refresh_cycle_overrun: bool = False
     slow_operations: tuple[str, ...] = ()
+    # Wall time the collateral read started: spending recorded after it is not in
+    # ``collateral_balance`` yet and must be subtracted by the entry budget.
+    collateral_read_started_at: datetime | None = None
 
     @property
     def read_complete(self) -> bool:
@@ -283,10 +289,9 @@ class AccountStateAuthority:
                 market_id,
                 self._latest_failures.get(market_id, ("ACCOUNT_STATE_NOT_OBSERVED",)),
             )
-        # During a submit critical section, keep the last complete snapshot
-        # executable even if wall-clock age would otherwise mark it STALE.
-        if self._ready_holds.get(market_id, 0) > 0 and snapshot.read_complete:
-            return snapshot
+        # During a submit critical section the held snapshot is not replaced by a new
+        # refresh (capabilities cannot flip mid prepare/final gate), but it is never
+        # acceptable beyond the freshness limit: age always counts from its reads.
         age_s = max(0.0, time.monotonic() - snapshot.observed_monotonic_s)
         if age_s <= self.policy.snapshot_max_age_s:
             return snapshot
@@ -502,6 +507,9 @@ class AccountStateAuthority:
         values: dict[str, Any] = {}
         elapsed_by_operation: dict[str, float] = {}
         queue_wait_by_operation: dict[str, float] = {}
+        first_read_mono: float | None = None
+        first_read_wall: datetime | None = None
+        collateral_started_wall: datetime | None = None
         error_details: list[dict[str, Any]] = []
         # Do not wrap these SDK calls in asyncio.timeout. The official SDK owns
         # connect/read/write/pool timeouts; outer cancellation was the source of
@@ -516,6 +524,11 @@ class AccountStateAuthority:
                     (time.monotonic() - queue_started) * 1_000, 3
                 )
                 started = time.monotonic()
+                started_wall = datetime.now(timezone.utc)
+                if first_read_mono is None:
+                    first_read_mono, first_read_wall = started, started_wall
+                if operation == "COLLATERAL":
+                    collateral_started_wall = started_wall
                 try:
                     values[operation] = await invoke()
                 except Exception as exc:  # classified below; never fake zero
@@ -576,7 +589,8 @@ class AccountStateAuthority:
             if token.balance_shares > 0:
                 blockers.append(f"PRIOR_POSITION:{token.token_id}:{token.balance_shares}")
         insufficient = any(value.startswith("INSUFFICIENT_") for value in blockers)
-        now = datetime.now(timezone.utc)
+        observed_at = first_read_wall or datetime.now(timezone.utc)
+        observed_mono = time.monotonic() if first_read_mono is None else first_read_mono
         return (
             AccountStateSnapshot(
                 market_id=target.market_id,
@@ -586,8 +600,8 @@ class AccountStateAuthority:
                     if insufficient
                     else AccountSnapshotStatus.READY
                 ),
-                observed_at=now,
-                observed_monotonic_s=time.monotonic(),
+                observed_at=observed_at,
+                observed_monotonic_s=observed_mono,
                 collateral_balance=collateral,
                 collateral_allowance=collateral_allowance,
                 tokens=tokens,
@@ -597,6 +611,7 @@ class AccountStateAuthority:
                 operation_elapsed_ms=tuple(elapsed_by_operation.items()),
                 operation_queue_wait_ms=tuple(queue_wait_by_operation.items()),
                 slow_operations=slow_operations,
+                collateral_read_started_at=collateral_started_wall,
             ),
             (),
             False,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -157,6 +158,15 @@ class AccountExecutionCoordinator:
     )
     recovery_generation: str | None = None
     recovery_now: Callable[[], datetime] | None = None
+    # Latency of each submit stage by order id (prepare/sign, final gate, durable
+    # authorization, POST), for run evidence. Bounded; never part of the journal.
+    submit_timings: dict[str, dict[str, float | None]] = field(default_factory=dict)
+
+    def _note_timing(self, order_id: str, stage: str, started: float) -> None:
+        timings = self.submit_timings.setdefault(order_id, {})
+        timings[stage] = round((time.monotonic() - started) * 1_000, 3)
+        while len(self.submit_timings) > 64:
+            self.submit_timings.pop(next(iter(self.submit_timings)))
 
     def _recovery_limit_block(
         self,
@@ -290,10 +300,13 @@ class AccountExecutionCoordinator:
             )
         )
         prepare_error: BaseException | None = None
+        stage_started = time.monotonic()
         try:
             prepared = await self.gateway.prepare_order(spec)
         except Exception as exc:
             prepare_error = exc
+        finally:
+            self._note_timing(spec.order_id, "prepare_ms", stage_started)
         if prepare_error is not None:
             classified = describe_error(
                 getattr(prepare_error, "original_error", None) or prepare_error,
@@ -343,8 +356,10 @@ class AccountExecutionCoordinator:
             )
         )
         dispatch_spec = prepared.dispatch_spec or spec
+        stage_started = time.monotonic()
         try:
             allowed, reason = await self.final_gate(dispatch_spec)
+            self._note_timing(spec.order_id, "final_gate_ms", stage_started)
         except Exception as exc:
             classified = describe_error(exc, operation=PolymarketOperation.PREPARE)
             await self.apply(
@@ -398,6 +413,7 @@ class AccountExecutionCoordinator:
             if blocked is not None:
                 await self.gateway.discard_prepared(prepared)
                 raise DispatchBlocked(blocked)
+        stage_started = time.monotonic()
         await self.apply(
             DispatchAuthorized(
                 **new_envelope(
@@ -421,9 +437,13 @@ class AccountExecutionCoordinator:
                 attempt_id=attempt_id,
             )
         )
+        self._note_timing(spec.order_id, "authorize_ms", stage_started)
+        stage_started = time.monotonic()
         try:
             result = await self.gateway.post_order(prepared)
+            self._note_timing(spec.order_id, "post_ms", stage_started)
         except (Exception, asyncio.CancelledError) as exc:
+            self._note_timing(spec.order_id, "post_ms", stage_started)
             classified = describe_error(exc, operation=PolymarketOperation.DISPATCH)
             await self.apply(
                 SubmissionFailed(

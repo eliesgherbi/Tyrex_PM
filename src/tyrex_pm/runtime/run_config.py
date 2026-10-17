@@ -88,6 +88,10 @@ class AccountRuntimeConfig:
     read_timeout_s: float
     retry_attempts: int
     retry_base_delay_s: float
+    # Account refreshes and session reconciliation use their own SDK clients, so
+    # their reads never delay order signing/POST (false: the earlier shared client
+    # with the refresh wait, kept as a rollback).
+    isolated_read_clients: bool = True
 
 
 @dataclass(frozen=True)
@@ -501,6 +505,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "read_timeout_s",
             "retry_attempts",
             "retry_base_delay_s",
+            "isolated_read_clients",
         },
         "account",
     )
@@ -510,6 +515,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         read_timeout_s=float(account_raw.get("read_timeout_s", 4.0)),
         retry_attempts=int(account_raw.get("retry_attempts", 3)),
         retry_base_delay_s=float(account_raw.get("retry_base_delay_s", 0.25)),
+        isolated_read_clients=bool(account_raw.get("isolated_read_clients", True)),
     )
     if min(
         account.refresh_interval_s,

@@ -186,17 +186,75 @@ class OrderMetadataWarmResult:
         return tuple(item.token_id for item in self.tokens if item.ok)
 
 
+async def _list_open_orders(
+    client: Any, *, token_id: str | None = None, market_id: str | None = None
+) -> tuple[Any, ...]:
+    paginator = client.list_open_orders(token_id=token_id, market=market_id)
+    return tuple([item async for item in paginator.iter_items()])
+
+
+async def _list_account_trades(
+    client: Any, *, token_id: str | None = None, market_id: str | None = None
+) -> tuple[Any, ...]:
+    paginator = client.list_account_trades(token_id=token_id, market=market_id)
+    return tuple([item async for item in paginator.iter_items()])
+
+
+async def _conditional_balance(client: Any, token_id: str) -> tuple[Decimal, Decimal | None]:
+    raw = await client.get_balance_allowance(asset_type="CONDITIONAL", token_id=token_id)
+    return balance_allowance_to_decimal(raw, conditional=True)
+
+
+async def _collateral_balance(client: Any) -> tuple[Decimal, Decimal | None]:
+    raw = await client.get_balance_allowance(asset_type="COLLATERAL")
+    return balance_allowance_to_decimal(raw, conditional=False)
+
+
+@dataclass
+class VenueReadView:
+    """Read-only venue calls bound to one dedicated SDK client.
+
+    Account-state refreshes and session reconciliation each get their own client so
+    their (sometimes multi-second) reads never share an HTTP/2 connection with order
+    signing, POST or cancel. It exposes no mutation.
+    """
+
+    client: Any
+    role: str
+
+    async def list_open_orders(
+        self, *, token_id: str | None = None, market_id: str | None = None
+    ) -> tuple[Any, ...]:
+        return await _list_open_orders(self.client, token_id=token_id, market_id=market_id)
+
+    async def list_account_trades(
+        self, *, token_id: str | None = None, market_id: str | None = None
+    ) -> tuple[Any, ...]:
+        return await _list_account_trades(self.client, token_id=token_id, market_id=market_id)
+
+    async def conditional_balance(self, token_id: str) -> tuple[Decimal, Decimal | None]:
+        return await _conditional_balance(self.client, token_id)
+
+    async def collateral_balance(self) -> tuple[Decimal, Decimal | None]:
+        return await _collateral_balance(self.client)
+
+
 @dataclass
 class PolymarketAsyncGateway:
     """AsyncSecureClient adapter.
 
-    Order preparation, POST, account-state refresh, and the authenticated stream
-    share the execution client. Background inspection uses ``inspection_client``,
-    a second SDK instance with its own transports. There is no sync fallback.
+    ``client`` is the trading client: order metadata, signing, POST, cancel and the
+    authenticated stream. With isolated reads, account-state refreshes use
+    ``account_client`` and session reconciliation uses ``reconciliation_client``;
+    background inspection uses ``inspection_client``. Each is a separate SDK
+    instance with its own transports. Without isolation every read shares the
+    trading client (the earlier behaviour, kept as a rollback). No sync fallback.
     """
 
     client: Any
     inspection_client: Any | None = None
+    account_client: Any | None = None
+    reconciliation_client: Any | None = None
     tick_size_resolver: TickSizeResolver | None = None
     tick_size_fetcher: TickSizeFetcher | None = None
     client_guard: Any | None = None
@@ -217,28 +275,68 @@ class PolymarketAsyncGateway:
     _stream_handle: Any | None = None
     _stream_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _abandoned_prepares: set[asyncio.Task[Any]] = field(default_factory=set)
+    # Orders being prepared or posted on the trading client. Metadata warm-up (for the
+    # next market) waits for this to reach zero; an order never waits for a warm-up.
+    _orders_in_flight: int = 0
+    _orders_idle: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        self._orders_idle.set()
+
+    def _order_started(self) -> None:
+        self._orders_in_flight += 1
+        self._orders_idle.clear()
+
+    def _order_finished(self) -> None:
+        self._orders_in_flight = max(0, self._orders_in_flight - 1)
+        if self._orders_in_flight == 0:
+            self._orders_idle.set()
 
     @classmethod
-    async def from_env(cls, env: dict[str, str] | None = None) -> "PolymarketAsyncGateway":
+    async def from_env(
+        cls, env: dict[str, str] | None = None, *, isolated_reads: bool = False
+    ) -> "PolymarketAsyncGateway":
+        """Trading + inspection clients; ``isolated_reads`` adds the account-read and
+        reconciliation clients (one SDK instance each)."""
         import os
 
         from tyrex_pm.adapters.polymarket.polygon_rpc import payout_caller_from_env
 
         source = env if env is not None else dict(os.environ)
-        client = await build_async_secure_client(env=env)
+        built: list[Any] = []
         try:
-            inspection_client = await build_async_secure_client(env=env)
+            for _ in range(4 if isolated_reads else 2):
+                built.append(await build_async_secure_client(env=env))
         except BaseException:
-            await client.close()
+            for opened in built:
+                await opened.close()
             raise
         from tyrex_pm.execution.settlement_cache import SettlementCache
 
         return cls(
-            client=client,
-            inspection_client=inspection_client,
+            client=built[0],
+            inspection_client=built[1],
+            account_client=built[2] if isolated_reads else None,
+            reconciliation_client=built[3] if isolated_reads else None,
             payout_eth_call=payout_caller_from_env(source),
             settlement_cache=SettlementCache(),
         )
+
+    def account_reads(self) -> Any:
+        """Reads for the account-state authority (dedicated client when isolated)."""
+        if self.account_client is None:
+            return self
+        return VenueReadView(self.account_client, role="account")
+
+    def reconciliation_reads(self) -> Any:
+        """Reads for session reconciliation (dedicated client when isolated)."""
+        if self.reconciliation_client is None:
+            return self
+        return VenueReadView(self.reconciliation_client, role="reconciliation")
+
+    @property
+    def reads_isolated(self) -> bool:
+        return self.account_client is not None and self.reconciliation_client is not None
 
     async def warm_order_metadata(
         self,
@@ -271,6 +369,7 @@ class PolymarketAsyncGateway:
             if not token_id or token_id in seen:
                 continue
             seen.add(token_id)
+            await self._orders_idle.wait()  # an entry/exit in progress goes first
             started = time.monotonic()
             try:
                 await self.client.create_market_order(
@@ -365,6 +464,13 @@ class PolymarketAsyncGateway:
 
     async def prepare_order(self, spec: OrderSpec) -> PreparedOrder:
         self._refuse_mutation("prepare or sign")
+        self._order_started()
+        try:
+            return await self._prepare_order(spec)
+        finally:
+            self._order_finished()
+
+    async def _prepare_order(self, spec: OrderSpec) -> PreparedOrder:
         requested_price = _protection_price(spec)
         details: dict[str, Any] = {
             "requested_protection_price": requested_price,
@@ -546,28 +652,28 @@ class PolymarketAsyncGateway:
             spec = self._prepared_specs.pop(prepared.digest)
         except KeyError as exc:
             raise RuntimeError("prepared order is unknown or already posted") from exc
-        response = await self.client.post_order(prepared.payload)
+        self._order_started()
+        try:
+            response = await self.client.post_order(prepared.payload)
+        finally:
+            self._order_finished()
         return _accepted_response(response, spec=spec)
 
     async def list_open_orders(
         self, *, token_id: str | None = None, market_id: str | None = None
     ) -> tuple[Any, ...]:
-        paginator = self.client.list_open_orders(token_id=token_id, market=market_id)
-        return tuple([item async for item in paginator.iter_items()])
+        return await _list_open_orders(self.client, token_id=token_id, market_id=market_id)
 
     async def list_account_trades(
         self, *, token_id: str | None = None, market_id: str | None = None
     ) -> tuple[Any, ...]:
-        paginator = self.client.list_account_trades(token_id=token_id, market=market_id)
-        return tuple([item async for item in paginator.iter_items()])
+        return await _list_account_trades(self.client, token_id=token_id, market_id=market_id)
 
     async def conditional_balance(self, token_id: str) -> tuple[Decimal, Decimal | None]:
-        raw = await self.client.get_balance_allowance(asset_type="CONDITIONAL", token_id=token_id)
-        return balance_allowance_to_decimal(raw, conditional=True)
+        return await _conditional_balance(self.client, token_id)
 
     async def collateral_balance(self) -> tuple[Decimal, Decimal | None]:
-        raw = await self.client.get_balance_allowance(asset_type="COLLATERAL")
-        return balance_allowance_to_decimal(raw, conditional=False)
+        return await _collateral_balance(self.client)
 
     async def start_user_stream(
         self,
@@ -763,9 +869,16 @@ class PolymarketAsyncGateway:
         await self.stop_user_stream()
         if self._abandoned_prepares:
             await asyncio.gather(*tuple(self._abandoned_prepares), return_exceptions=True)
-        inspection = self.inspection_client
+        others = [
+            extra
+            for extra in (self.inspection_client, self.account_client, self.reconciliation_client)
+            if extra is not None and extra is not self.client
+        ]
         try:
             await self.client.close()
         finally:
-            if inspection is not None and inspection is not self.client:
-                await inspection.close()
+            for extra in others:
+                try:
+                    await extra.close()
+                except Exception:  # noqa: BLE001, S110 - close every client regardless
+                    pass
