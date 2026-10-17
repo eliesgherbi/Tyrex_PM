@@ -185,7 +185,19 @@ class LedgerTotals:
     open_worst_case_loss: Decimal
     manual_count: int
     unredeemed_count: int = 0
+    # Expected payout (not cost) of proven winners awaiting operator redemption; the
+    # name is kept for the max_unredeemed_cost cap, which limits that payout.
     unredeemed_cost: Decimal = Decimal(0)
+    # Accounting kept apart (never mixed into one profit figure):
+    # - realized_*: confirmed outcomes only (redeemed winners, zero-payout losers, sales);
+    # - winning_receivable: payout proven on-chain but not yet redeemed. It is neither
+    #   profit nor available cash until confirm-redemption records the credit;
+    # - redeemed_cash: payouts whose redemption was confirmed (cash received).
+    realized_gains: Decimal = Decimal(0)
+    winning_receivable_count: int = 0
+    winning_receivable: Decimal = Decimal(0)
+    winning_receivable_cost: Decimal = Decimal(0)
+    redeemed_cash: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True)
@@ -452,6 +464,11 @@ class SettlementLedger:
         eps = list(self.episodes.values())
         realized = [e.realized_pnl for e in eps if e.realized_pnl is not None]
         unredeemed = [e for e in eps if e.state is S.REDEMPTION_PENDING_OPERATOR]
+        winners = [
+            e
+            for e in eps
+            if e.state in (S.PAYOUT_PROVEN, S.REDEMPTION_PENDING_OPERATOR) and e.receivable > 0
+        ]
         return LedgerTotals(
             episodes=len(eps),
             attempted_episodes=sum(1 for e in eps if e.state is not S.NO_DISPATCH),
@@ -477,4 +494,12 @@ class SettlementLedger:
             manual_count=sum(1 for e in eps if e.state is S.MANUAL_INTERVENTION),
             unredeemed_count=len(unredeemed),
             unredeemed_cost=sum((e.receivable for e in unredeemed), Decimal(0)),
+            realized_gains=sum((r for r in realized if r > 0), Decimal(0)),
+            winning_receivable_count=len(winners),
+            winning_receivable=sum((e.receivable for e in winners), Decimal(0)),
+            winning_receivable_cost=sum((e.cost_basis for e in winners), Decimal(0)),
+            redeemed_cash=sum(
+                (e.credited for e in eps if e.state is S.COMPLETED and e.credited > 0),
+                Decimal(0),
+            ),
         )

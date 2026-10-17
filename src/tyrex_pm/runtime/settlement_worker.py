@@ -66,6 +66,11 @@ class SettlementWorker:
             "unresolved_count": totals.unresolved_count,
             "unredeemed_count": totals.unredeemed_count,
             "unredeemed_cost": str(totals.unredeemed_cost),
+            "realized_pnl": str(totals.realized_pnl),
+            "realized_losses": str(totals.realized_losses),
+            "winning_receivable": str(totals.winning_receivable),
+            "winning_receivable_cost": str(totals.winning_receivable_cost),
+            "redeemed_cash": str(totals.redeemed_cash),
             "worklist": len(self.manager.worklist()),
         }
         if report.proven or report.completed_zero_payout or redeemed:

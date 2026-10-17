@@ -199,10 +199,14 @@ def snapshot(config_path: Path, run_id: str | None = None) -> str:
             "",
             "ledger: "
             f"open={totals.open_count} reserved={totals.reserved_cash} "
-            f"unresolved_cost={totals.spent_unresolved} "
-            f"unredeemed={totals.unredeemed_count} ({totals.unredeemed_cost}) "
-            f"realized_pnl={totals.realized_pnl} "
+            f"unresolved_cost={totals.spent_unresolved}",
+            f"  realized (confirmed only): pnl={totals.realized_pnl} "
+            f"gains={totals.realized_gains} losses={totals.realized_losses} "
             f"losses_today_utc={ledger.realized_losses_on(now.date())}",
+            f"  winning receivable (proven, NOT cash/profit until redeemed): "
+            f"{totals.winning_receivable} from {totals.winning_receivable_count} episode(s), "
+            f"cost {totals.winning_receivable_cost}",
+            f"  redeemed cash (confirmed): {totals.redeemed_cash}",
         ]
     if notes:
         lines += ["", "notices:"] + [f"  {n}" for n in notes[-5:]]

@@ -239,3 +239,24 @@ def test_receipt_verifier_attributes_only_our_redemption() -> None:
     assert not no.attributable and "NO_MATCHING_REDEMPTION_LOG" in no.reasons
     failed = asyncio.run(receipt_redemption_verifier(Reader([log], "0x0"))("0x1", episode, WALLET))
     assert not failed.attributable and "TRANSACTION_FAILED" in failed.reasons
+
+
+def test_totals_keep_losses_receivables_and_redeemed_cash_apart(tmp_path: Path) -> None:
+    ledger = SettlementLedger(tmp_path / "l.jsonl")
+    loser = reserve(ledger, 1)
+    hold(ledger, loser, shares="10", cost="4")
+    asyncio.run(_manager(ledger, PayoutObservation(True, Decimal(0), "ctf")).reconcile())
+    winner = reserve(ledger, 2)
+    hold(ledger, winner, shares="10", cost="4")
+    asyncio.run(_manager(ledger, PayoutObservation(True, Decimal(1), "ctf")).reconcile())
+    totals = ledger.totals()
+    assert totals.realized_losses == Decimal("4") and totals.realized_pnl == Decimal("-4")
+    assert totals.winning_receivable == Decimal("10") and totals.winning_receivable_count == 1
+    assert totals.winning_receivable_cost == Decimal("4")
+    assert totals.redeemed_cash == 0 and totals.realized_gains == 0  # receivable != profit
+    good = RedemptionEvidence(True, True, Decimal("10"), (), "0xabc", block_number=7)
+    ok, _ = asyncio.run(_manager(ledger, None, good).confirm_redemption(winner, "0xabc"))
+    assert ok
+    totals = ledger.totals()
+    assert totals.redeemed_cash == Decimal("10") and totals.realized_gains == Decimal("6")
+    assert totals.winning_receivable == 0 and totals.realized_pnl == Decimal("2")

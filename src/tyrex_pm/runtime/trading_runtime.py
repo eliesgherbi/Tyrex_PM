@@ -2971,6 +2971,7 @@ class TradingRuntime:
                 market_family=self.config.market.family,
                 on_public_fact=self.on_public_fact,
                 on_shutdown=self._shutdown_execution,
+                on_feed_event=self.run_recorder.record,
             )
         except BaseException as exc:  # always project a report before propagating interrupts
             fatal_exception = exc

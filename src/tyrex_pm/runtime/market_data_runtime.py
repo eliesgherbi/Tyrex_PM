@@ -40,6 +40,7 @@ from tyrex_pm.market_data.binding_record import (
 from tyrex_pm.market_data.book_feed import BookFeedSupervisor
 from tyrex_pm.market_data.book_store import MarketStateStore
 from tyrex_pm.runtime.composition import starts_adapter
+from tyrex_pm.runtime.feed_diagnostics import ReferenceFreshnessWatchdog
 from tyrex_pm.runtime.market_event_router import (
     route_settlement_reference,
     route_trading_reference,
@@ -231,6 +232,7 @@ async def run_market_data_runtime(
     market_family: str = "btc_updown_5m",
     on_public_fact: Callable[[str, MarketSessionRuntime], None] | None = None,
     on_shutdown: Callable[[str], Awaitable[None]] | None = None,
+    on_feed_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> MarketDataSummary:
     """Bounded live composition: discover → ingest → EXACT seal → optional eval.
 
@@ -383,6 +385,7 @@ async def run_market_data_runtime(
     feed_notes: list[str] = []
     sealed_windows: set[str] = set()
     seal_fail_logged: set[str] = set()
+    reference_watchdog = ReferenceFreshnessWatchdog()
     last_eval_mono: float = 0.0
     contract = runtime.input_contract
     scheduler = EvaluationScheduler(
@@ -591,8 +594,20 @@ async def run_market_data_runtime(
             json.dumps(rec.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
 
+    def emit_feed_event(kind: str, payload: dict[str, Any]) -> None:
+        if on_feed_event is None:
+            return
+        try:
+            on_feed_event(kind, payload)
+        except Exception:  # noqa: BLE001 - diagnostics must never stop the feeds
+            pass
+
     def on_cl(e: SettlementReferenceUpdated) -> None:
         counts["chainlink"] += 1
+        for kind, payload in reference_watchdog.on_tick(
+            source_ts=e.ts_event, receive_mono_s=time.monotonic()
+        ):
+            emit_feed_event(kind, {"series": "rtds_chainlink_btc", **payload})
         for window_id in route_settlement_reference(runtime, e):
             if contract.includes(F.PTB_SEALED):
                 _try_seal(window_id)
@@ -626,9 +641,21 @@ async def run_market_data_runtime(
     disp.subscribe(BookSnapshotReceived, on_book_snap)
     disp.subscribe(BookDeltaReceived, on_book_delta)
 
-    cl = RtdsChainlinkAdapter(time_authority=auth, heartbeat_timeout_s=25)
+    def _on_rtds_health(status: str, detail: dict[str, Any]) -> None:
+        emit_feed_event("FEED_CONNECTION_EVENT", {"status": status, **detail})
+        if status in ("heartbeat_timeout", "reconnecting"):
+            note = f"rtds_{status}:{detail.get('error') or ''}"
+            if not feed_notes or feed_notes[-1] != note:
+                feed_notes.append(note)
+
+    cl = RtdsChainlinkAdapter(
+        time_authority=auth, heartbeat_timeout_s=25, on_health=_on_rtds_health
+    )
 
     def _on_binance_health(status: str, detail: dict[str, Any]) -> None:
+        emit_feed_event(
+            "FEED_CONNECTION_EVENT", {"status": status, "adapter": "binance", **detail}
+        )
         if status == "handler_error":
             error_class = str(detail.get("error") or "UNKNOWN")
             summary.errors.append(f"binance_handler:{error_class}:event_dispatch_handler_failed")
@@ -769,6 +796,8 @@ async def run_market_data_runtime(
                 except Exception as exc:  # noqa: BLE001
                     summary.errors.append(f"async_tick:{type(exc).__name__}:{exc}")
                     notify_runtime_error("async_tick", exc)
+            for kind, payload in reference_watchdog.check(time.monotonic()):
+                emit_feed_event(kind, {"series": "rtds_chainlink_btc", **payload})
             timer_mono = clock.monotonic_ns() / 1e9
             if scheduler.should_evaluate_timer(mono_s=timer_mono):
                 _maybe_evaluate(timer=True)
