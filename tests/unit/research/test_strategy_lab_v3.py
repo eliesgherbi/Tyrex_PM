@@ -79,3 +79,28 @@ def test_frozen_windows_and_v2_rows() -> None:
     v2 = v3.v2_summaries(v3.load_candidates())
     assert set(v2["scenario_name"]) == {"friction", "favorable"}
     assert set(v2["config_hash"]) == set(V2_IDS.values())
+
+
+def test_runs_use_reference_availability_v1_and_legacy_ids_are_preserved() -> None:
+    candidates = v3.load_candidates()
+    windows = pd.DataFrame([{"market_id": "m", "warehouse": "w", "collection": "c",
+                             "slug": "s", "window_start_ns": 1}])
+    v1 = v3.Verification(candidates, windows)
+    legacy = v3.Verification(candidates, windows, reference_availability="legacy")
+    assert v1.reference_availability == "reference_availability_v1"
+    assert v1.id.startswith("v3_verification-ref_v1-") and v1.id != legacy.id
+    assert "ref_v1" not in legacy.id and "execution_policy" not in legacy.record
+    assert all(s.execution_policy == {"reference_availability": "reference_availability_v1"}
+               for s in v1.specs("friction"))
+    assert all(s.execution_policy == {} for s in legacy.specs("friction"))
+    retry = {"retry": {"enabled": True, "max_posts_per_episode": 1, "max_posts_per_window": 1}}
+    run = v3.FeatureRun("retry", candidates["default"], retry, windows=windows,
+                        execution_policy={"protection": None})
+    assert "-ref_v1-" in run.path.name
+    assert run.policy == {"protection": None,
+                          "reference_availability": "reference_availability_v1"}
+    old = v3.FeatureRun("retry", candidates["default"], retry, windows=windows,
+                        reference_availability="legacy")
+    assert "ref_v1" not in old.path.name and old.policy == {}
+    with pytest.raises(ValueError):
+        v3.Verification(candidates, windows, reference_availability="v0")

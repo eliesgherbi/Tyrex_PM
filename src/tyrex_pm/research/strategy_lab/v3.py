@@ -13,6 +13,14 @@
 Every launch is an explicit call. Saved results are never overwritten or mixed: an id is
 the digest of everything that determines the results, including replay and code
 identity, and a resume with different source code is refused unless accepted.
+
+Reference availability. Runs default to ``reference_availability_v1``, the rule the live
+runner applies to the settlement reference (Chainlink BTC/USD 60 s TWAP): a boundary
+tick pushed live must arrive within 5 s; subscription-history rows may only recover an
+exact boundary tick, at their recorded arrival, within the recovery deadline, and are
+never used as the latest reference. ``reference_availability="legacy"`` rebuilds the
+earlier experiment definitions (every recorded row applied as live, no arrival bound)
+with their original ids, so previous results stay addressable and are never mixed.
 """
 
 from __future__ import annotations
@@ -28,6 +36,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
+
+from tyrex_pm.domain.polymarket.reference_availability import POLICY_LEGACY, POLICY_V1
 
 from . import batch
 from .batch import Collection, RunSpec
@@ -55,6 +65,16 @@ SCENARIOS = ("friction", "favorable")  # v2: stage A friction, stage C favorable
 VERIFICATION_ROOT = STAGED
 FEATURE_ROOT = STAGED / "v3_features"
 SHARED_ROOT = STAGED / "v3_shared_account"
+# Live settlement-reference availability rule (domain.polymarket.reference_availability).
+REFERENCE_AVAILABILITY = POLICY_V1
+
+
+def reference_policy(reference_availability: str) -> dict:
+    """Execution-policy entry for the availability rule ({} for legacy: original ids)."""
+    if reference_availability not in (POLICY_V1, POLICY_LEGACY):
+        raise ValueError(f"unknown reference availability {reference_availability!r}")
+    return {} if reference_availability == POLICY_LEGACY else {
+        "reference_availability": reference_availability}
 # Settings that only label provenance; they do not change any decision.
 LABEL_ONLY = {
     "settlement.functional_id",
@@ -230,11 +250,14 @@ class Verification(_SavedRun):
     """Both candidates, every new feature off, on the frozen v2 windows and scenarios."""
 
     def __init__(self, candidates: dict[str, Candidate], windows: pd.DataFrame,
-                 scenarios: tuple[str, ...] = SCENARIOS, keep_timelines: bool = False):
+                 scenarios: tuple[str, ...] = SCENARIOS, keep_timelines: bool = False,
+                 reference_availability: str = REFERENCE_AVAILABILITY):
         self.candidates = candidates
         self.windows = windows
         self.scenarios = tuple(scenarios)
         self.keep = keep_timelines
+        self.reference_availability = reference_availability
+        self.policy = reference_policy(reference_availability)
         identity = {
             "kind": "v3_verification",
             "source_experiment": V2_EXPERIMENT,
@@ -244,8 +267,12 @@ class Verification(_SavedRun):
             "replay": replay_identity(),
             "keep_timelines": keep_timelines,
         }
+        tag = ""
+        if self.policy:  # legacy keeps the original identity, hence the original id
+            identity["execution_policy"] = self.policy
+            tag = "ref_v1-"
         fingerprint = _digest(identity)
-        self.path = VERIFICATION_ROOT / f"v3_verification-{fingerprint[:10]}"
+        self.path = VERIFICATION_ROOT / f"v3_verification-{tag}{fingerprint[:10]}"
         self.record = {**identity, "experiment_id": self.path.name, "fingerprint": fingerprint,
                        "status": {}}
 
@@ -255,7 +282,8 @@ class Verification(_SavedRun):
 
     def specs(self, scenario: str) -> list[RunSpec]:
         params = [c.parameters for c in self.candidates.values()]
-        return _specs(self.windows, params, scenario, f"v3_verification:{self.id}:{scenario}")
+        return _specs(self.windows, params, scenario, f"v3_verification:{self.id}:{scenario}",
+                      self.policy)
 
     def preview(self, workers: int) -> pd.DataFrame:
         from .staged import seconds_per_run
@@ -396,14 +424,16 @@ class FeatureRun(_SavedRun):
 
     def __init__(self, name: str, candidate: Candidate, overrides: dict, *,
                  scenario: str = "friction", windows: pd.DataFrame,
-                 execution_policy: dict | None = None):
+                 execution_policy: dict | None = None,
+                 reference_availability: str = REFERENCE_AVAILABILITY):
         self.name = name
         self.candidate = candidate
         self.parameters = merge_parameters(candidate.parameters, overrides)
         effective_parameters(self.parameters)  # validates (raises on invalid settings)
         self.scenario = scenario
         self.windows = windows
-        self.policy = dict(execution_policy or {})
+        self.reference_availability = reference_availability
+        self.policy = {**dict(execution_policy or {}), **reference_policy(reference_availability)}
         identity = {
             "kind": "v3_feature",
             "name": name,
@@ -415,7 +445,8 @@ class FeatureRun(_SavedRun):
             "replay": replay_identity(),
         }
         fingerprint = _digest(identity)
-        self.path = FEATURE_ROOT / f"{name}-{candidate.name}-{scenario}-{fingerprint[:10]}"
+        tag = "ref_v1-" if reference_policy(reference_availability) else ""
+        self.path = FEATURE_ROOT / f"{name}-{candidate.name}-{scenario}-{tag}{fingerprint[:10]}"
         self.record = {**identity, "fingerprint": fingerprint, "status": "not started"}
 
     def specs(self) -> list[RunSpec]:
@@ -451,7 +482,7 @@ def feature_vs_baseline(feature: pd.DataFrame, baseline: pd.DataFrame,
         (baseline["config_hash"] == candidate.config_id)
         & (baseline["scenario_name"] == scenario)]
     rows = []
-    for name, frame in (("features off (v3 verification)", base), ("feature run", feature)):
+    for name, frame in (("features off (verification)", base), ("feature run", feature)):
         if frame.empty:
             continue
         pnl = pd.to_numeric(frame["realized_pnl"], errors="coerce")
@@ -476,7 +507,8 @@ def feature_vs_baseline(feature: pd.DataFrame, baseline: pd.DataFrame,
 
 
 def shared_account(candidate: Candidate, windows: pd.DataFrame, *, scenario: str = "friction",
-                   limits: dict, initial_cash: str = "100", run: bool = False) -> dict:
+                   limits: dict, initial_cash: str = "100", run: bool = False,
+                   reference_availability: str = REFERENCE_AVAILABILITY) -> dict:
     """Ordered replay of ``windows`` through one account (``sequence.run_sequence``).
 
     Sequential (one window at a time) and slow: about one replay per window. Saved as
@@ -490,7 +522,11 @@ def shared_account(candidate: Candidate, windows: pd.DataFrame, *, scenario: str
                 "parameters": candidate.parameters, "scenario": scenario,
                 "windows": list(windows["market_id"]), "limits": limits,
                 "initial_cash": initial_cash, "replay": replay_identity()}
-    path = SHARED_ROOT / f"{candidate.name}-{scenario}-{_digest(identity)[:10]}.json"
+    policy = reference_policy(reference_availability)
+    if policy:  # legacy keeps the original identity, hence the original file name
+        identity["execution_policy"] = policy
+    tag = "ref_v1-" if policy else ""
+    path = SHARED_ROOT / f"{candidate.name}-{scenario}-{tag}{_digest(identity)[:10]}.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     if not run:
@@ -505,7 +541,8 @@ def shared_account(candidate: Candidate, windows: pd.DataFrame, *, scenario: str
         try:
             return lab.run(ref.ref.market_id, parameters=candidate.parameters,
                            scenario=scenario.name.split("[")[0],
-                           scenario_overrides={"initial_cash": scenario.initial_cash})
+                           scenario_overrides={"initial_cash": scenario.initial_cash},
+                           execution_policy=policy or None)
         finally:
             lab._windows.pop(ref.ref.market_id, None)
 
