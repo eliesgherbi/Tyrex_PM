@@ -168,6 +168,7 @@ class ExecutionLifecycle:
             state.resting_limit_venue_ids
             or state.has_unresolved_mutation_attempt
             or state.entry_match_awaiting_confirmation
+            or state.has_pending_trades
             or state.phase is ExecutionPhase.MANUAL_INTERVENTION
         ):
             raise RuntimeError(f"cannot detach a session with pending work ({reason})")

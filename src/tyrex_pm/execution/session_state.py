@@ -55,6 +55,9 @@ class ExecutionPhase(str, Enum):
     MANUAL_INTERVENTION = "MANUAL_INTERVENTION"
 
 
+PENDING_TRADE_STATUSES = frozenset({TradeStatus.MATCHED, TradeStatus.MINED, TradeStatus.RETRYING})
+
+
 TERMINAL_PHASES = {
     ExecutionPhase.COMPLETED_NO_DISPATCH,
     ExecutionPhase.COMPLETED_NO_FILL,
@@ -141,7 +144,15 @@ class ExecutionSessionState:
     baseline_position_shares: Decimal = Decimal("0")
     baseline_sellable_shares: Decimal = Decimal("0")
     baseline_open_order_ids: tuple[str, ...] = ()
+    # Derived by the reducer from separate evidence (never written by a single
+    # observation): applied confirmed trades, the latest reconciliation
+    # observation, settlement proofs and external disposals.
     confirmed_position_shares: Decimal = Decimal("0")
+    # Latest reconciliation observation of the session position (balance delta
+    # vs baseline, floored by the reconciler's trade-derived remainder) and the
+    # applied confirmed-trade net it was taken against.
+    observed_position_shares: Decimal | None = None
+    observed_trade_net_shares: Decimal = Decimal("0")
     sellable_shares: Decimal = Decimal("0")
     last_balance_source: str | None = None
     exit_requested_reason: str | None = None
@@ -179,6 +190,7 @@ class ExecutionSessionState:
             or self.resting_limit_venue_ids
             or self.has_unresolved_mutation_attempt
             or self.entry_match_awaiting_confirmation
+            or self.has_pending_trades
             or (self.phase is ExecutionPhase.RECONCILING)
         )
 
@@ -187,12 +199,17 @@ class ExecutionSessionState:
         return bool(
             self.has_unresolved_mutation_attempt
             or self.entry_match_awaiting_confirmation
+            or self.has_pending_trades
             or self.resting_limit_venue_ids
         )
 
     @property
     def clearance_prerequisites_hold(self) -> bool:
-        if self.has_unresolved_mutation_attempt or self.entry_match_awaiting_confirmation:
+        if (
+            self.has_unresolved_mutation_attempt
+            or self.entry_match_awaiting_confirmation
+            or self.has_pending_trades
+        ):
             return False
         if self.resting_limit_venue_ids:
             return False
@@ -262,6 +279,44 @@ class ExecutionSessionState:
     def confirmed_trade_net_shares(self) -> Decimal:
         """Net position proven by confirmed, session-owned venue trades."""
         return self.confirmed_buy_shares - self.confirmed_sell_shares
+
+    @property
+    def applied_trade_net_shares(self) -> Decimal:
+        """Net of confirmed trades already applied to the position (attributed to an order)."""
+        net = Decimal("0")
+        for trade in self.trades.values():
+            if trade.position_applied:
+                net += trade.shares if trade.side == "BUY" else -trade.shares
+        return net
+
+    def _pending_shares(self, side: str) -> Decimal:
+        return sum(
+            (
+                trade.shares
+                for trade in self.trades.values()
+                if trade.side == side and trade.status in PENDING_TRADE_STATUSES
+            ),
+            Decimal("0"),
+        )
+
+    @property
+    def pending_buy_shares(self) -> Decimal:
+        """Matched / mined / retrying BUY trades: exposure that is real but not yet confirmed."""
+        return self._pending_shares("BUY")
+
+    @property
+    def pending_sell_shares(self) -> Decimal:
+        return self._pending_shares("SELL")
+
+    @property
+    def has_pending_trades(self) -> bool:
+        """Any trade not yet terminal (CONFIRMED / FAILED). Not confirmed is not no exposure."""
+        return any(trade.status in PENDING_TRADE_STATUSES for trade in self.trades.values())
+
+    @property
+    def exposure_upper_bound_shares(self) -> Decimal:
+        """Confirmed position plus pending BUYs — the inventory that may exist right now."""
+        return self.confirmed_position_shares + self.pending_buy_shares
 
     @property
     def has_confirmed_buy(self) -> bool:

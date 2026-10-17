@@ -114,6 +114,11 @@ LATE_EVIDENCE_POLL_S = 5.0
 
 # Soft rewarm before official SDK AsyncOrderMetadataCache TTL (10 minutes).
 _ORDER_METADATA_WARM_TTL_S = 8 * 60
+# Refresh order metadata this long before it expires, also while its market is active.
+_ORDER_METADATA_REFRESH_LEAD_S = 90.0
+_ORDER_METADATA_REFRESH_MAX_ATTEMPTS = 5
+_ORDER_METADATA_RETRY_BASE_S = 2.0
+_ORDER_METADATA_RETRY_MAX_S = 30.0
 _ORDER_METADATA_WARM_MAX_PRICE = Decimal("0.99")
 _ORDER_METADATA_WARM_AMOUNT = Decimal("1")
 
@@ -242,6 +247,11 @@ class TradingRuntime:
     known_dust_residuals: list[KnownDustResidual] = field(default_factory=list)
     _order_metadata_warmed_at: dict[str, float] = field(default_factory=dict)
     _order_metadata_warm_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    # Single flight per token + bounded retries with backoff for metadata refresh.
+    _order_metadata_inflight: set[str] = field(default_factory=set)
+    _last_recheck_failure_key: tuple[Any, ...] | None = None
+    _order_metadata_failures: dict[str, int] = field(default_factory=dict)
+    _order_metadata_retry_after: dict[str, float] = field(default_factory=dict)
     _intent_dispatcher_task: asyncio.Task[None] | None = None
     _intent_dispatcher_stop: asyncio.Event = field(default_factory=asyncio.Event)
     _cleanup_done: bool = False
@@ -599,28 +609,94 @@ class TradingRuntime:
         self.capabilities.order_metadata_ready = ready
         self._record_readiness_if_changed()
 
-    def _schedule_order_metadata_warm(self, market_session: Any) -> None:
+    def _token_metadata_refresh_due(self, token_id: str, now: float) -> bool:
+        warmed_at = self._order_metadata_warmed_at.get(token_id)
+        if warmed_at is None:
+            return True
+        return (now - warmed_at) >= _ORDER_METADATA_WARM_TTL_S - _ORDER_METADATA_REFRESH_LEAD_S
+
+    def _schedule_order_metadata_warm(
+        self, market_session: Any, *, refresh_ahead: bool = False
+    ) -> None:
+        """Warm order metadata for a market's tokens.
+
+        Without ``refresh_ahead`` only tokens that are not warm are fetched (market prepare /
+        activation). With it, tokens close to expiry are refreshed too, so an active market never
+        loses readiness mid-window. At most one request per token is in flight; failures back off
+        and stop after a bounded number of attempts (entries then stay blocked).
+        """
         token_ids = self._market_token_ids(market_session)
         now = time.monotonic()
         pending = tuple(
             token_id
             for token_id in token_ids
-            if not self._token_metadata_is_warm(token_id, now=now)
+            if token_id not in self._order_metadata_inflight
+            and (
+                self._token_metadata_refresh_due(token_id, now)
+                if refresh_ahead
+                else not self._token_metadata_is_warm(token_id, now=now)
+            )
+            and now >= self._order_metadata_retry_after.get(token_id, 0.0)
+            and self._order_metadata_failures.get(token_id, 0)
+            < _ORDER_METADATA_REFRESH_MAX_ATTEMPTS
         )
         self._refresh_order_metadata_capability()
         if not pending:
             return
+        self._order_metadata_inflight.update(pending)
+        if refresh_ahead:
+            self.run_recorder.record(
+                "ORDER_METADATA_REFRESH_SCHEDULED",
+                {
+                    "token_ids": list(pending),
+                    "reason": [
+                        "missing_or_expired"
+                        if not self._token_metadata_is_warm(token_id, now=now)
+                        else "expiring"
+                        for token_id in pending
+                    ],
+                },
+            )
 
         async def _run() -> None:
             try:
                 await self._warm_order_metadata(pending)
             except Exception as exc:  # noqa: BLE001 - readiness owns failure
                 self._record_runtime_error("order_metadata_warm", exc)
+                for token_id in pending:
+                    self._order_metadata_warmed_at.pop(token_id, None)
+                    self._note_order_metadata_failure(token_id)
                 self._refresh_order_metadata_capability()
+            finally:
+                self._order_metadata_inflight.difference_update(pending)
 
         task = asyncio.create_task(_run(), name="order-metadata-warm")
         self._order_metadata_warm_tasks.add(task)
         task.add_done_callback(self._order_metadata_warm_tasks.discard)
+
+    def _note_order_metadata_failure(self, token_id: str) -> None:
+        failures = self._order_metadata_failures.get(token_id, 0) + 1
+        self._order_metadata_failures[token_id] = failures
+        delay = min(
+            _ORDER_METADATA_RETRY_MAX_S, _ORDER_METADATA_RETRY_BASE_S * (2 ** (failures - 1))
+        )
+        self._order_metadata_retry_after[token_id] = time.monotonic() + delay
+        if failures == _ORDER_METADATA_REFRESH_MAX_ATTEMPTS:
+            self.run_recorder.record(
+                "ORDER_METADATA_REFRESH_EXHAUSTED",
+                {"token_id": token_id, "attempts": failures},
+            )
+
+    def _note_order_metadata_success(self, token_id: str) -> None:
+        self._order_metadata_failures.pop(token_id, None)
+        self._order_metadata_retry_after.pop(token_id, None)
+
+    def _maybe_refresh_active_order_metadata(self) -> None:
+        """Tick hook: keep the active market's metadata fresh before it expires."""
+        if self.active_market is not None:
+            self._schedule_order_metadata_warm(self.active_market, refresh_ahead=True)
+        else:
+            self._refresh_order_metadata_capability()
 
     async def _warm_order_metadata(self, token_ids: tuple[str, ...]) -> None:
         self.run_recorder.record(
@@ -643,9 +719,12 @@ class TradingRuntime:
             }
             if item.ok:
                 self._order_metadata_warmed_at[item.token_id] = now
+                self._note_order_metadata_success(item.token_id)
                 self.run_recorder.record("ORDER_METADATA_WARM_OK", payload)
             else:
+                # A failed refresh keeps entries blocked; it is retried with backoff.
                 self._order_metadata_warmed_at.pop(item.token_id, None)
+                self._note_order_metadata_failure(item.token_id)
                 self.run_recorder.record("ORDER_METADATA_WARM_FAILED", payload)
         self._refresh_order_metadata_capability()
         self.run_recorder.record(
@@ -2052,7 +2131,7 @@ class TradingRuntime:
             remaining = float("-inf") if tau is None else tau
             if _hold_committed(self):
                 # Committed to resolution: never sold before close by the host.
-                self._refresh_order_metadata_capability()
+                self._maybe_refresh_active_order_metadata()
                 return
             if (
                 state is not None
@@ -2089,8 +2168,8 @@ class TradingRuntime:
                 self._maybe_emit_protection_exit(market_runtime)
         # Intent drain is owned by the event-woken intent dispatcher so entry
         # does not wait for the 1 Hz market-data tick. Tick still refreshes
-        # readiness and reconciles open exposure.
-        self._refresh_order_metadata_capability()
+        # readiness, refreshes order metadata before expiry and reconciles open exposure.
+        self._maybe_refresh_active_order_metadata()
         state = self.lifecycle.state
         if state is not None and state.needs_venue_followup:
             reconciled = await self.lifecycle.reconcile()
@@ -2333,10 +2412,11 @@ class TradingRuntime:
                 expired = True
             try:
                 assessment = await self._assess_startup(write_report=False)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - recorded, readiness stays blocked
+                reason = self._record_recheck_failure([], error=f"{type(exc).__name__}: {exc}")
                 self._invalidate_startup_recheck(
                     "STARTUP_ASSESSMENT_EXPIRED",
-                    "startup recheck failed",
+                    f"startup recheck failed: {reason}",
                 )
                 continue
             publication = self._last_inspection_publication
@@ -2347,12 +2427,18 @@ class TradingRuntime:
                         "startup recheck could not be published before it expired",
                     )
                 continue
-            if publication == "accepted" and self._recheck_keeps_readiness(assessment):
+            blocking = self._recheck_blocking_issues(assessment)
+            if publication == "accepted" and not blocking:
+                self._last_recheck_failure_key = None
                 self._mark_startup_fresh()
             else:
+                reason = self._record_recheck_failure(
+                    blocking,
+                    error=None if publication == "accepted" else f"publication:{publication}",
+                )
                 self._invalidate_startup_recheck(
                     "STARTUP_CHECK_PENDING",
-                    "startup recheck is not ready",
+                    f"startup recheck is not ready: {reason}",
                 )
 
     def _invalidate_startup_recheck(self, blocker: str, message: str) -> None:
@@ -2360,10 +2446,12 @@ class TradingRuntime:
         self._assessment_valid_until = None
         self.capabilities.set_blocker(blocker, message)
 
-    def _recheck_keeps_readiness(self, assessment: Any) -> bool:
+    def _recheck_blocking_issues(self, assessment: Any) -> list[Any]:
+        """Issues that fail a startup recheck (not AUTO, not the active session's own exposure)."""
         if assessment.ready:
-            return True
+            return []
         active = self.lifecycle.session_id
+        blocking = []
         for issue in assessment.issues:
             if issue.severity.value == "AUTO":
                 continue
@@ -2372,8 +2460,34 @@ class TradingRuntime:
                 and issue.session_id == active
             ):
                 continue
-            return False
-        return True
+            blocking.append(issue)
+        return blocking
+
+    def _recheck_keeps_readiness(self, assessment: Any) -> bool:
+        return not self._recheck_blocking_issues(assessment)
+
+    def _record_recheck_failure(self, issues: list[Any], *, error: str | None = None) -> str:
+        """Record why a startup recheck failed (once per distinct cause); return a summary."""
+        details = [
+            {
+                "code": issue.code,
+                "severity": issue.severity.value,
+                "session_id": issue.session_id,
+                "summary": issue.summary,
+            }
+            for issue in issues
+        ]
+        key = (error, tuple(sorted((d["code"], d["session_id"] or "") for d in details)))
+        if key != self._last_recheck_failure_key:
+            self._last_recheck_failure_key = key
+            self.run_recorder.record(
+                "STARTUP_RECHECK_FAILED",
+                {"issues": details, "error": error},
+            )
+        codes = ", ".join(
+            f"{d['code']}({(d['session_id'] or '-')[-8:]})" for d in details
+        )
+        return codes or (error or "unknown")
 
     def _sessions_for_inspection(self):
         """Restored sessions plus anything the running coordinator already owns."""

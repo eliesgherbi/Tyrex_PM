@@ -1,8 +1,9 @@
-# V3 runtime required: use Tyrex_PM-live or the reviewed, merged implementation.
+# Requires the merged v3 runtime (rest_project >= a39a504).
 # Fixed v2 research candidate; continuous operation, one entry attempt/window, hold only.
 # No entry retries, top-ups, managed exits, SL/TP or re-entry.
 # Research results do not qualify real provider semantics, fees or execution.
-# NOT ACTIVATED: replace every REQUIRED only after qualification and budget selection.
+# READY TO RUN (real money). Limits set 2026-10-16 for a first bounded test at 5 USDC per
+# trade; review them before longer runs. Wallet = POLYMARKET_FUNDER from .env.
 # Initial continuous live trial is bounded to 1800 seconds; one live runner at a time.
 # Both live candidates share durable state; never reset it to switch candidates.
 schema_version: 1
@@ -111,18 +112,18 @@ settlement:
   resolution_poll_interval_s: 30
   trial:
     max_debit_per_episode: '5'
-    max_episodes: REQUIRED
-    max_unresolved_count: REQUIRED
-    max_unresolved_cost: REQUIRED
-    trial_loss_budget: REQUIRED
+    max_episodes: 200
+    max_unresolved_count: 6
+    max_unresolved_cost: '30'
+    trial_loss_budget: '30'
   run_limits:
-    daily_loss_limit: REQUIRED
-    max_open_worst_case_loss: REQUIRED
-    max_reserved_debit: REQUIRED
-    max_unredeemed_count: REQUIRED
-    max_unredeemed_cost: REQUIRED
-    max_consecutive_losses: REQUIRED
+    daily_loss_limit: '30'
+    max_open_worst_case_loss: '30'
+    max_reserved_debit: '10'
+    max_unredeemed_count: 6
+    max_unredeemed_cost: '60'
+    max_consecutive_losses: 0
     accounting_timezone: UTC
-  redemption_wallet: REQUIRED
+  redemption_wallet: '0x64367d66bf08d3c8623530bc3113e60908c82bb0'
 state_directory: var/runtime_state/hold_candidates/execution
 report_directory: var/runs/settlement_value_leader_5c_240s_live

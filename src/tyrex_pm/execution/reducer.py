@@ -132,15 +132,64 @@ def _order_by_identity(
     return None
 
 
-def _confirmed_trade_delta(state: ExecutionSessionState, trade: TradeRecord) -> Decimal:
-    return trade.shares if trade.side == OrderSide.BUY.value else -trade.shares
+def _owned_before_adjustments(state: ExecutionSessionState) -> Decimal:
+    """Owned shares from confirmed trades and the latest reconciliation observation.
+
+    The two sources describe the same inventory and either may lag, so they are
+    combined with ``max`` and never added: a wallet observation that already
+    contains a BUY must not be increased again when that BUY is confirmed later.
+    Confirmed trades that *reduce* the position after the observation (SELLs)
+    are applied to it, because a lagging balance cannot prove they did not happen.
+    """
+    net = state.applied_trade_net_shares
+    if state.observed_position_shares is None:
+        return net
+    since_observation = net - state.observed_trade_net_shares
+    observed = state.observed_position_shares + min(Decimal("0"), since_observation)
+    return max(net, observed)
+
+
+def _recompute_position(state: ExecutionSessionState) -> Decimal:
+    """Derive ``confirmed_position_shares``; returns the owned quantity before clamping."""
+    owned = _owned_before_adjustments(state)
+    state.confirmed_position_shares = max(
+        Decimal("0"),
+        owned - state.settlement_holding_shares - state.external_reduction_shares,
+    )
+    return owned
+
+
+def _seed_unexplained_position(state: ExecutionSessionState) -> None:
+    """Treat a stored position that the evidence does not explain as an observation.
+
+    States replayed from the journal always satisfy the derivation. A state built
+    directly (tests, tooling, any state materialized by older code) may carry a
+    position with no reconciliation observation behind it; keep its meaning
+    instead of letting the derivation silently drop it.
+    """
+    if state.observed_position_shares is not None:
+        return
+    derived = max(
+        Decimal("0"),
+        state.applied_trade_net_shares
+        - state.settlement_holding_shares
+        - state.external_reduction_shares,
+    )
+    if state.confirmed_position_shares == derived:
+        return
+    state.observed_position_shares = (
+        state.confirmed_position_shares
+        + state.settlement_holding_shares
+        + state.external_reduction_shares
+    )
+    state.observed_trade_net_shares = state.applied_trade_net_shares
 
 
 def _unapply_confirmed_trade(state: ExecutionSessionState, trade: TradeRecord) -> None:
     if not trade.position_applied:
         return
-    state.confirmed_position_shares -= _confirmed_trade_delta(state, trade)
     trade.position_applied = False
+    _recompute_position(state)
 
 
 def _apply_confirmed_trade(
@@ -150,9 +199,9 @@ def _apply_confirmed_trade(
 ) -> None:
     if trade.status is not TradeStatus.CONFIRMED or trade.position_applied:
         return
-    state.confirmed_position_shares += _confirmed_trade_delta(state, trade)
     trade.position_applied = True
-    if state.confirmed_position_shares < 0:
+    owned = _recompute_position(state)
+    if owned < 0:
         state.phase = ExecutionPhase.RECONCILING
         effects.append(ReducerEffect(EffectKind.REQUEST_RECONCILIATION, "negative_position"))
         return
@@ -189,7 +238,11 @@ def assert_clearance_appendable(state: ExecutionSessionState, event: object) -> 
 def _clearance_allowed(
     state: ExecutionSessionState, disposition: OperationalDisposition
 ) -> bool:
-    if state.has_unresolved_mutation_attempt or state.entry_match_awaiting_confirmation:
+    if (
+        state.has_unresolved_mutation_attempt
+        or state.entry_match_awaiting_confirmation
+        or state.has_pending_trades
+    ):
         return False
     if state.resting_limit_venue_ids:
         return False
@@ -222,6 +275,7 @@ def reduce_execution_event(
     """
     if event.event_id in state.applied_event_ids:
         return state, ()
+    _seed_unexplained_position(state)
     effects: list[ReducerEffect] = []
     # Late venue observations must not reopen a session that already required
     # operator intervention or a classified leftover (known dust).
@@ -587,22 +641,35 @@ def reduce_execution_event(
             state.phase = ExecutionPhase.EXIT_PREPARING
 
     elif isinstance(event, ReconciliationObserved):
-        position = Decimal(str(event.confirmed_position_shares))
+        observed = Decimal(str(event.confirmed_position_shares))
         sellable = Decimal(str(event.sellable_shares))
-        if position < 0 or sellable < 0:
+        if observed < 0 or sellable < 0:
             raise ReducerInvariantError("reconciled quantities must be non-negative")
-        if state.operational_disposition is OperationalDisposition.SETTLEMENT_ONLY:
-            if position <= state.settlement_holding_shares:
-                position = Decimal("0")
-            else:
-                position = position - state.settlement_holding_shares
-        state.confirmed_position_shares = position
+        # An observation, not an assignment: settled and externally disposed
+        # shares are removed once, by the derivation, for every observation.
+        state.observed_position_shares = observed
+        state.observed_trade_net_shares = state.applied_trade_net_shares
+        _recompute_position(state)
+        position = state.confirmed_position_shares
         state.sellable_shares = sellable
         state.reconciliation_complete = event.complete
         state.reconciliation_notes = tuple(event.notes)
         state.open_venue_order_ids = tuple(event.open_order_ids)
+        observation_flat = (
+            observed - state.settlement_holding_shares - state.external_reduction_shares <= 0
+        )
         if not event.complete:
             state.phase = ExecutionPhase.RECONCILING
+        elif (
+            position > 0
+            and observation_flat
+            and state.has_confirmed_buy
+            and not state.has_confirmed_sell
+        ):
+            # The account looks flat but confirmed BUYs say otherwise: keep the
+            # exposure and keep reconciling until the balance catches up.
+            state.phase = ExecutionPhase.RECONCILING
+            effects.append(ReducerEffect(EffectKind.REQUEST_RECONCILIATION, "balance_lags_entry"))
         elif position > 0:
             state.phase = ExecutionPhase.POSITION_OPEN
         elif event.open_order_ids:
@@ -670,9 +737,7 @@ def reduce_execution_event(
         else:
             state.external_activity_ids.add(event.activity_id)
             state.external_reduction_shares += event.shares
-            state.confirmed_position_shares = max(
-                Decimal("0"), state.confirmed_position_shares - event.shares
-            )
+            _recompute_position(state)
 
     elif isinstance(event, MarketSettlementObserved):
         if not event.supported:
@@ -687,9 +752,7 @@ def reduce_execution_event(
             state.settlement_keys.add(key)
             state.settlement_holding_shares += event.holding_shares
             state.settlement_excluded_shares += event.holding_shares
-            state.confirmed_position_shares = max(
-                Decimal("0"), state.confirmed_position_shares - event.holding_shares
-            )
+            _recompute_position(state)
         state.operational_disposition = OperationalDisposition.SETTLEMENT_ONLY
         state.operational_proof_event_ids = (event.event_id,)
 

@@ -181,6 +181,7 @@ def _tick_runtime(committed: bool, tau: float):
         lifecycle=lifecycle,
         settlement_hooks=SimpleNamespace(is_committed=lambda window: committed),
         _refresh_order_metadata_capability=lambda: None,
+        _maybe_refresh_active_order_metadata=lambda: None,
         _enqueue_intent=lambda intent: (_ for _ in ()).throw(AssertionError("flatten enqueued")),
         stop_requested=False,
     )
