@@ -181,9 +181,12 @@ def snapshot(config_path: Path, run_id: str | None = None) -> str:
                 if x.strip()]
         lines.append(f"windows completed: {len(rows)} ({windows_file.parent.name})")
         for w in rows[-6:]:
+            attempts = w.get("entry_attempts", w.get("attempts"))
+            posts = w.get("venue_posts", w.get("posts"))
             lines.append(f"  {w.get('window_id')}  episodes={w.get('episodes')} "
-                         f"attempts={w.get('attempts')} posts={w.get('posts')} "
-                         f"states={w.get('states')} phase={w.get('strategy_phase')}")
+                         f"attempts={attempts} posts={posts} "
+                         f"never_sent={w.get('never_sent_attempts', '?')} "
+                         f"states={w.get('states')}")
     else:
         lines.append("windows completed: 0")
 

@@ -120,6 +120,7 @@ class PaperVenue:
     evidence_sink: Any = None
     prepare_budget_ms: float = 0.0
     refresh_wait_budget_ms: float = 0.0
+    refresh_revalidate_after_ms: float | None = None
     mutations_enabled: bool = True
     posts: int = 0
     _stream_ready: Any = None

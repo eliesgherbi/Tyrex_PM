@@ -104,6 +104,9 @@ class LifecycleRuntimeConfig:
     dust_max_notional: Decimal
     prepare_budget_ms: float
     refresh_wait_budget_ms: float
+    # Optional: a sign that waited longer than this for an account refresh is refused
+    # (never sent) so the strategy re-evaluates with a fresh intent. None: off.
+    refresh_revalidate_after_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -563,6 +566,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "dust_max_notional",
             "prepare_budget_ms",
             "refresh_wait_budget_ms",
+            "refresh_revalidate_after_ms",
             "mode",
         },
         "lifecycle",
@@ -622,6 +626,11 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         dust_max_notional=_decimal(life_raw["dust_max_notional"], "dust_max_notional"),
         prepare_budget_ms=float(life_raw["prepare_budget_ms"]),
         refresh_wait_budget_ms=float(life_raw["refresh_wait_budget_ms"]),
+        refresh_revalidate_after_ms=(
+            None
+            if life_raw.get("refresh_revalidate_after_ms") is None
+            else float(life_raw["refresh_revalidate_after_ms"])
+        ),
     )
     if lifecycle.mandatory_exit_before_end_s <= lifecycle.manual_deadline_before_end_s:
         raise RunConfigError("mandatory exit must begin before the manual deadline")
@@ -638,6 +647,10 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         or lifecycle.dust_max_notional <= 0
         or lifecycle.prepare_budget_ms <= 0
         or lifecycle.refresh_wait_budget_ms < 0
+        or (
+            lifecycle.refresh_revalidate_after_ms is not None
+            and not 0 <= lifecycle.refresh_revalidate_after_ms <= lifecycle.refresh_wait_budget_ms
+        )
     ):
         raise RunConfigError("lifecycle retry settings must be positive")
     startup_raw = dict(raw.get("startup") or {})

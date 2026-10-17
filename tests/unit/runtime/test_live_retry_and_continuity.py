@@ -417,3 +417,77 @@ async def test_continuous_report_counts_every_session_and_fill(tmp_path: Path) -
         assert _continuous_outcome(sessions, frozenset())[0] == "OPEN_EXPOSURE"
     finally:
         await close(runtime)
+
+
+RETRY_PROFILE = {"retry": {"enabled": True, "max_attempts_per_episode": 3,
+                           "max_attempts_per_window": 3,
+                           "max_prepare_failures_per_episode": 3,
+                           "max_posts_per_episode": 1, "max_posts_per_window": 1}}
+
+
+@pytest.mark.asyncio
+async def test_retry_profile_retries_never_sent_but_never_posts_twice(tmp_path: Path) -> None:
+    # settlement_value_baseline_2c_150s_retry_live caps: a never-sent attempt is retried;
+    # after one POST (zero fill here) the ledger refuses any further BUY in the window.
+    venue = ScriptedVenue(["zero", "fill"])
+    venue.fail_prepare_next = 1
+    runtime, driver = await make_runtime(tmp_path, venue, strategy=RETRY_PROFILE)
+    try:
+        await runtime._consume_entry(entry(runtime), None)
+        assert driver.entry_outcomes[-1].kind is EntryOutcomeKind.NOT_SENT
+        await runtime._consume_entry(entry(runtime, attempt=2), None)
+        assert driver.entry_outcomes[-1].kind is EntryOutcomeKind.ZERO_FILL
+        await runtime._consume_entry(entry(runtime, attempt=3), None)
+        third = driver.entry_outcomes[-1]
+        assert third.kind is EntryOutcomeKind.NOT_SENT and not third.posted
+        assert "POST_CAP" in (third.reason or "")
+        assert venue.posts == ["BUY"]
+        ep = episode(runtime)
+        assert ep.attempts == 2 and ep.posts == 1 and ep.prepare_failures == 1
+    finally:
+        await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_entry_outcome_records_signal_to_submission_latency(tmp_path: Path) -> None:
+    import time
+
+    venue = ScriptedVenue(["fill"])
+    runtime, _driver = await make_runtime(tmp_path, venue, run_mode="continuous")
+    try:
+        intent = entry(runtime)
+        runtime.intent_candidate_monotonic_ns[intent.intent_id.value] = time.monotonic_ns()
+        recorded = []
+        original = runtime.run_recorder.record
+        runtime.run_recorder.record = lambda kind, payload: (
+            recorded.append((kind, payload)), original(kind, payload))[-1]
+        await runtime._consume_entry(intent, None)
+        (payload,) = [p for k, p in recorded if k == "ENTRY_OUTCOME"]
+        latency = payload["latency"]
+        assert latency["signal_to_submit_start_ms"] is not None
+        assert latency["signal_to_outcome_ms"] >= latency["signal_to_submit_start_ms"]
+        assert "refresh_wait_ms" in latency and "pre_dispatch_stage" in latency
+    finally:
+        await close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_report_counts_separate_attempts_refusals_posts_and_history(
+    tmp_path: Path,
+) -> None:
+    from tyrex_pm.reporting.run_report import _run_counts
+
+    venue = ScriptedVenue(["fill"])
+    venue.fail_prepare_next = 1
+    runtime, _driver = await make_runtime(tmp_path, venue, strategy=RETRY_PROFILE)
+    try:
+        await runtime._consume_entry(entry(runtime), None)
+        await runtime._consume_entry(entry(runtime, attempt=2), None)
+        sessions = tuple(runtime.coordinator.states[s] for s in runtime.lifecycle.run_sessions)
+        counts = _run_counts(sessions, venue_posts_this_run=1, journal_lifetime_posts=7)
+        assert counts["entry_attempts"] == 2 and counts["entry_posts"] == 1
+        assert counts["never_sent_attempts"] == 1
+        assert sum(counts["never_sent_by_stage"].values()) == 1
+        assert counts["journal_lifetime_venue_posts"] == 7
+    finally:
+        await close(runtime)

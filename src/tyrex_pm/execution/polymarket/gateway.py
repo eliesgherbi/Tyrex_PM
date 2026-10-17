@@ -202,6 +202,9 @@ class PolymarketAsyncGateway:
     client_guard: Any | None = None
     prepare_budget_ms: float | None = None
     refresh_wait_budget_ms: float | None = None
+    # After waiting longer than this for an account refresh, refuse instead of signing
+    # the old signal; a retry re-evaluates and emits a fresh intent. None: off.
+    refresh_revalidate_after_ms: float | None = None
     metadata_cache_miss_ms: float = 500.0
     evidence_sink: Callable[[str, Mapping[str, Any]], None] | None = None
     fill_context: Callable[[], tuple[set[str], str | None, dict[str, str]]] | None = None
@@ -387,6 +390,16 @@ class PolymarketAsyncGateway:
                     (
                         "account refresh still owns the SDK client after "
                         f"{self.refresh_wait_budget_ms}ms; refusing to start sign"
+                    ),
+                    details=details,
+                )
+            revalidate_after = self.refresh_revalidate_after_ms
+            if revalidate_after is not None and waited.wait_ms > revalidate_after:
+                raise VenueOrderPreparationError(
+                    "ACCOUNT_REFRESH_WAIT_REVALIDATE",
+                    (
+                        f"waited {waited.wait_ms}ms for an account refresh "
+                        f"(> {revalidate_after}ms); the signal must be re-evaluated"
                     ),
                     details=details,
                 )

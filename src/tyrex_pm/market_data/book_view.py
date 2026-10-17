@@ -61,6 +61,8 @@ class LegBookSnapshot:
     apply_mono_ns: int | None
     data_age_ms: int | None
     quote: ExecutableQuote
+    # True when tick_size came from the discovery binding (no venue tick in the store).
+    tick_from_binding: bool = False
 
     @property
     def ready_for_entry_ask(self) -> bool:

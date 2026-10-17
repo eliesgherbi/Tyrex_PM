@@ -247,3 +247,37 @@ async def test_coordinator_persists_prepare_splits_on_success() -> None:
     assert order.prepare_queue_wait_ms is not None
     assert order.tick_resolve_ms is not None
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_long_refresh_wait_refuses_signing_the_old_signal() -> None:
+    # The client freed up within the wait budget, but after a meaningful wait the
+    # signal is refused (never sent) so the strategy re-evaluates with a fresh intent.
+    authority = AccountStateAuthority(_SlowRefreshGateway(hold_s=0.3), policy=_policy())
+    authority.prepare(
+        market_id="market-1",
+        token_ids=("yes-token",),
+        required_collateral=Decimal("5"),
+        active=True,
+    )
+    for _ in range(100):
+        if authority.refresh_status() is not None:
+            break
+        await asyncio.sleep(0.005)
+    client = _FastClient()
+    gateway = PolymarketAsyncGateway(
+        client=client,
+        tick_size_resolver=lambda _token: Decimal("0.01"),
+        client_guard=authority,
+        refresh_wait_budget_ms=1500,
+        refresh_revalidate_after_ms=100,
+        prepare_budget_ms=1500,
+    )
+    with pytest.raises(VenueOrderPreparationError) as exc:
+        await gateway.prepare_order(_buy())
+    assert exc.value.error_code == "ACCOUNT_REFRESH_WAIT_REVALIDATE"
+    assert not client.created
+    # A short wait (or none) still signs normally.
+    prepared = await gateway.prepare_order(_buy())
+    assert client.created and prepared.refresh_wait_ms is not None
+    await authority.close()

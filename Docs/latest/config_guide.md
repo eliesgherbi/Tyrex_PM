@@ -129,6 +129,7 @@ Dust / prepare / refresh-wait leaves are **required** (no hidden defaults). `man
 | `dust_max_notional` | Leftover × last bid ceiling for `COMPLETED_FLAT_WITH_DUST`. | `exit_sizing.py` |
 | `prepare_budget_ms` | Abandon create/sign if slower; no POST (`PREPARE_BUDGET_EXCEEDED`). Must be **less than** `market.maximum_candidate_age_ms`. | gateway prepare |
 | `refresh_wait_budget_ms` | If a wallet refresh is in-flight at submit, wait up to this then fail closed (`ACCOUNT_REFRESH_IN_FLIGHT`). `0` = do not wait. | gateway + `account_state.py` |
+| `refresh_revalidate_after_ms` | Optional (default off). If the wait for an in-flight refresh exceeded this, refuse the old signal before signing (`ACCOUNT_REFRESH_WAIT_REVALIDATE`, never sent); with retry enabled the strategy re-evaluates and emits a fresh intent. Must be between 0 and `refresh_wait_budget_ms`. Waits and signal-to-submission time are recorded in `ENTRY_OUTCOME.latency`. | gateway |
 
 Shipped YAML sets `tau_min_s: 105` so the plugin band matches the host floor `mandatory_exit_before_end_s + evidence_timeout_s` (90+15). That 105 s figure is the **hard** BUY cutoff: consume, the final gate, and POST refuse a new BUY once remaining time is below it. It is operational policy, not a guarantee that prepare, POST, cancel, or flatten finish inside a reserved margin.
 

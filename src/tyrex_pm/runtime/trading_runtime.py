@@ -524,6 +524,7 @@ class TradingRuntime:
         )
         active_gateway.prepare_budget_ms = config.lifecycle.prepare_budget_ms
         active_gateway.refresh_wait_budget_ms = config.lifecycle.refresh_wait_budget_ms
+        active_gateway.refresh_revalidate_after_ms = config.lifecycle.refresh_revalidate_after_ms
         active_gateway.evidence_sink = run_recorder.record
         for restored in coordinator.states.values():
             result._remember_dust(restored)
@@ -1681,7 +1682,31 @@ class TradingRuntime:
             return self.stream_session_id
         return f"{self.stream_session_id}:e{episode}a{attempt}"
 
-    def _deliver_entry_outcome(self, intent: EnterIntent, outcome: EntryOutcome) -> None:
+    def _entry_latency(self, intent: EnterIntent, state: Any = None) -> dict[str, Any]:
+        """Signal-to-submission timing and its components (milliseconds)."""
+        now_ns = time.monotonic_ns()
+        signal_ns = self.intent_candidate_monotonic_ns.get(intent.intent_id.value)
+        submit_ns = getattr(self, "_entry_submit_started_ns", {}).get(intent.intent_id.value)
+
+        def ms(a: int | None, b: int | None) -> float | None:
+            return None if a is None or b is None else round((b - a) / 1e6, 3)
+
+        latency: dict[str, Any] = {
+            "signal_to_submit_start_ms": ms(signal_ns, submit_ns),
+            "submit_elapsed_ms": ms(submit_ns, now_ns),
+            "signal_to_outcome_ms": ms(signal_ns, now_ns),
+        }
+        order = None if state is None else getattr(state, "entry", None)
+        if order is not None:
+            for key in ("refresh_wait_ms", "refresh_elapsed_ms", "prepare_queue_wait_ms",
+                        "tick_resolve_ms", "create_market_order_ms",
+                        "pre_dispatch_stage", "pre_dispatch_error_code"):
+                latency[key] = getattr(order, key, None)
+        return latency
+
+    def _deliver_entry_outcome(
+        self, intent: EnterIntent, outcome: EntryOutcome, state: Any = None
+    ) -> None:
         window_id = None if self.active_market is None else self.active_market.window_id
         payload = {
             "intent_id": intent.intent_id.value,
@@ -1694,7 +1719,9 @@ class TradingRuntime:
             "posted": outcome.posted,
             "prepare_failed": outcome.prepare_failed,
             "confirmed_shares": str(outcome.confirmed_shares),
+            "latency": self._entry_latency(intent, state),
         }
+        getattr(self, "_entry_submit_started_ns", {}).pop(intent.intent_id.value, None)
         self.run_recorder.record("ENTRY_OUTCOME", payload)
         if outcome.retry_class is RetryClass.PAUSE_ENTRIES:
             self.run_recorder.record(
@@ -1853,6 +1880,9 @@ class TradingRuntime:
                 # Re-apply held READY snapshot so final-gate capabilities
                 # stay entry_executable for the full prepare window.
                 self._apply_account_snapshot(self.account_state_authority.current(market_id))
+                if not hasattr(self, "_entry_submit_started_ns"):
+                    self._entry_submit_started_ns = {}
+                self._entry_submit_started_ns[intent.intent_id.value] = time.monotonic_ns()
                 state = await self.lifecycle.submit_entry(
                     intent,
                     token_id=token_id,
@@ -1880,7 +1910,7 @@ class TradingRuntime:
                 prepare_failed=outcome.prepare_failed,
             )
             self.run_recorder.record("SETTLEMENT_ENTRY_OUTCOME", {"outcome": settlement_outcome})
-        self._deliver_entry_outcome(intent, outcome)
+        self._deliver_entry_outcome(intent, outcome, state)
         if state is not None:
             self.capabilities.selected_token_sellable = state.sellable_shares > 0
             if intent.liquidity_role is LiquidityRole.MAKER and state.working_maker_entry:
@@ -2295,11 +2325,15 @@ class TradingRuntime:
         hooks = self.settlement_hooks
         if hooks is not None:
             usage = hooks.ledger.window_usage(window_id)
+            # Ledger counts: an entry attempt is one authorized intent; it either reached
+            # the venue (a POST) or was refused before sending (preparation failure or
+            # final-gate refusal).
             summary.update(
                 episodes=usage.episodes,
                 filled_episodes=usage.filled_episodes,
-                attempts=usage.attempts,
-                posts=usage.posts,
+                entry_attempts=usage.attempts,
+                venue_posts=usage.posts,
+                never_sent_attempts=max(0, usage.attempts - usage.posts),
                 prepare_failures=usage.prepare_failures,
                 states=[
                     e.state.value if e.state else None
@@ -2308,11 +2342,17 @@ class TradingRuntime:
             )
         driver = self._driver_for(window_id)
         episode_state = getattr(driver, "state", None)
-        if episode_state is not None and hasattr(episode_state, "phase"):
+        # Only report strategy state that belongs to this window (the driver may already
+        # have been reset for the next one).
+        if (
+            episode_state is not None
+            and hasattr(episode_state, "phase")
+            and getattr(episode_state, "window_id", window_id) == window_id
+        ):
             summary.update(
                 strategy_phase=episode_state.phase.value,
                 strategy_closed_reason=getattr(episode_state, "closed_reason", None),
-                window_attempts=getattr(episode_state, "window_attempts", None),
+                strategy_window_attempts=getattr(episode_state, "window_attempts", None),
             )
         self.window_summaries.append(summary)
         self.run_recorder.record("WINDOW_SUMMARY", summary)

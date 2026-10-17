@@ -381,13 +381,18 @@ class MarketStateStore:
                 counters.deltas_matched += 1
                 state = self._books.get(instrument_id)
                 if state is None or not state.initialized or state.book is None:
+                    # Keep seeded trading parameters: a delta before the first book must
+                    # not erase the tick/min size the strategy and signer rely on.
                     self._books[instrument_id] = BookState(
                         book=None,
                         last_ts_event=event.ts_event,
                         last_ts_received=event.ts_received,
+                        tick_size=None if state is None else state.tick_size,
+                        min_order_size=None if state is None else state.min_order_size,
                         sync_health=SyncHealth.DESYNCED,
                         recovery_required=True,
                         connection_epoch=conn_epoch,
+                        binding_id=None if state is None else state.binding_id,
                     )
                     self._books[instrument_id].derive_legacy_flags()
                     counters.deltas_application_rejected += 1
@@ -528,12 +533,14 @@ class MarketStateStore:
                 token_id=binding.up_token_id,
                 connection_health=connection_health,
                 now=at,
+                binding=binding,
             )
             down = self._leg_snapshot(
                 binding.down_instrument_id,
                 token_id=binding.down_token_id,
                 connection_health=connection_health,
                 now=at,
+                binding=binding,
             )
             return BookView(
                 binding_id=binding.binding_id,
@@ -554,8 +561,17 @@ class MarketStateStore:
         token_id: str,
         connection_health: ConnectionHealth,
         now: datetime,
+        binding: MarketBindingRecord | None = None,
     ) -> LegBookSnapshot:
         state = self._books.get(instrument_id, BookState())
+        # Same resolution as order signing (BindingFeed.resolve_tick_size): the store's
+        # venue value first, else the discovery binding's.
+        tick = state.tick_size
+        if tick is None and binding is not None:
+            tick = binding.tick_size
+        min_order = state.min_order_size
+        if min_order is None and binding is not None:
+            min_order = binding.min_order_size
         age_ms = None
         if state.last_apply_mono_ns is not None:
             age_ms = int((self._mono_ns() - state.last_apply_mono_ns) / 1e6)
@@ -571,14 +587,15 @@ class MarketStateStore:
             connection_health=connection_health,
             bid_liquidity=side_liquidity_from_book(state.book, side="BID"),
             ask_liquidity=side_liquidity_from_book(state.book, side="ASK"),
-            tick_size=state.tick_size,
-            min_order_size=state.min_order_size,
+            tick_size=tick,
+            min_order_size=min_order,
             source_ts=state.last_ts_event,
             receive_ts=state.last_ts_received,
             apply_ts=state.last_apply_ts,
             apply_mono_ns=state.last_apply_mono_ns,
             data_age_ms=age_ms,
             quote=book_quote(state.book),
+            tick_from_binding=state.tick_size is None and tick is not None,
         )
 
     def _emit_book_updated(

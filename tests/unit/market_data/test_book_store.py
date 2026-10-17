@@ -376,3 +376,52 @@ def test_explicit_empty_ask_liquidity_when_ready() -> None:
     assert view.up.sync_health is SyncHealth.READY
     assert view.up.ask_liquidity is SideLiquidity.EXPLICITLY_EMPTY
     assert view.up.bid_liquidity is SideLiquidity.AVAILABLE
+
+
+def test_delta_before_first_book_keeps_seeded_trading_parameters() -> None:
+    # Live run 3e98e437: a price_change arrived before the token's first full book;
+    # the reset wiped the seeded tick, so the strategy saw tick=None and skipped its
+    # configured limit buffer while signing (which falls back to the binding) knew 0.01.
+    store = MarketStateStore()
+    disp = EventDispatcher()
+    store.attach(disp)
+    store.seed_trading_parameters(
+        UP.value, tick_size=Decimal("0.01"), min_order_size=Decimal("5"), binding_id="b1"
+    )
+    disp.publish(
+        BookDeltaReceived(
+            **_evt(),
+            changes=(
+                BookLevelDelta(instrument_id=UP, side=BookSide.ASK, price=Decimal("0.60"),
+                               size=Decimal("10")),
+            ),
+        )
+    )
+    assert store.get(UP).sync_health is SyncHealth.DESYNCED
+    book = BookSnapshot(
+        instrument_id=UP, ts_event=TS,
+        bids=(BookLevel(price=Decimal("0.40"), quantity=Decimal("10")),),
+        asks=(BookLevel(price=Decimal("0.60"), quantity=Decimal("10")),),
+    )
+    disp.publish(BookSnapshotReceived(**_evt(), book=book))
+    after = store.get(UP)
+    assert after.sync_health is SyncHealth.READY
+    assert after.tick_size == Decimal("0.01")
+    assert after.min_order_size == Decimal("5")
+    assert after.binding_id == "b1"
+
+
+def test_book_view_falls_back_to_binding_trading_parameters() -> None:
+    # Decision and signing must agree: signing resolves store-then-binding, so the
+    # strategy's view uses the same rule.
+    from dataclasses import replace
+
+    store = MarketStateStore()
+    record = replace(_binding(), tick_size=Decimal("0.01"), min_order_size=Decimal("5"))
+    view = store.capture_pair(record)
+    assert view.up.tick_size == Decimal("0.01") and view.down.tick_size == Decimal("0.01")
+    assert view.up.min_order_size == Decimal("5")
+    store.seed_trading_parameters(UP.value, tick_size=Decimal("0.001"))
+    assert view.up.tick_from_binding
+    after = store.capture_pair(record)
+    assert after.up.tick_size == Decimal("0.001") and not after.up.tick_from_binding  # store wins

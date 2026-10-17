@@ -301,6 +301,32 @@ def _run_sessions_payload(
     }
 
 
+def _run_counts(
+    sessions: Sequence[ExecutionSessionState],
+    *,
+    venue_posts_this_run: int | None,
+    journal_lifetime_posts: int | None,
+) -> dict[str, Any]:
+    """Attempts, refusals and POSTs of this run, kept apart from journal history."""
+    entries = [s.entry for s in sessions if s.entry is not None]
+    never_sent = [e for e in entries if not e.attempt_ids]
+    stages = Counter(e.pre_dispatch_stage or "UNKNOWN" for e in never_sent)
+    return {
+        "entry_attempts": len(entries),
+        "entry_posts": sum(len(e.attempt_ids) for e in entries),
+        "never_sent_attempts": len(never_sent),
+        "never_sent_by_stage": dict(sorted(stages.items())),
+        "exit_posts": sum(len(s.exit.attempt_ids) for s in sessions if s.exit is not None),
+        "venue_posts_this_run": venue_posts_this_run,
+        "journal_lifetime_venue_posts": journal_lifetime_posts,
+        "note": (
+            "entry_attempts counts authorized intents that opened an execution attempt; "
+            "never_sent_attempts were refused before any POST (preparation or final "
+            "gate). journal_lifetime_venue_posts includes earlier runs."
+        ),
+    }
+
+
 def _no_entry_diagnosis(records: Sequence[RunEvidenceRecord]) -> dict[str, Any]:
     """Explain why a run with no execution session produced no order.
 
@@ -555,10 +581,16 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         "mutation_attempts": (
             None if source.mutation_attempts is None else int(source.mutation_attempts)
         ),
+        # Journal-wide total across all runs (kept for compatibility; see counts).
         "process_mutation_attempts": (
             None
             if source.process_mutation_attempts is None
             else int(source.process_mutation_attempts)
+        ),
+        "counts": _run_counts(
+            sessions or ((source.state,) if source.state is not None else ()),
+            venue_posts_this_run=source.mutation_attempts,
+            journal_lifetime_posts=source.process_mutation_attempts,
         ),
         "execution": execution_state_payload(source.state),
         "no_entry_diagnosis": no_entry,

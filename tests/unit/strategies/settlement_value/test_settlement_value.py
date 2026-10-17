@@ -312,3 +312,55 @@ def test_no_edge_waits_with_reason() -> None:
     assert result.decision.reason_code == R.EDGE_BELOW_COST
     row = result.reporting_context["decision_row"]
     assert row["up_feasible"] is False and row["down_feasible"] is False
+
+
+def _view_snapshot(at: datetime, *, tick: str | None, up_ask="0.30", down_ask="0.75"):
+    """A DecisionSnapshot carrying a real BookView from the live market-state store."""
+    from dataclasses import replace
+
+    from tyrex_pm.core.book_events import BookSnapshotReceived
+    from tyrex_pm.core.events import EventSource
+    from tyrex_pm.core.ids import new_event_id
+    from tyrex_pm.engine.dispatcher import EventDispatcher
+    from tyrex_pm.market_data.binding_record import (
+        BindingLifecycleRole,
+        MarketBindingRecord,
+    )
+    from tyrex_pm.market_data.book_store import MarketStateStore
+
+    base = snapshot(at, up_ask=up_ask, down_ask=down_ask)
+    store = MarketStateStore()
+    disp = EventDispatcher()
+    store.attach(disp)
+    for book in (base.yes_book, base.no_book):
+        disp.publish(BookSnapshotReceived(
+            event_id=new_event_id(), correlation_id=new_correlation_id(), ts_event=at,
+            ts_received=at, source=EventSource.POLYMARKET_CLOB, book=book))
+    record = MarketBindingRecord(
+        binding_id="b", window_slug="w", condition_id="c", market_id="m",
+        up_token_id="up", down_token_id="down", event_start=START, event_end=END,
+        role=BindingLifecycleRole.ACTIVE, role_epoch=0, outcome_semantics="UP_DOWN",
+        resolved_at=START, tick_size=None if tick is None else Decimal(tick),
+        min_order_size=Decimal("1"),
+    )
+    return replace(base, book_view=store.capture_pair(record, captured_at=at))
+
+
+@pytest.mark.parametrize(("tick", "limit", "bound"),
+                         [("0.01", "0.31", "buffer_full"),
+                          (None, "0.30", "buffer_skipped_tick_unknown")])
+def test_configured_limit_buffer_reaches_the_entry_intent(tick, limit, bound) -> None:
+    # Live run 3e98e437: every live entry had limit = best ask (tick unknown), so a
+    # one-tick move refused it at the final gate. With the tick known (venue store or
+    # discovery binding, as for signing) the configured buffer is applied.
+    d = driver(entry={"limit_buffer_ticks": 1})
+    at = START + timedelta(seconds=120)
+    snap = _view_snapshot(at, tick=tick)
+    result = d.evaluate(
+        market_snapshot=snap, causation_id=None, correlation_id=snap.correlation_id,
+        context=context(snap), trigger="test", features=vol(),
+    )
+    assert result.decision.action is StrategyAction.ENTER
+    (intent,) = result.intents
+    assert intent.max_price == Decimal(limit)
+    assert result.reporting_context["decision_row"]["limit_bound"] == bound

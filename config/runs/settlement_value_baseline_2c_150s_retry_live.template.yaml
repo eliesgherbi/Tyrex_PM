@@ -1,0 +1,143 @@
+# Requires rest_project with the tick-buffer fix, revalidation and run counts (2026-10-17).
+# RETRY PROFILE of the fixed v2 baseline candidate (2c edge, 150 s entry band), hold only.
+# Same signal, sizing, limits and account caps as settlement_value_baseline_2c_150s_live;
+# the only differences are the lifecycle sections marked "retry profile" below.
+# Retries are an experiment: v2 research qualified one attempt per window, and the v3
+# retry feature in notebook 05 is not yet evaluated. Every retry re-evaluates the model,
+# size and price on the current book and must clear every gate again; only attempts
+# proven never sent are retried, an uncertain submission blocks any further BUY, and the
+# ledger enforces one POST per episode and per window durably across restarts.
+# READY TO RUN (real money). One live runner at a time; both baseline profiles share
+# durable state and the account caps; never reset it to switch profiles.
+schema_version: 1
+run_name: settlement_value_baseline_2c_150s_retry_live
+strategy:
+  kind: settlement_value
+  parameters:
+    settlement:
+      functional_id: twap60_at_close_vs_open
+      comparison: AT_OR_ABOVE_K
+      reference_series: polymarket_rtds:crypto_prices_chainlink:btc/usd
+      provenance_status: ASSUMED
+    model:
+      backend: twap_proxy_diffusion
+      averaging_window_s: 60.0
+      spot_input: binance_spot
+      sigma_band: 0.25
+      reference_band_bps: 1.0
+      tau_floor_s: 1.0
+    volatility:
+      half_life_s: 30.0
+      min_samples_s: 20.0
+      jump_threshold_sigma: 4.0
+      sample_interval_s: 1.0
+      tau_floor_s: 1.0
+      sigma_floor: 1.0e-05
+      sigma_scale: 1.0
+    entry:
+      tau_min_s: 30.0
+      tau_max_s: 150
+      min_edge_per_share: '0.02'
+      target_mode: cap_only
+      target_profit_usdc: '3'
+      max_entry_price: '0.97'
+      limit_buffer_ticks: 1
+    sizing:
+      max_debit_usdc: '5'
+      max_loss_usdc: '5'
+      depth_participation: '1'
+      max_levels: 32
+      share_increment: '0.01'
+      default_min_order_shares: '5'
+    quality:
+      accepted_k_qualities:
+      - CONFIRMED_CANONICAL
+      - PROVISIONAL
+      require_verified_settlement_spec: false
+      max_clock_uncertainty_ms: 250
+    fees:
+      rate: '0.07'
+      exponent: '1'
+      provenance: MUST_MATCH_PROVIDER_FEE_SCHEDULE
+    retry:  # retry profile
+      enabled: true
+      # Attempts include the first; only never-sent attempts can be followed by another.
+      max_attempts_per_episode: 3
+      max_attempts_per_window: 3
+      max_prepare_failures_per_episode: 3
+      # One venue POST per episode and per window: a retry can never be a second BUY.
+      max_posts_per_episode: 1
+      max_posts_per_window: 1
+      max_retry_duration_s: 30
+      min_retry_interval_ms: 500
+      service_backoff_ms: 1000
+      service_backoff_max_ms: 4000
+    exit:
+      policy: hold_to_resolution
+      value_exit_enabled: false
+      thesis_stop_enabled: false
+    reentry:
+      max_trades_per_window: 1
+      opposite_side_allowed: false
+      max_window_debit_usdc: '5'
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+  run_mode: continuous
+  preparation_lead_s: 45
+  evaluation_interval_s: 1
+  maximum_book_age_ms: 2000
+  maximum_candidate_age_ms: 5000
+  maximum_duration_s: 1800
+account:
+  refresh_interval_s: 5
+  snapshot_max_age_s: 15
+  read_timeout_s: 4
+  retry_attempts: 3
+  retry_base_delay_s: 0.25
+risk:
+  target_notional: '5'
+  maximum_total_debit: '5'
+  fee_reserve_rate: '0.02'
+lifecycle:
+  mode: hold_to_resolution
+  mandatory_exit_before_end_s: 20
+  manual_deadline_before_end_s: 5
+  evidence_timeout_s: 15
+  reconciliation_interval_s: 0.25
+  exit_retry_limit: 3
+  exit_retry_budget_s: 10
+  minimum_exit_price: '0.01'
+  sell_size_increment: '0.01'
+  dust_abs_shares: '0.01'
+  dust_max_notional: '0.05'
+  prepare_budget_ms: 2000
+  # retry profile, provisional experiment (not a tuned value): wait up to 1500 ms for an
+  # in-flight account refresh; a wait longer than 750 ms refuses the old signal (never
+  # sent) and the retry re-evaluates with a fresh intent. ENTRY_OUTCOME.latency records
+  # the waits and signal-to-submission time for tuning.
+  refresh_wait_budget_ms: 1500
+  refresh_revalidate_after_ms: 750
+settlement:
+  ledger_path: var/runtime_state/settlement/settlement_value_hold_candidates.jsonl
+  hold_commit_budget_s: 10
+  redemption_mode: operator
+  resolution_poll_interval_s: 30
+  trial:
+    max_debit_per_episode: '5'
+    max_episodes: 200
+    max_unresolved_count: 6
+    max_unresolved_cost: '30'
+    trial_loss_budget: '30'
+  run_limits:
+    daily_loss_limit: '30'
+    max_open_worst_case_loss: '30'
+    max_reserved_debit: '10'
+    max_unredeemed_count: 6
+    max_unredeemed_cost: '60'
+    max_consecutive_losses: 0
+    accounting_timezone: UTC
+  redemption_wallet: '0x64367d66bf08d3c8623530bc3113e60908c82bb0'
+state_directory: var/runtime_state/hold_candidates/execution
+report_directory: var/runs/settlement_value_baseline_2c_150s_retry_live

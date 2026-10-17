@@ -110,6 +110,7 @@ def dispatch_check(
         elif (
             spec.metadata.get("venue_tick_size") is not None
             and leg.tick_size is not None
+            and not getattr(leg, "tick_from_binding", False)
             and leg.tick_size != Decimal(str(spec.metadata["venue_tick_size"]))
         ):
             # Missing book tick is tolerated when preparation already locked a
