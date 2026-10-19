@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tyrex_pm.indicators.ewma_volatility import EwmaVolatilityEstimator, SigmaConfig
 from tyrex_pm.indicators.spec import IndicatorSpec
 from tyrex_pm.research.strategy_lab.extreme_cases import (
     ProbabilityStudy,
@@ -15,74 +14,6 @@ from tyrex_pm.research.strategy_lab.extreme_cases import (
 START = datetime(2026, 10, 19, tzinfo=timezone.utc)
 
 
-def estimator(policy="elapsed_variance_v1", **kwargs):
-    return EwmaVolatilityEstimator(SigmaConfig(
-        time_policy=policy, min_samples_s=0, sigma_floor=0, jump_guard=False, **kwargs))
-
-
-def test_elapsed_variance_has_consistent_units_across_irregular_intervals():
-    est = estimator(half_life_s=10)
-    est._commit_variance(r_t=.01, dt_s=1, ts=START, price=Decimal(100))
-    est._commit_variance(r_t=.02, dt_s=4, ts=START + timedelta(seconds=4), price=Decimal(102))
-    # Both observations estimate .0001 variance / second. No spurious division
-    # of all preceding variance by the latest four-second interval.
-    assert est.snapshot().sigma == pytest.approx(.01)
-    assert est._last_dt_s == 4
-    assert est._previous_variance == pytest.approx(.0001)
-
-
-def test_half_life_means_elapsed_seconds_and_zero_returns_decay():
-    est = estimator(half_life_s=10)
-    est.update("100", START)
-    initial = est.update("101", START + timedelta(seconds=1)).sigma
-    final = est.update("101", START + timedelta(seconds=11)).sigma
-    assert final == pytest.approx(initial * 2 ** -.5)
-    assert est.snapshot().last_update_ts == START + timedelta(seconds=11)
-    assert est._last_return == 0
-
-
-def test_legacy_default_keeps_old_zero_return_behavior():
-    est = estimator("legacy")
-    est.update("100", START)
-    initial = est.update("101", START + timedelta(seconds=1)).sigma
-    assert est.update("101", START + timedelta(seconds=11)).sigma == initial
-    assert SigmaConfig().time_policy == "legacy"
-
-
-def test_elapsed_jump_guard_scales_with_interval():
-    est = EwmaVolatilityEstimator(SigmaConfig(
-        time_policy="elapsed_variance_v1", min_samples_s=0,
-        sigma_floor=0, jump_threshold_sigma=4))
-    est.update("100", START)
-    est.update("101", START + timedelta(seconds=1))
-    # ~5 sigma at one second, ~1.67 sigma over nine seconds.
-    result = est.update("106", START + timedelta(seconds=10))
-    assert not result.jump_guard_tripped
-
-
-def test_gap_does_not_create_samples_and_flat_bootstrap_stays_unready():
-    est = estimator()
-    est.update("100", START)
-    result = est.update("100", START + timedelta(seconds=20))
-    assert not result.ready
-    assert result.sample_count == 0
-
-
-def test_floor_duplicate_and_reset_invariants():
-    est = EwmaVolatilityEstimator(SigmaConfig(
-        time_policy="elapsed_variance_v1", sigma_floor=.0001, min_samples_s=0))
-    est.update("100", START)
-    est.update("100.01", START + timedelta(seconds=1))
-    est.update("100.01", START + timedelta(seconds=100))
-    assert est.snapshot().sigma >= .0001
-    count = est.snapshot().sample_count
-    est.update("100.02", START + timedelta(seconds=100))
-    assert est.snapshot().sample_count == count
-    est.reset()
-    assert est._last_dt_s is None
-    assert est.snapshot().sigma is None
-
-
 def test_reconnect_preserves_experimental_time_policy():
     spec = IndicatorSpec(name="ewma_vol", source="binance", params=tuple({
         "half_life_s": "30", "min_samples_s": "20", "jump_threshold_sigma": "4",
@@ -90,7 +21,12 @@ def test_reconnect_preserves_experimental_time_policy():
     }.items()))
     graph = StudyIndicatorGraph((spec,), time_policy="elapsed_variance_v1")
     graph.invalidate_source("binance")
-    assert graph._ewma[spec.instance_id].config.time_policy == "elapsed_variance_v1"
+    assert graph._ewma[spec.instance_id].config.variance_time_policy == "elapsed_variance_v1"
+    legacy = StudyIndicatorGraph((spec,), time_policy="legacy")
+    assert legacy._ewma[spec.instance_id].config.variance_time_policy == "per_sample_v0"
+
+
+# Estimator invariants moved to tests/unit/indicators/test_ewma_variance_time_policy.py.
 
 
 @pytest.mark.parametrize("row,reason", [

@@ -72,6 +72,31 @@ class SettlementVolatilityConfig:
     sigma_floor: float = 1e-5
     # Scale applied to the EWMA sigma before pricing (1.0 = as estimated).
     sigma_scale: float = 1.0
+    # Versioned elapsed-time handling of the variance (indicators.ewma_volatility):
+    # per_sample_v0 = original estimator; elapsed_variance_v1 = research, not qualified.
+    variance_time_policy: str = "per_sample_v0"
+
+
+@dataclass(frozen=True, kw_only=True)
+class SettlementDisagreementVetoConfig:
+    """Wait instead of entering while the model and the market disagree too much.
+
+    ``gap_pp = 100 * |P_point(UP) - mid(UP)|`` in percentage points of probability, with
+    ``mid(UP) = (best bid + best ask) / 2`` of the UP leg in the same book snapshot as
+    the decision. Checked once per entry decision, after the side is chosen and before an
+    attempt starts: a veto is a strategy WAIT (no attempt, POST or reservation). Missing,
+    non-finite, crossed or one-sided inputs also wait. Entry only: positions, holds and
+    exits are never affected. ``recheck_at_dispatch`` repeats the check at the pre-send
+    gate with the freshest book; a refusal there is a NOT_SENT outcome of a started
+    attempt. Off by default; any threshold is a research hypothesis until qualified.
+    """
+
+    enabled: bool = False
+    # Maximum absolute gap [percentage points of probability, (0, 100]]; required when on.
+    max_gap_pp: float = 0.0
+    probability: str = "point"
+    market_price: str = "up_two_sided_mid"
+    recheck_at_dispatch: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -232,12 +257,33 @@ class SettlementValueConfig:
     retry: SettlementRetryConfig = SettlementRetryConfig()
     exit: SettlementExitConfig = SettlementExitConfig()
     reentry: SettlementReentryConfig = SettlementReentryConfig()
+    disagreement_veto: SettlementDisagreementVetoConfig = SettlementDisagreementVetoConfig()
 
     def __post_init__(self) -> None:
         validate_settlement_value_config(self)
 
 
+VARIANCE_TIME_POLICIES = frozenset({"per_sample_v0", "elapsed_variance_v1"})
+VETO_PROBABILITIES = frozenset({"point"})
+VETO_MARKET_PRICES = frozenset({"up_two_sided_mid"})
+
+
 def validate_settlement_value_config(cfg: SettlementValueConfig) -> None:
+    if cfg.volatility.variance_time_policy not in VARIANCE_TIME_POLICIES:
+        raise ValueError(
+            "volatility.variance_time_policy must be one of "
+            f"{sorted(VARIANCE_TIME_POLICIES)}")
+    veto = cfg.disagreement_veto
+    if veto.probability not in VETO_PROBABILITIES:
+        raise ValueError(
+            f"disagreement_veto.probability must be one of {sorted(VETO_PROBABILITIES)}")
+    if veto.market_price not in VETO_MARKET_PRICES:
+        raise ValueError(
+            f"disagreement_veto.market_price must be one of {sorted(VETO_MARKET_PRICES)}")
+    if veto.enabled and not 0 < veto.max_gap_pp <= 100:
+        raise ValueError("disagreement_veto.max_gap_pp must be in (0, 100] when enabled")
+    if veto.recheck_at_dispatch and not veto.enabled:
+        raise ValueError("disagreement_veto.recheck_at_dispatch requires enabled")
     s = cfg.settlement
     if s.provenance_status not in PROVENANCE_STATUSES:
         raise ValueError(

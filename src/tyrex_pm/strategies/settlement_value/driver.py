@@ -369,6 +369,7 @@ class SettlementValueDriver:
         row["reference_price"] = None if obs.spot is None else str(obs.spot)
         vol = self._volatility(features or FeatureBundle())
         row["sigma_raw"] = None if vol is None else vol.sigma
+        row["variance_time_policy"] = self.config.volatility.variance_time_policy
         if vol is None or not vol.ready or vol.sigma is None:
             reject = "missing" if vol is None else (vol.reject_reason or "not_ready")
             obs.vol_problem = f"vol:{reject}"

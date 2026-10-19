@@ -76,18 +76,19 @@ def _lifecycle_modes(config: SettlementValueConfig) -> frozenset[str]:
 
 
 def ewma_vol_spec(volatility: SettlementVolatilityConfig) -> IndicatorSpec:
-    return IndicatorSpec(
-        name="ewma_vol",
-        source=F.BINANCE_SPOT_TRADES,
-        params=(
-            ("half_life_s", str(volatility.half_life_s)),
-            ("min_samples_s", str(volatility.min_samples_s)),
-            ("jump_threshold_sigma", str(volatility.jump_threshold_sigma)),
-            ("sample_interval_s", str(volatility.sample_interval_s)),
-            ("tau_floor_s", str(volatility.tau_floor_s)),
-            ("sigma_floor", str(volatility.sigma_floor)),
-        ),
+    params: tuple[tuple[str, str], ...] = (
+        ("half_life_s", str(volatility.half_life_s)),
+        ("min_samples_s", str(volatility.min_samples_s)),
+        ("jump_threshold_sigma", str(volatility.jump_threshold_sigma)),
+        ("sample_interval_s", str(volatility.sample_interval_s)),
+        ("tau_floor_s", str(volatility.tau_floor_s)),
+        ("sigma_floor", str(volatility.sigma_floor)),
     )
+    # The original policy is not emitted, so its indicator instance id is unchanged;
+    # another policy is a different indicator instance (and identity).
+    if volatility.variance_time_policy != "per_sample_v0":
+        params += (("variance_time_policy", volatility.variance_time_policy),)
+    return IndicatorSpec(name="ewma_vol", source=F.BINANCE_SPOT_TRADES, params=params)
 
 
 def spot_path_spec(config: SettlementValueConfig) -> IndicatorSpec:

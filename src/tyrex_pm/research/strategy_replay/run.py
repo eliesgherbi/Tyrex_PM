@@ -789,6 +789,18 @@ def _check_lifecycle_policy(strategy_config: Any, policy: ReplayExecutionPolicy)
         )
 
 
+def _full_strategy_config(strategy_config: Any) -> Any:
+    try:
+        from tyrex_pm.strategies.settlement_value.config import SettlementValueConfig
+        from tyrex_pm.strategies.settlement_value.schema import (
+            settlement_value_config_as_parameters,
+        )
+    except ImportError:  # pragma: no cover
+        return None
+    if isinstance(strategy_config, SettlementValueConfig):
+        return settlement_value_config_as_parameters(strategy_config, full=True)
+    return None
+
 def run_window(
     window: WindowData,
     *,
@@ -946,6 +958,8 @@ def assemble_result(
                     "last_uncertainty_ms": agent.time_authority.uncertainty_ms,
                 },
                 "maximum_trade_age_ms": agent.runtime.indicator_graph.max_trade_age_ms,
+                # Every strategy field incl. defaults (identity hashes omit legacy defaults).
+                "effective_config_full": _full_strategy_config(agent.strategy_config),
                 "execution_policy": agent.policy.identity(),
                 "execution_contract": {
                     "version": EXECUTION_CONTRACT_VERSION,

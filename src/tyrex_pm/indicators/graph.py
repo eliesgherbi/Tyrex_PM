@@ -11,6 +11,7 @@ from tyrex_pm.core.clock import Clock, SystemClock
 from tyrex_pm.core.ids import InstrumentId
 from tyrex_pm.indicators.depth import DepthSnapshot, DepthStore
 from tyrex_pm.indicators.ewma_volatility import (
+    PER_SAMPLE_V0,
     SIGMA_UNITS_PER_SQRT_SECOND,
     EwmaVolatilityEstimator,
     SigmaConfig,
@@ -45,6 +46,9 @@ _EWMA_PARAM_KEYS = (
     "tau_floor_s",
     "sigma_floor",
 )
+# Optional keys, absent from specs at their original behaviour so existing indicator
+# instance ids are unchanged.
+_EWMA_OPTIONAL_KEYS = ("variance_time_policy",)
 
 
 @dataclass
@@ -75,7 +79,7 @@ def sigma_config_from_spec(spec: IndicatorSpec) -> SigmaConfig:
         raise ValueError(f"sigma_config_from_spec requires ewma_vol, got {spec.name!r}")
     mapping = spec.param_map
     missing = [key for key in _EWMA_PARAM_KEYS if key not in mapping]
-    extra = sorted(set(mapping) - set(_EWMA_PARAM_KEYS))
+    extra = sorted(set(mapping) - set(_EWMA_PARAM_KEYS) - set(_EWMA_OPTIONAL_KEYS))
     if missing:
         raise ValueError(f"ewma_vol missing required params: {missing}")
     if extra:
@@ -87,6 +91,7 @@ def sigma_config_from_spec(spec: IndicatorSpec) -> SigmaConfig:
         sample_interval_s=float(mapping["sample_interval_s"]),
         tau_floor_s=float(mapping["tau_floor_s"]),
         sigma_floor=float(mapping["sigma_floor"]),
+        variance_time_policy=mapping.get("variance_time_policy", PER_SAMPLE_V0),
     )
 
 
@@ -141,6 +146,27 @@ class IndicatorGraph:
             elif spec.name == "spot_path":
                 self._paths[spec.instance_id] = _spot_path_from_spec(spec)
                 self._bundle.values[spec.instance_id] = empty_spot_path()
+
+    def explain(self) -> dict[str, dict]:
+        """Decision-time copy of calculated indicator state (no recomputation).
+
+        Per ``ewma_vol`` instance: the estimator's ``explain()`` plus the age of the last
+        trade on its source tape (the freshness input the host gate uses).
+        """
+        now_mono = self._clock.monotonic_ns()
+        out: dict[str, dict] = {}
+        for spec in self.specs:
+            est = self._ewma.get(spec.instance_id)
+            if est is None:
+                continue
+            last = self._last_trade_mono_ns.get(spec.source)
+            out[spec.instance_id] = {
+                **est.explain(),
+                "source": spec.source,
+                "tape_age_ms": None if last is None else round((now_mono - last) / 1e6, 3),
+                "max_trade_age_ms": self.max_trade_age_ms,
+            }
+        return out
 
     def snapshot(self) -> FeatureBundle:
         now_mono = self._clock.monotonic_ns()

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from tyrex_pm.runtime.config_error import ConfigError
 from tyrex_pm.strategies.settlement_value.config import (
+    SettlementDisagreementVetoConfig,
     SettlementEntryConfig,
     SettlementExitConfig,
     SettlementFeeConfig,
@@ -32,9 +33,27 @@ _SECTIONS: dict[str, type] = {
     "retry": SettlementRetryConfig,
     "exit": SettlementExitConfig,
     "reentry": SettlementReentryConfig,
+    "disagreement_veto": SettlementDisagreementVetoConfig,
 }
-# Lifecycle sections added with strategy_closed_loop_v3. A configuration that leaves them
-# at their defaults serializes exactly as before, so a v2 parameter set keeps its hash.
+# Identity compatibility (closed lists; see the integration plan, amendment 0.5).
+# Parameters added after configuration identities were frozen are omitted from the
+# IDENTITY payload only while they equal their legacy behaviour, so earlier ids stay
+# valid. Any other value always enters the identity. A new field must be registered here
+# deliberately: tests/unit/strategies/settlement_value/test_identity_compat.py fails for
+# an unregistered field. The full effective configuration (every field) is saved
+# separately via settlement_value_config_as_parameters(cfg, full=True).
+#   sections added later: omitted while the whole section equals its legacy default
+IDENTITY_LATER_SECTIONS: dict[str, Any] = {
+    "retry": SettlementRetryConfig(),
+    "exit": SettlementExitConfig(),
+    "reentry": SettlementReentryConfig(),
+    "disagreement_veto": SettlementDisagreementVetoConfig(),
+}
+#   fields added later inside frozen sections: omitted while equal to the legacy value
+IDENTITY_LATER_FIELDS: dict[tuple[str, str], Any] = {
+    ("volatility", "variance_time_policy"): "per_sample_v0",
+}
+# Backwards-compatible name for the v3 lifecycle sections.
 _LIFECYCLE_SECTIONS = ("retry", "exit", "reentry")
 
 
@@ -67,6 +86,9 @@ def _coerce(sample: Any, value: Any, *, path: str, file: str | None) -> Any:
             raise ConfigError(f"expected string, got {value!r}", file=file, field=path)
         return value
     raise ConfigError("unsupported field type", file=file, field=path)
+
+
+_NO_LEGACY = object()
 
 
 def settlement_value_config_from_parameters(
@@ -108,16 +130,27 @@ def settlement_value_config_from_parameters(
         raise ConfigError(str(exc), file=file, field="parameters") from exc
 
 
-def settlement_value_config_as_parameters(cfg: SettlementValueConfig) -> dict[str, Any]:
-    """Round-trippable plain mapping (Decimals as strings) for provenance hashing."""
+def settlement_value_config_as_parameters(
+    cfg: SettlementValueConfig, *, full: bool = False
+) -> dict[str, Any]:
+    """Round-trippable plain mapping (Decimals as strings).
+
+    Default: the IDENTITY payload used for configuration hashes (explicit compatibility
+    lists above). ``full=True``: every section and field, for provenance.
+    """
     out: dict[str, Any] = {}
     for name in _SECTIONS:
         section = getattr(cfg, name)
-        if name in _LIFECYCLE_SECTIONS and section == type(section)():
+        if not full and name in IDENTITY_LATER_SECTIONS and (
+            section == IDENTITY_LATER_SECTIONS[name]
+        ):
             continue
         values: dict[str, Any] = {}
         for f in dataclasses.fields(section):
             value = getattr(section, f.name)
+            legacy = IDENTITY_LATER_FIELDS.get((name, f.name), _NO_LEGACY)
+            if not full and legacy is not _NO_LEGACY and value == legacy:
+                continue
             if isinstance(value, Decimal):
                 value = str(value)
             elif isinstance(value, tuple):

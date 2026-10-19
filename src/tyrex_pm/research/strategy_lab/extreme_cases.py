@@ -122,6 +122,11 @@ def gap_reason(row: dict, threshold_pp: float | None) -> str | None:
     return "STUDY_DISAGREEMENT_VETO" if 100 * abs(p - (bid + ask) / 2) > threshold_pp else None
 
 
+# Saved study bundles name the original estimator "legacy"; the shared estimator calls it
+# per_sample_v0 (versioned policy names, integration plan 0.6).
+STUDY_POLICY_NAMES = {"legacy": "per_sample_v0"}
+
+
 class StudyIndicatorGraph(IndicatorGraph):
     """Keep the chosen time policy even when reconnects reset an estimator.
 
@@ -134,8 +139,9 @@ Indicator instance ids and all other production feature calculations are unchang
         self._set_policy()
 
     def _set_policy(self):
+        policy = STUDY_POLICY_NAMES.get(self.time_policy, self.time_policy)
         for estimator in self._ewma.values():
-            estimator.config = replace(estimator.config, time_policy=self.time_policy)
+            estimator.config = replace(estimator.config, variance_time_policy=policy)
             estimator.config.validate()
 
     def invalidate_source(self, source):

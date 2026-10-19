@@ -22,6 +22,14 @@ ESTIMATOR_EWMA = "ewma"
 # jump thresholds that lock the estimator for an entire window.
 DEFAULT_SIGMA_FLOOR = 1e-4
 
+# Variance time policies. per_sample_v0: the original estimator (squared returns mixed with
+# a per-update lambda, then divided by the newest interval). elapsed_variance_v1: variance
+# per second (r**2/dt) with lambda(dt) = exp(-ln 2 * dt / half_life_s); zero returns decay
+# an established variance; the jump threshold scales with sqrt(dt).
+PER_SAMPLE_V0 = "per_sample_v0"
+ELAPSED_VARIANCE_V1 = "elapsed_variance_v1"
+VARIANCE_TIME_POLICIES = frozenset({PER_SAMPLE_V0, ELAPSED_VARIANCE_V1})
+
 
 @dataclass(frozen=True)
 class SigmaConfig:
@@ -38,7 +46,9 @@ class SigmaConfig:
     sample_interval_s: float = 1.0  # provisional default 1s resample
     tau_floor_s: float = 1.0  # provisional (used by fair-value consumers)
     sigma_floor: float = DEFAULT_SIGMA_FLOOR  # provisional per √second
-    time_policy: str = "legacy"  # elapsed_variance_v1 is opt-in, not live-qualified
+    # Versioned elapsed-time handling of the variance (see VARIANCE_TIME_POLICIES).
+    # per_sample_v0 is the original formula; elapsed_variance_v1 is opt-in research.
+    variance_time_policy: str = "per_sample_v0"
 
     def ewma_lambda(self) -> float:
         if self.half_life_s <= 0:
@@ -46,8 +56,9 @@ class SigmaConfig:
         return math.exp(-math.log(2.0) / self.half_life_s)
 
     def validate(self) -> None:
-        if self.time_policy not in ("legacy", "elapsed_variance_v1"):
-            raise ValueError("unknown volatility time_policy")
+        if self.variance_time_policy not in VARIANCE_TIME_POLICIES:
+            raise ValueError(
+                f"variance_time_policy must be one of {sorted(VARIANCE_TIME_POLICIES)}")
         if self.half_life_s <= 0:
             raise ValueError("half_life_s must be positive")
         if self.min_samples_s < 0:
@@ -176,10 +187,36 @@ class EwmaVolatilityEstimator:
     def snapshot(self) -> VolatilitySnapshot:
         return self._snapshot()
 
+    def explain(self) -> dict:
+        """Calculated state behind the current sigma, as a new mapping of primitives.
+
+        Read-only: copies stored values (never recomputes), so a recorded explanation
+        keeps its decision-time values while the estimator keeps updating.
+        """
+        elapsed = self.config.variance_time_policy == ELAPSED_VARIANCE_V1
+        return {
+            "variance_time_policy": self.config.variance_time_policy,
+            "variance": self._var,
+            "variance_units": "log_return_variance_per_second"
+            if elapsed else "log_return_variance_per_sample",
+            "previous_variance": self._previous_variance,
+            "last_return": self._last_return,
+            "last_dt_s": self._last_dt_s,
+            "sigma": self._sigma,
+            "sample_count": self._sample_count,
+            "effective_samples_s": self._effective_samples_s,
+            "jump_guard_tripped": self._jump_guard_tripped,
+            "last_sample_ts": None
+            if self._last_sample_ts is None else self._last_sample_ts.isoformat(),
+            "last_sample_price": None if self._last_price is None else str(self._last_price),
+            "half_life_s": self.config.half_life_s,
+            "sigma_floor": self.config.sigma_floor,
+        }
+
     def _commit_variance(self, *, r_t: float, dt_s: float, ts: datetime, price: Decimal) -> None:
         self._last_return, self._last_dt_s = r_t, dt_s
         self._previous_variance = self._var
-        elapsed_policy = self.config.time_policy == "elapsed_variance_v1"
+        elapsed_policy = self.config.variance_time_policy == ELAPSED_VARIANCE_V1
         lam = self.config.ewma_lambda() ** dt_s if elapsed_policy else self.config.ewma_lambda()
         observation = r_t * r_t / dt_s if elapsed_policy else r_t * r_t
         if self._var is None:
@@ -225,7 +262,7 @@ class EwmaVolatilityEstimator:
 
         r_t = math.log(float(new_price / old_price))
         if abs(r_t) < 1e-15:
-            if self.config.time_policy == "elapsed_variance_v1" and self._var is not None:
+            if self.config.variance_time_policy == ELAPSED_VARIANCE_V1 and self._var is not None:
                 self._commit_variance(r_t=0.0, dt_s=dt_s, ts=ts, price=new_price)
                 self._jump_guard_tripped = False
                 return self._snapshot(jump_guard_tripped=False)
@@ -238,7 +275,7 @@ class EwmaVolatilityEstimator:
             return self.snapshot()
 
         threshold = self._jump_threshold()
-        if threshold is not None and self.config.time_policy == "elapsed_variance_v1":
+        if threshold is not None and self.config.variance_time_policy == ELAPSED_VARIANCE_V1:
             threshold *= math.sqrt(dt_s)
         if (
             threshold is not None

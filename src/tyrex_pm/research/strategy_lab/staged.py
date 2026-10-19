@@ -83,6 +83,7 @@ EDITABLE = {
         "sigma_scale",
         "min_samples_s",
         "jump_threshold_sigma",
+        "variance_time_policy",
     },
     "entry": {
         "tau_min_s",
