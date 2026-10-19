@@ -48,16 +48,18 @@ INPUT_CLASSES = {
     "evaluations": ("collector", "host_event"),
 }
 
-# Known gaps for exact replay of a captured run with the current loader. Reported in
-# the completeness manifest instead of being papered over.
+# What decision completeness depends on. A capture is decision-complete only once its
+# reconstruction report (``tyrex-pm recording reconstruct``) reproduces the run's
+# decisions; the manifest never asserts it at capture time.
 REPLAY_GAPS = (
-    "rtds: the warehouse has no normalizer for crypto_prices_twap_sixty; replay reads "
-    "the polybolt reference series",
-    "clob: market websocket and REST book are SDK objects, not venue bytes; the "
-    "warehouse clob normalizer expects venue JSON",
-    "gamma: discovery returns SDK-converted event dicts, not the raw Gamma response",
-    "binance depth: live uses @depth20 partial snapshots; the warehouse normalizes "
-    "@depth diff streams only",
+    "not yet verified: run `tyrex-pm recording reconstruct --capture <run folder>` "
+    "(observation captures); its report states decisions_reconstructed_equal",
+    "clob/gamma: captured as SDK objects and replayed through documented adapters "
+    "(content-equivalent venue messages, not venue bytes)",
+    "binance depth: live uses @depth20 partial snapshots, which the warehouse does not "
+    "normalize (not in settlement_value's input contract)",
+    "trading runs: reconstructing decisions after an order also needs the position "
+    "timeline from the execution journal (not part of raw capture)",
 )
 
 

@@ -246,6 +246,25 @@ class RawWriter:
             self.queue.put((record, future, reservation))
             return record, future
 
+    def submit_envelope(self, record: RawEnvelope) -> concurrent.futures.Future:
+        """Persist an envelope built elsewhere (import of a run's raw capture).
+
+        Its receipt wall and monotonic times are kept as captured; the ingest sequence
+        must continue this writer's sequence (capture order)."""
+        reservation = len(record.bytes()) * 2 + 4096
+        with self.lock:
+            if self.fault or self.closed:
+                raise DurabilityError("capture writer unavailable") from self.fault
+            if record.ingest_sequence != self.sequence + 1:
+                raise ValueError("imported envelopes must continue the ingest sequence")
+            self.sequence = record.ingest_sequence
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            self.queued_bytes += reservation
+            self.max_queue_bytes = max(self.max_queue_bytes, self.queued_bytes)
+            self.received = self.sequence
+            self.queue.put((record, future, reservation))
+            return future
+
     def _run(self) -> None:
         handles: dict[str, Any] = {}
         paths: dict[str, Path] = {}

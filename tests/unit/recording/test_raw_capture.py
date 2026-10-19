@@ -58,7 +58,7 @@ def test_completeness_is_honest_about_replay_gaps() -> None:
     assert report["missing_classes"] == ["clob_market"]
     assert report["sdk_model_classes"] == ["clob_market"]
     assert report["inputs_captured"] is False and report["decision_complete"] is False
-    assert any("rtds" in reason for reason in report["decision_complete_reasons"])
+    assert any("reconstruct" in reason for reason in report["decision_complete_reasons"])
     raw.not_in_contract("clob_market")
     report = raw.completeness(expected=("reference_twap", "clob_market"))
     assert report["missing_classes"] == [] and report["inputs_captured"] is True

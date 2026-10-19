@@ -397,6 +397,9 @@ def dispatch(raw: RawEnvelope, path: str, item: dict) -> list[tuple[str, dict]]:
                 history=bool(item.get("snapshot")),
             )
         return rows
+    if raw.source_id == "rtds":
+        rtds_reference_rows(raw, item, emit)
+        return rows
     if raw.source_id == "binance":
         event = item.get("data", item)
         iid = "binance:spot:BTCUSDT"
@@ -516,3 +519,54 @@ def emit_metadata(emit: Callable, mid: str, item: dict, entity: dict) -> None:
             "additional_fields": canonical(item),
         },
     )
+
+
+RTDS_TWAP_FEED_ID = "polymarket_rtds:crypto_prices_twap_sixty:btc/usd"
+
+
+def rtds_reference_rows(raw: RawEnvelope, item: dict, emit: Callable) -> None:
+    """Polymarket RTDS ``crypto_prices_twap_sixty`` frames, parsed by the live adapter's
+    own functions (``rtds_normalize``): a live tick, or the subscription-history snapshot
+    (each point flagged ``history`` with the snapshot's actual receipt time)."""
+    from datetime import datetime, timezone
+
+    from tyrex_pm.adapters.polymarket.rtds_normalize import (
+        normalize_chainlink_tick,
+        normalize_twap_history,
+    )
+
+    received = datetime.fromtimestamp(raw.received_at / 1e9, tz=timezone.utc)
+    counter = iter(range(1, 1_000_000))
+    common = dict(ts_received=received, receive_monotonic_ns=raw.received_monotonic_ns,
+                  connection_generation=int(raw.connection_id or 0), clock_uncertainty_ms=None)
+    events = normalize_twap_history(item, next_sequence=lambda: next(counter), **common)
+    history = bool(events)
+    if not events:
+        tick = normalize_chainlink_tick(item, ingress_sequence=max(1, raw.ingest_sequence),
+                                        **common)
+        events = [] if tick is None else [tick]
+    for n, event in enumerate(events):
+        point = event.settlement
+        payload = item.get("payload") or {}
+        exact_origin = ("full_accuracy_value" if (
+            "full_accuracy_value" in payload
+            or any("full_accuracy_value" in p for p in payload.get("data") or [])
+        ) else "value")
+        emit(
+            "reference_observations",
+            {
+                "feed_id": RTDS_TWAP_FEED_ID,
+                "value": point.price,
+                "unit": "USD",
+                "measurement_type": "TWAP",
+                "aggregation_window_s": 60,
+                "provider_dropped_count": None,
+                "precision_origin": exact_origin,
+                "provider_sequence": None if item.get("timestamp") is None
+                else str(item.get("timestamp")),
+                "provider_sequence_scope": f"{raw.session_id}/{raw.connection_id}/rtds",
+            },
+            f".payload[{n}]",
+            source_time=int(round(point.ts_event.timestamp() * 1000)),
+            history=history,
+        )

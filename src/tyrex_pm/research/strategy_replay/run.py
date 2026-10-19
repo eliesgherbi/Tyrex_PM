@@ -79,8 +79,8 @@ from tyrex_pm.strategies.outcomes import (
 )
 from tyrex_pm.strategies.registry import get_strategy_plugin
 
-from .clock_sync import CLOCK_POLICY, RecordedClockAuthority
-from .feed import REPLAYED_REFERENCE_SERIES, StrategyFeed, utc
+from .clock_sync import RecordedClockAuthority
+from .feed import StrategyFeed, utc
 from .labels import PROXY_STATUS, OutcomeLabel, engine_labels, proxy_outcome
 from .loader import NS, WindowData
 
@@ -213,6 +213,12 @@ class ReplayAgent:
     planner: IntentOrderPlanner | None = None
     armed: ArmedProtection | None = None
     _attempt_by_order: dict[str, dict] = field(default_factory=dict)
+    # Decision reconstruction of a captured run (capture_replay): evaluate exactly at
+    # the captured evaluation instants (not on the replay scheduler) and never execute
+    # intents (signal-only: the strategy context stays flat, as in observation).
+    evaluation_instants: tuple[int, ...] | None = None
+    observe_only: bool = False
+    recommendations: list[dict] = field(default_factory=list)
     # Framework recording (opt-in): input timing on decisions + selected explanations.
     record_inputs: bool = False
     explain_selector: Any = None
@@ -224,7 +230,13 @@ class ReplayAgent:
         self.engine = engine
         self.horizon_ns = horizon_ns
         first = self.window.range_start_ns
-        engine.schedule(first, TIMER, "timer", None)
+        if self.evaluation_instants is None:
+            engine.schedule(first, TIMER, "timer", None)
+        else:
+            for instant in self.evaluation_instants:
+                if first <= instant <= horizon_ns:
+                    # After every same-nanosecond observation (decision priority).
+                    engine.schedule(instant, DECISION, "decision", None)
         # Clock observations apply from their own receive time; the latest one received
         # before the range is already known at its start.
         prior = [r for r in self.clock_observations if r["received_at"] < first]
@@ -242,7 +254,8 @@ class ReplayAgent:
         if kind == "strategy_observation":
             dataset, row = payload
             fact = self.feed.apply(dataset, row)
-            if fact is not None and self.scheduler.should_evaluate(fact, mono_s=mono_s):
+            if (fact is not None and self.evaluation_instants is None
+                    and self.scheduler.should_evaluate(fact, mono_s=mono_s)):
                 self._request_decision(now)
         elif kind == "timer":
             if self.scheduler.should_evaluate_timer(mono_s=mono_s):
@@ -343,6 +356,14 @@ class ReplayAgent:
         self.evaluate_seconds += time.perf_counter() - started
         self.decisions.append(evaluated_record(ready, result, at_ns=now, window_end_ns=end_ns))
         self._record_framework(ready, now)
+        if self.observe_only:
+            for intent in result.intents:
+                self.recommendations.append({
+                    "at_ns": now, "intent_type": type(intent).__name__,
+                    "reason_code": intent.reason_code,
+                    "instrument_id": intent.instrument_id.value,
+                    "max_price": str(getattr(intent, "max_price", None))})
+            return
         exits = [] if protective is None else [protective]
         for intent in result.intents:
             if isinstance(intent, EnterIntent):
@@ -870,6 +891,8 @@ def run_window(
     clock_observations: list[dict] | None = None,
     execution_policy: ReplayExecutionPolicy | None = None,
     recording: Any = None,
+    evaluation_instants: list[int] | None = None,
+    observe_only: bool = False,
 ) -> dict:
     """Replay one window. Returns a JSON-friendly result bundle (Decimals as strings).
 
@@ -942,6 +965,9 @@ def run_window(
         planner=planner,
     )
     _configure_recording(agent, plugin, strategy_config, recording)
+    if evaluation_instants is not None:
+        agent.evaluation_instants = tuple(sorted(int(i) for i in evaluation_instants))
+    agent.observe_only = observe_only
     label = proxy_outcome(window)
     engine = Engine(scenario)
     result = engine.run_closed_loop(
@@ -1004,14 +1030,14 @@ def assemble_result(
                 "range_start_ns": window.range_start_ns,
                 "range_end_ns": window.range_end_ns,
                 "row_counts": window.counts,
-                "replayed_reference_series": REPLAYED_REFERENCE_SERIES,
+                "replayed_reference_series": agent.feed.reference_series,
                 "constraints_at_start": constraints,
                 "published_depth_levels": agent.feed.depth_levels,
                 "clock_correction": "none_raw_receive_time"
                 if agent.time_authority is None
                 else {
                     "source": "recorded_clock_observations",
-                    "policy": CLOCK_POLICY,
+                    "policy": agent.time_authority.policy,
                     "observations_applied": agent.time_authority.observations_applied,
                     "rejected_sources": dict(agent.time_authority.rejected_sources),
                     "last_offset_ms": agent.time_authority.estimated_offset_ms,
@@ -1041,6 +1067,10 @@ def assemble_result(
             },
             "seals": agent.feed.seals,
             "decisions": agent.decisions,
+            **({"recommendations": agent.recommendations,
+                "reconstruction": {"evaluation_instants": len(agent.evaluation_instants or ()),
+                                   "observe_only": True}}
+               if agent.observe_only else {}),
             **({"explanations": agent.explanations}
                if agent.explain_selector is not None else {}),
             "orders": agent.orders,

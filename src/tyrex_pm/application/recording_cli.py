@@ -34,6 +34,14 @@ def add_parser(commands: Any) -> None:
     bench.add_argument("--slow-disk-ms", type=float, default=2.0)
     bench.add_argument("--pace-ms", type=float, default=0.0,
                        help="sleep between evaluations (0 = burst)")
+    rec = sub.add_parser(
+        "reconstruct",
+        help="Import a raw-captured observation into its own warehouse collection and "
+        "reconstruct its decisions at the captured evaluation instants (offline)")
+    rec.add_argument("--capture", type=Path, required=True,
+                     help="observation output folder (decisions.jsonl + recording/raw)")
+    rec.add_argument("--out", type=Path, default=None,
+                     help="report folder (default: <capture>/reconstruction)")
 
 
 def recordings_to_prune(root: Path, older_than_days: float, *, now: float | None = None
@@ -69,6 +77,20 @@ def run(args: argparse.Namespace) -> int:
                 shutil.rmtree(folder)
         print(f"{len(found)} recording(s), {total / 2**20:.1f} MiB"
               + ("" if args.apply else " - dry run, pass --apply to delete"))
+        return 0
+    if args.recording_command == "reconstruct":
+        from tyrex_pm.research.strategy_replay.capture_replay import reconstruct
+
+        report = reconstruct(args.capture, out=args.out or args.capture / "reconstruction")
+        summary = {
+            "decisions_reconstructed_equal": report["decisions_reconstructed_equal"],
+            "raw_completeness": report["raw_completeness"],
+            "windows": [{"window_id": w["window_id"], **{k: (w.get("comparison") or {}).get(k)
+                         for k in ("live_evaluations", "replayed_evaluations",
+                                   "decision_equal", "fully_equal",
+                                   "field_mismatch_counts")}} for w in report["windows"]],
+        }
+        print(json.dumps(summary, indent=1, default=str))
         return 0
     from tyrex_pm.recording.benchmark import run_benchmark
 

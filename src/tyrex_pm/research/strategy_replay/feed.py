@@ -60,6 +60,13 @@ from tyrex_pm.runtime.market_runtime import MarketSessionRuntime, SessionSlot
 from .loader import NS, WindowData
 
 REPLAYED_REFERENCE_SERIES = "polybolt:price.crypto.twap:chainlink:btcusd:twap:60"
+# Captured live runs replay the RTDS series the live runtime consumed (capture_replay).
+RTDS_REFERENCE_SERIES = "polymarket_rtds:crypto_prices_twap_sixty:btc/usd"
+
+
+def reference_series_of(row: dict) -> str:
+    return RTDS_REFERENCE_SERIES if row.get("source_id") == "rtds" else (
+        REPLAYED_REFERENCE_SERIES)
 
 
 def utc(ns: int) -> datetime:
@@ -149,6 +156,8 @@ class StrategyFeed:
         default_factory=ReferenceAvailabilityPolicy.legacy
     )
     _arrival_refused: set[str] = field(default_factory=set)
+    # Series of the reference rows replayed (PolyBolt warehouse or captured RTDS).
+    reference_series: str = REPLAYED_REFERENCE_SERIES
     # True publishes every book change immediately (reference mode for equivalence tests).
     eager_books: bool = False
     _pending: dict[str, tuple[str, dict, bool]] = field(default_factory=dict)
@@ -397,11 +406,13 @@ class StrategyFeed:
                 symbol="BTC/USD",
                 price=row["value"],
                 ts_event=source_ts,
-                venue="polybolt_replay",
+                venue="polybolt_replay" if row.get("source_id") != "rtds"
+                else "polymarket_rtds_twap_sixty",
                 provider="chainlink",
             ),
             ingress=self._ingress(row, FeedRole.SETTLEMENT_REFERENCE),
         )
+        self.reference_series = reference_series_of(row)
         policy = self.reference_policy
         if not policy.is_legacy and is_history(event.ingress):
             # Same rule as live: history only recovers an exact boundary tick, at its
@@ -467,7 +478,7 @@ class StrategyFeed:
                 "sealed_at": sealed.sealed_at.isoformat(),
                 "quality": None if snap is None else snap.quality.value,
                 "attestation": "SKIPPED_NO_ATTESTATION_SOURCE_IN_REPLAY",
-                "reference_series": REPLAYED_REFERENCE_SERIES,
+                "reference_series": self.reference_series,
                 "recovered_from_history": recovered,
                 "availability_policy": policy.policy_id,
             }
