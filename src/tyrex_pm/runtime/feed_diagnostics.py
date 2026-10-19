@@ -84,6 +84,9 @@ class EventLoopLagMonitor:
     _task: asyncio.Task | None = field(default=None, init=False)
     _last_report_s: float = field(default=0.0, init=False)
     max_lag_ms: float = field(default=0.0, init=False)
+    # Distribution of every sample, reported once per interval (overhead measurement).
+    summary_every_s: float = 60.0
+    _last_summary_s: float = field(default=0.0, init=False)
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -98,6 +101,23 @@ class EventLoopLagMonitor:
     def record(self, lag_ms: float, now_s: float) -> None:
         self._samples.append((now_s, lag_ms))
         self.max_lag_ms = max(self.max_lag_ms, lag_ms)
+        if self._last_summary_s == 0.0:
+            self._last_summary_s = now_s
+        elif now_s - self._last_summary_s >= self.summary_every_s and self.on_report:
+            window = sorted(lag for at, lag in self._samples
+                            if now_s - at <= self.summary_every_s)
+            self._last_summary_s = now_s
+            if window:
+                def pct(q: float) -> float:
+                    return round(window[min(len(window) - 1, int(q * len(window)))], 2)
+
+                try:
+                    self.on_report("EVENT_LOOP_LAG_SUMMARY", {
+                        "window_s": self.summary_every_s, "samples": len(window),
+                        "p50_ms": pct(0.5), "p95_ms": pct(0.95), "p99_ms": pct(0.99),
+                        "max_ms": round(window[-1], 2)})
+                except Exception:  # noqa: BLE001, S110 - diagnostics never stop trading
+                    pass
         if (
             lag_ms > self.report_above_ms
             and self.on_report is not None
