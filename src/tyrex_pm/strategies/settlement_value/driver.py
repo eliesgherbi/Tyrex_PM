@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from tyrex_pm.core.disagreement import check_disagreement
 from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
 from tyrex_pm.core.intents import (
@@ -216,6 +217,14 @@ class SettlementValueDriver:
             delay_ms = max(delay_ms, min(backoff, retry.service_backoff_max_ms))
         st.next_attempt_not_before = _iso(outcome.at + timedelta(milliseconds=delay_ms))
         st.phase = P.REARMABLE
+
+    def _dispatch_checks(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Checks the strategy asks the shared pre-send gate to repeat (optional)."""
+        veto = self.config.disagreement_veto
+        if not (veto.enabled and veto.recheck_at_dispatch):
+            return {}
+        return {"dispatch_checks": {"disagreement": {
+            "p_up": row.get("p_up_point"), "max_gap_pp": veto.max_gap_pp}}}
 
     def on_hold_committed(self) -> None:
         """The host committed the filled episode to resolution (hold profile).
@@ -700,6 +709,16 @@ class SettlementValueDriver:
             waiting = self._reentry_wait(chosen, now)
             if waiting is not None:
                 return finish(StrategyAction.WAIT, waiting, model_ready=True)
+        veto = cfg.disagreement_veto
+        if veto.enabled:
+            # Same snapshot and probability as this decision; a WAIT, not an attempt.
+            check = check_disagreement(p_up=row.get("p_up_point"), up_bid=row.get("up_bid"),
+                                       up_ask=row.get("up_ask"), max_gap_pp=veto.max_gap_pp)
+            row.update(disagreement_gap_pp=check.gap_pp, disagreement_mid_up=check.mid_up,
+                       disagreement_reason=check.reason)
+            if check.reason is not None:
+                # A strategy decision, not an input-quality blocker.
+                return finish(StrategyAction.WAIT, check.reason, model_ready=True)
 
         instrument = market.yes if chosen.up else market.no
         assert chosen.worst_price is not None and chosen.p_conservative is not None
@@ -749,6 +768,7 @@ class SettlementValueDriver:
                 "settlement_provenance": cfg.settlement.provenance_status,
                 "k_quality": row.get("k_quality"),
                 **self._attempt_evidence(),
+                **self._dispatch_checks(row),
             },
         )
         intents.append(intent)

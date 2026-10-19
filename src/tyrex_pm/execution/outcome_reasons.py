@@ -71,6 +71,9 @@ REASON_CLASSES: dict[str, RetryClass] = {
     "entry_price_moved": C.RETRY_WHEN_CLEARED,
     "entry_depth_below_minimum": C.RETRY_WHEN_CLEARED,
     "candidate_stale_after_signing": C.RETRY_WHEN_CLEARED,
+    # Strategy-declared pre-send rechecks (shared dispatch_check).
+    "disagreement_veto_at_dispatch": C.RETRY_WHEN_CLEARED,
+    "disagreement_input_invalid_at_dispatch": C.RETRY_WHEN_CLEARED,
     "candidate_monotonic_time_invalid": C.PAUSE_ENTRIES,
     # Venue / replay engine terminal outcomes.
     "NO_FILL_CONFIRMED": C.RETRY_AFTER_ZERO_FILL,

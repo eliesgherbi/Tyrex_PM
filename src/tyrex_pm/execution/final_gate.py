@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from tyrex_pm.execution.orders import (
     LimitOrderSpec,
@@ -124,6 +125,8 @@ def dispatch_check(
                 reason = "entry_price_moved"
             elif leg.quote.ask_size_at_touch < policy.minimum_entry_depth_shares:
                 reason = "entry_depth_below_minimum"
+            else:
+                reason = _strategy_dispatch_checks(spec, view)
         elif isinstance(spec, LimitOrderSpec):
             post_only = bool(spec.metadata.get("post_only"))
             if spec.side is OrderSide.BUY:
@@ -224,3 +227,24 @@ class FinalExecutionGate:
                 self.note_stream_gap()
         self.last_reason = reason
         return reason is None, reason
+
+
+def _strategy_dispatch_checks(spec: Any, view: Any) -> str | None:
+    """Strategy-declared pre-send checks (``metadata["dispatch_checks"]``), repeated on the
+    book captured for this gate. A refusal is a NOT_SENT outcome of a started attempt."""
+    checks = (getattr(spec, "metadata", None) or {}).get("dispatch_checks") or {}
+    disagreement = checks.get("disagreement")
+    if disagreement:
+        from tyrex_pm.core.disagreement import check_disagreement
+
+        up = getattr(view, "up", None)
+        quote = None if up is None else up.quote
+        result = check_disagreement(
+            p_up=disagreement.get("p_up"),
+            up_bid=None if quote is None else quote.best_bid,
+            up_ask=None if quote is None else quote.best_ask,
+            max_gap_pp=float(disagreement.get("max_gap_pp")),
+        )
+        if result.reason is not None:
+            return f"{result.reason.lower()}_at_dispatch"
+    return None

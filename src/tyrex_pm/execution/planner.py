@@ -9,7 +9,13 @@ from decimal import Decimal
 from uuid import uuid4
 
 from tyrex_pm.core.intents import EnterIntent, ExitIntent, FlattenIntent, LiquidityRole
-from tyrex_pm.execution.orders import LimitOrderSpec, MarketBuyOrderSpec, MarketSellOrderSpec, OrderSide, TimeInForce
+from tyrex_pm.execution.orders import (
+    LimitOrderSpec,
+    MarketBuyOrderSpec,
+    MarketSellOrderSpec,
+    OrderSide,
+    TimeInForce,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,10 @@ class IntentOrderPlanner:
                 else int(candidate_monotonic_ns)
             ),
         }
+        checks = (getattr(intent, "evidence", None) or {}).get("dispatch_checks")
+        if checks:
+            # Strategy-declared checks the shared pre-send gate repeats on the freshest book.
+            metadata["dispatch_checks"] = dict(checks)
         if intent.liquidity_role is LiquidityRole.MAKER:
             shares = spend / worst
             return LimitOrderSpec(
