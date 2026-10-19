@@ -45,6 +45,9 @@ DECISION_COLUMNS = (
     "up_reason",
     "down_reason",
     "twap_reason",
+    # Strategy disagreement veto (absent from parts written before it existed).
+    "disagreement_gap_pp",
+    "disagreement_reason",
 )
 
 
@@ -172,6 +175,7 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
                     {
                         **d,
                         "market_id": spec.market_id,
+                        "tag": spec.tag,
                         "config": spec.config_label,
                         "scenario_name": result["scenario_name"],
                         "winner": result["label"]["winner"],
@@ -192,7 +196,8 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
         _lab(spec.collection)._windows.pop(spec.market_id, None)
     parts_dir.mkdir(parents=True, exist_ok=True)
     if decision_path is not None:
-        frame = _typed(pd.DataFrame(decision_rows), (*NUMERIC, "at_ns", "window_end_ns"))
+        numeric = (*NUMERIC, "at_ns", "window_end_ns", "disagreement_gap_pp")
+        frame = _typed(pd.DataFrame(decision_rows), numeric)
         frame.to_parquet(decision_path, index=False)
     if explain_rows:
         pd.DataFrame(explain_rows).to_parquet(_explain_path(summary_path), index=False)
