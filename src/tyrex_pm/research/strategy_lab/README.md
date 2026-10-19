@@ -24,6 +24,13 @@ The notebooks read `var/warehouse_btc5m`, collection `380e44875c8e483aa4f76e17ca
 
 Corrected S2 numbers (clock correction, both backends) are in `var/research/strategy_runs/s2/validation_seed/` and summarised in `Docs/implementation/strategies/settlement_value_candidate_ranges.md`. Experiments are run with `python -m tyrex_pm.research.strategy_lab.s2_experiments {split,vol,grid,buffer,holdout}` (about 2.5 GB per worker; use 4–6 workers).
 
+`06_probability_stress_cases.ipynb` is the focused development case bench for the two
+frozen hold configurations: seven recorded cases, four live evidence-only cases,
+optional full probability traces, and opt-in elapsed-time volatility / disagreement
+veto experiments. Run All reads evidence by default (`RUN_CASE_REPLAYS = False`).
+Its 42 selected-case replays are separate from notebook 04/05 experiments; they do
+not qualify a live change. See `Docs/implementation/strategies/probability_stress_cases.md`.
+
 ## Beginner reading path
 
 Read **00, then 01**, running cells in order with the project Python kernel.

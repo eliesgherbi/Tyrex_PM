@@ -38,6 +38,7 @@ class SigmaConfig:
     sample_interval_s: float = 1.0  # provisional default 1s resample
     tau_floor_s: float = 1.0  # provisional (used by fair-value consumers)
     sigma_floor: float = DEFAULT_SIGMA_FLOOR  # provisional per √second
+    time_policy: str = "legacy"  # elapsed_variance_v1 is opt-in, not live-qualified
 
     def ewma_lambda(self) -> float:
         if self.half_life_s <= 0:
@@ -45,6 +46,8 @@ class SigmaConfig:
         return math.exp(-math.log(2.0) / self.half_life_s)
 
     def validate(self) -> None:
+        if self.time_policy not in ("legacy", "elapsed_variance_v1"):
+            raise ValueError("unknown volatility time_policy")
         if self.half_life_s <= 0:
             raise ValueError("half_life_s must be positive")
         if self.min_samples_s < 0:
@@ -94,6 +97,11 @@ class EwmaVolatilityEstimator:
       sample not-ready but still updates variance so the estimator can recover.
     - Near-zero returns do not install σ=0; the estimator stays warming until a
       non-zero return establishes variance (then floored).
+
+    ``elapsed_variance_v1`` is an opt-in research correction: keep variance per
+    second, blend r²/dt with λ(dt)=exp(-ln(2)*dt/half_life), and take sqrt(var).
+    Zero returns decay an established variance; jump thresholds scale by sqrt(dt).
+    No synthetic prices are inserted during a feed gap. Freshness remains host-owned.
     """
 
     config: SigmaConfig = field(default_factory=SigmaConfig)
@@ -107,6 +115,9 @@ class EwmaVolatilityEstimator:
     _effective_samples_s: float = field(default=0.0, init=False, repr=False)
     _last_update_ts: datetime | None = field(default=None, init=False, repr=False)
     _jump_guard_tripped: bool = field(default=False, init=False, repr=False)
+    _last_return: float | None = field(default=None, init=False, repr=False)
+    _last_dt_s: float | None = field(default=None, init=False, repr=False)
+    _previous_variance: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -166,12 +177,17 @@ class EwmaVolatilityEstimator:
         return self._snapshot()
 
     def _commit_variance(self, *, r_t: float, dt_s: float, ts: datetime, price: Decimal) -> None:
-        lam = self.config.ewma_lambda()
+        self._last_return, self._last_dt_s = r_t, dt_s
+        self._previous_variance = self._var
+        elapsed_policy = self.config.time_policy == "elapsed_variance_v1"
+        lam = self.config.ewma_lambda() ** dt_s if elapsed_policy else self.config.ewma_lambda()
+        observation = r_t * r_t / dt_s if elapsed_policy else r_t * r_t
         if self._var is None:
-            self._var = r_t * r_t
+            self._var = observation
         else:
-            self._var = lam * self._var + (1.0 - lam) * (r_t * r_t)
-        self._sigma = self._floored_sigma(math.sqrt(self._var / dt_s))
+            self._var = lam * self._var + (1.0 - lam) * observation
+        variance_rate = self._var if elapsed_policy else self._var / dt_s
+        self._sigma = self._floored_sigma(math.sqrt(variance_rate))
         self._sample_count += 1
         self._effective_samples_s += dt_s
         self._last_update_ts = ts
@@ -209,6 +225,10 @@ class EwmaVolatilityEstimator:
 
         r_t = math.log(float(new_price / old_price))
         if abs(r_t) < 1e-15:
+            if self.config.time_policy == "elapsed_variance_v1" and self._var is not None:
+                self._commit_variance(r_t=0.0, dt_s=dt_s, ts=ts, price=new_price)
+                self._jump_guard_tripped = False
+                return self._snapshot(jump_guard_tripped=False)
             self._last_price = new_price
             self._last_sample_ts = ts
             # Do not install σ=0 from stagnant prices; that made every later
@@ -217,14 +237,14 @@ class EwmaVolatilityEstimator:
                 self._effective_samples_s += dt_s
             return self.snapshot()
 
-        jump_tripped = False
         threshold = self._jump_threshold()
+        if threshold is not None and self.config.time_policy == "elapsed_variance_v1":
+            threshold *= math.sqrt(dt_s)
         if (
             threshold is not None
             and self.config.jump_guard
             and abs(r_t) > threshold
         ):
-            jump_tripped = True
             self._jump_guard_tripped = True
             # Still update variance so σ can adapt after an outlier.
             self._commit_variance(r_t=r_t, dt_s=dt_s, ts=ts, price=new_price)
@@ -287,6 +307,9 @@ class EwmaVolatilityEstimator:
         self._effective_samples_s = 0.0
         self._last_update_ts = None
         self._jump_guard_tripped = False
+        self._last_return = None
+        self._last_dt_s = None
+        self._previous_variance = None
 
 
 def default_sigma_config() -> SigmaConfig:

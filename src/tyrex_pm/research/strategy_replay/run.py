@@ -200,6 +200,7 @@ class ReplayAgent:
     planner: IntentOrderPlanner | None = None
     armed: ArmedProtection | None = None
     _attempt_by_order: dict[str, dict] = field(default_factory=dict)
+    research_study: Any = None  # explicit notebook diagnostics; absent in ordinary runs
 
     # -- timeline hooks ----------------------------------------------------------------
 
@@ -294,6 +295,8 @@ class ReplayAgent:
             return
         context = self._context(ready)
         features = self.runtime.indicator_graph.snapshot()
+        if self.research_study is not None:
+            context = self.research_study.before(self, ready, context, features)
         started = time.perf_counter()
         result = ready.binding.evaluate(
             market_snapshot=ready.snapshot,
@@ -305,6 +308,8 @@ class ReplayAgent:
         )
         self.evaluate_seconds += time.perf_counter() - started
         self.decisions.append(evaluated_record(ready, result, at_ns=now, window_end_ns=end_ns))
+        if self.research_study is not None:
+            self.research_study.record(self, ready, context, features, self.decisions[-1])
         exits = [] if protective is None else [protective]
         for intent in result.intents:
             if isinstance(intent, EnterIntent):
@@ -795,6 +800,7 @@ def run_window(
     eager_books: bool = False,
     clock_observations: list[dict] | None = None,
     execution_policy: ReplayExecutionPolicy | None = None,
+    research_study: Any = None,
 ) -> dict:
     """Replay one window. Returns a JSON-friendly result bundle (Decimals as strings)."""
     if scenario.adapter != "strategy_closed_loop_v1":
@@ -825,6 +831,8 @@ def run_window(
         maximum_trade_age_ms=maximum_trade_age_ms,
         freshness_clock=clock,
     )
+    if research_study is not None:
+        research_study.configure(runtime)
     max_levels = getattr(getattr(strategy_config, "sizing", None), "max_levels", None)
     if max_levels is not None and max_levels > depth_levels:
         raise ValueError("depth_levels must cover the strategy's sizing.max_levels")
@@ -860,6 +868,7 @@ def run_window(
         clock_observations=sorted(clock_observations or [], key=lambda r: r["received_at"]),
         policy=policy,
         planner=planner,
+        research_study=research_study,
     )
     label = proxy_outcome(window)
     engine = Engine(scenario)
