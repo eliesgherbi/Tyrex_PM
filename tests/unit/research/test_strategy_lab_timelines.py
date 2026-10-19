@@ -140,11 +140,13 @@ def fake_result(digest: str) -> dict:
 def replay_env(monkeypatch, tmp_path):
     calls = []
 
-    def fake_replay(collection, market_id, params, scenario):
+    def fake_replay(collection, market_id, params, scenario, execution_policy=None):
         calls.append((collection, market_id, scenario))
+        fake_replay.policies.append(execution_policy)
         return fake_result(fake_replay.digest)
 
     fake_replay.digest = "d-saved"
+    fake_replay.policies = []
     monkeypatch.setattr(tl, "_replay", fake_replay)
     monkeypatch.setattr(tl, "replay_check", lambda ds, row: ({"a": 1}, [], []))
     monkeypatch.setattr(staged, "code_identity", lambda: {"source_fingerprint": "x"})
