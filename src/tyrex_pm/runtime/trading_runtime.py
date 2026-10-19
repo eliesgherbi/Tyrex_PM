@@ -295,6 +295,7 @@ class TradingRuntime:
     recording_status: dict[str, Any] | None = None
     _recording_status_mono: float = 0.0
     _recording_failed_reported: bool = False
+    _raw_fault_handled: bool = False
 
     @classmethod
     async def create(
@@ -1515,6 +1516,32 @@ class TradingRuntime:
                 "effect": "decision recording stopped; trading continues",
             })
 
+    def _check_raw_capture(self) -> None:
+        """Apply ``recording.raw_on_fault`` once when raw capture becomes incomplete.
+
+        ``stop_capture`` (default): capture stops visibly, trading continues.
+        ``stop_entries`` (strict qualification runs): also block new entries; exits,
+        holds and position management are unaffected (entry-only blocker).
+        """
+        recording = self.decision_recording
+        if self._raw_fault_handled or recording is None or recording.raw is None:
+            return
+        reason = recording.raw_fault()
+        if reason is None:
+            return
+        self._raw_fault_handled = True
+        recording.stop_raw(reason)
+        policy = self.config.recording.raw_on_fault
+        if policy == "stop_entries":
+            self.capabilities.set_blocker("RAW_CAPTURE_FAILED", reason)
+        self.run_recorder.record("RAW_CAPTURE_FAILED", {
+            "reason": reason, "policy": policy,
+            "effect": "raw capture stopped; new entries blocked, positions managed"
+            if policy == "stop_entries"
+            else "raw capture stopped; trading continues",
+        })
+        self._record_readiness_if_changed()
+
     def _close_recording(self) -> None:
         recording = self.decision_recording
         if recording is None:
@@ -2404,6 +2431,7 @@ class TradingRuntime:
             await self._try_detach()
         await self._bind_pending_market()
         if getattr(self, "decision_recording", None) is not None:
+            self._check_raw_capture()
             self._recording_heartbeat()
         worker = getattr(self, "settlement_worker", None)
         if worker is not None:
@@ -3237,6 +3265,7 @@ class TradingRuntime:
                 on_public_fact=self.on_public_fact,
                 on_shutdown=self._shutdown_execution,
                 on_feed_event=self.run_recorder.record,
+                raw_capture=getattr(self.decision_recording, "raw", None),
             )
         except BaseException as exc:  # always project a report before propagating interrupts
             fatal_exception = exc

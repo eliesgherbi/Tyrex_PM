@@ -387,6 +387,18 @@ class Recorder:
     def has_stream(self, stream: str) -> bool:
         return stream in self._streams
 
+    def stream_health(self, stream: str) -> tuple[str | None, int, str | None]:
+        """(state, dropped, last_error) without building a snapshot (trading loop)."""
+        target = self._streams.get(stream)
+        if target is None:
+            return None, 0, None
+        st = target.status
+        state = st.state
+        if (self._thread is not None and not self._thread.is_alive()
+                and not self._stop.is_set()):
+            state = "failed"
+        return state, st.dropped, st.last_error or self._writer_error
+
     # -- status (read by the trading loop; independent of the writer) -----------------
     def status(self) -> dict:
         alive = self._thread is not None and self._thread.is_alive()

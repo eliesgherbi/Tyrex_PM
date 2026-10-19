@@ -37,7 +37,9 @@ class BinanceTradeWsAdapter:
         reconnect_backoff_s: float = 1.0,
         max_backoff_s: float = 30.0,
         time_authority: Any | None = None,
+        raw_sink: Any | None = None,
     ) -> None:
+        self._raw_sink = raw_sink
         self._symbol = symbol.upper()
         self._url = binance_trade_ws_url(self._symbol)
         self._correlation_id = correlation_id or new_correlation_id()
@@ -54,6 +56,15 @@ class BinanceTradeWsAdapter:
         self._ever_connected = False
         self._last_trade_id: int | None = None
         self.ready = False
+
+    def _tee(self, raw: Any, connection: Any) -> None:
+        """Raw capture hook (recording/raw.py): the frame before parsing. Never raises."""
+        if self._raw_sink is None:
+            return
+        try:
+            self._raw_sink(raw, connection)
+        except Exception:  # noqa: BLE001, S110 - capture never stops the feed
+            pass
 
     @property
     def connection_generation(self) -> int:
@@ -95,6 +106,7 @@ class BinanceTradeWsAdapter:
                     async for raw in ws:
                         if self._stop.is_set():
                             break
+                        self._tee(raw, gen)
                         await self._handle_raw(raw, dispatcher, generation=gen)
                         if not self.ready:
                             self.ready = True

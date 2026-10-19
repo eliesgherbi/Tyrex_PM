@@ -93,6 +93,8 @@ class BindingFeed:
     )
     buffer_max_events: int = DEFAULT_BUFFER_MAX_EVENTS
     buffer_max_age_s: float = DEFAULT_BUFFER_MAX_AGE_S
+    # Raw input capture (recording/raw.py RawCapture); None = no capture.
+    raw_capture: Any = None
 
     phase: FeedSyncPhase = FeedSyncPhase.UNINITIALIZED
     connection_health: ConnectionHealth = ConnectionHealth.CLOSED
@@ -306,6 +308,10 @@ class BindingFeed:
                 self._stream = stream
                 self.connection_epoch += 1
                 epoch = self.connection_epoch
+                if self.raw_capture is not None:
+                    self.raw_capture.event("connections", "connected", {
+                        "feed": "clob_market", "binding_id": self.binding.binding_id,
+                        "connection_epoch": epoch, "asset_ids": list(self.binding.asset_ids)})
                 self.store.set_min_connection_epoch(epoch)
                 self.store.metrics.for_token(self.binding.up_token_id).reconnect_count += 1
                 self.subscription_sent = True
@@ -347,6 +353,7 @@ class BindingFeed:
                     self.connection_health = ConnectionHealth.RECONNECTING
                     self.phase = FeedSyncPhase.DESYNCED
                     self.recovery_reason = "ws_stream_ended"
+                    self._capture_disconnect("ws_stream_ended")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -355,6 +362,7 @@ class BindingFeed:
                 self.phase = FeedSyncPhase.DESYNCED
                 self.recovery_reason = f"reconnect:{self.last_error}"
                 logger.warning("BindingFeed %s reconnecting: %s", self.binding.binding_id, exc)
+                self._capture_disconnect(self.last_error)
             finally:
                 if self._stream is not None:
                     try:
@@ -389,8 +397,20 @@ class BindingFeed:
                     source="REST_RECONCILED",
                 )
 
+    def _capture_disconnect(self, reason: str | None) -> None:
+        if self.raw_capture is not None:
+            self.raw_capture.event("connections", "disconnected", {
+                "feed": "clob_market", "binding_id": self.binding.binding_id,
+                "connection_epoch": self.connection_epoch, "reason": reason})
+
     async def _handle_sdk_event(self, sdk_event: Any, *, connection_epoch: int) -> None:
         ts_received = datetime.now(timezone.utc)
+        if self.raw_capture is not None:
+            # The SDK delivers typed events only: captured as an SDK model dump.
+            self.raw_capture.message(
+                "clob_market", sdk_event,
+                connection=f"{self.binding.binding_id}:{connection_epoch}",
+                event_type=type(sdk_event).__name__)
         try:
             event = sdk_market_event_to_tyrex(sdk_event, ts_received=ts_received)
         except (ValueError, TypeError, KeyError) as exc:
@@ -532,6 +552,7 @@ class BookFeedSupervisor:
     out_dir: Any | None = None
     rest_fetcher: Callable[[str], Any] = fetch_clob_book
     market_stream_factory: MarketEventStreamFactory | None = None
+    raw_capture: Any = None
 
     active: BindingFeed | None = None
     prepared: BindingFeed | None = None
@@ -560,6 +581,7 @@ class BookFeedSupervisor:
             "store": self.store,
             "dispatcher": self.dispatcher,
             "rest_fetcher": self.rest_fetcher,
+            "raw_capture": self.raw_capture,
         }
         if self.market_stream_factory is not None:
             kwargs["market_stream_factory"] = self.market_stream_factory

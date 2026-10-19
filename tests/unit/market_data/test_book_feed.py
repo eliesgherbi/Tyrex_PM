@@ -288,3 +288,24 @@ def test_size_zero_delta_official_semantics() -> None:
     assert store.metrics.for_token(UP).levels_deleted >= 1
     view = store.capture_pair(_binding())
     assert view.up.ask_liquidity is SideLiquidity.EXPLICITLY_EMPTY
+
+
+def test_raw_capture_receives_sdk_events_before_normalization() -> None:
+    captured: list[tuple] = []
+
+    class _Raw:
+        def message(self, input_class, body, **kw):  # noqa: ANN001
+            captured.append((input_class, body, kw))
+
+        def event(self, *args, **kw):  # noqa: ANN002
+            captured.append(("event", args))
+
+    store = MarketStateStore()
+    disp = EventDispatcher()
+    store.attach(disp)
+    feed = BindingFeed(binding=_binding(), store=store, dispatcher=disp, raw_capture=_Raw())
+    unknown = object()  # not a market event: normalization rejects or ignores it
+    asyncio.run(feed._handle_sdk_event(unknown, connection_epoch=4))
+    (input_class, body, kw), *_ = captured
+    assert input_class == "clob_market" and body is unknown
+    assert kw["connection"].endswith(":4") and kw["event_type"] == "object"

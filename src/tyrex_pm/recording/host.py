@@ -46,6 +46,8 @@ class DecisionRecording:
         self.level = level
         self.selector = selector
         self.undeclared: set[str] = set()
+        self.records_decisions = recorder.has_stream("decisions") or selector is not None
+        self.raw: Any = None  # RawCapture when ``recording.raw_inputs`` is on
         self.capture_errors = 0
         self.last_capture_error: str | None = None
         self._cost_us: deque[float] = deque(maxlen=_COST_SAMPLES)
@@ -64,6 +66,8 @@ class DecisionRecording:
 
     def _capture(self, ready: Any, row: Mapping[str, Any], *, window_id: Any,
                  time_view: Any, graph: Any, strategy_explain: Any) -> None:
+        if not self.records_decisions:
+            return
         started = time.perf_counter_ns()
         try:
             record = decision_record(
@@ -89,6 +93,24 @@ class DecisionRecording:
         finally:
             self._cost_us.append((time.perf_counter_ns() - started) / 1000.0)
 
+    # -- raw capture health -------------------------------------------------------------
+    def raw_fault(self) -> str | None:
+        """Why raw capture is no longer complete (failure or loss), else None. Cheap."""
+        if self.raw is None:
+            return None
+        if self.raw.fault is not None:
+            return f"capture_error: {self.raw.fault}"
+        state, dropped, error = self.recorder.stream_health("raw")
+        if state == "failed":
+            return f"writer_failed: {error}"
+        if dropped:
+            return f"records_dropped: {dropped}"
+        return None
+
+    def stop_raw(self, reason: str) -> None:
+        if self.raw is not None and self.raw.fault is None:
+            self.raw.fault = f"stopped: {reason}"
+
     # -- status ------------------------------------------------------------------------
     def status(self) -> dict:
         costs = list(self._cost_us)
@@ -105,11 +127,27 @@ class DecisionRecording:
                                 "max": None if not costs else round(max(costs), 2),
                                 "samples": len(costs)},
         })
+        if self.raw is not None:
+            status["raw_capture"] = {"fault": self.raw_fault(),
+                                     "captured": dict(self.raw.captured)}
         return status
 
     def close(self) -> dict:
         closed = self.recorder.close()
         merged = self.status()
+        if self.raw is not None:
+            completeness = self.raw.completeness()
+            completeness["stream"] = closed.get("streams", {}).get("raw")
+            completeness["inputs_captured"] = bool(
+                completeness["inputs_captured"] and not merged["raw_capture"]["fault"])
+            merged["raw_capture"]["completeness"] = completeness
+            try:
+                import json
+
+                (self.recorder.directory / "raw_completeness.json").write_text(
+                    json.dumps(completeness, indent=1, default=str), encoding="utf-8")
+            except OSError as exc:
+                merged["raw_capture"]["write_error"] = f"{type(exc).__name__}: {exc}"
         merged.update({k: v for k, v in closed.items() if k not in merged or k == "streams"})
         merged["writer_finished"] = closed.get("writer_finished")
         return merged
@@ -120,17 +158,18 @@ def open_decision_recording(config: RecordingConfig, *, output_directory: Path, 
                             entry_band: tuple[float, float] | None,
                             manifest: Mapping[str, Any],
                             record_decisions: bool = True) -> DecisionRecording | None:
-    """Start recording for ``config.level``; None when there is nothing to record.
+    """Start recording; None when there is nothing to record.
 
-    ``record_decisions=False`` is for hosts that already write their own decision rows
-    (observation): only the explain stream is opened here, at level ``explain``.
+    * ``decisions`` stream: level ``decisions`` or ``explain`` (hosts that write their own
+      decision rows, i.e. observation, pass ``record_decisions=False``);
+    * ``explain`` stream: level ``explain``;
+    * ``raw`` stream: ``raw_inputs`` (any level); the host passes ``recording.raw`` (a
+      ``RawCapture``) to the market-data composition.
     """
-    if not config.level.includes(RecordingLevel.DECISIONS):
-        return None
-    if not record_decisions and not config.level.includes(RecordingLevel.EXPLAIN):
-        return None
+    from tyrex_pm.recording.raw import RAW_SCHEMA, RawCapture
+
     streams: dict[str, str | None] = {}
-    if record_decisions:
+    if record_decisions and config.level.includes(RecordingLevel.DECISIONS):
         streams["decisions"] = None if schema is None else schema.schema_id
     selector = None
     if config.level.includes(RecordingLevel.EXPLAIN):
@@ -138,10 +177,17 @@ def open_decision_recording(config: RecordingConfig, *, output_directory: Path, 
         selector = ExplainSelector(config.explain_trigger,
                                    context_evaluations=config.explain_context_evaluations,
                                    entry_band=entry_band)
+    if config.raw_inputs:
+        streams["raw"] = RAW_SCHEMA
+    if not streams:
+        return None
     directory = config.directory or (Path(output_directory) / "recording")
     recorder = Recorder(directory, config, streams=streams, manifest={
         "mode": mode, "run_id": run_id, "level": config.level.value,
         "schemas": dict(streams), "entry_band": entry_band, **dict(manifest)})
     recorder.start()
-    return DecisionRecording(recorder, mode=mode, run_id=run_id, schema=schema,
-                             level=config.level, selector=selector)
+    recording = DecisionRecording(recorder, mode=mode, run_id=run_id, schema=schema,
+                                  level=config.level, selector=selector)
+    if config.raw_inputs:
+        recording.raw = RawCapture(recorder)
+    return recording

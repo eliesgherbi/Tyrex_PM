@@ -366,6 +366,8 @@ async def run_observation(
             on_rollover=session.on_rollover,
             should_stop=session.should_stop,
             on_async_tick=tick,
+            raw_capture=None if session.explain_recording is None
+            else session.explain_recording.raw,
         )
     finally:
         recording_status = (

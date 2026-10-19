@@ -55,7 +55,10 @@ class BinanceDepthWsAdapter:
         on_health: Callable[[str, dict], None] | None = None,
         reconnect_backoff_s: float = 1.0,
         max_backoff_s: float = 30.0,
+        raw_sink: Any | None = None,
     ) -> None:
+        self._raw_sink = raw_sink
+        self._connections = 0
         self._symbol = symbol.upper()
         self._url = binance_depth_ws_url(self._symbol)
         self._store = store
@@ -66,6 +69,15 @@ class BinanceDepthWsAdapter:
         self._stop = asyncio.Event()
         self._ws = None
         self.ready = False
+
+    def _tee(self, raw: Any, connection: Any) -> None:
+        """Raw capture hook (recording/raw.py): the frame before parsing. Never raises."""
+        if self._raw_sink is None:
+            return
+        try:
+            self._raw_sink(raw, connection)
+        except Exception:  # noqa: BLE001, S110 - capture never stops the feed
+            pass
 
     async def stop(self) -> None:
         self._stop.set()
@@ -91,11 +103,13 @@ class BinanceDepthWsAdapter:
                 self._health("connecting", url=self._url)
                 async with websockets.connect(self._url, ping_interval=20, ping_timeout=20) as ws:
                     self._ws = ws
+                    self._connections += 1
                     self._health("connected", symbol=self._symbol)
                     backoff = self._reconnect_backoff_s
                     async for raw in ws:
                         if self._stop.is_set():
                             break
+                        self._tee(raw, self._connections)
                         self._handle_raw(raw)
                         if not self.ready:
                             self.ready = True

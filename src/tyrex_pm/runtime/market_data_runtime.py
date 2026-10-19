@@ -248,6 +248,7 @@ async def run_market_data_runtime(
     on_public_fact: Callable[[str, MarketSessionRuntime], None] | None = None,
     on_shutdown: Callable[[str], Awaitable[None]] | None = None,
     on_feed_event: Callable[[str, dict[str, Any]], None] | None = None,
+    raw_capture: Any | None = None,
 ) -> MarketDataSummary:
     """Bounded live composition: discover → ingest → EXACT seal → optional eval.
 
@@ -297,10 +298,16 @@ async def run_market_data_runtime(
         except Exception:
             pass
     provider = OsMonitorClockSyncProvider(enable_binance_cross_check=True)
-    clock_loop = ClockSyncLoop(provider=provider, apply=auth.apply_snapshot, interval_s=5.0)
+
+    def apply_clock(snap: Any) -> None:
+        auth.apply_snapshot(snap)
+        if raw_capture is not None:
+            raw_capture.event("clock", "clock_sample", {"snapshot": snap})
+
+    clock_loop = ClockSyncLoop(provider=provider, apply=apply_clock, interval_s=5.0)
     try:
         snap = await provider.measure()
-        auth.apply_snapshot(snap)
+        apply_clock(snap)
         summary.clock = _clock_payload(auth)
     except Exception as exc:
         summary.errors.append(f"clock:{type(exc).__name__}:{exc}")
@@ -351,7 +358,18 @@ async def run_market_data_runtime(
     )
 
     family = get_market_family(market_family)
-    discovery = GammaMarketDiscovery()
+    if raw_capture is None:
+        discovery = GammaMarketDiscovery()
+    else:
+        from tyrex_pm.adapters.polymarket.discovery import fetch_gamma_event
+
+        def captured_gamma_event(slug: str) -> dict[str, Any]:
+            event = fetch_gamma_event(slug)
+            # SDK-converted Gamma event: exactly what discovery parses (not venue bytes).
+            raw_capture.message("market_metadata", event, transport="http", slug=slug)
+            return event
+
+        discovery = GammaMarketDiscovery(event_fetcher=captured_gamma_event)
     try:
         active_binding = await family.resolve_active(discovery)
         prepared = await family.prepare_next(discovery)
@@ -394,6 +412,17 @@ async def run_market_data_runtime(
     book_store.attach(disp)
     runtime.book_store = book_store
     feed_supervisor = BookFeedSupervisor(store=book_store, dispatcher=disp, out_dir=out_dir)
+    if raw_capture is not None:
+        feed_supervisor.raw_capture = raw_capture
+        base_fetcher = feed_supervisor.rest_fetcher
+
+        def captured_rest_book(token_id: str) -> Any:
+            payload = base_fetcher(token_id)
+            raw_capture.message("clob_rest_book", payload, transport="http",
+                                token_id=token_id)
+            return payload
+
+        feed_supervisor.rest_fetcher = captured_rest_book
     if on_feed_supervisor is not None:
         on_feed_supervisor(feed_supervisor)
     counts = {"chainlink": 0, "binance": 0, "binance_l2": 0, "clob": 0}
@@ -443,6 +472,11 @@ async def run_market_data_runtime(
         last_eval_mono = mono
         if on_evaluation is None:
             return
+        if raw_capture is not None:
+            # Evaluation instant: what triggered it, on the same monotonic clock.
+            raw_capture.event("evaluations", "evaluation", {
+                "trigger": "timer" if timer else fact, "monotonic_s": mono,
+                "window_id": runtime.active.window_id})
         try:
             on_evaluation(runtime)
         except Exception as exc:  # noqa: BLE001 - keep public sockets alive
@@ -630,6 +664,8 @@ async def run_market_data_runtime(
         )
 
     def emit_feed_event(kind: str, payload: dict[str, Any]) -> None:
+        if raw_capture is not None and kind == "FEED_CONNECTION_EVENT":
+            raw_capture.event("connections", str(payload.get("status")), payload)
         if on_feed_event is None:
             return
         try:
@@ -703,7 +739,8 @@ async def run_market_data_runtime(
                 feed_notes.append(note)
 
     cl = RtdsChainlinkAdapter(
-        time_authority=auth, heartbeat_timeout_s=25, on_health=_on_rtds_health
+        time_authority=auth, heartbeat_timeout_s=25, on_health=_on_rtds_health,
+        raw_sink=None if raw_capture is None else raw_capture.sink("reference_twap"),
     )
 
     def _on_binance_health(status: str, detail: dict[str, Any]) -> None:
@@ -723,7 +760,8 @@ async def run_market_data_runtime(
                 invalidate(F.BINANCE_SPOT_TRADES)
 
     bn = BinanceTradeWsAdapter(
-        symbol=binance_symbol, time_authority=auth, on_health=_on_binance_health
+        symbol=binance_symbol, time_authority=auth, on_health=_on_binance_health,
+        raw_sink=None if raw_capture is None else raw_capture.sink("binance_trades"),
     )
     # Binding-scoped feeds own WS + REST bootstrap (not session quote mutation).
     active_rec = binding_record_from_discovery(
@@ -734,6 +772,10 @@ async def run_market_data_runtime(
     )
     await feed_supervisor.set_active(active_rec)
     await feed_supervisor.set_prepared(prepared_rec)
+    if raw_capture is not None:
+        raw_capture.event("bindings", "feed_binding", {"role": "active", "binding": active_rec})
+        raw_capture.event("bindings", "feed_binding",
+                          {"role": "prepared_next", "binding": prepared_rec})
     runtime.active_binding_record = active_rec
     summary.gate_notes.append(
         "book_path=MarketStateStore→BookView; binding_feeds=ACTIVE+PREPARED_NEXT"
@@ -746,11 +788,15 @@ async def run_market_data_runtime(
         summary.gate_notes.append("adapter=chainlink.twap")
     else:
         summary.gate_notes.append("adapter=chainlink.twap skipped (not in InputContract)")
+        if raw_capture is not None:
+            raw_capture.not_in_contract("reference_twap")
     if starts_adapter(contract, F.BINANCE_SPOT_TRADES):
         tasks.append(asyncio.create_task(bn.run(disp), name="bn"))
         summary.gate_notes.append("adapter=binance.spot.trades")
     else:
         summary.gate_notes.append("adapter=binance.spot.trades skipped (not in InputContract)")
+        if raw_capture is not None:
+            raw_capture.not_in_contract("binance_trades")
     spot_depth = runtime.indicator_graph.depth
     runtime.spot_depth_store = spot_depth
 
@@ -769,12 +815,15 @@ async def run_market_data_runtime(
         store=spot_depth,
         on_update=_on_spot_depth,
         on_health=_on_binance_health,
+        raw_sink=None if raw_capture is None else raw_capture.sink("binance_depth"),
     )
     if starts_adapter(contract, F.BINANCE_SPOT_L2):
         tasks.append(asyncio.create_task(bn_l2.run(), name="bn_l2"))
         summary.gate_notes.append("adapter=binance.spot.l2")
     else:
         summary.gate_notes.append("adapter=binance.spot.l2 skipped (not in InputContract)")
+        if raw_capture is not None:
+            raw_capture.not_in_contract("binance_depth")
 
     compose_started_raw = datetime.now(timezone.utc)
     compose_started_mono_ns = time.monotonic_ns()
@@ -830,6 +879,9 @@ async def run_market_data_runtime(
                     role_epoch=feed_supervisor.role_epoch_counter,
                 )
                 await feed_supervisor.set_prepared(nxt_rec)
+                if raw_capture is not None:
+                    raw_capture.event("bindings", "feed_binding",
+                                      {"role": "prepared_next", "binding": nxt_rec})
         except Exception as exc:
             summary.errors.append(f"prepare_next:{type(exc).__name__}:{exc}")
             notify_runtime_error("prepare_next", exc)
@@ -925,6 +977,11 @@ async def run_market_data_runtime(
                         _project_active_quotes()
                         if on_active_session is not None:
                             on_active_session(promoted)
+                        if raw_capture is not None:
+                            raw_capture.event("bindings", "promotion", {
+                                "from_window_id": old_id,
+                                "to_window_id": promoted.window_id,
+                                "promoted_at": now.isoformat()})
                         if on_rollover is not None:
                             on_rollover(
                                 {

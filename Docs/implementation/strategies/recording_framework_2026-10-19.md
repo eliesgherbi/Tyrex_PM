@@ -163,3 +163,86 @@ Storage is about 25–50 B compressed per record, about 4 MB per day per stream 
 - It is a dry run unless `--apply` is given.
 - It removes only `recording/` folders whose `manifest.json` was written by this recorder.
 - Run summaries, journals, ledgers and the execution database are never touched.
+
+## Raw input capture (P5)
+
+`recording.raw_inputs: on` adds a `raw` stream to the same recorder, so it has the same bounds, accounting, status, close and prune behaviour. `recording/raw.py` (`RawCapture`) is passed to `run_market_data_runtime(raw_capture=...)` by both the live runtime and observation.
+
+### What is captured, and how faithfully
+
+| Input class | Where | Fidelity |
+|---|---|---|
+| `reference_twap` | RTDS adapter, frame before parsing (incl. subscription history) | `byte_exact` |
+| `binance_trades` | Binance trade adapter, frame before parsing | `byte_exact` |
+| `binance_depth` | Binance depth adapter (only when in the input contract) | `byte_exact` |
+| `clob_market` | `BindingFeed._handle_sdk_event`, before normalization | `sdk_model` (JSON dump of the SDK event) |
+| `clob_rest_book` | REST bootstrap/resync fetcher | `sdk_model` |
+| `market_metadata` | Gamma discovery `event_fetcher` | `sdk_model` (SDK-converted event dict) |
+| `clock` | every clock snapshot applied to the time authority | `host_event` |
+| `connections` | RTDS/Binance health callbacks, CLOB connect/disconnect per epoch | `host_event` |
+| `bindings` | active/prepared feed bindings, promotions | `host_event` |
+| `evaluations` | each evaluation instant (trigger, monotonic time, window) | `host_event` |
+
+Each record carries:
+
+- `source`, `stream` and `connection_id`;
+- `received_at` (wall time, ns) and `received_monotonic_ns`;
+- `transport`, `body_kind`, and the body as `body_text`, `body_base64` or `body_json`;
+- a capture sequence number.
+
+The CLOB websocket, REST book and Gamma reach Tyrex only as typed objects from the Polymarket SDK. Their venue bytes do not exist in Tyrex code, so they are labelled `sdk_model` rather than presented as raw.
+
+### Completeness manifest (`recording/raw_completeness.json`)
+
+The manifest gives, per input class: records captured, fidelity, and whether the class is outside the strategy's input contract. It also reports missing classes and capture faults. Its fields:
+
+- `inputs_captured`: every expected class was captured, with no fault and no drop.
+- `decision_complete`: replay decision for decision from this capture. **Currently `false`**, for these reasons, each listed in the manifest:
+  - the warehouse has no RTDS (`crypto_prices_twap_sixty`) normalizer, and replay reads the PolyBolt reference series;
+  - the CLOB and Gamma captures are SDK models, while the warehouse normalizers expect venue JSON;
+  - live Binance depth is `@depth20`, while the warehouse normalizes `@depth` diffs.
+- `fill_simulation`: fills need execution and account state, which is in the execution journal, not in raw capture.
+
+Decision reconstruction (feeds, warm-up, clock, connections, metadata, evaluation instants) and fill simulation are therefore reported as separate questions (amendment 3).
+
+### Fault policy (decision 6)
+
+A raw fault is any of: a capture exception, a failed writer, or any dropped raw record.
+
+- `raw_on_fault: stop_capture` (default): capture stops, `RAW_CAPTURE_FAILED` is recorded, and trading continues.
+- `stop_entries` (strict qualification runs): additionally sets the entry-only blocker `RAW_CAPTURE_FAILED`. Exits, holds and position management are unaffected.
+
+### Storage, measured (signal-only observation, 2026-10-19, 3.5 min, one rollover)
+
+| Stream | Records | Uncompressed | Compressed |
+|---|---|---|---|
+| raw | 135,247 | 142 MB | 11.1 MB |
+| explain (`entry_band`) | 93 | 24 KB | 1.5 KB |
+
+Raw records by class:
+
+| Class | Records |
+|---|---|
+| CLOB market | 131,630 |
+| Binance trades | 3,157 |
+| RTDS | 199 |
+| evaluations | 197 |
+| clock | 38 |
+| connections | 12 |
+| REST book | 7 |
+| bindings | 4 |
+| Gamma | 3 |
+
+Results:
+
+- Writer CPU was 3.4 s over 212 s (~1.6% of one core).
+- No drops.
+- Decision capture cost was p50 58 µs and p99 150 µs per evaluation.
+
+Extrapolation: about 190 MB/hour, or about 4.5 GB/day, compressed. About 97% of that is the CLOB SDK event dumps (~620 events/s across two bindings).
+
+Consequences:
+
+- Keep raw capture for observation and diagnostic trials, as decided, with `retention_days` and `recording prune`.
+- Do not leave raw capture on in continuous live runs without disk monitoring.
+- The default queue bound (64 MiB estimated) absorbs roughly 20–40 s of raw input if the disk stalls. After that, drops are counted, and under `stop_entries` new entries stop.

@@ -55,7 +55,9 @@ class RtdsChainlinkAdapter:
         connect: Any | None = None,
         ssl: Any = None,
         time_authority: Any | None = None,
+        raw_sink: Any | None = None,
     ) -> None:
+        self._raw_sink = raw_sink
         self._url = url
         self._symbol = symbol.lower()
         self._ping_interval_s = ping_interval_s
@@ -75,6 +77,15 @@ class RtdsChainlinkAdapter:
         self._last_source_ts_ms: int | None = None
         self._last_msg_mono = 0.0
         self.ready = False
+
+    def _tee(self, raw: Any, connection: Any) -> None:
+        """Raw capture hook (recording/raw.py): the frame before parsing. Never raises."""
+        if self._raw_sink is None:
+            return
+        try:
+            self._raw_sink(raw, connection)
+        except Exception:  # noqa: BLE001, S110 - capture never stops the feed
+            pass
 
     @property
     def connection_generation(self) -> int:
@@ -145,6 +156,7 @@ class RtdsChainlinkAdapter:
                                 )
                                 break
                             self._last_msg_mono = time.monotonic()
+                            self._tee(raw, gen)
                             await self._handle_raw(raw, dispatcher, generation=gen)
                             if not self.ready:
                                 self.ready = True
