@@ -173,3 +173,18 @@ def test_reference_availability_v1_matches_legacy_when_the_boundary_is_live(load
     assert outcomes(v1) == outcomes(legacy)
     assert v1["provenance"]["execution_policy"]["reference_availability"] == (
         "reference_availability_v1")
+
+
+def test_execution_contract_v2_adds_only_the_live_readiness_gate(loaded) -> None:
+    # Measured separately from any configuration change (integration plan 0.2).
+    from tyrex_pm.research.strategy_replay.run import ReplayExecutionPolicy
+
+    v1 = replay(loaded, config(), scenario("favorable"))
+    v2 = replay(loaded, config(), scenario("favorable"),
+                ReplayExecutionPolicy(execution_contract="replay_execution_contract_v2"))
+    assert v2["provenance"]["execution_contract"]["version"] == "replay_execution_contract_v2"
+    assert v1["provenance"]["execution_contract"]["version"] == "replay_execution_contract_v1"
+    new_refusals = {a.get("gate_reason") for a in v2["attempts"]} - {
+        a.get("gate_reason") for a in v1["attempts"]}
+    assert new_refusals <= {"EWMA_NOT_READY"}
+    assert [d["at_ns"] for d in v1["decisions"]][:5] == [d["at_ns"] for d in v2["decisions"]][:5]

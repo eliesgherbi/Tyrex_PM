@@ -146,6 +146,9 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
             orders=len(result["orders"]),
             entry_reason_counts=json.dumps(_reason_counts(result)),
             execution_events=json.dumps(execution_events(result)),
+            # Exact replay execution policy, so a timeline regenerates the same run.
+            execution_policy=json.dumps(dict(spec.execution_policy), sort_keys=True,
+                                        default=str),
         )
         summaries_rows.append(row)
         if keep_decisions:

@@ -416,27 +416,20 @@ class TradingRuntime:
         from tyrex_pm.strategies.registry import get_strategy_plugin, plugin_indicator_specs
 
         plugin = get_strategy_plugin(config.strategy_kind)
-        required_features = tuple(
-            spec
-            for spec in plugin_indicator_specs(plugin, config.strategy)
-            if spec.name == "ewma_vol"
+        from tyrex_pm.indicators.readiness import features_ready_reason, required_feature_specs
+
+        required_features = required_feature_specs(
+            plugin_indicator_specs(plugin, config.strategy)
         )
 
         def features_ready() -> bool | str:
             runtime = holder["runtime"]
             if runtime is None:
                 return "FEATURE_NOT_READY"
-            if not runtime._required_feature_specs:
-                return True
-            graph = runtime.indicator_graph
-            if graph is None:
-                return "EWMA_NOT_READY"
-            bundle = graph.snapshot()
-            for spec in runtime._required_feature_specs:
-                snap = bundle.get(spec.instance_id)
-                if snap is None or not bool(getattr(snap, "ready", False)):
-                    return "EWMA_NOT_READY"
-            return True
+            # Shared with replay contract v2 (indicators.readiness).
+            return features_ready_reason(
+                runtime.indicator_graph, runtime._required_feature_specs
+            )
 
         final_gate = FinalExecutionGate(
             capture_book=capture_book,

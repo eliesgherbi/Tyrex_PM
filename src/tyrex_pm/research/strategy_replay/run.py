@@ -52,6 +52,7 @@ from tyrex_pm.execution.final_gate import (
 )
 from tyrex_pm.execution.outcome_reasons import classify_reason
 from tyrex_pm.execution.planner import ExecutionRiskPolicy, IntentOrderPlanner
+from tyrex_pm.indicators.readiness import features_ready_reason, required_feature_specs
 from tyrex_pm.protection import (
     ArmedProtection,
     ProtectionPhase,
@@ -90,6 +91,10 @@ from .loader import NS, WindowData
 # v1 mixed in whole-second clob_time samples and skipped most evaluations.
 RUNNER_VERSION = "strategy_closed_loop_v3"
 EXECUTION_CONTRACT_VERSION = "replay_execution_contract_v1"
+# v2 = v1 + the live feature-readiness check at the replay final gate (EWMA_NOT_READY).
+# New experiments opt in; historical results keep v1 (integration plan 0.2, decision 8).
+EXECUTION_CONTRACT_V2 = "replay_execution_contract_v2"
+EXECUTION_CONTRACTS = frozenset({EXECUTION_CONTRACT_VERSION, EXECUTION_CONTRACT_V2})
 STRATEGY_DATASETS = (
     "book_snapshots",
     "book_updates",
@@ -128,6 +133,8 @@ class ReplayExecutionPolicy:
     # "reference_availability_v1" is the live rule (history rows only recover an exact
     # boundary tick at their actual arrival, within the recovery deadline).
     reference_availability: str = "legacy"
+    # Replay execution contract (EXECUTION_CONTRACTS). v1 reproduces saved experiments.
+    execution_contract: str = EXECUTION_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         if self.order_contract not in ("planner_amount", "strategy_shares"):
@@ -135,6 +142,8 @@ class ReplayExecutionPolicy:
         if self.fee_reserve_rate < 0 or self.sell_size_increment <= 0:
             raise ValueError("fee_reserve_rate must be >= 0 and sell_size_increment > 0")
         self.reference_policy()  # validates the policy id
+        if self.execution_contract not in EXECUTION_CONTRACTS:
+            raise ValueError(f"execution_contract must be one of {sorted(EXECUTION_CONTRACTS)}")
 
     def reference_policy(self) -> ReferenceAvailabilityPolicy:
         if self.reference_availability == POLICY_LEGACY:
@@ -147,6 +156,10 @@ class ReplayExecutionPolicy:
 
     def identity(self) -> dict:
         out = asdict(self)
+        # Explicit compatibility: the contract field was added later; v1 identities are
+        # unchanged, v2 is always part of the identity.
+        if out.get("execution_contract") == EXECUTION_CONTRACT_VERSION:
+            out.pop("execution_contract")
         out["protection"] = None if self.protection is None else _jsonable_spec(self.protection)
         return {k: (str(v) if isinstance(v, Decimal) else v) for k, v in out.items()}
 
@@ -514,11 +527,17 @@ class ReplayAgent:
         if cutoff is None:
             cutoff = float(getattr(getattr(self.strategy_config, "entry", None), "tau_min_s", 0))
         spec = attempt["_spec"] or attempt.get("_exit_spec")
+        features_ready: bool | str = True
+        if self.policy.execution_contract == EXECUTION_CONTRACT_V2:
+            graph = self.runtime.indicator_graph
+            features_ready = features_ready_reason(
+                graph, required_feature_specs(() if graph is None else graph.specs))
         facts = DispatchFacts(
             now_monotonic_ns=now,
             active_binding_id=None if view is None else view.binding_id,
             entry_tau_s=(end_ns - now) / NS,
             entry_cutoff_s=cutoff if attempt["role"] == "ENTRY" else None,
+            features_ready=features_ready,
         )
         gate_policy = FinalGatePolicy(
             max_book_age_ms=self.policy.max_book_age_ms,
@@ -962,7 +981,7 @@ def assemble_result(
                 "effective_config_full": _full_strategy_config(agent.strategy_config),
                 "execution_policy": agent.policy.identity(),
                 "execution_contract": {
-                    "version": EXECUTION_CONTRACT_VERSION,
+                    "version": agent.policy.execution_contract,
                     "dispatch_check": DISPATCH_CHECK_VERSION,
                     "source": execution_source_identity(),
                 },

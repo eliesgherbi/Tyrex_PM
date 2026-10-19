@@ -25,6 +25,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -298,12 +299,23 @@ def replay_check(dataset, row: pd.Series) -> tuple[dict | None, list[str], list[
     return params, problems, notes
 
 
-def _replay(collection: str, market_id: str, params: dict, scenario: str) -> dict:
+def _row_policy(row: Any) -> dict | None:
+    """The run's replay execution policy (batch column), or None for older tables."""
+    raw = row.get("execution_policy") if hasattr(row, "get") else None
+    if raw is None or (isinstance(raw, float) and raw != raw):
+        return None
+    policy = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    return policy or None
+
+
+def _replay(collection: str, market_id: str, params: dict, scenario: str,
+            execution_policy: dict | None = None) -> dict:
     from .batch import _lab
 
     lab = _lab(_collection(collection))
     try:
-        return lab.run(market_id, parameters=params, scenario=scenario)
+        return lab.run(market_id, parameters=params, scenario=scenario,
+                       execution_policy=execution_policy)
     finally:
         # A prepared window holds ~1 GB of rows; Lab keeps it for reuse, which in a
         # notebook kernel would accumulate with every generated timeline.
@@ -313,11 +325,12 @@ def _replay(collection: str, market_id: str, params: dict, scenario: str) -> dic
 TEXT_COLUMNS = ("action", "reason", "chosen_side", "up_reason", "down_reason", "twap_reason")
 
 
-def replay_compact(collection: str, market_id: str, params: dict, scenario: str) -> dict:
+def replay_compact(collection: str, market_id: str, params: dict, scenario: str,
+                   execution_policy: dict | None = None) -> dict:
     """Replay one run and keep only what the chart needs (picklable; runs in workers)."""
     from .batch import DECISION_COLUMNS, execution_events
 
-    result = _replay(collection, market_id, params, scenario)
+    result = _replay(collection, market_id, params, scenario, execution_policy)
     frame = pd.DataFrame([{k: d.get(k) for k in DECISION_COLUMNS} for d in result["decisions"]])
     for column in frame.columns:
         if column not in TEXT_COLUMNS:
@@ -363,7 +376,8 @@ def generate(dataset, row: pd.Series, root: Path = TIMELINE_CACHE) -> Trace:
     params, problems, notes = replay_check(dataset, row)
     if problems:
         raise RuntimeError("replay refused: " + "; ".join(problems))
-    payload = replay_compact(row["collection"], row["market_id"], params, row["scenario_name"])
+    payload = replay_compact(row["collection"], row["market_id"], params, row["scenario_name"],
+                             _row_policy(row))
     return _save(row, params, notes, payload, root)
 
 
@@ -408,7 +422,8 @@ def generate_many(
     started = datetime.now(timezone.utc)
     if workers <= 1:
         for i, (row, params, notes) in enumerate(todo, 1):
-            args = (row["collection"], row["market_id"], params, row["scenario_name"])
+            args = (row["collection"], row["market_id"], params, row["scenario_name"],
+                    _row_policy(row))
             record(row, params, notes, replay_compact(*args))
             print(f"timelines {i}/{len(todo)}", flush=True)
     else:
@@ -420,6 +435,7 @@ def generate_many(
                     row["market_id"],
                     params,
                     row["scenario_name"],
+                    _row_policy(row),
                 ): (row, params, notes)
                 for row, params, notes in todo
             }
