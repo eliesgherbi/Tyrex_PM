@@ -140,6 +140,7 @@ class Lab:
         scenario_overrides: Mapping[str, Any] | None = None,
         save: bool = False,
         execution_policy: Mapping[str, Any] | None = None,
+        recording: Mapping[str, Any] | None = None,
     ) -> dict:
         params = merge(RESEARCH_BASE_PARAMETERS, parameters or {})
         config = settlement_value_config_from_parameters(params, file="notebook")
@@ -147,6 +148,11 @@ class Lab:
         kwargs = {}
         if execution_policy:
             kwargs["execution_policy"] = replay_execution_policy(execution_policy)
+        if recording:
+            from tyrex_pm.recording import recording_config_from_mapping
+
+            # Same ``recording:`` block as live/observation (level, explain_trigger, ...).
+            kwargs["recording"] = recording_config_from_mapping(recording)
         result = run_window(
             window,
             strategy_config=config,

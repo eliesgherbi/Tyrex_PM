@@ -40,6 +40,9 @@ def test_snapshot_shows_decisions_entries_and_windows(tmp_path: Path, capsys) ->
                                          "window_id": "w1", "decision_evidence": {}})
     journal.append("ENTRY_OUTCOME", {"window_id": "w1", "episode_seq": 1, "attempt_seq": 1,
                                      "kind": "FILLED", "confirmed_shares": "10"})
+    journal.append("RECORDING_STATUS", {"level": "decisions", "capture_cost_us": {"p99": 41.0},
+                                        "streams": {"decisions": {"written": 120,
+                                                                  "dropped": 0}}})
     journal.close()
     late = SqliteRunEvidenceJournal(state / "execution.sqlite3", run_instance_id="check-2")
     late.append("RUN_STARTED", {"live_requested": False})
@@ -51,5 +54,6 @@ def test_snapshot_shows_decisions_entries_and_windows(tmp_path: Path, capsys) ->
     assert "run live-1" in text  # the trading run, not the later account check
     assert "WAIT / EDGE_BELOW_COST" in text and "FILLED" in text
     assert "windows completed: 1" in text
+    assert "recording (decisions): decisions 120 written/0 dropped; capture p99 41.0us" in text
     assert main(["watch-run", "--config", str(cfg)]) == 0
     assert "live-1" in capsys.readouterr().out

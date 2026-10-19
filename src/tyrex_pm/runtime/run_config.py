@@ -15,6 +15,7 @@ from tyrex_pm.protection.spec import (
     ProtectionSpecError,
     protection_spec_from_mapping,
 )
+from tyrex_pm.recording.config import RecordingConfig, recording_config_from_mapping
 from tyrex_pm.runtime.market_family import get_market_family
 from tyrex_pm.runtime.yaml_loading import load_yaml_mapping
 from tyrex_pm.strategies.registry import (
@@ -176,6 +177,8 @@ class TradingRunConfig:
     settlement: SettlementRuntimeConfig | None = None
     venue: str = "live"
     paper: PaperRuntimeConfig | None = None
+    # Decision diagnostics / explanations / raw capture (tyrex_pm.recording).
+    recording: RecordingConfig = RecordingConfig()
 
 
 RUN_LIMIT_FIELDS = (
@@ -382,6 +385,15 @@ def max_clock_uncertainty_ms(config: TradingRunConfig) -> float:
     return plugin.max_clock_uncertainty_ms(config.strategy)
 
 
+def _recording_config(raw: Any) -> RecordingConfig:
+    if raw is not None and not isinstance(raw, dict):
+        raise RunConfigError("recording must be a mapping")
+    try:
+        return recording_config_from_mapping(raw)
+    except ValueError as exc:
+        raise RunConfigError(str(exc)) from exc
+
+
 def load_trading_run_config(path: Path) -> TradingRunConfig:
     raw = load_yaml_mapping(path)
     _reject_unknown(
@@ -401,6 +413,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
             "settlement",
             "venue",
             "paper",
+            "recording",
         },
         "top-level",
     )
@@ -695,6 +708,7 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
         settlement=settlement,
         venue=venue,
         paper=paper,
+        recording=_recording_config(raw.get("recording")),
     )
     if venue == "paper":
         for label, path in (

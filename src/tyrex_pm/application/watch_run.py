@@ -103,6 +103,8 @@ def snapshot(config_path: Path, run_id: str | None = None) -> str:
     exits: list[dict] = []
     finished = None
     notes: list[str] = []
+    recording: dict = {}
+    recording_failed: dict | None = None
     for event_type, observed_at, payload_json in events:
         at = _parse_time(observed_at)
         first_at = first_at or at
@@ -124,6 +126,10 @@ def snapshot(config_path: Path, run_id: str | None = None) -> str:
             exits.append({**payload, "at": observed_at})
         elif event_type == "RUN_FINISHED":
             finished = payload
+        elif event_type in ("RECORDING_STARTED", "RECORDING_STATUS", "RECORDING_CLOSED"):
+            recording = {**recording, **payload, "event": event_type}
+        elif event_type == "RECORDING_FAILED":
+            recording_failed = payload
         else:
             other[event_type] += 1
             if event_type in ("SETTLEMENT_WORKER_UNAVAILABLE", "LATE_FILL_DETECTED",
@@ -152,6 +158,8 @@ def snapshot(config_path: Path, run_id: str | None = None) -> str:
             + (f" · up ask {evidence.get('up_ask')} / down ask {evidence.get('down_ask')}"
                if evidence.get("up_ask") else "")
         )
+    if recording or recording_failed:
+        lines.append(_recording_line(recording, recording_failed))
     lines.append("")
     lines.append(f"decisions (total {sum(decisions.values())}; last {RECENT_S:.0f}s in brackets):")
     for key, count in decisions.most_common(10):
@@ -239,3 +247,22 @@ def run(args: argparse.Namespace) -> int:
             time.sleep(args.refresh)
     except KeyboardInterrupt:
         return 0
+
+
+def _recording_line(status: dict, failed: dict | None) -> str:
+    """One line of decision-recording health (RECORDING_* run events)."""
+    if failed is not None:
+        return (f"recording: FAILED at {failed.get('stage')} "
+                f"({failed.get('writer_error') or failed.get('error') or failed.get('streams')})"
+                " - trading continues without decision records")
+    streams = status.get("streams") or {}
+    parts = [f"{name} {s.get('written', 0)} written/{s.get('dropped', 0)} dropped"
+             for name, s in streams.items()]
+    cost = (status.get("capture_cost_us") or {}).get("p99")
+    level = status.get("level")
+    head = "recording" + (f" ({level})" if level else "")
+    if status.get("event") == "RECORDING_STARTED":
+        return f"{head}: started -> {status.get('directory')}"
+    return (f"{head}: " + ("; ".join(parts) or "no streams")
+            + (f"; capture p99 {cost}us" if cost is not None else "")
+            + ("; CLOSED" if status.get("event") == "RECORDING_CLOSED" else ""))

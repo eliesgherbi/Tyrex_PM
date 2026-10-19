@@ -188,3 +188,22 @@ def test_execution_contract_v2_adds_only_the_live_readiness_gate(loaded) -> None
         a.get("gate_reason") for a in v1["attempts"]}
     assert new_refusals <= {"EWMA_NOT_READY"}
     assert [d["at_ns"] for d in v1["decisions"]][:5] == [d["at_ns"] for d in v2["decisions"]][:5]
+
+
+def test_replay_recording_adds_evidence_without_changing_behaviour(loaded) -> None:
+    from tyrex_pm.recording import RecordingConfig, RecordingLevel
+    from tyrex_pm.research.strategy_replay import run_window
+    from tyrex_pm.research.strategy_replay.results import decision_digest
+
+    window, clock = loaded
+    plain = replay(loaded, config(), scenario("favorable"))
+    recorded = run_window(window, strategy_config=config(), scenario=scenario("favorable"),
+                          clock_observations=clock,
+                          recording=RecordingConfig(level=RecordingLevel.EXPLAIN))
+    assert decision_digest(recorded) == decision_digest(plain)
+    assert "explanations" not in plain and "inputs" not in plain["decisions"][0]
+    assert recorded["decisions"][0]["inputs"]["clock"]
+    assert recorded["explanations"], "the entry band always yields explanations"
+    first = next(e for e in recorded["explanations"] if e["indicators"])
+    assert {"variance", "sample_count", "tape_age_ms"} <= set(next(iter(
+        first["indicators"].values())))

@@ -36,6 +36,8 @@ from typing import Any
 import yaml
 
 from tyrex_pm.core.clock import Clock, SystemClock
+from tyrex_pm.recording import RecordingConfig, recording_config_from_mapping
+from tyrex_pm.recording.records import input_timing
 from tyrex_pm.runtime.decision_records import (
     RECORD_SCHEMA,
     decision_context,
@@ -69,6 +71,9 @@ class ObservationConfig:
     flush_interval_s: float = 2.0
     max_buffered_rows: int = 20_000
     target_notional: Decimal = Decimal("5")
+    # Decision rows are always written (``decisions`` stream); level ``explain`` adds
+    # indicator explanations through the shared recorder (recording/host.py).
+    recording: RecordingConfig = field(default_factory=RecordingConfig)
 
     @property
     def strategy_config(self) -> Any:
@@ -76,7 +81,8 @@ class ObservationConfig:
         return plugin.load_config(dict(self.strategy_parameters), f"observe:{self.run_name}")
 
 
-_TOP = {"schema_version", "mode", "run_name", "strategy", "market", "observation", "output"}
+_TOP = {"schema_version", "mode", "run_name", "strategy", "market", "observation", "output",
+        "recording"}
 
 
 def load_observation_config(path: Path) -> ObservationConfig:
@@ -122,6 +128,7 @@ def load_observation_config(path: Path) -> ObservationConfig:
         flush_rows=int(obs.get("flush_rows", 200)),
         flush_interval_s=float(obs.get("flush_interval_s", 2.0)),
         max_buffered_rows=int(obs.get("max_buffered_rows", 20_000)),
+        recording=_recording(raw.get("recording")),
     )
     if config.max_windows < 1 or config.max_duration_s <= 0:
         raise ObservationConfigError("max_windows and max_duration_s must be positive")
@@ -180,6 +187,13 @@ def _book_tops(snapshot: Any) -> dict[str, Any]:
     return out
 
 
+def _recording(raw: Any) -> RecordingConfig:
+    try:
+        return recording_config_from_mapping(raw if isinstance(raw, Mapping) else None)
+    except ValueError as exc:
+        raise ObservationConfigError(str(exc)) from exc
+
+
 @dataclass
 class ObservationSession:
     """The only consumer of strategy output in observe mode: it records, nothing else."""
@@ -192,6 +206,8 @@ class ObservationSession:
     windows_seen: list[str] = field(default_factory=list)
     rollovers: int = 0
     evaluate_ms: list[float] = field(default_factory=list)
+    # Explain stream (level ``explain``); decision rows go through ``recorder``.
+    explain_recording: Any = None
 
     def on_evaluation(self, market_runtime: Any) -> list[dict[str, Any]]:
         ready = market_runtime.prepare_aligned_eval()
@@ -205,8 +221,11 @@ class ObservationSession:
         if window_id and window_id not in self.windows_seen:
             self.windows_seen.append(window_id)
         if not ready.ok or ready.snapshot is None or ready.binding is None:
-            row = {**skipped_record(ready, at_ns=at_ns, window_end_ns=end), "window_id": window_id}
+            row = {**skipped_record(ready, at_ns=at_ns, window_end_ns=end), "window_id": window_id,
+                   "inputs": input_timing(ready)}
             self.recorder.record("decisions", row)
+            if self.explain_recording is not None:
+                self.explain_recording.on_skipped(ready, row, window_id=window_id)
             return [row]
         # Always flat: recommendations never become positions.
         context = decision_context(
@@ -232,8 +251,11 @@ class ObservationSession:
             "window_id": window_id,
             "evaluate_ms": self.evaluate_ms[-1],
             "snapshot_observed_at": ready.snapshot.observed_at.isoformat(),
+            "inputs": input_timing(ready),
         }
         self.recorder.record("decisions", row)
+        if self.explain_recording is not None:
+            self.explain_recording.on_evaluated(ready, row, window_id=window_id, graph=graph)
         for intent in result.intents:
             self.recommendations += 1
             self.recorder.record(
@@ -311,28 +333,45 @@ async def run_observation(
     (out_dir / "observation_manifest.json").write_text(
         json.dumps(manifest, indent=1, default=str), encoding="utf-8"
     )
+    from tyrex_pm.recording.host import open_decision_recording
+
+    plugin = get_strategy_plugin(config.strategy_kind)
+    try:
+        band = tuple(float(v) for v in plugin.entry_tau_bounds(plugin_config))
+    except Exception:  # noqa: BLE001 - the explain band is optional
+        band = None
+    session.explain_recording = open_decision_recording(
+        config.recording, output_directory=out_dir, mode=OBSERVATION_MODE,
+        run_id=config.run_name, schema=None, entry_band=band, manifest=manifest,
+        record_decisions=False)
 
     async def tick(_runtime: Any) -> None:
         recorder.flush()
 
-    summary = await market_data_runner(
-        out_dir=out_dir,
-        run_id=config.run_name,
-        runtime=runtime,
-        max_duration_s=config.max_duration_s,
-        duration_anchor="compose_start",
-        stop_when_seals_met=False,
-        evaluation_interval_s=config.evaluation_interval_s,
-        basis_ewma_half_life_s=config.basis_ewma_half_life_s,
-        require_ssr_price_match=config.require_ssr_price_match,
-        target_notional=config.target_notional,
-        binance_symbol=config.binance_symbol,
-        market_family=config.market_family,
-        on_evaluation=session.on_evaluation,
-        on_rollover=session.on_rollover,
-        should_stop=session.should_stop,
-        on_async_tick=tick,
-    )
+    try:
+        summary = await market_data_runner(
+            out_dir=out_dir,
+            run_id=config.run_name,
+            runtime=runtime,
+            max_duration_s=config.max_duration_s,
+            duration_anchor="compose_start",
+            stop_when_seals_met=False,
+            evaluation_interval_s=config.evaluation_interval_s,
+            basis_ewma_half_life_s=config.basis_ewma_half_life_s,
+            require_ssr_price_match=config.require_ssr_price_match,
+            target_notional=config.target_notional,
+            binance_symbol=config.binance_symbol,
+            market_family=config.market_family,
+            on_evaluation=session.on_evaluation,
+            on_rollover=session.on_rollover,
+            should_stop=session.should_stop,
+            on_async_tick=tick,
+        )
+    finally:
+        recording_status = (
+            None if session.explain_recording is None
+            else session.explain_recording.close()
+        )
     recorder.flush()
     result = {
         **manifest,
@@ -346,6 +385,7 @@ async def run_observation(
         "evaluate_ms_p50": _quantile(session.evaluate_ms, 0.5),
         "evaluate_ms_p99": _quantile(session.evaluate_ms, 0.99),
         "market_data_errors": list(getattr(summary, "errors", []) or []),
+        "recording": recording_status,
     }
     (out_dir / "observation_summary.json").write_text(
         json.dumps(result, indent=1, default=str), encoding="utf-8"

@@ -162,6 +162,30 @@ def test_run_observation_stops_after_max_windows_and_passes_no_execution_hooks(
     assert skipped["action"] == "HOST_SKIPPED" and "no_active_session" in skipped["reason"]
 
 
+def test_observation_explain_level_writes_explanations_and_input_timing(
+    tmp_path: Path,
+) -> None:
+    from tyrex_pm.recording import RecordingConfig, RecordingLevel
+    from tyrex_pm.recording.config import ExplainTrigger
+    from tyrex_pm.recording.records import iter_records
+
+    async def fake_runner(**kwargs):
+        kwargs["on_evaluation"](kwargs["runtime"])  # host skip: a data fault, explained
+        return SimpleNamespace(errors=[])
+
+    config = _config(tmp_path, max_windows=1, recording=RecordingConfig(
+        level=RecordingLevel.EXPLAIN, explain_trigger=ExplainTrigger.ACTIONABLE))
+    result = asyncio.run(run_observation(config, out_dir=tmp_path,
+                                         market_data_runner=fake_runner,
+                                         clock=FakeClock(_wall=T0)))
+    assert result["recording"]["streams"]["explain"]["written"] == 1
+    assert "decisions" not in result["recording"]["streams"]  # written by observation
+    (explained,) = iter_records(tmp_path / "recording", "explain")
+    assert explained["action"] == "HOST_SKIPPED" and explained["mode"] == "observe"
+    row = json.loads((tmp_path / "decisions.jsonl").read_text().splitlines()[0])
+    assert set(row["inputs"]) >= {"decision_at", "up_book", "reference", "up_leg"}
+
+
 def test_observation_config_is_strict(tmp_path: Path) -> None:
     good = load_observation_config(ROOT / "config" / "observe" / "settlement_value_observe.yaml")
     assert good.strategy_kind == "settlement_value" and good.max_windows == 12

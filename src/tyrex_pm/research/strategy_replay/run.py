@@ -214,6 +214,10 @@ class ReplayAgent:
     armed: ArmedProtection | None = None
     _attempt_by_order: dict[str, dict] = field(default_factory=dict)
     research_study: Any = None  # explicit notebook diagnostics; absent in ordinary runs
+    # Framework recording (opt-in): input timing on decisions + selected explanations.
+    record_inputs: bool = False
+    explain_selector: Any = None
+    explanations: list[dict] = field(default_factory=list)
 
     # -- timeline hooks ----------------------------------------------------------------
 
@@ -294,6 +298,25 @@ class ReplayAgent:
             last_exit_reason=pos.last_exit_reason,
         )
 
+    def _record_framework(self, ready: Any, now: int) -> None:
+        """Same record builders as live and observation (recording.records)."""
+        if not self.record_inputs and self.explain_selector is None:
+            return
+        from tyrex_pm.recording.records import clock_state, explain_record, input_timing
+
+        row = self.decisions[-1]
+        if self.record_inputs:
+            view = None if self.time_authority is None else self.time_authority.view()
+            row["inputs"] = input_timing(ready, clock_state(view))
+        if self.explain_selector is not None:
+            explain = explain_record(
+                at_ns=now, window_id=self.window.ref.slug, mode="replay", run_id="replay",
+                indicators=self.runtime.indicator_graph.explain(), strategy=None,
+                action=row.get("action"), reason=row.get("reason"), tau_s=row.get("tau_s"))
+            self.explanations.extend(self.explain_selector.offer(
+                explain, action=row.get("action"), reason=row.get("reason"),
+                tau_s=row.get("tau_s")))
+
     def _decide(self, now: int) -> None:
         mono_s = now / NS
         self.scheduler.mark_evaluated(mono_s=mono_s)
@@ -303,6 +326,7 @@ class ReplayAgent:
         protective = self._protection_intent(now)
         if not ready.ok or ready.snapshot is None or ready.binding is None:
             self.decisions.append(skipped_record(ready, at_ns=now, window_end_ns=end_ns))
+            self._record_framework(ready, now)
             if protective is not None:
                 self._submit_exit(protective, now, protective=True)
             return
@@ -321,6 +345,7 @@ class ReplayAgent:
         )
         self.evaluate_seconds += time.perf_counter() - started
         self.decisions.append(evaluated_record(ready, result, at_ns=now, window_end_ns=end_ns))
+        self._record_framework(ready, now)
         if self.research_study is not None:
             self.research_study.record(self, ready, context, features, self.decisions[-1])
         exits = [] if protective is None else [protective]
@@ -820,6 +845,24 @@ def _full_strategy_config(strategy_config: Any) -> Any:
         return settlement_value_config_as_parameters(strategy_config, full=True)
     return None
 
+def _configure_recording(agent: ReplayAgent, plugin: Any, strategy_config: Any,
+                         recording: Any) -> None:
+    if recording is None:
+        return
+    from tyrex_pm.recording.config import RecordingLevel
+    from tyrex_pm.recording.records import ExplainSelector
+
+    agent.record_inputs = recording.level.includes(RecordingLevel.DECISIONS)
+    if recording.level.includes(RecordingLevel.EXPLAIN):
+        try:
+            band = tuple(float(v) for v in plugin.entry_tau_bounds(strategy_config))
+        except Exception:  # noqa: BLE001 - the explain band is optional
+            band = None
+        agent.explain_selector = ExplainSelector(
+            recording.explain_trigger,
+            context_evaluations=recording.explain_context_evaluations, entry_band=band)
+
+
 def run_window(
     window: WindowData,
     *,
@@ -832,8 +875,14 @@ def run_window(
     clock_observations: list[dict] | None = None,
     execution_policy: ReplayExecutionPolicy | None = None,
     research_study: Any = None,
+    recording: Any = None,
 ) -> dict:
-    """Replay one window. Returns a JSON-friendly result bundle (Decimals as strings)."""
+    """Replay one window. Returns a JSON-friendly result bundle (Decimals as strings).
+
+    ``recording`` (a ``RecordingConfig``) is opt-in: at ``decisions`` each decision row
+    gains its input timing; at ``explain`` the result also carries ``explanations``
+    selected by the same trigger as live. Without it the bundle is unchanged.
+    """
     if scenario.adapter != "strategy_closed_loop_v1":
         raise ValueError("strategy replay requires a strategy_closed_loop_v1 scenario")
     policy = execution_policy or ReplayExecutionPolicy()
@@ -901,6 +950,7 @@ def run_window(
         planner=planner,
         research_study=research_study,
     )
+    _configure_recording(agent, plugin, strategy_config, recording)
     label = proxy_outcome(window)
     engine = Engine(scenario)
     result = engine.run_closed_loop(
@@ -1000,6 +1050,8 @@ def assemble_result(
             },
             "seals": agent.feed.seals,
             "decisions": agent.decisions,
+            **({"explanations": agent.explanations}
+               if agent.explain_selector is not None else {}),
             "orders": agent.orders,
             "attempts": attempts,
             "holds": agent.holds,

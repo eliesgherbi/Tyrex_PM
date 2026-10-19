@@ -14,6 +14,7 @@ from tyrex_pm.strategies.settlement_value.config import (
     SettlementVolatilityConfig,
 )
 from tyrex_pm.strategies.settlement_value.driver import create_settlement_value_driver
+from tyrex_pm.strategies.settlement_value.record_schema import decision_record_schema
 from tyrex_pm.strategies.settlement_value.schema import settlement_value_config_from_parameters
 
 SETTLEMENT_VALUE_INPUT_CONTRACT = InputContract(
@@ -116,4 +117,5 @@ SETTLEMENT_VALUE_PLUGIN = StrategyPlugin(
     validate_run_config=_validate_run_config,
     indicator_specs=_indicator_specs,
     lifecycle_modes=_lifecycle_modes,
+    decision_record_schema=decision_record_schema,
 )

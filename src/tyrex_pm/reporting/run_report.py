@@ -422,6 +422,10 @@ def _run_evidence_summary(records: Sequence[RunEvidenceRecord]) -> dict[str, Any
     }
 
 
+# High-volume, one-per-evaluation evidence types (not embedded in run_summary.json).
+PER_EVALUATION_EVENTS = frozenset({"STRATEGY_DECISION", "EVALUATION_SKIPPED"})
+
+
 @dataclass(frozen=True)
 class RunReportInput:
     run_instance_id: str
@@ -448,6 +452,8 @@ class RunReportInput:
     # committed holds) and the ids of those committed to resolution (ledger-owned).
     run_sessions: Sequence[ExecutionSessionState] = ()
     committed_session_ids: frozenset[str] = frozenset()
+    # Decision/explain recording status (``recording.host``); None when not recorded.
+    recording: Mapping[str, Any] | None = None
 
 
 def _fill_completeness(
@@ -571,7 +577,7 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
             "reconciliation_complete": all(s.reconciliation_complete for s in sessions),
         }
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "generated_at": _utc_now_text(),
         "run_instance_id": source.run_instance_id,
         "configured_run_name": source.configured_run_name,
@@ -626,7 +632,18 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         "capabilities": dict(source.capabilities),
         "market_data": None if source.market_data is None else dict(source.market_data),
         "run_evidence_summary": _run_evidence_summary(records),
-        "run_evidence": [record.to_dict() for record in records],
+        # Per-evaluation events stay in sqlite.run_events (and the decision recording);
+        # they are counted in run_evidence_summary instead of embedded here.
+        "run_evidence": [
+            record.to_dict() for record in records
+            if record.event_type not in PER_EVALUATION_EVENTS
+        ],
+        "run_evidence_omitted": {
+            event: count for event, count in sorted(
+                Counter(r.event_type for r in records
+                        if r.event_type in PER_EVALUATION_EVENTS).items())
+        },
+        "recording": None if source.recording is None else dict(source.recording),
         "runtime_errors": list(source.runtime_errors),
         "fatal_error": None if source.fatal_error is None else dict(source.fatal_error),
         "summary": summary,

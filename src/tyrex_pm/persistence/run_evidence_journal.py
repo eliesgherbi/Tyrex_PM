@@ -12,6 +12,12 @@ from threading import RLock
 from typing import Any, Mapping
 from uuid import uuid4
 
+RUN_EVENTS_SCHEMA_VERSION = 2
+# One record per evaluation: bounded and droppable under back-pressure. Every other
+# event type is low volume and always accepted.
+DROPPABLE_EVENTS = frozenset({"STRATEGY_DECISION", "EVALUATION_SKIPPED"})
+DEFAULT_MAX_DROPPABLE_QUEUED = 20_000
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -70,6 +76,16 @@ class SqliteRunEvidenceJournal:
             ON run_events(run_instance_id, sequence)
             """
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS run_events_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        # v2: observed_at is the capture time on the trading loop, not the write time.
+        for key, value in (("schema_version", str(RUN_EVENTS_SCHEMA_VERSION)),
+                           ("observed_at_basis", "capture")):
+            self._db.execute(
+                "INSERT OR REPLACE INTO run_events_meta(key, value) VALUES (?, ?)",
+                (key, value),
+            )
 
     def append(
         self,
@@ -130,13 +146,24 @@ class SqliteRunEvidenceJournal:
 
 
 class RunEvidenceRecorder:
-    """Non-blocking producer with one background durable writer."""
+    """Non-blocking producer with one background durable writer.
 
-    def __init__(self, journal: SqliteRunEvidenceJournal) -> None:
+    The timestamp is taken at ``record()`` (capture), so a backed-up writer never skews
+    event times. Per-evaluation events are bounded (``max_droppable_queued``); beyond the
+    bound they are dropped and counted (``dropped``), never blocking the trading loop.
+    """
+
+    def __init__(self, journal: SqliteRunEvidenceJournal, *,
+                 max_droppable_queued: int = DEFAULT_MAX_DROPPABLE_QUEUED) -> None:
         self.journal = journal
-        self._queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, dict[str, Any], datetime] | None] = (
+            asyncio.Queue()
+        )
         self._writer_task: asyncio.Task[None] | None = None
         self.failures: list[str] = []
+        self.max_droppable_queued = max_droppable_queued
+        self._droppable_queued = 0
+        self.dropped: dict[str, int] = {}
 
     async def start(self) -> None:
         if self._writer_task is None:
@@ -145,7 +172,17 @@ class RunEvidenceRecorder:
     def record(self, event_type: str, payload: Mapping[str, Any]) -> None:
         if self._writer_task is None:
             raise RuntimeError("run evidence recorder is not started")
-        self._queue.put_nowait((event_type, dict(payload)))
+        if event_type in DROPPABLE_EVENTS:
+            if self._droppable_queued >= self.max_droppable_queued:
+                self.dropped[event_type] = self.dropped.get(event_type, 0) + 1
+                return
+            self._droppable_queued += 1
+        self._queue.put_nowait((event_type, dict(payload), _utc_now()))
+
+    def status(self) -> dict[str, Any]:
+        return {"queued": self._queue.qsize(), "droppable_queued": self._droppable_queued,
+                "max_droppable_queued": self.max_droppable_queued,
+                "dropped": dict(self.dropped), "write_failures": len(self.failures)}
 
     async def _writer(self) -> None:
         while True:
@@ -153,12 +190,16 @@ class RunEvidenceRecorder:
             if item is None:
                 self._queue.task_done()
                 return
-            event_type, payload = item
+            event_type, payload, observed_at = item
             try:
-                await asyncio.to_thread(self.journal.append, event_type, payload)
+                await asyncio.to_thread(
+                    self.journal.append, event_type, payload, observed_at=observed_at
+                )
             except Exception as exc:  # reporting failure must not stop trading
                 self.failures.append(f"{event_type}:{type(exc).__name__}:{exc}")
             finally:
+                if event_type in DROPPABLE_EVENTS:
+                    self._droppable_queued -= 1
                 self._queue.task_done()
 
     async def flush(self) -> None:
@@ -170,6 +211,8 @@ class RunEvidenceRecorder:
             await self._queue.put(None)
             await self._writer_task
             self._writer_task = None
+        if self.dropped:
+            self.failures.append(f"run_evidence_dropped:{sorted(self.dropped.items())}")
         records = self.journal.load()
         self.journal.close()
         return records

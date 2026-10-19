@@ -627,11 +627,34 @@ async def test_unified_report_is_written_after_normal_composition_shutdown(
         "strategy_input_blocker_counts": {},
         "last_readiness_blockers": [],
     }
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
+    assert payload["run_evidence_omitted"] == {"STRATEGY_DECISION": 1}
+    assert all(r["event_type"] != "STRATEGY_DECISION" for r in payload["run_evidence"])
     assert payload["mutation_attempts"] == 0
     assert payload["run_evidence_summary"]["strategy_reason_counts"] == {"INSUFFICIENT_EDGE": 1}
     assert payload["reporting"]["execution_authority"] == "sqlite.execution_events"
     assert payload["validation_scope"]["execution_lifecycle_exercised"] is False
+
+
+@pytest.mark.asyncio
+async def test_decision_recording_is_started_closed_and_reported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = await _reporting_runtime(tmp_path)
+    monkeypatch.setattr(trading_runtime_module, "run_market_data_runtime", _completed_market_data)
+    result = await runtime.run()
+    payload = json.loads(result.report_path.read_text(encoding="utf-8"))
+    recording = payload["recording"]
+    assert recording["level"] == "decisions" and recording["failed"] is False
+    assert recording["streams"]["decisions"]["state"] == "closed"
+    assert recording["writer_finished"] is True
+    assert recording["run_evidence"]["dropped"] == {}
+    folder = tmp_path / "output" / "recording"
+    manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["mode"] == "live" and manifest["run_id"] == runtime.run_instance_id
+    assert (folder / "status.json").exists()
+    events = [r["event_type"] for r in payload["run_evidence"]]
+    assert "RECORDING_STARTED" in events and "RECORDING_CLOSED" in events
 
 
 @pytest.mark.asyncio

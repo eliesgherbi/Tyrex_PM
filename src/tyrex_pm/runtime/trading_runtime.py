@@ -290,6 +290,11 @@ class TradingRuntime:
     _pending_detach: str | None = None
     # Read-only Polygon RPC for payout tracking, from the process env or the run's .env.
     polygon_rpc_url: str | None = None
+    # Decision/explain recording (recording.host); None at level ``essential``.
+    decision_recording: Any | None = None
+    recording_status: dict[str, Any] | None = None
+    _recording_status_mono: float = 0.0
+    _recording_failed_reported: bool = False
 
     @classmethod
     async def create(
@@ -1300,6 +1305,8 @@ class TradingRuntime:
                 "EVALUATION_SKIPPED",
                 {"reasons": list(ready.skip_reasons)},
             )
+            if getattr(self, "decision_recording", None) is not None:
+                self._record_skipped_decision(ready, market_runtime)
             self._record_readiness_if_changed()
             return [{"kind": "skipped", "reasons": list(ready.skip_reasons)}]
         state = self.lifecycle.state
@@ -1349,6 +1356,10 @@ class TradingRuntime:
         )
         self.capabilities.model_ready = result.eligibility.model_ready
         decision_evidence = dict(result.decision.evidence)
+        if getattr(self, "decision_recording", None) is not None:
+            self._record_evaluated_decision(ready, result, market_runtime)
+            # The full row lives in the decision recording; keep the journal compact.
+            decision_evidence = _compact_decision_evidence(decision_evidence)
         strategy_blockers = result.eligibility.blockers
         strategy_inputs_eligible = result.eligibility.strategy_inputs_eligible
         decision_record = {
@@ -1384,6 +1395,137 @@ class TradingRuntime:
                     },
                 )
         return [{"kind": "evaluated", **decision_record}]
+
+    # -- decision recording (recording.host) ---------------------------------------
+    def _open_recording(self) -> None:
+        settings = getattr(self.config, "recording", None)
+        if settings is None:
+            return
+        from tyrex_pm.recording.host import open_decision_recording
+        from tyrex_pm.strategies.registry import get_strategy_plugin
+
+        try:
+            plugin = get_strategy_plugin(self.config.strategy_kind)
+            schema_hook = getattr(plugin, "decision_record_schema", None)
+            schema = None if schema_hook is None else schema_hook(self.config.strategy)
+            try:
+                band = tuple(float(v) for v in plugin.entry_tau_bounds(self.config.strategy))
+            except Exception:  # noqa: BLE001 - the explain band is optional
+                band = None
+            repro = self.reproducibility or {}
+            self.decision_recording = open_decision_recording(
+                settings,
+                output_directory=self.output_directory,
+                mode="paper" if getattr(self.config, "venue", "live") == "paper" else "live",
+                run_id=self.run_instance_id,
+                schema=schema,
+                entry_band=band,
+                manifest={
+                    "configured_run_name": self.config.run_name,
+                    "strategy_kind": self.config.strategy_kind,
+                    "reproducibility": repro,
+                    "clock_policy": {
+                        "max_uncertainty_ms": max_clock_uncertainty_ms(self.config),
+                    },
+                    "feature_policies": [
+                        getattr(spec, "instance_id", str(spec))
+                        for spec in self._required_feature_specs
+                    ],
+                    "evaluation_interval_s": self.config.market.evaluation_interval_s,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - recording never blocks trading
+            self.decision_recording = None
+            self.recording_status = {"failed": True,
+                                     "error": f"{type(exc).__name__}: {exc}"}
+            self.run_recorder.record("RECORDING_FAILED", {"stage": "open",
+                                                          **self.recording_status})
+            return
+        if self.decision_recording is not None:
+            self.run_recorder.record("RECORDING_STARTED", {
+                "directory": str(self.decision_recording.recorder.directory),
+                "level": settings.level.value,
+                "explain_trigger": settings.explain_trigger.value,
+            })
+
+    def _recording_time_view(self) -> Any:
+        authority = self.time_authority
+        try:
+            return None if authority is None else authority.view()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _record_skipped_decision(self, ready: Any, market_runtime: Any) -> None:
+        recording = self.decision_recording
+        if recording is None:
+            return
+        from tyrex_pm.runtime.decision_records import skipped_record
+
+        session = ready.session or getattr(market_runtime, "active", None)
+        at_ns, end_ns = self._recording_times(ready, session)
+        recording.on_skipped(
+            ready, skipped_record(ready, at_ns=at_ns, window_end_ns=end_ns),
+            window_id=None if session is None else session.window_id,
+            time_view=self._recording_time_view())
+
+    def _record_evaluated_decision(self, ready: Any, result: Any, market_runtime: Any) -> None:
+        from tyrex_pm.runtime.decision_records import evaluated_record
+
+        session = ready.session
+        at_ns, end_ns = self._recording_times(ready, session)
+        self.decision_recording.on_evaluated(
+            ready, evaluated_record(ready, result, at_ns=at_ns, window_end_ns=end_ns),
+            window_id=None if session is None else session.window_id,
+            time_view=self._recording_time_view(),
+            graph=getattr(market_runtime, "indicator_graph", None))
+
+    def _recording_times(self, ready: Any, session: Any) -> tuple[int, int | None]:
+        snapshot = getattr(ready, "snapshot", None)
+        if snapshot is not None:
+            at = snapshot.observed_at
+        elif self.time_authority is not None:
+            at = self.time_authority.now_corrected_utc()
+        else:
+            at = datetime.now(timezone.utc)
+        end = None if session is None else getattr(session.market, "event_end", None)
+        return (int(at.timestamp() * 1e9),
+                None if end is None else int(end.timestamp() * 1e9))
+
+    def _recording_heartbeat(self, *, force: bool = False) -> None:
+        """RECORDING_STATUS every 60 s; RECORDING_FAILED once when a stream fails."""
+        recording = self.decision_recording
+        if recording is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._recording_status_mono < RECORDING_STATUS_INTERVAL_S:
+            return
+        self._recording_status_mono = now
+        status = recording.status()
+        status["run_evidence"] = self.run_recorder.status()
+        self.recording_status = status
+        self.run_recorder.record("RECORDING_STATUS", _recording_status_event(status))
+        if status.get("failed") and not self._recording_failed_reported:
+            self._recording_failed_reported = True
+            self.run_recorder.record("RECORDING_FAILED", {
+                "stage": "write",
+                "writer_error": status.get("writer_error"),
+                "streams": {name: snap.get("last_error")
+                            for name, snap in status.get("streams", {}).items()
+                            if snap.get("state") == "failed"},
+                "effect": "decision recording stopped; trading continues",
+            })
+
+    def _close_recording(self) -> None:
+        recording = self.decision_recording
+        if recording is None:
+            return
+        try:
+            status = recording.close()
+        except Exception as exc:  # noqa: BLE001
+            status = {"failed": True, "error": f"{type(exc).__name__}: {exc}"}
+        status["run_evidence"] = self.run_recorder.status()
+        self.recording_status = status
+        self.run_recorder.record("RECORDING_CLOSED", _recording_status_event(status))
 
     def _select_token(self, intent: EnterIntent) -> tuple[str, Any]:
         if self.active_market is None:
@@ -2261,6 +2403,8 @@ class TradingRuntime:
         if getattr(self, "_pending_detach", None) is not None:
             await self._try_detach()
         await self._bind_pending_market()
+        if getattr(self, "decision_recording", None) is not None:
+            self._recording_heartbeat()
         worker = getattr(self, "settlement_worker", None)
         if worker is not None:
             worker.start()  # idempotent; also covers a restart into a committed window
@@ -3050,6 +3194,7 @@ class TradingRuntime:
         self.indicator_graph = runtime.indicator_graph
         self._market_runtime_ref = runtime
         self.settlement_worker = self._build_settlement_worker()
+        self._open_recording()
         fatal_exception: BaseException | None = None
         fatal_error: dict[str, Any] | None = None
         reporting_failures: list[str] = []
@@ -3103,6 +3248,8 @@ class TradingRuntime:
             self._record_runtime_error("market_data_runtime", exc)
         finally:
             await self._stop_intent_dispatcher()
+            if getattr(self, "decision_recording", None) is not None:
+                self._close_recording()
             monitor = getattr(self, "loop_lag_monitor", None)
             if monitor is not None:
                 await monitor.stop()
@@ -3415,6 +3562,7 @@ class TradingRuntime:
             committed_session_ids=frozenset(
                 getattr(self.lifecycle, "detached_sessions", ())
             ),
+            recording=self.recording_status,
         )
         try:
             payload = build_run_report(source)
@@ -3437,6 +3585,41 @@ class TradingRuntime:
             mutation_attempts=mutation_attempts,
             state=state,
         )
+
+
+RECORDING_STATUS_INTERVAL_S = 60.0
+# Decision-row fields kept in the STRATEGY_DECISION journal event when the full row is
+# in the decision recording (watch-run and the run report read these).
+_JOURNAL_DECISION_FIELDS = (
+    "tau_s", "p_up_point", "up_ask", "up_bid", "down_ask", "down_bid", "chosen_side",
+    "episode_seq", "attempt_seq", "episode_phase", "disagreement_gap_pp",
+)
+
+
+def _compact_decision_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    row = evidence.get("decision_row")
+    if not isinstance(row, dict):
+        return evidence
+    return {**evidence, "decision_row": {k: row[k] for k in _JOURNAL_DECISION_FIELDS
+                                         if k in row}, "decision_row_compact": True}
+
+
+def _recording_status_event(status: dict[str, Any]) -> dict[str, Any]:
+    """Compact status for the run journal (counters, no gap lists)."""
+    streams = {}
+    for name, snap in (status.get("streams") or {}).items():
+        streams[name] = {key: value for key, value in snap.items() if key != "gaps"}
+        streams[name]["gap_count"] = len(snap.get("gaps") or ())
+    return {
+        "failed": status.get("failed"), "dropped": status.get("dropped"),
+        "writer_alive": status.get("writer_alive"),
+        "writer_cpu_s": status.get("writer_cpu_s"),
+        "capture_cost_us": status.get("capture_cost_us"),
+        "capture_errors": status.get("capture_errors"),
+        "undeclared_fields": status.get("undeclared_fields"),
+        "streams": streams, "run_evidence": status.get("run_evidence"),
+        "error": status.get("error"),
+    }
 
 
 # Hold refusals that clear by themselves (trades confirming, a cancel being proven).

@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     from tyrex_pm.application.watch_run import add_parser as add_watch_parser
 
     add_watch_parser(commands)
+    from tyrex_pm.application.recording_cli import add_parser as add_recording_parser
+
+    add_recording_parser(commands)
     return parser
 
 
@@ -325,6 +328,10 @@ def main(argv: list[str] | None = None) -> int:
         from tyrex_pm.application.watch_run import run as run_watch
 
         return run_watch(args)
+    if args.command == "recording":
+        from tyrex_pm.application.recording_cli import run as run_recording
+
+        return run_recording(args)
     parser.print_help()
     return 0
 

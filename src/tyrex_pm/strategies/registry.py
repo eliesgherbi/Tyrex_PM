@@ -26,6 +26,9 @@ class StrategyPlugin:
     # Run-config lifecycle modes the plugin's behavior is valid under. None means the
     # legacy host lifecycle only (flatten before close).
     lifecycle_modes: Callable[[Any], frozenset[str]] | None = None
+    # Declared decision-record fields (tyrex_pm.recording.records.RecordSchema). None:
+    # the host records the strategy's decision row as is.
+    decision_record_schema: Callable[[Any], Any] | None = None
 
 
 def register_strategy(plugin: StrategyPlugin) -> None:

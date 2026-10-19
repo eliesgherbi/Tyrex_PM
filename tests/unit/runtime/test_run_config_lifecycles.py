@@ -155,3 +155,21 @@ def test_settlement_cli_acknowledges_a_loss_pause(tmp_path: Path, capsys) -> Non
     assert status["accounting_day_utc"] and status["reported_at_paris"].endswith(("+01:00", "+02:00"))
     assert main(["settlement", "--config", str(cfg), "ack-loss-pause", "--reason", "review"]) == 0
     assert json.loads(capsys.readouterr().out)["acknowledged_losses"] == 0
+
+
+def test_recording_block_is_parsed_and_validated(tmp_path: Path) -> None:
+    from tyrex_pm.recording import RecordingLevel
+
+    assert load_trading_run_config(PAPER).recording.level is RecordingLevel.DECISIONS
+
+    def explain(raw):
+        raw["recording"] = {"level": "explain", "explain_trigger": "all", "queue_max_mib": 8}
+
+    cfg = load_trading_run_config(write(tmp_path, PAPER, explain)).recording
+    assert cfg.level is RecordingLevel.EXPLAIN and cfg.queue_max_bytes == 8 * 1024 * 1024
+
+    def bad(raw):
+        raw["recording"] = {"level": "verbose"}
+
+    with pytest.raises(RunConfigError):
+        load_trading_run_config(write(tmp_path, PAPER, bad))

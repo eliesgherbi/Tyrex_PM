@@ -10,6 +10,8 @@ Bundle layout (``<out>/``):
   data split, hardware and timings.
 * ``summaries.parquet`` — one row per (window, configuration, scenario).
 * ``decisions.parquet`` — compact per-evaluation series (only when requested).
+* ``explanations.parquet`` — indicator explanations, when a spec sets ``recording``
+  to level ``explain`` (selected by the same trigger as live).
 """
 
 from __future__ import annotations
@@ -62,6 +64,9 @@ class RunSpec:
     tag: str = ""
     # Replay execution policy (v3): e.g. a protection SL/TP block. Empty = defaults.
     execution_policy: Mapping[str, Any] = field(default_factory=dict)
+    # Framework recording block (e.g. {"level": "explain"}); explanations are written to
+    # ``explanations.parquet``. Empty = no recording (bundle unchanged).
+    recording: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def config_label(self) -> str:
@@ -85,13 +90,21 @@ def _compact(result: dict) -> list[dict]:
     return rows
 
 
+def _spec_identity(spec: RunSpec) -> dict:
+    """Spec fields for the part digest; an empty ``recording`` keeps pre-P4 digests."""
+    identity = {**asdict(spec), "collection": asdict(spec.collection)}
+    if not identity.get("recording"):
+        identity.pop("recording", None)
+    return identity
+
+
 def _group_digest(specs: list[RunSpec], keep_decisions: bool) -> str:
     from tyrex_pm.research.strategy_replay.loader import LOADER_VERSION
     from tyrex_pm.research.strategy_replay.run import RUNNER_VERSION
 
     payload = json.dumps(
         {
-            "specs": [{**asdict(s), "collection": asdict(s.collection)} for s in specs],
+            "specs": [_spec_identity(s) for s in specs],
             "keep": keep_decisions,
             "versions": [LOADER_VERSION, RUNNER_VERSION, PART_VERSION],
         },
@@ -122,6 +135,7 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
         return str(summary_path), None if decision_path is None else str(decision_path)
     summaries_rows: list[dict] = []
     decision_rows: list[dict] = []
+    explain_rows: list[dict] = []
     for spec in specs:
         lab = _lab(spec.collection)
         started = time.perf_counter()
@@ -131,6 +145,7 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
             scenario=spec.scenario,
             scenario_overrides=dict(spec.scenario_overrides) or None,
             execution_policy=dict(spec.execution_policy) or None,
+            recording=dict(spec.recording) or None,
         )
         row = summary(result)
         row.update(
@@ -164,6 +179,14 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
                         "window_end_ns": result["window"]["window_end_ns"],
                     }
                 )
+        for e in result.get("explanations", ()):
+            explain_rows.append({
+                "market_id": spec.market_id, "config": spec.config_label,
+                "scenario_name": result["scenario_name"], "tag": spec.tag,
+                "at_ns": e.get("at_ns"), "tau_s": e.get("tau_s"), "action": e.get("action"),
+                "reason": e.get("reason"), "context_for_at_ns": e.get("context_for_at_ns"),
+                "indicators": json.dumps(e.get("indicators"), sort_keys=True, default=str),
+            })
         del result
     for spec in specs:  # one window per group: release its ~1 GB of rows now
         _lab(spec.collection)._windows.pop(spec.market_id, None)
@@ -171,10 +194,17 @@ def _run_group(specs: list[RunSpec], keep_decisions: bool, parts: str) -> tuple[
     if decision_path is not None:
         frame = _typed(pd.DataFrame(decision_rows), (*NUMERIC, "at_ns", "window_end_ns"))
         frame.to_parquet(decision_path, index=False)
+    if explain_rows:
+        pd.DataFrame(explain_rows).to_parquet(_explain_path(summary_path), index=False)
     tmp = summary_path.with_suffix(".tmp")
     pd.DataFrame(summaries_rows).to_parquet(tmp, index=False)
     os.replace(tmp, summary_path)  # summary last: its presence marks a complete part
     return str(summary_path), None if decision_path is None else str(decision_path)
+
+
+def _explain_path(summary_path: Path | str) -> Path:
+    path = Path(summary_path)
+    return path.with_name(path.name.replace(".summaries.parquet", ".explanations.parquet"))
 
 
 EXECUTION_EVENTS = (
@@ -300,6 +330,10 @@ def run_batch(
         summaries.to_parquet(out / "summaries.parquet", index=False)
         if decisions is not None:
             decisions.to_parquet(out / "decisions.parquet", index=False)
+        explain_parts = [_explain_path(p) for p, _ in paths if _explain_path(p).exists()]
+        if explain_parts:
+            pd.concat([pd.read_parquet(x) for x in explain_parts], ignore_index=True
+                      ).to_parquet(out / "explanations.parquet", index=False)
         labs = {(s.collection.warehouse, s.collection.collection) for s in specs}
         manifest = {
             "created_by": "tyrex_pm.research.strategy_lab.batch.run_batch",
