@@ -146,6 +146,16 @@ class PaperRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class RedemptionDiscoveryConfig:
+    """Automatic, read-only recognition of UI redemptions (settlement/redemption_discovery)."""
+
+    enabled: bool = True
+    interval_s: float = 300.0
+    max_blocks_per_pass: int = 200_000
+    max_log_calls_per_pass: int = 400
+
+
+@dataclass(frozen=True)
 class SettlementRuntimeConfig:
     """Hold-to-resolution profile: durable ledger, trial limits, operator redemption."""
 
@@ -157,6 +167,7 @@ class SettlementRuntimeConfig:
     run_limits: RunLimits | None = None
     # Automatic resolution/payout reconciliation cadence of the runner [s].
     resolution_poll_interval_s: float = 30.0
+    redemption_discovery: RedemptionDiscoveryConfig = RedemptionDiscoveryConfig()
 
 
 @dataclass(frozen=True)
@@ -237,6 +248,7 @@ def _settlement_config(raw: Any, mode: str) -> SettlementRuntimeConfig | None:
             "redemption_mode",
             "run_limits",
             "resolution_poll_interval_s",
+            "redemption_discovery",
         },
         "settlement",
     )
@@ -295,7 +307,27 @@ def _settlement_config(raw: Any, mode: str) -> SettlementRuntimeConfig | None:
         redemption_mode=mode_raw,
         run_limits=_run_limits(raw.get("run_limits")),
         resolution_poll_interval_s=poll,
+        redemption_discovery=_redemption_discovery(raw.get("redemption_discovery")),
     )
+
+
+def _redemption_discovery(raw: Any) -> RedemptionDiscoveryConfig:
+    if raw is None:
+        return RedemptionDiscoveryConfig()
+    if not isinstance(raw, dict):
+        raise RunConfigError("settlement.redemption_discovery must be a mapping")
+    _reject_unknown(raw, {"enabled", "interval_s", "max_blocks_per_pass",
+                          "max_log_calls_per_pass"}, "settlement.redemption_discovery")
+    config = RedemptionDiscoveryConfig(
+        enabled=bool(raw.get("enabled", True)),
+        interval_s=float(raw.get("interval_s", 300.0)),
+        max_blocks_per_pass=int(raw.get("max_blocks_per_pass", 200_000)),
+        max_log_calls_per_pass=int(raw.get("max_log_calls_per_pass", 400)),
+    )
+    if (config.interval_s <= 0 or config.max_blocks_per_pass <= 0
+            or config.max_log_calls_per_pass <= 0):
+        raise RunConfigError("settlement.redemption_discovery values must be positive")
+    return config
 
 
 def _paper_config(raw: Any) -> PaperRuntimeConfig:

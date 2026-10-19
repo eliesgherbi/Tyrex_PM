@@ -42,6 +42,10 @@ class RedemptionEvidence:
     tx_hash: str
     block_number: int | None = None
     source: str = ""
+    # The attributable log (``chain.RedemptionMatch``): one log is credited at most once.
+    log_index: int | None = None
+    route: str = ""
+    credited_asset: str = ""
 
 
 PayoutReader = Callable[[str, int], Awaitable[PayoutObservation]]
@@ -121,12 +125,32 @@ class ResolutionManager:
                 "net_shares": str(ep.net_shares),
                 "payout_per_share": str(ep.payout_per_share),
                 "expected_credit": str(ep.receivable),
-                "action": "Redeem this position in the venue UI, then run "
-                "`tyrex-pm settlement confirm-redemption` with the transaction hash.",
+                "action": "Redeem this position in the venue UI. A running runner (or "
+                "`tyrex-pm settlement discover-redemptions --connect-chain --apply`) "
+                "recognises the finalized redemption automatically; "
+                "`confirm-redemption` with the tx hash remains available.",
             }
             for ep in self.ledger.episodes.values()
             if ep.state is S.REDEMPTION_PENDING_OPERATOR
         ]
+
+    def credited_redemptions(self) -> dict[str, str]:
+        """Redemption logs already credited -> episode. ``tx:*`` = whole tx (legacy record
+        without a log index: every log of that tx is treated as already used)."""
+        used: dict[str, str] = {}
+        for ep in self.ledger.episodes.values():
+            for item in ep.evidence:
+                if item.get("event") != "CASH_CONFIRMED" or not item.get("tx_hash"):
+                    continue
+                tx = str(item["tx_hash"]).lower()
+                index = item.get("log_index")
+                used[f"{tx}:{'*' if index is None else index}"] = ep.episode_id
+        return used
+
+    def already_credited(self, tx_hash: str, log_index: int | None) -> str | None:
+        used = self.credited_redemptions()
+        tx = tx_hash.lower()
+        return used.get(f"{tx}:*") or (None if log_index is None else used.get(f"{tx}:{log_index}"))
 
     async def confirm_redemption(
         self, episode_id: str, tx_hash: str
@@ -147,17 +171,57 @@ class ResolutionManager:
             reasons.append("CREDIT_AMOUNT_UNKNOWN")
         elif abs(credited - ep.receivable) > CREDIT_TOLERANCE:
             reasons.append("CREDIT_AMOUNT_MISMATCH")
+        if evidence.attributable and self.already_credited(tx_hash, evidence.log_index):
+            reasons.append("REDEMPTION_ALREADY_CREDITED")
         if reasons:
             return False, tuple(dict.fromkeys(reasons))
-        self.ledger.record(
-            "CASH_CONFIRMED",
-            episode_id,
-            credited_amount=str(credited),
-            evidence={
-                "tx_hash": tx_hash,
-                "block": evidence.block_number,
-                "source": evidence.source,
-            },
-        )
+        record = {"tx_hash": tx_hash, "block": evidence.block_number, "source": evidence.source}
+        if evidence.log_index is not None:
+            record.update(log_index=evidence.log_index, route=evidence.route,
+                          credited_asset=evidence.credited_asset)
+        self.ledger.record("CASH_CONFIRMED", episode_id, credited_amount=str(credited),
+                           evidence=record)
         self.ledger.record("EPISODE_COMPLETED", episode_id, reason="cash_confirmed")
+        return True, ()
+
+    def apply_redemption(self, match, episode_ids: list[str], *,
+                         discovery: dict | None = None) -> tuple[bool, tuple[str, ...]]:
+        """Credit one proven, finalized redemption (``chain.RedemptionMatch``) to the
+        episodes whose shares it redeemed. Each episode is credited its own receivable;
+        the receivables must add up to the proven credit. Refused (nothing recorded) on
+        any doubt; the caller keeps the item unresolved."""
+        reasons: list[str] = []
+        episodes = [self.ledger.episodes.get(e) for e in episode_ids]
+        if not episodes or any(
+            ep is None or ep.state is not S.REDEMPTION_PENDING_OPERATOR for ep in episodes
+        ):
+            reasons.append("EPISODE_NOT_AWAITING_REDEMPTION")
+        elif any(not match.covers(ep.condition_id, ep.outcome_index, ep.token_id)
+                 for ep in episodes):
+            reasons.append("REDEMPTION_DOES_NOT_COVER_EPISODE")
+        else:
+            total = sum((ep.receivable for ep in episodes), Decimal(0))
+            if abs(total - match.credited) > CREDIT_TOLERANCE * len(episodes):
+                reasons.append("CREDIT_AMOUNT_MISMATCH")
+        if self.already_credited(match.tx_hash, match.log_index):
+            reasons.append("REDEMPTION_ALREADY_CREDITED")
+        if reasons:
+            return False, tuple(dict.fromkeys(reasons))
+        group = sorted(episode_ids)
+        for ep in episodes:
+            self.ledger.record(
+                "CASH_CONFIRMED",
+                ep.episode_id,
+                credited_amount=str(ep.receivable),
+                evidence={
+                    "tx_hash": match.tx_hash, "block": match.block_number,
+                    "log_index": match.log_index, "route": match.route,
+                    "credited_asset": match.credited_asset,
+                    "source": f"{match.route}_receipt",
+                    "redemption_credit_total": str(match.credited),
+                    "allocated_to": group,
+                    **dict(discovery or {}),
+                },
+            )
+            self.ledger.record("EPISODE_COMPLETED", ep.episode_id, reason="cash_confirmed")
         return True, ()

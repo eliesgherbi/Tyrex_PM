@@ -34,6 +34,8 @@ class SettlementWorker:
     interval_s: float
     record: Callable[[str, dict], None]
     paper_redeemer: PaperRedeemer | None = None
+    # Automatic recognition of UI redemptions (read-only; settlement/redemption_discovery).
+    discovery: Any | None = None
     runs: int = 0
     last_report: dict = field(default_factory=dict)
     _task: asyncio.Task | None = None
@@ -55,6 +57,13 @@ class SettlementWorker:
                 else:
                     self.record("PAPER_REDEMPTION_REFUSED",
                                 {"episode_id": ep.episode_id, "reasons": list(reasons)})
+        discovered: dict | None = None
+        if self.discovery is not None and (self.runs == 0 or self.discovery.due()):
+            try:
+                discovered = await self.discovery.run_once(apply=True)
+            except Exception as exc:  # noqa: BLE001 - discovery never stops the worker
+                discovered = {"error": f"{type(exc).__name__}: {exc}"}
+                self.record("REDEMPTION_DISCOVERY_ERROR", discovered)
         self.runs += 1
         totals = self.manager.ledger.totals()
         self.last_report = {
@@ -73,7 +82,12 @@ class SettlementWorker:
             "redeemed_cash": str(totals.redeemed_cash),
             "worklist": len(self.manager.worklist()),
         }
-        if report.proven or report.completed_zero_payout or redeemed:
+        if discovered is not None:
+            self.last_report["redemption_discovery"] = {
+                k: discovered.get(k) for k in ("scanned", "applied", "unresolved", "skipped",
+                                               "scan_error", "error")}
+        applied = bool(discovered and discovered.get("applied"))
+        if report.proven or report.completed_zero_payout or redeemed or applied:
             self.record("SETTLEMENT_RECONCILED", self.last_report)
         return self.last_report
 

@@ -3394,8 +3394,10 @@ class TradingRuntime:
         from tyrex_pm.runtime.settlement_worker import SettlementWorker
 
         reader = getattr(self.gateway, "payout_reader", None)
+        chain_reader = None
         if reader is None:
-            reader = _chain_payout_reader(self.polygon_rpc_url)
+            chain_reader = _chain_reader(self.polygon_rpc_url)
+            reader = _chain_payout_reader(self.polygon_rpc_url, chain_reader)
         if reader is None:
             self.run_recorder.record(
                 "SETTLEMENT_WORKER_UNAVAILABLE",
@@ -3419,11 +3421,31 @@ class TradingRuntime:
             from tyrex_pm.execution.paper import delayed_paper_redeemer
 
             redeemer = delayed_paper_redeemer(self.gateway, paper.auto_redeem_after_s)
+        discovery = None
+        options = getattr(settlement, "redemption_discovery", None)
+        if (paper is None and chain_reader is not None and wallet
+                and options is not None and options.enabled):
+            # The trading process owns the ledger while it runs (state lock held):
+            # discovery runs in this worker, outside evaluation and order submission.
+            from tyrex_pm.execution.settlement.redemption_discovery import (
+                DiscoveryPolicy,
+                RedemptionDiscovery,
+            )
+
+            discovery = RedemptionDiscovery(
+                manager, chain_reader, wallet=wallet,
+                state_path=settlement.ledger_path.parent / "redemption_discovery.json",
+                policy=DiscoveryPolicy(
+                    interval_s=options.interval_s,
+                    max_blocks_per_pass=options.max_blocks_per_pass,
+                    max_log_calls_per_pass=options.max_log_calls_per_pass),
+                record=self.run_recorder.record)
         return SettlementWorker(
             manager=manager,
             interval_s=settlement.resolution_poll_interval_s,
             record=self.run_recorder.record,
             paper_redeemer=redeemer,
+            discovery=discovery,
         )
 
     def _build_execution_timeline(
@@ -3657,20 +3679,27 @@ _TRANSIENT_HOLD_REFUSALS = frozenset(
      "CONFLICTING_ORDER_NOT_PROVEN_CANCELLED", "UNRESOLVED_MUTATION"}
 )
 
-def _chain_payout_reader(url: str | None = None):
-    """Read-only finalized payout reader for ``url`` (TYREX_POLYGON_RPC_URL), or None."""
+def _chain_reader(url: str | None = None):
+    """Read-only Polygon settlement reader for ``url`` (TYREX_POLYGON_RPC_URL), or None."""
     try:
         from tyrex_pm.adapters.polymarket.polygon_rpc import POLYGON_RPC_ENV
-        from tyrex_pm.execution.settlement.chain import (
-            SettlementChainReader,
-            finalized_payout_reader,
-        )
+        from tyrex_pm.execution.settlement.chain import SettlementChainReader
     except Exception:  # noqa: BLE001 - optional live dependency
         return None
     url = url or os.environ.get(POLYGON_RPC_ENV, "")
     if not url:
         return None
-    return finalized_payout_reader(SettlementChainReader(url))
+    return SettlementChainReader(url)
+
+
+def _chain_payout_reader(url: str | None = None, reader: Any = None):
+    """Read-only finalized payout reader for ``url`` (TYREX_POLYGON_RPC_URL), or None."""
+    reader = reader or _chain_reader(url)
+    if reader is None:
+        return None
+    from tyrex_pm.execution.settlement.chain import finalized_payout_reader
+
+    return finalized_payout_reader(reader)
 
 
 def ready_binding_strategy_id(runtime: ZGapMarketRuntime):

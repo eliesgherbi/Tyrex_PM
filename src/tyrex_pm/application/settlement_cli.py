@@ -2,8 +2,10 @@
 
 Offline:  status, worklist, mark-manual, ack-loss-pause
 Chain (read-only, ``--connect-chain`` + ``TYREX_POLYGON_RPC_URL``): reconcile,
-confirm-redemption. Nothing here signs, redeems, transfers or submits orders; the
-operator redeems in the venue UI and then proves it with the transaction hash.
+confirm-redemption, discover-redemptions. Nothing here signs, redeems, transfers or
+submits orders; the operator redeems in the venue UI. ``discover-redemptions`` finds and
+proves those redemptions itself (a running runner does the same in the background);
+``confirm-redemption`` proves one by its transaction hash.
 """
 
 from __future__ import annotations
@@ -34,6 +36,15 @@ def add_parser(commands: Any) -> None:
     conf.add_argument("--episode", required=True)
     conf.add_argument("--tx-hash", required=True)
     conf.add_argument("--connect-chain", action="store_true")
+    disc = sub.add_parser(
+        "discover-redemptions",
+        help="Find and prove UI redemptions on chain (dry run unless --apply; refused while "
+        "a runner owns the ledger, which discovers them itself)",
+    )
+    disc.add_argument("--connect-chain", action="store_true")
+    disc.add_argument("--apply", action="store_true",
+                      help="record proven, unambiguous redemptions in the ledger")
+    disc.add_argument("--force", action="store_true", help="ignore the error backoff")
     manual = sub.add_parser("mark-manual", help="Record operator intervention for an episode")
     manual.add_argument("--episode", required=True)
     manual.add_argument("--reason", required=True)
@@ -100,6 +111,58 @@ def _daily(ledger: SettlementLedger) -> dict:
         "reported_at_paris": paris_iso(now),
         "realized_losses_today_utc": str(ledger.realized_losses_on(now.date())),
     }
+
+
+def _rpc_url(dotenv: Path) -> str:
+    from tyrex_pm.adapters.polymarket.polygon_rpc import POLYGON_RPC_ENV
+
+    url = os.environ.get(POLYGON_RPC_ENV, "")
+    if not url and dotenv.exists():
+        for line in dotenv.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith(f"{POLYGON_RPC_ENV}="):
+                url = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not url:
+        raise RuntimeError(f"{POLYGON_RPC_ENV} is not configured")
+    return url
+
+
+def _discover(config: Any, args: argparse.Namespace) -> int:
+    from tyrex_pm.execution.process_lock import StateDirectoryBusy, StateDirectoryLock
+    from tyrex_pm.execution.settlement.chain import SettlementChainReader
+    from tyrex_pm.execution.settlement.redemption_discovery import (
+        DiscoveryPolicy,
+        RedemptionDiscovery,
+    )
+
+    wallet = config.settlement.redemption_wallet
+    if not wallet:
+        print("settlement.redemption_wallet is not configured", file=sys.stderr)
+        return 2
+    lock = StateDirectoryLock(config.state_directory)
+    try:
+        lock.acquire()
+    except StateDirectoryBusy:
+        print("a running runner owns this ledger; its settlement worker discovers "
+              "redemptions automatically (see run events REDEMPTION_DISCOVERED)",
+              file=sys.stderr)
+        return 3
+    try:
+        ledger = _ledger(config)
+        reader = SettlementChainReader(_rpc_url(args.dotenv), timeout_s=15.0, attempts=4,
+                                       retry_delay_s=1.0)
+        manager = ResolutionManager(ledger, payout_reader=_no_reader, wallet=wallet)
+        options = config.settlement.redemption_discovery
+        discovery = RedemptionDiscovery(
+            manager, reader, wallet=wallet,
+            state_path=config.settlement.ledger_path.parent / "redemption_discovery.json",
+            policy=DiscoveryPolicy(interval_s=options.interval_s,
+                                   max_blocks_per_pass=options.max_blocks_per_pass,
+                                   max_log_calls_per_pass=options.max_log_calls_per_pass))
+        report = asyncio.run(discovery.run_once(apply=args.apply, force=args.force))
+        print(json.dumps(report, indent=1, default=str))
+        return 0
+    finally:
+        lock.release()
 
 
 def _chain_manager(ledger: SettlementLedger, config: Any, dotenv: Path) -> ResolutionManager:
@@ -171,6 +234,8 @@ def run(args: argparse.Namespace) -> int:
     if not getattr(args, "connect_chain", False):
         print(f"`{command}` reads Polygon; re-run with --connect-chain", file=sys.stderr)
         return 2
+    if command == "discover-redemptions":
+        return _discover(config, args)
     manager = _chain_manager(ledger, config, args.dotenv)
     if command == "reconcile":
         report = asyncio.run(manager.reconcile())
