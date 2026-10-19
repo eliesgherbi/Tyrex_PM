@@ -42,6 +42,15 @@ def add_parser(commands: Any) -> None:
         help="Acknowledge a consecutive-loss pause (losses before this no longer count)",
     )
     ack.add_argument("--reason", required=True)
+    repair = sub.add_parser(
+        "repair-attempt-ownership",
+        help="Verify and correct a window whose fill was mis-owned by a never-sent attempt "
+        "(dry run unless --apply; never trades or redeems)",
+    )
+    repair.add_argument("--window", required=True, help="window id, e.g. btc-updown-5m-...")
+    repair.add_argument("--apply", action="store_true", help="append the corrections")
+    repair.add_argument("--connect-chain", action="store_true",
+                        help="read the finalized payout (established resolution workflow)")
 
 
 def _ledger(config: Any) -> SettlementLedger:
@@ -126,8 +135,12 @@ def run(args: argparse.Namespace) -> int:
     if config.settlement is None:
         print("config is not a hold_to_resolution profile", file=sys.stderr)
         return 2
-    ledger = _ledger(config)
     command = args.settlement_command
+    if command == "repair-attempt-ownership":
+        from tyrex_pm.application import ownership_repair
+
+        return ownership_repair.run(args)
+    ledger = _ledger(config)
     if command == "status":
         print(json.dumps(_status(ledger, config), indent=1))
         return 0

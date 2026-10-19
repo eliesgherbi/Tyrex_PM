@@ -58,6 +58,58 @@ class ReconciliationResult:
     notes: tuple[str, ...]
 
 
+def _may_own_balance(state: ExecutionSessionState) -> bool:
+    """False only for a provably never-sent attempt: it has entry orders, none of them
+    reached a POST attempt or got a venue order id, and it holds no BUY trade. Such a
+    session cannot own shares. Sessions without entry orders (adopted or recovered
+    holdings proven by observation) and any posted or uncertain attempt keep the
+    balance as an authority, so genuine late fills are still detected."""
+    entries = [o for o in state.orders.values() if o.role is ExecutionRole.ENTRY]
+    if not entries:
+        return True
+    if any(order.attempt_ids or order.venue_order_id for order in entries):
+        return True
+    return any(trade.side == "BUY" for trade in state.trades.values())
+
+
+def _sibling_owned_since(coordinator: Any, state: ExecutionSessionState) -> Decimal:
+    """Shares other sessions on the same token and window acquired after ``state``
+    opened, proven by their own trades.
+
+    The account balance is token-wide: without this, every session would claim the same
+    shares. A sibling opened later owns all its trade-proven inventory; an earlier one
+    only what it gained after this session's baseline was taken.
+    """
+    identity = state.identity
+    if identity is None:
+        return Decimal("0")
+    owned = Decimal("0")
+    for other in getattr(coordinator, "states", {}).values():
+        if other is state or other.identity is None or other.session_id == state.session_id:
+            continue
+        if (
+            other.identity.token_id != identity.token_id
+            or other.identity.window_id != identity.window_id
+        ):
+            continue
+        remaining = trade_remaining_after_exits(other)
+        if remaining <= 0:
+            continue
+        opened_after = (
+            other.opened_at is not None
+            and state.opened_at is not None
+            and other.opened_at >= state.opened_at
+        )
+        if opened_after:
+            owned += remaining
+        else:
+            already_in_baseline = max(
+                Decimal("0"), state.baseline_position_shares - other.baseline_position_shares
+            )
+            owned += max(Decimal("0"), remaining - already_in_baseline)
+    return owned
+
+
 class SessionReconciler:
     """Backfill venue evidence and close the loop against account balances.
 
@@ -235,6 +287,17 @@ class SessionReconciler:
             complete = False
 
         account_position = max(Decimal("0"), current_balance - state.baseline_position_shares)
+        if not _may_own_balance(state):
+            # Never sent (no POST attempt, no venue order, no trade): it cannot own
+            # shares. A balance change on its token belongs to a sibling attempt.
+            if account_position > 0:
+                notes.append("balance_not_attributable:no_buy_evidence")
+            account_position = Decimal("0")
+        else:
+            siblings = _sibling_owned_since(coordinator, state)
+            if siblings > 0:
+                notes.append(f"sibling_owned_since_open:{siblings}")
+                account_position = max(Decimal("0"), account_position - siblings)
         # Either source may lag.  Confirmed session trades create an exposure
         # obligation that a stale balance read cannot erase; conversely, a
         # lagging post-SELL balance prevents a premature flat declaration.

@@ -995,6 +995,7 @@ class TradingRuntime:
                     and not is_exempt_prior_position_blocker(
                         blocker, self.known_dust_residuals
                     )
+                    and not self._balance_explained_by_owned(blocker)
                 )
                 or blocker.startswith("PRIOR_OPEN_ORDER")
             )
@@ -1006,12 +1007,54 @@ class TradingRuntime:
         for index, blocker in enumerate(snapshot.blockers):
             if is_exempt_prior_position_blocker(blocker, self.known_dust_residuals):
                 continue
+            if self._balance_explained_by_owned(blocker):
+                continue
             self.capabilities.set_blocker(f"ACCOUNT_STATE_{index}", blocker)
         if snapshot.status in {AccountSnapshotStatus.UNAVAILABLE, AccountSnapshotStatus.STALE}:
             self.capabilities.set_blocker("ACCOUNT_STATE_AUTHORITY", snapshot.status.value)
         else:
             self.capabilities.clear_blocker("ACCOUNT_STATE_AUTHORITY")
         self._record_readiness_if_changed()
+
+    def owned_token_shares(self, token_id: str) -> Decimal:
+        """Shares of ``token_id`` this account provably owns through its own records.
+
+        Execution sessions of this process (active, earlier attempts of the window,
+        detached committed holds) and the settlement ledger's episodes (fills not sold;
+        committed, resolving or settled holdings whose tokens may still be held). Both
+        describe the same holdings, so the larger is used, never their sum.
+        """
+        session_ids = [self.lifecycle.session_id, *self.lifecycle.window_sessions,
+                       *self.lifecycle.detached_sessions]
+        from_sessions = Decimal(0)
+        for session_id in dict.fromkeys(s for s in session_ids if s):
+            state = self.coordinator.states.get(session_id)
+            if state is None or state.identity is None or state.identity.token_id != token_id:
+                continue
+            from_sessions += state.confirmed_position_shares
+        from_ledger = Decimal(0)
+        hooks = getattr(self, "settlement_hooks", None)
+        if hooks is not None:
+            from_ledger = hooks.ledger.unsold_shares(token_id)
+        return max(from_sessions, from_ledger)
+
+    def _balance_explained_by_owned(self, blocker: str) -> bool:
+        """A PRIOR_POSITION balance fully explained by owned positions is not unknown.
+
+        Only the explained quantity is exempt: any excess (a balance above what this
+        account's own records explain) keeps the blocker, i.e. UNKNOWN_INVENTORY.
+        """
+        if not blocker.startswith("PRIOR_POSITION:"):
+            return False
+        token_id, sep, qty_text = blocker[len("PRIOR_POSITION:"):].rpartition(":")
+        if not sep or not token_id:
+            return False
+        try:
+            balance = Decimal(qty_text)
+        except Exception:  # noqa: BLE001
+            return False
+        owned = self.owned_token_shares(token_id)
+        return owned > 0 and balance <= owned + self.config.lifecycle.dust_abs_shares
 
     async def _bind_pending_market(self) -> None:
         session = self.pending_market
@@ -1949,6 +1992,11 @@ class TradingRuntime:
             )
             self.run_recorder.record("SETTLEMENT_ENTRY_OUTCOME", {"outcome": settlement_outcome})
         self._deliver_entry_outcome(intent, outcome, state)
+        if outcome.exposure and self._host_commits_hold() and self.active_market is not None:
+            # hold_to_resolution: commit as soon as the fill is owned, not on the next
+            # strategy evaluation (an account refresh in between must not leave it open).
+            await self._commit_hold(self.active_market.window_id, source="host_after_fill",
+                                    intent_id=intent.intent_id.value)
         if state is not None:
             self.capabilities.selected_token_sellable = state.sellable_shares > 0
             if intent.liquidity_role is LiquidityRole.MAKER and state.working_maker_entry:
@@ -2109,39 +2157,77 @@ class TradingRuntime:
             )
 
     async def _consume_hold(self, intent: HoldToResolutionIntent) -> None:
-        committed, detail = (False, "LIFECYCLE_NOT_SETTLEMENT_PROFILE")
-        if self.settlement_hooks is not None:
-            committed, detail = await self.settlement_hooks.commit_hold(
-                window_id=intent.window_id,
-                state=self.lifecycle.state,
-                cancel_conflicting=self._cancel_for_hold,
-            )
-        self.run_recorder.record(
-            "HOLD_TO_RESOLUTION",
-            {
-                "intent_id": intent.intent_id.value,
+        await self._commit_hold(
+            intent.window_id,
+            source="strategy_intent",
+            intent_id=intent.intent_id.value,
+            extra={
                 "reason_code": intent.reason_code,
                 "market_id": intent.market_id.value,
                 "instrument_id": intent.instrument_id.value,
-                "window_id": intent.window_id,
-                "committed": committed,
-                "detail": detail,
             },
         )
+
+    def _host_commits_hold(self) -> bool:
+        """Hold profile: the host commits a filled position itself (no strategy turn)."""
+        if self.settlement_hooks is None or getattr(self.config, "lifecycle_mode", None) != (
+            "hold_to_resolution"
+        ):
+            return False
+        strategy_exit = getattr(getattr(self.config, "strategy", None), "exit", None)
+        return getattr(strategy_exit, "policy", None) == "hold_to_resolution"
+
+    async def _commit_hold(
+        self,
+        window_id: str,
+        *,
+        source: str,
+        intent_id: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
+        """Commit the window's filled episode to resolution (idempotent).
+
+        Keeps every precondition of ``SettlementHooks.commit_hold`` (confirmed inventory
+        matching the ledger, conflicting orders cancelled, no unresolved submission).
+        A transient refusal is retried on the next tick; a committed hold is never sold
+        and survives rollover and shutdown (detached to the settlement ledger).
+        """
+        committed, detail = (False, "LIFECYCLE_NOT_SETTLEMENT_PROFILE")
+        if self.settlement_hooks is not None:
+            committed, detail = await self.settlement_hooks.commit_hold(
+                window_id=window_id,
+                state=self.lifecycle.state,
+                cancel_conflicting=self._cancel_for_hold,
+            )
+        if committed or getattr(self, "_hold_commit_noted", None) != (window_id, detail):
+            self._hold_commit_noted = (window_id, detail)
+            self.run_recorder.record(
+                "HOLD_TO_RESOLUTION",
+                {"intent_id": intent_id, "window_id": window_id, "source": source,
+                 "committed": committed, "detail": detail, **(extra or {})},
+            )
         if not committed:
-            return
+            if source == "host_after_fill" and detail in _TRANSIENT_HOLD_REFUSALS:
+                self._pending_hold_commit = window_id
+            return False
+        self._pending_hold_commit = None
+        driver = self._driver_for(window_id)
+        note = getattr(driver, "on_hold_committed", None)
+        if callable(note):
+            note()
         state = self.lifecycle.state
         if state is not None:
             self.protection_registry.disarm(state.session_id)
         if self.continuous:
             # The holding now belongs to the settlement ledger (resolution worker); the
             # lifecycle is freed for the next window once its trades are confirmed.
-            self._pending_detach = intent.window_id
+            self._pending_detach = window_id
             await self._try_detach()
-            return
+            return True
         # The single episode is complete for this process; the holding now
         # waits for resolution under `tyrex-pm settlement`.
         self.stop_requested = True
+        return True
 
     async def _try_detach(self) -> bool:
         """Detach a committed hold once nothing about it is pending (e.g. a matched trade
@@ -2176,6 +2262,9 @@ class TradingRuntime:
         return True
 
     async def on_async_tick(self, market_runtime: ZGapMarketRuntime) -> None:
+        pending_hold = getattr(self, "_pending_hold_commit", None)
+        if pending_hold is not None:
+            await self._commit_hold(pending_hold, source="host_after_fill")
         if getattr(self, "_pending_detach", None) is not None:
             await self._try_detach()
         await self._bind_pending_market()
@@ -3356,6 +3445,12 @@ class TradingRuntime:
             state=state,
         )
 
+
+# Hold refusals that clear by themselves (trades confirming, a cancel being proven).
+_TRANSIENT_HOLD_REFUSALS = frozenset(
+    {"NO_CONFIRMED_INVENTORY", "INVENTORY_DIFFERS_FROM_LEDGER",
+     "CONFLICTING_ORDER_NOT_PROVEN_CANCELLED", "UNRESOLVED_MUTATION"}
+)
 
 def _chain_payout_reader(url: str | None = None):
     """Read-only finalized payout reader for ``url`` (TYREX_POLYGON_RPC_URL), or None."""

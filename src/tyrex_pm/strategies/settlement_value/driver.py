@@ -217,6 +217,17 @@ class SettlementValueDriver:
         st.next_attempt_not_before = _iso(outcome.at + timedelta(milliseconds=delay_ms))
         st.phase = P.REARMABLE
 
+    def on_hold_committed(self) -> None:
+        """The host committed the filled episode to resolution (hold profile).
+
+        Recorded so a later empty position (the hold was detached to the settlement
+        ledger) is not mistaken for a sale, and no second hold intent is emitted.
+        """
+        st = self.state
+        st.hold_requested = True
+        if st.phase in (P.POSITION, P.PENDING, P.UNCERTAIN, P.REARMABLE):
+            st.phase = P.HOLD_COMMITTED
+
     def on_exit_outcome(self, outcome: ExitOutcome) -> None:
         st = self.state
         if outcome.intent_id != st.exit_intent_id:

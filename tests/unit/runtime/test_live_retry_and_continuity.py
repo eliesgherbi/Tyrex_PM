@@ -53,7 +53,8 @@ async def test_zero_fill_then_fill_uses_a_fresh_attempt_session(tmp_path: Path) 
         assert driver.entry_outcomes[-1].kind is EntryOutcomeKind.FILLED
         assert runtime.lifecycle.session_id == "stream-w1:e1a2"
         ep = episode(runtime)
-        assert ep.state is S.FILLED and ep.attempts == 2 and ep.posts == 2
+        # Hold profile: the host commits the filled episode at once (no strategy turn).
+        assert ep.state is S.HOLD_COMMITTED and ep.attempts == 2 and ep.posts == 2
         assert venue.posts == ["BUY", "BUY"]
     finally:
         await close(runtime)
@@ -193,7 +194,7 @@ async def test_continuous_hold_detaches_and_allows_the_next_window(tmp_path: Pat
         runtime._summarize_window("w1", "promoted")
         bind(runtime, market("w2"))
         await runtime._consume_entry(entry(runtime), None)
-        assert episode(runtime, "w2").state is S.FILLED
+        assert episode(runtime, "w2").state is S.HOLD_COMMITTED  # committed by the host
         assert venue.posts == ["BUY", "BUY"]
         assert runtime.window_summaries[0]["window_id"] == "w1"
         assert runtime.window_summaries[0]["states"] == ["HOLD_COMMITTED"]

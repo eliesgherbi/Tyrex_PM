@@ -463,6 +463,22 @@ class SettlementLedger:
             count += 1
         return count
 
+    def unsold_shares(self, token_id: str) -> Decimal:
+        """Shares of ``token_id`` bought by recorded episodes and not sold since.
+
+        Committed, resolving and settled holdings count (a losing or not yet redeemed
+        holding stays in the wallet); a redeemed winner's tokens are burned, which only
+        lowers the balance below this figure.
+        """
+        total = Decimal(0)
+        for ep in self.episodes.values():
+            if ep.token_id != token_id or ep.state in (S.NO_DISPATCH, S.NO_FILL, S.SOLD):
+                continue
+            if ep.state in RESERVED_STATES or ep.state is None:
+                continue
+            total += max(Decimal(0), ep.net_shares)
+        return total
+
     def spent_since(self, since: datetime | None) -> Decimal:
         """Cash spent by fills recorded at or after ``since``.
 
