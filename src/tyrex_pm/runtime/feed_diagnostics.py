@@ -131,13 +131,15 @@ class EventLoopLagMonitor:
                 pass
 
     def recent_max_ms(self, now_s: float | None = None, window_s: float = 10.0) -> float:
-        now = time.monotonic() if now_s is None else now_s
+        now = time.perf_counter() if now_s is None else now_s
         recent = [lag for at, lag in self._samples if now - at <= window_s]
         return round(max(recent, default=0.0), 1)
 
     async def _run(self) -> None:
+        # perf_counter: time.monotonic ticks every ~15.6 ms on Windows, which would
+        # quantize the lag distribution into that step.
         while True:
-            expected = time.monotonic() + self.interval_s
+            expected = time.perf_counter() + self.interval_s
             await asyncio.sleep(self.interval_s)
-            now = time.monotonic()
+            now = time.perf_counter()
             self.record(max(0.0, (now - expected) * 1_000), now)
