@@ -181,6 +181,10 @@ class Dataset:
     runs: pd.DataFrame
     configs: pd.DataFrame  # one row per config_id: config (JSON), label, overrides
     stages: pd.DataFrame | None = None  # staged experiments: every stage and its status
+    # "fixed" | "staged" | "batch" (v3 verification/feature runs, case runs; one batch
+    # bundle per scenario folder) | "study" (preserved notebook 06 study bundles).
+    kind: str = "fixed"
+    root: Path | None = None
 
     @property
     def counts(self) -> dict:
@@ -205,20 +209,81 @@ class Dataset:
 _CACHE: dict[tuple[str, float], Dataset] = {}
 
 
+BATCH_PREFIX = "batch:"
+STUDY_PREFIX = "study:"
+# Experiment records whose results are batch bundles (one per scenario folder), not stages.
+BATCH_KINDS = frozenset({"v3_verification", "v3_feature", "v3_shared_account"})
+
+
+def _kind(exp_file: Path) -> str | None:
+    try:
+        return json.loads(exp_file.read_text(encoding="utf-8")).get("kind")
+    except (OSError, ValueError):
+        return None
+
+
+def batch_experiments() -> list[tuple[str, Path]]:
+    """v3 verification / feature / shared-account runs and case runs, with results."""
+    from .case_runs import CASE_RUNS
+    from .v3 import FEATURE_ROOT, SHARED_ROOT
+
+    found: list[tuple[str, Path]] = []
+    for root in (STAGED, FEATURE_ROOT, SHARED_ROOT):
+        for exp_file in sorted(root.glob("*/experiment.json")):
+            kind = _kind(exp_file)
+            if kind in BATCH_KINDS and _batch_dirs(exp_file.parent):
+                title = {"v3_verification": "v3 verification", "v3_feature": "v3 feature run",
+                         "v3_shared_account": "v3 shared account"}[kind]
+                found.append((f"{title} {exp_file.parent.name}", exp_file.parent))
+    for summaries in sorted(CASE_RUNS.glob("cases-*/summaries.parquet")):
+        found.append((f"Case run {summaries.parent.name}", summaries.parent))
+    return found
+
+
+def study_bundles() -> list[tuple[str, Path]]:
+    """Preserved notebook 06 study results (saved with the former study hooks)."""
+    from .case_runs import LEGACY_CASES
+
+    return [(f"Notebook 06 study {p.parent.name} (preserved)", p.parent)
+            for p in sorted(LEGACY_CASES.glob("*/experiment.json"))
+            if any(p.parent.glob("btc-*.json"))]
+
+
+def _relative_key(prefix: str, path: Path) -> str:
+    try:
+        return prefix + str(path.resolve().relative_to(REPO)).replace("\\", "/")
+    except ValueError:
+        return prefix + str(path)
+
+
 def available_datasets(root: Path = STAGED) -> list[tuple[str, str]]:
-    """(title, key) for the fixed datasets and every staged experiment found under root."""
+    """(title, key): fixed datasets, staged experiments, batch experiments (v3
+    verification/feature runs, case runs) and preserved notebook 06 study bundles."""
     out = [(spec.title, key) for key, spec in DATASETS.items()]
     for exp_file in sorted(root.glob("*/experiment.json")):
+        if _kind(exp_file) in BATCH_KINDS:
+            continue
         out.append(
             (f"Staged experiment {exp_file.parent.name}", STAGED_PREFIX + exp_file.parent.name)
         )
+    out += [(title, _relative_key(BATCH_PREFIX, path)) for title, path in batch_experiments()]
+    out += [(title, _relative_key(STUDY_PREFIX, path)) for title, path in study_bundles()]
     return out
+
+
+def _key_path(key: str, prefix: str) -> Path:
+    raw = Path(key[len(prefix):])
+    return raw if raw.is_absolute() else REPO / raw
 
 
 def load_dataset(key: str) -> Dataset:
     """Load a saved summaries file once per (path, modification time)."""
     if key.startswith(STAGED_PREFIX):
         return load_experiment(STAGED / key[len(STAGED_PREFIX) :])
+    if key.startswith(BATCH_PREFIX):
+        return load_batch(_key_path(key, BATCH_PREFIX))
+    if key.startswith(STUDY_PREFIX):
+        return load_study(_key_path(key, STUDY_PREFIX))
     spec = DATASETS[key]
     if not spec.path.exists():
         raise FileNotFoundError(f"{spec.title}: file not found at {spec.path}")
@@ -310,6 +375,205 @@ def load_experiment(path: Path | str) -> Dataset:
     )
     dataset = prepare(frame, spec, labels=labels)
     dataset.stages = stage_table
+    dataset.kind, dataset.root = "staged", path
+    _CACHE[cache_key] = dataset
+    return dataset
+
+
+def _batch_dirs(path: Path) -> list[Path]:
+    """Batch bundles of an experiment: one per scenario folder, or the folder itself."""
+    if (path / "summaries.parquet").exists():
+        return [path]
+    return sorted(p.parent for p in path.glob("*/summaries.parquet"))
+
+
+def _record_policy(record: dict) -> dict:
+    """Execution policy a whole experiment ran under (older tables lack the column).
+
+    The contract is stated explicitly so a regenerated timeline uses exactly it."""
+    policy = dict(record.get("execution_policy") or {})
+    contract = (record.get("replay") or {}).get("execution_contract")
+    if contract and "execution_contract" not in policy:
+        policy["execution_contract"] = contract
+    return policy
+
+
+def _candidate_labels(record: dict) -> dict[str, str]:
+    from .staged import config_id
+
+    labels = {}
+    for name, params in (record.get("candidates") or {}).items():
+        try:
+            labels[config_id(params)] = name
+        except Exception:  # noqa: BLE001 - a label only
+            continue
+    if record.get("kind") == "v3_feature" and record.get("parameters"):
+        try:
+            labels[config_id(record["parameters"])] = (
+                f"{record.get('candidate')} + {record.get('name')}")
+        except Exception:  # noqa: BLE001
+            pass
+    return labels
+
+
+def load_batch(path: Path | str) -> Dataset:
+    """A batch experiment: v3 verification / feature run (``experiment.json`` + scenario
+    folders) or a case run (``case_runs``). Every row keeps its exact parameters,
+    scenario, execution contract and reference-availability policy."""
+    path = Path(path)
+    dirs = _batch_dirs(path)
+    if not dirs:
+        raise FileNotFoundError(f"no summaries.parquet under {path}")
+    watched = [d / "summaries.parquet" for d in dirs]
+    cache_key = (str(path), sum(f.stat().st_mtime for f in watched))
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
+    exp_file = path / "experiment.json"
+    record = json.loads(exp_file.read_text(encoding="utf-8")) if exp_file.exists() else {}
+    fallback = json.dumps(_record_policy(record), sort_keys=True) if record else None
+    frames = []
+    for folder in dirs:
+        frame = pd.read_parquet(folder / "summaries.parquet")
+        frame["bundle_dir"] = str(folder)
+        if "execution_policy" not in frame:
+            frame["execution_policy"] = fallback
+        elif fallback is not None:
+            empty = frame["execution_policy"].isna() | frame["execution_policy"].isin(["", "{}"])
+            frame.loc[empty, "execution_policy"] = fallback
+        frames.append(frame)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        frame = pd.concat(frames, ignore_index=True)
+    labels = _candidate_labels(record)
+    case_run = not record and "tag" in frame
+    if case_run:
+        for (cfg_hash, tag) in frame[["config_hash", "tag"]].drop_duplicates().itertuples(
+                index=False):
+            parts = str(tag).split("--")
+            if len(parts) == 3:
+                labels[str(cfg_hash)] = f"{parts[1]} · {parts[2]}"
+    policies = sorted(set(frame["execution_policy"].dropna()))
+    kind = record.get("kind", "case_run" if case_run else "batch")
+    spec = DatasetSpec(
+        key=_relative_key(BATCH_PREFIX, path),
+        title=f"{kind.replace('_', ' ')} {path.name}",
+        path=path,
+        scope=(f"{kind.replace('_', ' ')}: {frame['market_id'].nunique()} windows, "
+               f"{frame['config_hash'].nunique()} configurations, scenarios "
+               f"{', '.join(sorted(frame['scenario_name'].unique()))}. Execution policy: "
+               + ("; ".join(policies) if policies else "replay defaults") + "."),
+        limitations=(
+            "Every timeline (saved or regenerated) uses this run's exact parameters, "
+            "scenario and execution policy; a regenerated one is compared with the saved "
+            "decision digest.",
+            *(("Case runs vary strategy settings (variance time policy, disagreement "
+               "veto) on deliberately selected development cases; not a parameter search "
+               "and not evaluation evidence.",) if case_run else ()),
+        ),
+        traces=("Saved per-decision timelines exist for this run"
+                if any((d / "decisions.parquet").exists() for d in dirs)
+                else "Only summary rows were saved; timelines must be regenerated")
+        + (" and indicator explanations (recording level explain)."
+           if (path / "explanations.parquet").exists() else "."),
+    )
+    dataset = prepare(frame, spec, labels=labels)
+    dataset.kind, dataset.root = "batch", path
+    _CACHE[cache_key] = dataset
+    return dataset
+
+
+STUDY_INDEX = REPO / "var" / "research" / "case_runs" / "study_index"
+
+
+def load_study(path: Path | str) -> Dataset:
+    """Preserved notebook 06 study bundles (read only; indexed once into a side cache).
+
+    Saved traces are the study's own decisions. A regenerated timeline replays the
+    variant as strategy settings on the production path (``case_runs.variant_overlays``),
+    which the migration check proved trading-equal (entries, fills, economics);
+    decision labels of the veto variant differ (study vetoed every evaluation)."""
+    from tyrex_pm.research.strategy_replay.results import decision_digest
+
+    from .batch import _reason_counts, execution_events
+    from .case_runs import variant_overlays
+    from .experiments import label as params_label
+    from .experiments import merge
+    from .staged import config_id
+    from .v3 import frozen_windows, load_candidates
+
+    path = Path(path)
+    exp_file = path / "experiment.json"
+    record = json.loads(exp_file.read_text(encoding="utf-8"))
+    bundles = sorted(path.glob("btc-*.json"))
+    stamp = hashlib.sha256(json.dumps(
+        [exp_file.stat().st_mtime, [(b.name, b.stat().st_size) for b in bundles]]
+    ).encode()).hexdigest()[:12]
+    cache_key = (str(path), stamp)
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
+    index = STUDY_INDEX / f"{path.name}-{stamp}.parquet"
+    if index.exists():
+        frame = pd.read_parquet(index)
+    else:
+        candidates = load_candidates()
+        variants = record.get("variants") or {}
+        threshold = float((variants.get("time_corrected_gap_veto") or {}).get(
+            "disagreement_pp", 9.0))
+        overlays = variant_overlays(threshold)
+        windows = frozen_windows().set_index("slug")
+        policy = {**{k: v for k, v in (record.get("execution") or {}).items()
+                     if k == "reference_availability"},
+                  "execution_contract": "replay_execution_contract_v1"}
+        rows = []
+        for bundle in bundles:
+            result = json.loads(bundle.read_text(encoding="utf-8"))
+            study = result["case_study"]
+            params = merge(candidates[study["candidate"]].parameters, overlays[study["variant"]])
+            slug = result["window"]["slug"]
+            rows.append({
+                **result["case_summary"],
+                "collection": str(windows.loc[slug].collection),
+                "market_id": result["window"]["market_id"],
+                "window_start_ns": result["window"]["window_start_ns"],
+                "config": params_label(params), "config_hash": config_id(params),
+                "scenario_name": result["scenario_name"], "tag": bundle.stem,
+                "candidate": study["candidate"], "variant": study["variant"],
+                "digest": decision_digest(result),
+                "execution_events": json.dumps(execution_events(result)),
+                "entry_reason_counts": json.dumps(_reason_counts(result)),
+                "execution_policy": json.dumps(policy, sort_keys=True),
+                "bundle_path": str(bundle), "trace_level": study.get("trace_level"),
+            })
+            del result
+        frame = pd.DataFrame(rows)
+        STUDY_INDEX.mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(index, index=False)
+    labels = {h: f"{c} · {v} (study)" for h, c, v in
+              frame[["config_hash", "candidate", "variant"]].drop_duplicates().itertuples(
+                  index=False)}
+    spec = DatasetSpec(
+        key=_relative_key(STUDY_PREFIX, path),
+        title=f"Notebook 06 study {path.name} (preserved)",
+        path=path,
+        scope=(f"Preserved notebook 06 study: {frame['market_id'].nunique()} deliberately "
+               f"selected development cases × {frame['candidate'].nunique()} candidates × "
+               f"{frame['variant'].nunique()} variants, scenario "
+               f"{', '.join(sorted(frame['scenario_name'].unique()))}, "
+               f"{(record.get('execution') or {}).get('reference_availability')}, "
+               "execution contract v1."),
+        limitations=(
+            "Recorded with the former study hooks (removed after the migration check). "
+            "Saved timelines show the study's decision labels: its veto marked every "
+            "evaluation over the gap BLOCKED, also outside the entry band.",
+            "A regenerated timeline replays the variant as strategy settings on the "
+            "production path: trading-equal by the migration check, decision labels may "
+            "differ; its digest is therefore compared and reported.",
+            "Development cases, not evaluation evidence.",
+        ),
+        traces="Saved per-decision study traces exist for every run.",
+    )
+    dataset = prepare(frame, spec, labels=labels)
+    dataset.kind, dataset.root = "study", path
     _CACHE[cache_key] = dataset
     return dataset
 
@@ -947,6 +1211,7 @@ class Explorer:
         self.out_scope, self.out_compare, self.out_summary = w.VBox(), w.VBox(), w.VBox()
         self.out_windows, self.out_detail, self.out_dist = w.VBox(), w.VBox(), w.VBox()
         self.out_timeline = w.VBox()
+        self.out_explain = w.VBox()
         self.w_warmup = w.Checkbox(value=False, description="Show 5-minute warm-up before open")
         self.w_strict = w.Checkbox(
             value=False, description="Strict lines: break at every skipped second"
@@ -999,7 +1264,9 @@ class Explorer:
                 w.HBox([self.w_warmup, self.w_strict]),
                 self.w_generate,
                 self.out_timeline,
-                head("7. Its profit/loss distribution"),
+                head("7. Indicator state behind its decisions (recorded explanations)"),
+                self.out_explain,
+                head("8. Its profit/loss distribution"),
                 self.out_dist,
             ]
         )
@@ -1021,6 +1288,7 @@ class Explorer:
                 self.out_windows,
                 self.out_detail,
                 self.out_timeline,
+                self.out_explain,
                 self.out_dist,
             ):
                 out.children = ()
@@ -1184,7 +1452,9 @@ class Explorer:
         if row is None:
             self.w_generate.layout.display = "none"
             self._show(self.out_timeline, text="No window selected.")
+            self._show(self.out_explain, text="No window selected.")
             return
+        self._render_explanations(row)
         key = self._trace_key(row)
         if key not in self._traces:
             self._traces[key] = timelines.get_trace(self.dataset, row)
@@ -1241,6 +1511,32 @@ class Explorer:
                 text += "<ul>" + "".join(f"<li>{n}</li>" for n in notes) + "</ul>"
         self._show(self.out_timeline, html=text)
 
+    def _render_explanations(self, row: pd.Series) -> None:
+        """Recorded indicator explanations of exactly this run. Never replays."""
+        try:
+            frame = timelines.explanations_for(self.dataset, row)
+        except Exception as exc:  # noqa: BLE001 - shown, never fatal
+            self._show(self.out_explain, text=f"Explanations unreadable: {exc}")
+            return
+        if frame.empty:
+            self._show(
+                self.out_explain,
+                html="No indicator explanations were recorded for this run. They exist only "
+                "for runs made with <code>recording: {level: explain}</code> (case runs "
+                "launched from notebook 06, observation and live runs at that level).",
+            )
+            return
+        table = timelines.explanation_table(frame)
+        entries = table[table["action"].eq("ENTER")]
+        note = (
+            f"{frame['at_ns'].nunique()} explained evaluations (entry band plus context "
+            "before entries, vetoes and data faults). Rows marked <i>context_for</i> are "
+            "the evaluations preceding that actionable one. Values are copies taken at "
+            "decision time, before the estimator moved on."
+        )
+        shown = pd.concat([entries, table]).drop_duplicates().head(60)
+        self._show(self.out_explain, html=note, obj=shown)
+
     def _on_generate(self) -> None:
         row = self._selected_row()
         if row is None:
@@ -1268,3 +1564,13 @@ class Explorer:
 
     def _ipython_display_(self) -> None:
         self._display(self.view)
+
+
+def dataset_key(path: Path | str) -> str:
+    """Explorer dataset key for a result folder: batch experiment, case run or study."""
+    path = Path(path)
+    if (path / "experiment.json").exists() and any(path.glob("btc-*.json")):
+        return _relative_key(STUDY_PREFIX, path)
+    if path.parent == STAGED and _kind(path / "experiment.json") not in BATCH_KINDS:
+        return STAGED_PREFIX + path.name
+    return _relative_key(BATCH_PREFIX, path)

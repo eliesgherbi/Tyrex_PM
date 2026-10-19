@@ -95,11 +95,49 @@ def _is_staged(dataset) -> bool:
     return getattr(dataset, "stages", None) is not None
 
 
+def _kind(dataset) -> str:
+    return getattr(dataset, "kind", "fixed")
+
+
+def _bundle_dir(dataset, row: pd.Series) -> Path:
+    """Batch experiments: the run's own scenario folder (or the experiment folder)."""
+    folder = _row_value(row, "bundle_dir")
+    return Path(folder) if folder else Path(dataset.spec.path)
+
+
 def decisions_file(dataset, row: pd.Series) -> Path:
     """The decisions file that belongs to the selected run's own bundle."""
     if _is_staged(dataset):
         return Path(dataset.spec.path) / f"stage_{row['stage']}" / "decisions.parquet"
+    if _kind(dataset) == "batch":
+        return _bundle_dir(dataset, row) / "decisions.parquet"
     return Path(dataset.spec.path).parent / "decisions.parquet"
+
+
+def load_study_trace(row: pd.Series) -> Trace | None:
+    """A preserved notebook 06 study bundle's own decisions (saved, not regenerated)."""
+    bundle = _row_value(row, "bundle_path")
+    if not bundle or not Path(bundle).exists():
+        return None
+    result = json.loads(Path(bundle).read_text(encoding="utf-8"))
+    decisions = result.get("decisions") or []
+    if not decisions:
+        return None
+    frame = pd.DataFrame([{k: d.get(k) for k in TRACE_COLUMNS} for d in decisions])
+    frame["window_end_ns"] = result["window"]["window_end_ns"]
+    for column in frame.columns:
+        if column not in TEXT_COLUMNS:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    orders, events = saved_execution(row)
+    return Trace(
+        frame=frame.sort_values("at_ns").reset_index(drop=True),
+        source="original",
+        provenance=f"saved study trace ({Path(bundle).parent.name}/{Path(bundle).name}; "
+        "recorded with the former study hooks)",
+        orders=orders,
+        events=events,
+        has_event_times=bool(events),
+    )
 
 
 def saved_execution(row: pd.Series) -> tuple[list[dict], list[dict]]:
@@ -111,6 +149,8 @@ def saved_execution(row: pd.Series) -> tuple[list[dict], list[dict]]:
 
 
 def load_original(dataset, row: pd.Series) -> Trace | None:
+    if _kind(dataset) == "study":
+        return load_study_trace(row)
     path = decisions_file(dataset, row)
     if not path.exists():
         return None
@@ -186,6 +226,9 @@ def available_windows(dataset, runs: pd.DataFrame, root: Path = TIMELINE_CACHE) 
         return set()
     first = runs.iloc[0]
     found: set[str] = set()
+    if _kind(dataset) == "study":
+        return {r["market_id"] for _, r in runs.iterrows()
+                if _row_value(r, "trace_level") in ("decisions", "full")}
     path = decisions_file(dataset, first)
     if path.exists():
         filters = [("scenario_name", "=", first["scenario_name"]), ("config", "=", first["config"])]
@@ -204,11 +247,22 @@ def get_trace(dataset, row: pd.Series, root: Path = TIMELINE_CACHE) -> Trace | N
 # --------------------------------------------------------------------------- replay
 
 
+def _manifest_path(dataset, row: pd.Series) -> Path:
+    if _kind(dataset) == "batch":
+        return _bundle_dir(dataset, row) / "manifest.json"
+    return Path(dataset.spec.path).parent / "manifest.json"
+
+
 def _saved_scenario(dataset, row: pd.Series) -> dict | None:
     if _is_staged(dataset):
         path = Path(dataset.spec.path) / f"stage_{row['stage']}" / "stage.json"
         return json.loads(path.read_text(encoding="utf-8")).get("scenario_effective")
-    manifest = Path(dataset.spec.path).parent / "manifest.json"
+    if _kind(dataset) == "study":
+        bundle = _row_value(row, "bundle_path")
+        if not bundle or not Path(bundle).exists():
+            return None
+        return json.loads(Path(bundle).read_text(encoding="utf-8")).get("scenario")
+    manifest = _manifest_path(dataset, row)
     if manifest.exists():
         return (
             json.loads(manifest.read_text(encoding="utf-8"))
@@ -222,7 +276,12 @@ def _saved_cache_key(dataset, row: pd.Series) -> str | None:
     if _is_staged(dataset):
         record = json.loads((Path(dataset.spec.path) / "experiment.json").read_text("utf-8"))
         return record.get("cache_keys", {}).get(row["market_id"])
-    manifest = Path(dataset.spec.path).parent / "manifest.json"
+    if _kind(dataset) == "study":
+        record = json.loads((Path(dataset.spec.path) / "experiment.json").read_text("utf-8"))
+        slug = _row_value(row, "slug")
+        return next((s["cache_key"] for s in record.get("sources", [])
+                     if s.get("slug") == slug), None)
+    manifest = _manifest_path(dataset, row)
     if manifest.exists():
         keys = json.loads(manifest.read_text(encoding="utf-8")).get("cache_keys", {})
         return keys.get(f"{row['collection']}:{row['market_id']}")
@@ -288,6 +347,13 @@ def replay_check(dataset, row: pd.Series) -> tuple[dict | None, list[str], list[
         notes.append("data identity was not recorded with this run; current recording used")
     elif saved_key != _current_cache_key(row["collection"], row["market_id"]):
         problems.append("the recorded window data changed since the run (cache key differs)")
+    if _kind(dataset) == "study":
+        notes.append("study variant replayed as strategy settings on the production path "
+                     "(trading-equal by the migration check; decision labels of the veto "
+                     "variant differ, so the digest comparison is expected to differ there)")
+    policy = _row_policy(row)
+    notes.append("execution policy: " + (json.dumps(policy, sort_keys=True) if policy
+                                         else "replay defaults (none recorded)"))
     saved_sc = _saved_scenario(dataset, row)
     current_sc = _current_scenario(row["scenario_name"])
     if saved_sc is None:
@@ -357,6 +423,7 @@ def _save(row: pd.Series, params: dict, notes: list[str], payload: dict, root: P
         "parameters": params,
         "decision_digest": payload["decision_digest"],
         "saved_digest_at_generation": _row_value(row, "digest"),
+        "execution_policy": _row_policy(row),
         "config_hash_replayed": payload["config_hash"],
         "notes": notes,
         "clock_correction": payload["clock_correction"],
@@ -459,6 +526,44 @@ def generate_many(
                     future.cancel()  # queued windows dropped; saved ones are kept
                 raise
     return pd.DataFrame(report)
+
+
+def explanations_for(dataset, row: pd.Series) -> pd.DataFrame:
+    """Indicator explanations recorded for exactly this run (recording level explain).
+
+    Only batch experiments run with ``recording: {level: explain}`` have them (case runs
+    write ``explanations.parquet``). Never replays."""
+    if _kind(dataset) != "batch" or dataset.root is None:
+        return pd.DataFrame()
+    path = Path(dataset.root) / "explanations.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    frame = pd.read_parquet(path, filters=[("market_id", "=", row["market_id"]),
+                                           ("scenario_name", "=", row["scenario_name"])])
+    if "tag" in frame and _row_value(row, "tag"):
+        frame = frame[frame["tag"].eq(row["tag"])]
+    return frame.sort_values("at_ns").reset_index(drop=True)
+
+
+def explanation_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per explained evaluation and indicator: the calculated state behind it."""
+    rows = []
+    for item in frame.itertuples():
+        indicators = json.loads(item.indicators) if isinstance(item.indicators, str) else {}
+        for name, state in (indicators or {}).items():
+            rows.append({
+                "time_utc": _utc(item.at_ns).strftime("%H:%M:%S"),
+                "tau_s": item.tau_s, "action": item.action, "reason": item.reason,
+                "context_for": None if pd.isna(getattr(item, "context_for_at_ns", None))
+                else _utc(item.context_for_at_ns).strftime("%H:%M:%S"),
+                "indicator": name.split(":")[-1][:24],
+                "sigma": state.get("sigma"), "variance": state.get("variance"),
+                "units": state.get("variance_units"), "last_return": state.get("last_return"),
+                "last_dt_s": state.get("last_dt_s"), "samples": state.get("sample_count"),
+                "tape_age_ms": state.get("tape_age_ms"),
+                "jump_guard": state.get("jump_guard_tripped"),
+            })
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- curves
