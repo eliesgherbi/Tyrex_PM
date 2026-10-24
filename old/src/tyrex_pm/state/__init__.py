@@ -1,1 +1,0 @@
-"""Explicit state stores."""
