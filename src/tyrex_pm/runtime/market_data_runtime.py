@@ -452,6 +452,7 @@ async def run_market_data_runtime(
                 return
         elif fact is None or not scheduler.should_evaluate(fact, mono_s=mono):
             return
+        _project_active_quotes()
         if evaluation_ready is not None and not evaluation_ready():
             af = feed_supervisor.active
             diagnostics = {} if readiness_diagnostics is None else readiness_diagnostics()
@@ -721,7 +722,6 @@ async def run_market_data_runtime(
 
     def on_book_delta(e: BookDeltaReceived) -> None:
         counts["clob"] += 1
-        _project_active_quotes()
         if on_public_fact is not None:
             on_public_fact(F.POLYMARKET_BOOKS, runtime)
         _maybe_evaluate(F.POLYMARKET_BOOKS)

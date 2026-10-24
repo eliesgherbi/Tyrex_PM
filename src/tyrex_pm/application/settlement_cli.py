@@ -65,7 +65,7 @@ def add_parser(commands: Any) -> None:
 
 
 def _ledger(config: Any) -> SettlementLedger:
-    return SettlementLedger(config.settlement.ledger_path)
+    return SettlementLedger(config.settlement.ledger_path, read_only=True)
 
 
 def _status(ledger: SettlementLedger, config: Any) -> dict:
@@ -74,6 +74,8 @@ def _status(ledger: SettlementLedger, config: Any) -> dict:
     return {
         "ledger": str(config.settlement.ledger_path),
         "torn_tail_skipped": ledger.torn_tail_skipped,
+        "snapshot_at": ledger.snapshot_at,
+        "through_sequence": ledger._seq,
         "episodes": [
             {
                 "episode_id": e.episode_id,
@@ -126,8 +128,7 @@ def _rpc_url(dotenv: Path) -> str:
     return url
 
 
-def _discover(config: Any, args: argparse.Namespace) -> int:
-    from tyrex_pm.execution.process_lock import StateDirectoryBusy, StateDirectoryLock
+def _discover(config: Any, args: argparse.Namespace, ledger: SettlementLedger) -> int:
     from tyrex_pm.execution.settlement.chain import SettlementChainReader
     from tyrex_pm.execution.settlement.redemption_discovery import (
         DiscoveryPolicy,
@@ -138,31 +139,19 @@ def _discover(config: Any, args: argparse.Namespace) -> int:
     if not wallet:
         print("settlement.redemption_wallet is not configured", file=sys.stderr)
         return 2
-    lock = StateDirectoryLock(config.state_directory)
-    try:
-        lock.acquire()
-    except StateDirectoryBusy:
-        print("a running runner owns this ledger; its settlement worker discovers "
-              "redemptions automatically (see run events REDEMPTION_DISCOVERED)",
-              file=sys.stderr)
-        return 3
-    try:
-        ledger = _ledger(config)
-        reader = SettlementChainReader(_rpc_url(args.dotenv), timeout_s=15.0, attempts=4,
-                                       retry_delay_s=1.0)
-        manager = ResolutionManager(ledger, payout_reader=_no_reader, wallet=wallet)
-        options = config.settlement.redemption_discovery
-        discovery = RedemptionDiscovery(
-            manager, reader, wallet=wallet,
-            state_path=config.settlement.ledger_path.parent / "redemption_discovery.json",
-            policy=DiscoveryPolicy(interval_s=options.interval_s,
-                                   max_blocks_per_pass=options.max_blocks_per_pass,
-                                   max_log_calls_per_pass=options.max_log_calls_per_pass))
-        report = asyncio.run(discovery.run_once(apply=args.apply, force=args.force))
-        print(json.dumps(report, indent=1, default=str))
-        return 0
-    finally:
-        lock.release()
+    reader = SettlementChainReader(_rpc_url(args.dotenv), timeout_s=15.0, attempts=4,
+                                   retry_delay_s=1.0)
+    manager = ResolutionManager(ledger, payout_reader=_no_reader, wallet=wallet)
+    options = config.settlement.redemption_discovery
+    discovery = RedemptionDiscovery(
+        manager, reader, wallet=wallet,
+        state_path=config.settlement.ledger_path.parent / "redemption_discovery.json",
+        policy=DiscoveryPolicy(interval_s=options.interval_s,
+                               max_blocks_per_pass=options.max_blocks_per_pass,
+                               max_log_calls_per_pass=options.max_log_calls_per_pass))
+    report = asyncio.run(discovery.run_once(apply=args.apply, force=args.force))
+    print(json.dumps(report, indent=1, default=str))
+    return 0
 
 
 def _chain_manager(ledger: SettlementLedger, config: Any, dotenv: Path) -> ResolutionManager:
@@ -199,11 +188,29 @@ def run(args: argparse.Namespace) -> int:
         print("config is not a hold_to_resolution profile", file=sys.stderr)
         return 2
     command = args.settlement_command
+    from tyrex_pm.execution.process_lock import LedgerWriter, StateDirectoryBusy
+
     if command == "repair-attempt-ownership":
         from tyrex_pm.application import ownership_repair
 
-        return ownership_repair.run(args)
-    ledger = _ledger(config)
+        try:
+            return ownership_repair.run(args)
+        except StateDirectoryBusy as exc:
+            print(f"settlement writer busy: {exc}", file=sys.stderr)
+            return 3
+
+    if command in ("status", "worklist"):
+        return _run_command(config, args, _ledger(config))
+    try:
+        with LedgerWriter(config.settlement.ledger_path) as writer:
+            return _run_command(config, args, writer.ledger())
+    except StateDirectoryBusy as exc:
+        print(f"settlement writer busy: {exc}; stop the owning runner first", file=sys.stderr)
+        return 3
+
+
+def _run_command(config: Any, args: argparse.Namespace, ledger: SettlementLedger) -> int:
+    command = args.settlement_command
     if command == "status":
         print(json.dumps(_status(ledger, config), indent=1))
         return 0
@@ -235,7 +242,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"`{command}` reads Polygon; re-run with --connect-chain", file=sys.stderr)
         return 2
     if command == "discover-redemptions":
-        return _discover(config, args)
+        return _discover(config, args, ledger)
     manager = _chain_manager(ledger, config, args.dotenv)
     if command == "reconcile":
         report = asyncio.run(manager.reconcile())

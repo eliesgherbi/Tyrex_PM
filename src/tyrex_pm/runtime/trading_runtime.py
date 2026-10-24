@@ -93,7 +93,7 @@ from tyrex_pm.runtime.run_config import (
     max_clock_uncertainty_ms,
     strategy_entry_cutoff_s,
 )
-from tyrex_pm.runtime.settlement_hooks import SettlementHooks
+from tyrex_pm.runtime.settlement_hooks import SettlementHooks, startup_exposure_decision
 from tyrex_pm.strategies.context import (
     DecisionContext,
     ReferenceFacts,
@@ -265,6 +265,10 @@ class TradingRuntime:
     startup_report: dict[str, Any] | None = None
     recovery_sessions: list[dict[str, Any]] = field(default_factory=list)
     _state_lock: Any = None
+    _ledger_writer: Any = None
+    _trading_evaluation_seq: int = 0
+    _capture_seeded_windows: dict = field(default_factory=dict)
+    _captured_account_refs: dict = field(default_factory=dict)
     _recovery_binding_id: str | None = None
     _recovery_book: Any = None
     _assessment_valid_until: datetime | None = None
@@ -309,11 +313,15 @@ class TradingRuntime:
         live_requested: bool = True,
     ) -> "TradingRuntime":
         output_directory.mkdir(parents=True, exist_ok=True)
-        from tyrex_pm.execution.process_lock import StateDirectoryLock
+        from tyrex_pm.execution.process_lock import LedgerWriter, StateDirectoryLock
 
         state_lock = StateDirectoryLock(config.state_directory)
         state_lock.acquire()
+        ledger_writer = None
         try:
+            if config.settlement is not None:
+                ledger_writer = LedgerWriter(config.settlement.ledger_path)
+                ledger_writer.acquire()
             return await cls._create_locked(
                 config=config,
                 output_directory=output_directory,
@@ -322,8 +330,11 @@ class TradingRuntime:
                 run_instance_id=run_instance_id,
                 live_requested=live_requested,
                 state_lock=state_lock,
+                ledger_writer=ledger_writer,
             )
         except BaseException:
+            if ledger_writer is not None:
+                ledger_writer.release()
             state_lock.release()
             raise
 
@@ -338,6 +349,7 @@ class TradingRuntime:
         run_instance_id: str | None,
         live_requested: bool,
         state_lock: Any,
+        ledger_writer: Any = None,
     ) -> "TradingRuntime":
         active_gateway = gateway or await PolymarketAsyncGateway.from_env(
             env, isolated_reads=config.account.isolated_read_clients
@@ -514,7 +526,8 @@ class TradingRuntime:
             ),
         )
         holder["runtime"] = result
-        result.settlement_hooks = SettlementHooks.from_config(config)
+        result.settlement_hooks = SettlementHooks.from_config(config, ledger_writer=ledger_writer)
+        result._ledger_writer = ledger_writer
         result.polygon_rpc_url = env.get("TYREX_POLYGON_RPC_URL") or os.environ.get(
             "TYREX_POLYGON_RPC_URL"
         )
@@ -530,6 +543,7 @@ class TradingRuntime:
         active_gateway.fill_context = result.lifecycle.fill_context
         final_gate.entry_cutoff_s = effective_entry_cutoff_s(config)
         final_gate.entry_tau_s = result._current_entry_tau_s
+        final_gate.strategy_sell_check = result._value_exit_check
         final_gate.startup_buy_block = result.startup_buy_block
         final_gate.note_stream_gap = result.note_startup_stream_gap
         result._state_lock = state_lock
@@ -560,6 +574,8 @@ class TradingRuntime:
 
     def on_feed_supervisor(self, supervisor: Any) -> None:
         self.feed_supervisor = supervisor
+        if getattr(supervisor, "store", None) is not None:
+            supervisor.store.rest_applied_sink = self._capture_rest_book
         self.run_recorder.record("PUBLIC_FEED_SUPERVISOR_READY", {})
 
     def on_active_market(self, market_session: Any) -> None:
@@ -887,11 +903,68 @@ class TradingRuntime:
             residual = getattr(self, "_shutdown_residual_hold", None)
             if residual is not None and await residual(reason):
                 return
+            if await self._preserve_uncommitted_hold(reason):
+                return
             await self.lifecycle.drain_open_session(
                 reason,
                 min_order_size=self._held_min_order_size(),
                 last_bid=self._held_best_bid(self.active_market),
             )
+
+    async def _preserve_uncommitted_hold(self, reason: str) -> bool:
+        """Do not sell a filled settlement episode just because the process is stopping.
+
+        A proven hold policy is committed if its prerequisites still hold, and is
+        otherwise left in place. A missing or conflicting policy is also left in
+        place. A managed-exit episode keeps the documented shutdown flatten.
+        """
+        hooks = getattr(self, "settlement_hooks", None)
+        market = getattr(self, "active_market", None)
+        if hooks is None or market is None or not hasattr(hooks, "current_episode"):
+            return False
+        episode = hooks.current_episode(market.window_id)
+        if episode is None:
+            return False
+        state = getattr(episode, "state", None)
+        state_value = state.value if hasattr(state, "value") else state
+        if state_value not in ("FILLED", "HOLD_REQUESTED"):
+            return False
+        policy = getattr(episode, "lifecycle_policy", None)
+        if policy != "hold_to_resolution" and not getattr(self, "_recovery_policy_unresolved", False):
+            return False
+        if policy == "hold_to_resolution" and not getattr(self, "_recovery_policy_unresolved", False):
+            await self._commit_hold(market.window_id, source="shutdown_recovery")
+        preserved = _hold_committed(self)
+        if preserved:
+            await self._cancel_for_hold()
+        self.run_recorder.record(
+            "SHUTDOWN_HOLD_PRESERVED" if preserved else "SHUTDOWN_HOLD_UNCOMMITTED",
+            {"reason": reason, "policy": policy},
+        )
+        return True
+
+    def _driver_episode_started_at(self, window_id: str) -> str | None:
+        driver = self._driver_for(window_id)
+        state = getattr(driver, "state", None)
+        return None if state is None else getattr(state, "episode_started_at", None)
+
+    def _retry_clock_payload(self) -> dict[str, Any]:
+        window_id = None if self.active_market is None else self.active_market.window_id
+        driver = self._driver_for(window_id)
+        state = getattr(driver, "state", None)
+        phase = getattr(state, "phase", None)
+        if getattr(phase, "value", phase) != "REARMABLE":
+            return {}
+        deadline = getattr(state, "next_attempt_not_before", None)
+        return {
+            "entry_started_at": getattr(state, "episode_started_at", None),
+            "entry_side": getattr(state, "entry_side", None),
+            "retry_clock": "none" if not deadline else "deadline",
+            "retry_not_before": deadline,
+            "consecutive_service_failures": int(
+                getattr(state, "consecutive_service_failures", 0) or 0
+            ),
+        }
 
     def _market_data_ready(self) -> bool:
         feed = None if self.feed_supervisor is None else self.feed_supervisor.active
@@ -1178,11 +1251,42 @@ class TradingRuntime:
                 self.capabilities.set_blocker("PRIOR_SESSION_RECONCILIATION_INCOMPLETE")
             elif reconciled.has_exposure and self.selected_instrument is not None:
                 self.capabilities.selected_token_sellable = reconciled.sellable_shares > 0
-                self.capabilities.set_blocker(
-                    "STARTUP_ACTION_REQUIRED",
-                    "owned exposure remains after startup assessment",
+                episode = (
+                    None
+                    if self.settlement_hooks is None or self.active_market is None
+                    else self.settlement_hooks.current_episode(self.active_market.window_id)
                 )
-                self.stop_requested = True
+                episode_state = None if episode is None or episode.state is None else episode.state.value
+                decision = startup_exposure_decision(
+                    has_exposure=True,
+                    episode_state=episode_state,
+                    stored_policy=None if episode is None else episode.lifecycle_policy,
+                    loaded_policy=getattr(self.config, "lifecycle_mode", None),
+                )
+                self._recovery_policy_unresolved = decision == "block"
+                self.run_recorder.record(
+                    "SETTLEMENT_EXPOSURE_RECOVERED",
+                    {
+                        "action": decision,
+                        "episode_state": episode_state,
+                        "stored_policy": None if episode is None else episode.lifecycle_policy,
+                    },
+                )
+                if decision == "commit_hold" and self.active_market is not None:
+                    self._pending_hold_commit = self.active_market.window_id
+                elif decision == "track_hold" and self.continuous and self.active_market is not None:
+                    self._pending_detach = self.active_market.window_id
+                elif decision == "block":
+                    self.capabilities.set_blocker(
+                        "RECOVERY_POLICY_UNRESOLVED",
+                        "original lifecycle policy is missing or disagrees with the loaded configuration",
+                    )
+                elif decision == "stop":
+                    self.capabilities.set_blocker(
+                        "STARTUP_ACTION_REQUIRED",
+                        "owned exposure remains after startup assessment",
+                    )
+                    self.stop_requested = True
             elif reconciled.has_unresolved_mutation_attempt:
                 await self.lifecycle.mark_manual("ambiguous_prior_submission")
                 self.capabilities.set_blocker("AMBIGUOUS_PRIOR_SUBMISSION")
@@ -1239,6 +1343,8 @@ class TradingRuntime:
                 strategy_fee_curve=self._strategy_fee_curve(),
                 episode_seq=episode_seq,
                 attempt_seq=attempt_seq,
+                lifecycle_policy=getattr(self.config, "lifecycle_mode", None),
+                entry_started_at=self._driver_episode_started_at(session.window_id),
                 available_collateral=collateral,
                 collateral_read_started_at=None
                 if account_state is None
@@ -1319,6 +1425,7 @@ class TradingRuntime:
         )
         caps = self.capabilities.snapshot(exposed=exposed)
         context = DecisionContext(
+            monotonic_ns=time.monotonic_ns(),
             run_id=RunId(self.config.run_name),
             snapshot=ready.snapshot,
             target_notional=self.config.risk.target_notional,
@@ -1347,6 +1454,44 @@ class TradingRuntime:
         )
         graph = getattr(market_runtime, "indicator_graph", None)
         features = graph.snapshot() if graph is not None else FeatureBundle()
+        capture = getattr(getattr(self, "decision_recording", None), "raw", None)
+        if capture is not None:
+            from tyrex_pm.recording.trading import context_input
+
+            window_id = self.active_market.window_id
+            if window_id not in self._capture_seeded_windows:
+                driver = self._driver_for(window_id)
+                seed = getattr(driver, "persistence_slice", None)
+                capture.event("strategy_feedback", "feedback", {
+                    "window_id": window_id, "kind": "seed",
+                    "payload": {} if seed is None else seed()})
+                self._capture_seeded_windows[window_id] = True
+                if len(self._capture_seeded_windows) > 64:
+                    self._capture_seeded_windows.pop(next(iter(self._capture_seeded_windows)))
+            self._trading_evaluation_seq += 1
+            session_id = self.lifecycle.session_id
+            account = self.account_state_authority.current(
+                market.condition_id or market.market_id.value)
+            account_ref = None
+            if account is not None:
+                account_ref = (f"{account.market_id}:{account.observed_monotonic_s}:"
+                               f"{account.status.value}:{account.read_attempt}")
+                if account_ref not in self._captured_account_refs:
+                    capture.event("account_snapshot", "account", {
+                        "account_ref": account_ref, "snapshot": account})
+                    self._captured_account_refs[account_ref] = True
+                    if len(self._captured_account_refs) > 64:
+                        self._captured_account_refs.pop(next(iter(self._captured_account_refs)))
+            capture.event("trading_context", "context", {
+                "evaluation_id": self._trading_evaluation_seq,
+                "window_id": self.active_market.window_id,
+                "context": context_input(context),
+                "monotonic_ns": self.time_authority.view().monotonic_ns,
+                "session_id": session_id,
+                "account_ref": account_ref,
+                "applied_event_id": self.coordinator.applied_event_ids.get(session_id),
+                "ledger_sequence": (None if self.settlement_hooks is None
+                                    else self.settlement_hooks.ledger._seq)})
         result = ready.binding.evaluate(
             market_snapshot=ready.snapshot,
             causation_id=ready.snapshot.causation_id,
@@ -1355,6 +1500,16 @@ class TradingRuntime:
             context=context,
             features=features,
         )
+        if capture is not None:
+            from tyrex_pm.runtime.decision_records import evaluated_record
+
+            at_ns, end_ns = self._recording_times(ready, ready.session)
+            capture.event("trading_decision", "decision", {
+                "evaluation_id": self._trading_evaluation_seq,
+                "window_id": self.active_market.window_id,
+                "decision": evaluated_record(ready, result, at_ns=at_ns, window_end_ns=end_ns),
+                "intents": [{"id": i.intent_id.value, "kind": type(i).__name__,
+                             "reason": i.reason_code} for i in result.intents]})
         self.capabilities.model_ready = result.eligibility.model_ready
         decision_evidence = dict(result.decision.evidence)
         if getattr(self, "decision_recording", None) is not None:
@@ -1398,11 +1553,19 @@ class TradingRuntime:
         return [{"kind": "evaluated", **decision_record}]
 
     # -- decision recording (recording.host) ---------------------------------------
+
+    def _capture_rest_book(self, book, metadata) -> None:
+        capture = getattr(getattr(self, "decision_recording", None), "raw", None)
+        if capture is not None:
+            capture.message("applied_rest_book", {"book": book, **metadata},
+                            connection=f"{metadata['binding_id']}:{metadata['connection_epoch']}",
+                            transport="collector_event", body_kind="host_event")
     def _open_recording(self) -> None:
         settings = getattr(self.config, "recording", None)
         if settings is None:
             return
         from tyrex_pm.recording.host import open_decision_recording
+        from tyrex_pm.recording.raw import _jsonable
         from tyrex_pm.strategies.registry import get_strategy_plugin
 
         try:
@@ -1424,6 +1587,13 @@ class TradingRuntime:
                 manifest={
                     "configured_run_name": self.config.run_name,
                     "strategy_kind": self.config.strategy_kind,
+                    "strategy_parameters": _jsonable(self.config.strategy),
+                    "book_reconstruction": "venue_top_v1",
+                    "trading_capture_version": "recorded_execution_v1",
+                    "risk_policy": _jsonable(self.config.risk),
+                    "account_policy": _jsonable(self.config.account),
+                    "settlement_limits": (None if self.config.settlement is None else
+                                          _jsonable(self.config.settlement.run_limits)),
                     "reproducibility": repro,
                     "clock_policy": {
                         "max_uncertainty_ms": max_clock_uncertainty_ms(self.config),
@@ -1464,6 +1634,13 @@ class TradingRuntime:
 
         session = ready.session or getattr(market_runtime, "active", None)
         at_ns, end_ns = self._recording_times(ready, session)
+        capture = getattr(recording, "raw", None)
+        if capture is not None:
+            self._trading_evaluation_seq += 1
+            capture.event("trading_skipped", "skipped", {
+                "evaluation_id": self._trading_evaluation_seq,
+                "window_id": None if session is None else session.window_id,
+                "decision": skipped_record(ready, at_ns=at_ns, window_end_ns=end_ns)})
         recording.on_skipped(
             ready, skipped_record(ready, at_ns=at_ns, window_end_ns=end_ns),
             window_id=None if session is None else session.window_id,
@@ -1547,6 +1724,13 @@ class TradingRuntime:
         if recording is None:
             return
         try:
+            if recording.raw is not None:
+                from tyrex_pm.recording.trading import export_evidence
+
+                try:
+                    export_evidence(self.config, self.output_directory, self.run_instance_id)
+                except Exception as exc:  # noqa: BLE001 - still drain optional recording
+                    self.run_recorder.record("EXECUTION_EXPORT_FAILED", {"error": str(exc)})
             status = recording.close()
         except Exception as exc:  # noqa: BLE001
             status = {"failed": True, "error": f"{type(exc).__name__}: {exc}"}
@@ -1642,6 +1826,8 @@ class TradingRuntime:
         self.known_dust_residuals.append(residual)
 
     def _maybe_arm_protection(self, market_runtime: ZGapMarketRuntime) -> None:
+        if getattr(self, "_recovery_policy_unresolved", False):
+            return
         spec = self.config.protection
         state = self.lifecycle.state
         if (
@@ -1975,6 +2161,16 @@ class TradingRuntime:
         handler = getattr(driver, "on_entry_outcome", None)
         if handler is not None:
             handler(outcome)
+            self._capture_feedback(window_id, "entry", outcome)
+
+    def _capture_feedback(self, window_id, kind, payload) -> None:
+        capture = getattr(getattr(self, "decision_recording", None), "raw", None)
+        if capture is not None:
+            from tyrex_pm.recording.trading import feedback_input
+
+            capture.event("strategy_feedback", "feedback", {
+                "window_id": window_id, "kind": kind,
+                "payload": payload if isinstance(payload, dict) else feedback_input(payload)})
 
     def _not_sent(self, intent: EnterIntent, reason: str, *, reasons: tuple[str, ...] = ()) -> None:
         retry_class = classify_reasons(reasons) if reasons else classify_reason(reason)
@@ -2142,6 +2338,7 @@ class TradingRuntime:
             )
             state = await self.lifecycle.reconcile()
         outcome = self._entry_outcome_from_state(intent, state)
+        self._deliver_entry_outcome(intent, outcome, state)
         if getattr(self, "settlement_hooks", None) is not None and self.active_market is not None:
             episode_seq = self._intent_episode(intent)[0]
             settlement_outcome = self.settlement_hooks.after_entry(
@@ -2151,9 +2348,9 @@ class TradingRuntime:
                 episode_seq=episode_seq,
                 posted=outcome.posted if self._multi_attempt() else None,
                 prepare_failed=outcome.prepare_failed,
+                **self._retry_clock_payload(),
             )
             self.run_recorder.record("SETTLEMENT_ENTRY_OUTCOME", {"outcome": settlement_outcome})
-        self._deliver_entry_outcome(intent, outcome, state)
         if outcome.exposure and self._host_commits_hold() and self.active_market is not None:
             # hold_to_resolution: commit as soon as the fill is owned, not on the next
             # strategy evaluation (an account refresh in between must not leave it open).
@@ -2191,6 +2388,16 @@ class TradingRuntime:
     async def _consume_exit(
         self, intent: ExitIntent | FlattenIntent, candidate_monotonic_ns: int | None
     ) -> None:
+        if getattr(self, "_recovery_policy_unresolved", False):
+            self.run_recorder.record(
+                "EXIT_INTENT_DROPPED",
+                {
+                    "intent_id": intent.intent_id.value,
+                    "reason_code": intent.reason_code,
+                    "dropped": "RECOVERY_POLICY_UNRESOLVED",
+                },
+            )
+            return
         window_id = None if self.active_market is None else self.active_market.window_id
         state = self.lifecycle.state
         in_flight = None
@@ -2283,6 +2490,27 @@ class TradingRuntime:
             else:
                 self.stop_requested = True
 
+    def _value_exit_check(self, spec):
+        if (getattr(spec, "metadata", None) or {}).get("reason_code") != "VALUE_EXIT":
+            return None
+        runtime = getattr(self, "_market_runtime_ref", None)
+        if runtime is None:
+            return "value_exit_runtime_missing"
+        ready = runtime.prepare_aligned_eval()
+        if not ready.ok or ready.snapshot is None:
+            return "value_exit_inputs_unavailable"
+        from tyrex_pm.runtime.decision_records import decision_context
+
+        state = self.lifecycle.state
+        context = decision_context(
+            ready, run_id=self.config.run_name, target_notional=self.config.risk.target_notional,
+            position_quantity=Decimal(0) if state is None else state.confirmed_position_shares)
+        driver = runtime.window_driver()
+        check = getattr(driver, "value_exit_refusal", None)
+        return None if check is None else check(
+            ready.snapshot, context, runtime.indicator_graph.snapshot(),
+            spec.token_id, spec.minimum_price)
+
     def _deliver_exit_outcome(
         self,
         intent: ExitIntent | FlattenIntent,
@@ -2305,18 +2533,12 @@ class TradingRuntime:
         driver = self._driver_for(window_id)
         handler = getattr(driver, "on_exit_outcome", None)
         if handler is not None:
-            handler(
-                ExitOutcome(
-                    kind,
-                    intent.intent_id.value,
-                    self._corrected_now(),
-                    reason=reason,
-                    remaining_shares=Decimal("0")
-                    if state is None
-                    else state.confirmed_position_shares,
-                    sold_shares=sold or Decimal("0"),
-                )
-            )
+            outcome = ExitOutcome(
+                kind, intent.intent_id.value, self._corrected_now(), reason=reason,
+                remaining_shares=Decimal("0") if state is None else state.confirmed_position_shares,
+                sold_shares=sold or Decimal("0"))
+            handler(outcome)
+            self._capture_feedback(window_id, "exit", outcome)
 
     async def _consume_hold(self, intent: HoldToResolutionIntent) -> None:
         await self._commit_hold(
@@ -2355,7 +2577,9 @@ class TradingRuntime:
         and survives rollover and shutdown (detached to the settlement ledger).
         """
         committed, detail = (False, "LIFECYCLE_NOT_SETTLEMENT_PROFILE")
-        if self.settlement_hooks is not None:
+        if getattr(self, "_recovery_policy_unresolved", False):
+            detail = "RECOVERY_POLICY_UNRESOLVED"
+        elif self.settlement_hooks is not None:
             committed, detail = await self.settlement_hooks.commit_hold(
                 window_id=window_id,
                 state=self.lifecycle.state,
@@ -2377,6 +2601,7 @@ class TradingRuntime:
         note = getattr(driver, "on_hold_committed", None)
         if callable(note):
             note()
+            self._capture_feedback(window_id, "hold", {})
         state = self.lifecycle.state
         if state is not None:
             self.protection_registry.disarm(state.session_id)
@@ -2460,6 +2685,19 @@ class TradingRuntime:
                 # Committed to resolution: never sold before close by the host.
                 self._maybe_refresh_active_order_metadata()
                 return
+            strategy_exit = getattr(self.config.strategy, "exit", None)
+            residual_hold = (getattr(self.config, "lifecycle_mode", None) == "managed_exit"
+                             and getattr(strategy_exit, "residual_policy", None)
+                             == "hold_to_resolution")
+            if (residual_hold and state is not None and state.has_exposure
+                    and remaining <= strategy_exit.exit_cutoff_tau_s):
+                committed = await self._commit_hold(
+                    self.active_market.window_id, source="host_exit_cutoff")
+                if (not committed
+                        and remaining <= self.config.lifecycle.manual_deadline_before_end_s):
+                    await self.lifecycle.mark_manual("residual_hold_not_proven_at_deadline")
+                    self.stop_requested = True
+                return
             if (
                 state is not None
                 and state.has_exposure
@@ -2472,6 +2710,7 @@ class TradingRuntime:
                 state is not None
                 and state.has_exposure
                 and remaining <= self.config.lifecycle.mandatory_exit_before_end_s
+                and not residual_hold
                 and not state.exit_requested_reason
                 and self.selected_instrument is not None
             ):
@@ -2517,14 +2756,33 @@ class TradingRuntime:
         if usage.episodes == 0:
             return
         latest = hooks.ledger.by_window(window_id)
-        restore(
+        started = None if latest is None else (latest.entry_started_at or latest.opened_at)
+        if latest is None or latest.retry_clock == "none":
+            backoff_state = "unknown" if latest is None else "none"
+        elif latest.retry_clock == "deadline" and latest.retry_not_before:
+            backoff_state = "deadline"
+        else:
+            backoff_state = "unknown"
+        usage_input = dict(
             episodes=usage.episodes,
             attempts=usage.attempts,
             posts=usage.posts,
             filled_episodes=usage.filled_episodes,
             latest_attempts=0 if latest is None else latest.attempts,
             latest_state=None if latest is None or latest.state is None else latest.state.value,
+            latest_posts=0 if latest is None else latest.posts,
+            latest_prepare_failures=0 if latest is None else latest.prepare_failures,
+            entry_started_at=started,
+            started_known=bool(started),
+            retry_not_before=None if latest is None else latest.retry_not_before,
+            backoff_state=backoff_state,
+            entry_side=None if latest is None else latest.entry_side,
+            consecutive_service_failures=(
+                None if latest is None else latest.consecutive_service_failures
+            ),
         )
+        restore(**usage_input)
+        self._capture_feedback(window_id, "usage", usage_input)
         self.run_recorder.record(
             "WINDOW_BUDGET_RESTORED",
             {"window_id": window_id, "episodes": usage.episodes, "attempts": usage.attempts,
@@ -2666,6 +2924,10 @@ class TradingRuntime:
         }
 
     def _release_state_lock(self) -> None:
+        writer = self._ledger_writer
+        self._ledger_writer = None
+        if writer is not None:
+            writer.release()
         lock = self._state_lock
         self._state_lock = None
         if lock is not None:
@@ -2954,10 +3216,14 @@ class TradingRuntime:
             ready=bool(assessment.ready and publication == "accepted"),
         )
         if write_report:
+            venue = getattr(self.config, "venue", None)
+            armed = self.capabilities.live_requested
             payload = startup_report_payload(
                 assessment,
                 run_name=self.config.run_name,
-                live_requested=self.capabilities.live_requested,
+                live_requested=armed,
+                venue=venue,
+                real_orders_authorized=venue == "live" and armed,
             )
             self.startup_report = payload
             write_startup_report(self.output_directory / "startup_report.json", payload)
@@ -3589,10 +3855,14 @@ class TradingRuntime:
         except Exception as exc:
             market_data = None
             reporting_failures.append(f"market_projection:{type(exc).__name__}:{exc}")
+        venue = getattr(self.config, "venue", None)
+        armed = self.capabilities.live_requested
         source = RunReportInput(
             run_instance_id=self.run_instance_id,
             configured_run_name=self.config.run_name,
-            live_requested=self.capabilities.live_requested,
+            live_requested=armed,
+            venue=venue,
+            real_orders_authorized=venue == "live" and armed,
             state=state,
             mutation_attempts=mutation_attempts,
             process_mutation_attempts=self._process_mutation_attempts,
@@ -3623,11 +3893,13 @@ class TradingRuntime:
                 path,
                 run_instance_id=self.run_instance_id,
                 configured_run_name=self.config.run_name,
-                live_requested=True,
+                live_requested=armed,
                 mutation_attempts=mutation_attempts,
                 fatal_error=fatal_error,
                 reporting_error=exc,
                 reproducibility=self.reproducibility,
+                venue=venue,
+                real_orders_authorized=venue == "live" and armed,
             )
         return TradingRunResult(
             outcome=str(payload["outcome"]),
@@ -3761,14 +4033,14 @@ async def run_trading_runtime(
 
     run_instance_id = str(uuid4())
     output_directory.mkdir(parents=True, exist_ok=True)
+    paper = getattr(config, "venue", "live") == "paper"
     reproducibility = capture_reproducibility(
         config=config,
         config_path=config_path,
-        cli_flags={"live": True, "out_dir": output_directory},
+        cli_flags={"live": not paper, "paper": paper, "out_dir": output_directory},
         run_instance_id=run_instance_id,
     )
     try:
-        paper = getattr(config, "venue", "live") == "paper"
         if paper and gateway is None:
             gateway = build_paper_venue(config)
         runtime = await TradingRuntime.create(
@@ -3797,6 +4069,8 @@ async def run_trading_runtime(
             fatal_error=fatal_error,
             reporting_error=exc,
             reproducibility=reproducibility,
+            venue=getattr(config, "venue", None),
+            real_orders_authorized=not paper,
         )
         return TradingRunResult(
             outcome=str(payload["outcome"]),

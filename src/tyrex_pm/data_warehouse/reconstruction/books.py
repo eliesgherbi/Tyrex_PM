@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from tyrex_pm.market_data.reconcile import BOOK_POLICIES, LEGACY, VENUE_TOP_V1, reconcile_top
+
 from ..contracts import decode, identity
 
 BINANCE = "binance:spot:BTCUSDT"
@@ -26,6 +28,7 @@ class Book:
     reason: str = "no_seed"
     update_id: int | None = None
     assurance: str = "UNUSABLE"
+    source_time: int | None = None
 
     def view(self) -> dict[str, Any]:
         return {
@@ -56,7 +59,10 @@ class Books:
     Binance book, and for CLOB the selected valid stream (else the latest one seen).
     """
 
-    def __init__(self, *, retain_epochs: bool = True) -> None:
+    def __init__(self, *, retain_epochs: bool = True, reconstruction: str = LEGACY) -> None:
+        if reconstruction not in BOOK_POLICIES:
+            raise ValueError("unknown book reconstruction policy")
+        self.reconstruction = reconstruction
         self.books: dict[str, Book] = {}
         self.streams: dict[tuple, Book] = {}
         self.epochs: list[dict] = []
@@ -97,7 +103,8 @@ class Books:
                     **book.view(),
                     "invalidated_at": at,
                     "reason": reason,
-                    "reconstruction_version": "3",
+                    "reconstruction_version": ("3" if self.reconstruction == LEGACY
+                                               else self.reconstruction),
                 }
             )
         book.valid, book.reason = False, reason
@@ -183,6 +190,7 @@ class Books:
         book.usable_from = book.last_update = row["received_at"]
         book.update_id = int(row["provider_update_id"]) if row.get("provider_update_id") else None
         book.valid, book.reason = True, "seeded"
+        book.source_time = row.get("source_time")
         book.assurance = "SEQUENCED" if book.update_id is not None else "UNKNOWN_CONTINUITY"
         if book.update_id is not None:
             book.valid, book.reason = False, "awaiting_sequence_bridge"
@@ -194,6 +202,8 @@ class Books:
                 ):
                     self.apply("book_updates", change)
         self._crossed(book, row["received_at"])
+        if row["snapshot_origin"] == "captured_rest_syncing" and book.valid:
+            book.valid, book.reason = False, "captured_rest_syncing"
         self._reselect([book])
 
     def _update(self, row: dict) -> None:
@@ -222,6 +232,7 @@ class Books:
                 book.usable_from = max(book.usable_from or 0, row["received_at"])
             book.update_id, book.valid, book.reason = last, True, "sequence_bridged"
         touched = {}
+        reports = {}
         for change in row["changes"]:
             iid = change["instrument_id"]
             if row["source_id"] == "binance":
@@ -246,7 +257,15 @@ class Books:
                     )
                     self._select(iid)
                     continue
+            if not book.valid and book.reason == "captured_rest_syncing":
+                book.valid, book.reason = True, "captured_sync_bridged"
             if not book.valid:
+                continue
+            source_time = row.get("source_time")
+            if (self.reconstruction == VENUE_TOP_V1 and book.source_id != "binance"
+                    and source_time is not None and book.source_time is not None
+                    and source_time < book.source_time):
+                self.invalidate(book, row["received_at"], "out_of_order_source_time")
                 continue
             side = book.bids if change["side"] == "BUY" else book.asks
             if change["new_quantity"] == 0:
@@ -254,8 +273,17 @@ class Books:
             else:
                 side[change["price"]] = change["new_quantity"]
             book.last_update = row["received_at"]
+            book.source_time = source_time
             touched[id(book)] = book
+            reports[id(book)] = (change.get("reported_best_bid"),
+                                 change.get("reported_best_ask"))
         for book in touched.values():  # Validate each book once after the entire batch.
+            if self.reconstruction == VENUE_TOP_V1 and book.source_id != "binance":
+                try:
+                    reconcile_top(book.bids, book.asks, *reports[id(book)])
+                except ValueError as exc:
+                    self.invalidate(book, row["received_at"], str(exc))
+                    continue
             self._crossed(book, row["received_at"])
         self._reselect(list(touched.values()))
 

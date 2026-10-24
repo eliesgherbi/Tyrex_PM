@@ -1,0 +1,34 @@
+# Closed-loop strategy replay: FRICTION STRESS v1 (23 Oct 2026).
+# Pessimistic companion to friction_v2: the book is assumed one tick worse at arrival
+# (levels above limit minus one tick are out of reach), arrival is slower and only a
+# tenth of displayed depth is available. Limit prices are always respected.
+# Research use only; values are assumptions, not measured venue latency.
+schema_version: 1
+adapter: strategy_closed_loop_v1
+name: friction_stress_v1
+initial_cash: '100'
+feed_delay_ms: 100
+decision_delay_ms: 0
+order_delay_ms: 600       # twice the base arrival delay
+cancel_delay_ms: 600
+feedback_delay_ms: 300
+adverse_price_ticks: 1    # book one tick worse at arrival; never fills above the limit
+participation: '0.10'     # a tenth of displayed depth
+timer_interval_ms: 1000
+gap_tolerance_ms: 250
+quality_predicate: valid_books_at_actions
+maker_model: no_fill
+maker_queue_multiplier: '2'
+gap_policy: invalidate_path
+tie_policy: observations_before_actions
+seed: 0
+settlement_release_delay_ms: 60000
+fee_policy:
+  version: explicit_scenario_v1
+  mode: recorded
+  rate: '0.07'
+  exponent: 1
+  quantum: '0.00001'
+  buy_fee_unit: shares
+  maker_rate: '0'
+  provenance: RECORDED_MARKET_FEE_SCHEDULE

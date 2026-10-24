@@ -49,6 +49,39 @@ def test_capture_keeps_decision_time_values(tmp_path: Path) -> None:
     assert row["variance"] == 1.0
 
 
+def test_reader_ignores_an_active_segment_without_its_manifest(tmp_path):
+    import zstandard
+
+    recorder = make(tmp_path)
+    recorder.capture("decisions", {"closed": True})
+    recorder.close()
+    active = tmp_path / "rec/decisions/part-999999.jsonl.zst"
+    active.write_bytes(zstandard.ZstdCompressor().compress(b'{"unfinished":'))
+    assert list(iter_records(tmp_path / "rec", "decisions")) == [{"closed": True}]
+
+
+@pytest.mark.parametrize("problem", ["missing_file", "changed_file", "wrong_count"])
+def test_closed_segment_corruption_cannot_be_read_as_complete(tmp_path, problem):
+    import zstandard
+
+    recorder = make(tmp_path)
+    recorder.capture("decisions", {"original": True})
+    recorder.close()
+    folder = tmp_path / "rec/decisions"
+    path = next(folder.glob("*.jsonl.zst"))
+    if problem == "missing_file":
+        path.unlink()
+    elif problem == "changed_file":
+        path.write_bytes(zstandard.ZstdCompressor().compress(b'{"changed":true}\n'))
+    else:
+        manifest_path = next(folder.glob("*.manifest.json"))
+        manifest = json.loads(manifest_path.read_text())
+        manifest["records"] += 1
+        manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises((FileNotFoundError, ValueError)):
+        list(iter_records(tmp_path / "rec", "decisions"))
+
+
 @pytest.mark.parametrize("policy,kept", [("drop_newest", [0, 1]), ("drop_oldest", [2, 3])])
 def test_overflow_is_bounded_counted_and_leaves_a_gap(tmp_path: Path, policy, kept) -> None:
     recorder = Recorder(tmp_path / "rec", RecordingConfig(queue_max_records=2, overflow=policy),

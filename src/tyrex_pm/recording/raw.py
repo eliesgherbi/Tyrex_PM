@@ -25,6 +25,7 @@ state is kept in the execution journal, not in raw capture.
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -53,13 +54,14 @@ INPUT_CLASSES = {
 # decisions; the manifest never asserts it at capture time.
 REPLAY_GAPS = (
     "not yet verified: run `tyrex-pm recording reconstruct --capture <run folder>` "
-    "(observation captures); its report states decisions_reconstructed_equal",
+    "(supported observation/trading captures); its report states "
+    "decisions_reconstructed_equal",
     "clob/gamma: captured as SDK objects and replayed through documented adapters "
     "(content-equivalent venue messages, not venue bytes)",
     "binance depth: live uses @depth20 partial snapshots, which the warehouse does not "
     "normalize (not in settlement_value's input contract)",
-    "trading runs: reconstructing decisions after an order also needs the position "
-    "timeline from the execution journal (not part of raw capture)",
+    "trading runs require causal context/feedback records and the checksummed execution "
+    "export; older captures cannot acquire missing position history retroactively",
 )
 
 
@@ -106,11 +108,16 @@ class RawCapture:
         self.fault: str | None = None
         # Inputs the strategy's input contract does not use (adapter not started).
         self.not_expected: set[str] = set()
+        self._capture_lock = threading.RLock()
 
     def not_in_contract(self, *input_classes: str) -> None:
         self.not_expected.update(input_classes)
 
     def _put(self, input_class: str, record: dict) -> None:
+        with self._capture_lock:
+            self._put_locked(input_class, record)
+
+    def _put_locked(self, input_class: str, record: dict) -> None:
         if self.fault is not None:
             return
         try:

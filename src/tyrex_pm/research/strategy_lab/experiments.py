@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from tyrex_pm.data_warehouse.contracts import PARSER_VERSION
+from tyrex_pm.data_warehouse.normalize.worker import committed
 from tyrex_pm.data_warehouse.query.reader import Reader
 from tyrex_pm.research.replay.config import Scenario, load_scenario
 from tyrex_pm.research.strategy_replay import (
@@ -58,6 +60,8 @@ class Lab:
     collection: str = DEFAULT_COLLECTION
     warmup_s: float = 300.0
     cache_dir: Path | None = CACHE
+    # Builds of this parser version; an older one reproduces runs made before a re-normalization.
+    parser: str = PARSER_VERSION
     _catalog: WindowCatalog | None = None
     _windows: dict[str, WindowData] = field(default_factory=dict)
     _cache: WindowCache | None = None
@@ -65,7 +69,11 @@ class Lab:
     @property
     def catalog(self) -> WindowCatalog:
         if self._catalog is None:
-            reader = Reader(self.warehouse, self.collection)
+            reader = Reader(
+                self.warehouse,
+                self.collection,
+                manifests=committed(self.warehouse, self.collection, parser=self.parser),
+            )
             self._catalog = (
                 WindowCatalog(reader)
                 if self.cache_dir is None

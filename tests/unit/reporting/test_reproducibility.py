@@ -288,3 +288,30 @@ def test_completed_no_dispatch_is_confirmed_no_mutation() -> None:
     assert report["ok"] is True
     assert report["summary"]["observed_fills_complete"] is True
     assert report["summary"]["reconciliation_complete"] is True
+
+
+def test_paper_report_keeps_arming_separate_from_real_orders(tmp_path: Path) -> None:
+    report = build_run_report(_input(
+        live_requested=True, venue="paper", real_orders_authorized=False,
+    ))
+    assert report["live_requested"] is True
+    assert report["venue"] == "paper"
+    assert report["real_orders_authorized"] is False
+    live = build_run_report(_input(
+        live_requested=True, venue="live", real_orders_authorized=True,
+    ))
+    assert live["real_orders_authorized"] is True
+    emergency = write_emergency_report(
+        tmp_path / "run_summary.json",
+        run_instance_id="r",
+        configured_run_name="paper",
+        live_requested=True,
+        mutation_attempts=0,
+        fatal_error={"stage": "probe"},
+        reporting_error=RuntimeError("probe"),
+        venue="paper",
+        real_orders_authorized=False,
+    )
+    assert emergency["live_requested"] is True
+    assert emergency["venue"] == "paper"
+    assert emergency["real_orders_authorized"] is False

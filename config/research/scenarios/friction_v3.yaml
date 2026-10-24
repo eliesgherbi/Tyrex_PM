@@ -1,0 +1,36 @@
+# Closed-loop strategy replay: FRICTION v3, the base research scenario (23 Oct 2026).
+# As friction_v2, with books rebuilt by venue_top_v1 (no crossed-book reconstruction blips).
+# Delays move the book against the order on the recorded data itself, so no extra price
+# tick is added on top. Fees come from each market's recorded fee schedule.
+# Book stretches shorter than gap_tolerance_ms while holding are reconstruction blips.
+# Research use only; values are assumptions, not measured venue latency.
+schema_version: 1
+adapter: strategy_closed_loop_v1
+name: friction_v3
+initial_cash: '100'
+feed_delay_ms: 100        # information delay: recorded row -> strategy view
+decision_delay_ms: 0      # compute time
+order_delay_ms: 300       # submission -> venue arrival
+cancel_delay_ms: 300
+feedback_delay_ms: 300    # venue result -> strategy context
+adverse_price_ticks: 0    # the recorded book at arrival already reflects the delay
+participation: '0.25'     # a quarter of displayed depth is available
+timer_interval_ms: 1000
+gap_tolerance_ms: 250     # safety net; venue_top_v1 removes the legacy blips
+book_reconstruction: venue_top_v1
+quality_predicate: valid_books_at_actions
+maker_model: no_fill
+maker_queue_multiplier: '2'
+gap_policy: invalidate_path
+tie_policy: observations_before_actions
+seed: 0
+settlement_release_delay_ms: 60000
+fee_policy:
+  version: explicit_scenario_v1
+  mode: recorded          # per-market fee schedule from metadata; missing -> order rejected
+  rate: '0.07'            # not used in recorded mode
+  exponent: 1
+  quantum: '0.00001'
+  buy_fee_unit: shares
+  maker_rate: '0'
+  provenance: RECORDED_MARKET_FEE_SCHEDULE

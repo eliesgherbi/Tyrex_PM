@@ -88,3 +88,5 @@ class DecisionContext:
     # Reason of the host's most recent exit for this window (strategy, protective or
     # mandatory), so a strategy can apply re-entry lockouts. None when none happened.
     last_exit_reason: str | None = None
+    # Host elapsed-time clock; captured across decision reconstruction, never venue time.
+    monotonic_ns: int | None = None

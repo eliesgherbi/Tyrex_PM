@@ -1,5 +1,9 @@
 # Research proposal: a learned BTC5m strategy with repeated decisions
 
+> **Scope update — 20 October 2026:** the active plan is now [Task A: terminal-probability ML lab](btc5m_ml_lab_terminal_probability_plan_2026-10-20.md). Start with `research/ml_lab/ai_settlement`, two explanatory data/training notebooks and a reusable inference artifact. Later replace the probability backend inside the existing `settlement_value` strategy, keeping the selected policy unchanged. Short-horizon models and RL are deferred.
+>
+> **Framework status correction:** retries, managed exits, re-entry/continuous execution, replay SELL feedback and shared capture/recording have since been added. The gap descriptions in sections 1 and 4 and the controller-first sequence in section 8 below are the historical 15 October assessment, not current prerequisites. The linked Task A plan contains the current inspected status and integration path, including the point-probability versus conservative-band contract. The rest of this original proposal is retained as background for the broader research direction.
+
 15 October 2026. Design proposal based on the current working tree, including its uncommitted implementation. No strategy, model, run configuration, or live trading behavior is changed by this note. Proposed names and settings below are not implemented interfaces or validated trading parameters.
 
 ## 1. The strategy we are trying to build

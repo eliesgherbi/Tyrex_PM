@@ -20,7 +20,7 @@ from tyrex_pm.core.book_events import (
 from tyrex_pm.core.clock import Clock
 from tyrex_pm.core.events import BookUpdated, EventSource
 from tyrex_pm.core.ids import InstrumentId, new_event_id
-from tyrex_pm.core.snapshots import BookLevel, BookSnapshot
+from tyrex_pm.core.snapshots import BookSnapshot
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.market_data.binding_record import MarketBindingRecord
 from tyrex_pm.market_data.book_health import (
@@ -33,7 +33,9 @@ from tyrex_pm.market_data.book_view import (
     LegBookSnapshot,
     side_liquidity_from_book,
 )
+from tyrex_pm.market_data.depth_snapshot import DepthSnapshot, materialize
 from tyrex_pm.market_data.executable import book_quote
+from tyrex_pm.market_data.reconcile import BOOK_POLICIES, VENUE_TOP_V1, reconcile_top
 
 
 @dataclass
@@ -81,9 +83,14 @@ class MarketStateStore:
         dispatcher: EventDispatcher | None = None,
         *,
         clock: Clock | None = None,
+        reconstruction: str = VENUE_TOP_V1,
     ) -> None:
         # None keeps host time; replay injects a virtual clock for freshness/staleness.
         self._clock = clock
+        if reconstruction not in BOOK_POLICIES:
+            raise ValueError("unknown book reconstruction policy")
+        self.reconstruction = reconstruction
+        self.rest_applied_sink = None
         self._books: dict[InstrumentId, BookState] = {}
         self._dispatcher = dispatcher
         self._lock = threading.RLock()
@@ -172,7 +179,7 @@ class MarketStateStore:
                 return BookState()
             # Return a shallow copy snapshot of fields for safe read.
             return BookState(
-                book=state.book,
+                book=materialize(state.book),
                 initialized=state.initialized,
                 last_ts_event=state.last_ts_event,
                 last_ts_received=state.last_ts_received,
@@ -188,6 +195,23 @@ class MarketStateStore:
                 binding_id=state.binding_id,
                 source=state.source,
             )
+
+    def has_book(self, instrument_id: InstrumentId) -> bool:
+        """Metadata-only read: recovery must not sort depth on every ingress message."""
+        with self._lock:
+            state = self._books.get(instrument_id)
+            return state is not None and state.book is not None
+
+    def sync_health(self, instrument_id: InstrumentId) -> SyncHealth:
+        with self._lock:
+            state = self._books.get(instrument_id)
+            return SyncHealth.UNINITIALIZED if state is None else state.sync_health
+
+    def quote_for(self, instrument_id: InstrumentId):
+        """Top-only observation; no depth materialization or inference of readiness."""
+        with self._lock:
+            state = self._books.get(instrument_id)
+            return book_quote(None if state is None else state.book)
 
     def seed_trading_parameters(
         self,
@@ -259,6 +283,12 @@ class MarketStateStore:
                 return
             counters.snapshots_decoded += 1
             counters.snapshots_matched += 1
+            if (self.reconstruction == VENUE_TOP_V1 and event.book.best_bid is not None
+                    and event.book.best_ask is not None
+                    and event.book.best_bid.price == event.book.best_ask.price):
+                self.invalidate(event.book.instrument_id, ts_event=event.ts_event,
+                                ts_received=event.ts_received)
+                return
             prev = self._books.get(event.book.instrument_id, BookState())
             mono = self._mono_ns()
             now = event.ts_received
@@ -323,6 +353,11 @@ class MarketStateStore:
                 counters.rest_failures += 1
                 return False
             mono = self._mono_ns()
+            if (self.reconstruction == VENUE_TOP_V1 and book.best_bid is not None
+                    and book.best_ask is not None and book.best_bid.price == book.best_ask.price):
+                self.invalidate(book.instrument_id, ts_event=book.ts_event,
+                                ts_received=ts_received)
+                return False
             health = SyncHealth.READY if mark_ready else SyncHealth.SYNCING
             state = BookState(
                 book=book,
@@ -356,6 +391,13 @@ class MarketStateStore:
             counters.snapshots_decoded += 1
             counters.snapshots_matched += 1
             counters.snapshots_applied += 1
+            if self.rest_applied_sink is not None:
+                try:
+                    self.rest_applied_sink(book, {
+                        "binding_id": binding_id, "connection_epoch": connection_epoch,
+                        "sync_health": health.value, "source": source})
+                except Exception:  # noqa: BLE001 - optional capture never breaks book ingestion
+                    __import__("logging").getLogger(__name__).exception("REST capture failed")
             return True
 
     def on_delta(self, event: BookDeltaReceived) -> None:
@@ -404,9 +446,18 @@ class MarketStateStore:
                 }:
                     counters.deltas_application_rejected += 1
                     continue
+                if (self.reconstruction == VENUE_TOP_V1 and state.last_ts_event is not None
+                        and event.ts_event < state.last_ts_event):
+                    self.invalidate(instrument_id, ts_event=event.ts_event,
+                                    ts_received=event.ts_received)
+                    counters.deltas_application_rejected += 1
+                    continue
                 # Meaningful change detection for version bump / noop.
-                before = {("BID", lv.price): lv.quantity for lv in state.book.bids}
-                before.update({("ASK", lv.price): lv.quantity for lv in state.book.asks})
+                old = state.book
+                old_bids = (old.bid_map if isinstance(old, DepthSnapshot)
+                            else {lv.price: lv.quantity for lv in old.bids})
+                old_asks = (old.ask_map if isinstance(old, DepthSnapshot)
+                            else {lv.price: lv.quantity for lv in old.asks})
                 try:
                     book = self._apply_deltas(state.book, changes, ts_event=event.ts_event)
                 except ValueError as exc:
@@ -425,19 +476,17 @@ class MarketStateStore:
                         logger = __import__("logging").getLogger(__name__)
                         logger.warning("book DESYNC token=%s reason=%s", token, exc)
                     continue
-                after = {("BID", lv.price): lv.quantity for lv in book.bids}
-                after.update({("ASK", lv.price): lv.quantity for lv in book.asks})
-                if before == after:
+                if old_bids == book.bid_map and old_asks == book.ask_map:
                     counters.deltas_ignored_noop += 1
                     continue
-                for key, size in after.items():
-                    if key not in before:
-                        counters.levels_inserted += 1
-                    elif before[key] != size:
-                        counters.levels_updated += 1
-                for key in before:
-                    if key not in after:
-                        counters.levels_deleted += 1
+                for before, after in ((old_bids, book.bid_map), (old_asks, book.ask_map)):
+                    for price in before.keys() | after.keys():
+                        if price not in before:
+                            counters.levels_inserted += 1
+                        elif price not in after:
+                            counters.levels_deleted += 1
+                        elif before[price] != after[price]:
+                            counters.levels_updated += 1
                 mono = self._mono_ns()
                 new_state = BookState(
                     book=book,
@@ -580,7 +629,7 @@ class MarketStateStore:
         return LegBookSnapshot(
             token_id=token_id,
             instrument_id=instrument_id,
-            book=state.book,
+            book=materialize(state.book),
             book_version=state.book_version,
             venue_hash=state.venue_hash,
             sync_health=state.sync_health,
@@ -603,6 +652,8 @@ class MarketStateStore:
     ) -> None:
         if self._dispatcher is None:
             return
+        if not self._dispatcher._handler_count(BookUpdated):
+            return
         self._dispatcher.publish(
             BookUpdated(
                 event_id=new_event_id(),
@@ -611,36 +662,32 @@ class MarketStateStore:
                 ts_event=cause.ts_event,
                 ts_received=cause.ts_received,
                 source=EventSource.SYSTEM,
-                book=book,
+                book=materialize(book),
             )
         )
 
-    @staticmethod
     def _apply_deltas(
+        self,
         book: BookSnapshot,
         changes: list,
         *,
         ts_event: datetime,
     ) -> BookSnapshot:
-        bids = {level.price: level.quantity for level in book.bids}
-        asks = {level.price: level.quantity for level in book.asks}
+        bids = (dict(book.bid_map) if isinstance(book, DepthSnapshot)
+                else {level.price: level.quantity for level in book.bids})
+        asks = (dict(book.ask_map) if isinstance(book, DepthSnapshot)
+                else {level.price: level.quantity for level in book.asks})
         for change in changes:
             levels = bids if change.side is BookSide.BID else asks
             if change.size == 0:
                 levels.pop(change.price, None)
             else:
                 levels[change.price] = change.size
-        bid_levels = tuple(
-            BookLevel(price=p, quantity=q)
-            for p, q in sorted(bids.items(), key=lambda item: item[0], reverse=True)
-        )
-        ask_levels = tuple(
-            BookLevel(price=p, quantity=q)
-            for p, q in sorted(asks.items(), key=lambda item: item[0])
-        )
-        return BookSnapshot(
-            instrument_id=book.instrument_id,
-            ts_event=ts_event,
-            bids=bid_levels,
-            asks=ask_levels,
-        )
+        if self.reconstruction == VENUE_TOP_V1:
+            # Last row for this token carries the final message top. Intermediate
+            # reports may legitimately differ within the same atomic message.
+            last = changes[-1]
+            reconcile_top(bids, asks, last.reported_best_bid, last.reported_best_ask)
+        if bids and asks and max(bids) > min(asks):
+            raise ValueError("crossed book")
+        return DepthSnapshot(book.instrument_id, ts_event, bids, asks)

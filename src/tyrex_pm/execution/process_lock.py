@@ -15,9 +15,9 @@ class StateDirectoryBusy(RuntimeError):
 
 
 class StateDirectoryLock:
-    def __init__(self, directory: Path | str) -> None:
-        self.directory = Path(directory)
-        self.path = self.directory / ".tyrex_state.lock"
+    def __init__(self, directory: Path | str, *, filename: str = ".tyrex_state.lock") -> None:
+        self.directory = Path(directory).resolve()
+        self.path = self.directory / filename
         self._handle: object | None = None
 
     def acquire(self) -> None:
@@ -62,3 +62,44 @@ class StateDirectoryLock:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
         finally:
             handle.close()  # type: ignore[attr-defined]
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+class LedgerWriter(StateDirectoryLock):
+    """Lifetime ownership of one canonical local ledger, independent of run config.
+
+    A writer has one mutable projection. Acquire execution-directory ownership first
+    when both locks are needed. Lock files are never deleted on release.
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        self.ledger_path = Path(path).resolve()
+        if str(self.ledger_path).startswith("\\\\"):
+            raise StateDirectoryBusy("ledger ownership requires a local filesystem")
+        if self.ledger_path.exists() and self.ledger_path.stat().st_nlink > 1:
+            raise StateDirectoryBusy("hard-linked ledgers are unsupported; use one canonical path")
+        super().__init__(self.ledger_path.parent, filename=self.ledger_path.name + ".lock")
+        self._ledger = None
+
+    def ledger(self):
+        if self._handle is None:
+            raise StateDirectoryBusy("ledger writer does not own the lock")
+        if self._ledger is None:
+            from tyrex_pm.execution.settlement.ledger import SettlementLedger
+
+            self._ledger = SettlementLedger(self.ledger_path, writer=self)
+        return self._ledger
+
+    def assert_owner(self, ledger) -> None:
+        if self._handle is None or self._ledger is not ledger:
+            raise StateDirectoryBusy("ledger ownership expired or projection is not authoritative")
+
+    def release(self) -> None:
+        self._ledger = None
+        super().release()

@@ -37,9 +37,10 @@ from tyrex_pm.core.intents import (
 )
 from tyrex_pm.core.snapshots import BookSnapshot
 from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, TimeAuthority
-from tyrex_pm.domain.polymarket.fees import FeeCurveParams
+from tyrex_pm.domain.polymarket.fees import FeeCurveParams, phi_taker_fee_per_share
 from tyrex_pm.domain.polymarket.ptb import PtbSnapshot
 from tyrex_pm.facts.contract import EligibilityFacts
+from tyrex_pm.indicators.evaluated_bid_trend import EvaluatedBidTrend
 from tyrex_pm.indicators.ewma_volatility import VolatilitySnapshot
 from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.indicators.spot_path import SpotPathSnapshot
@@ -156,6 +157,8 @@ class SettlementValueDriver:
     state: EpisodeState = field(init=False)
     ptb: PtbSnapshot | None = None
     market_context: StrategyContext | None = None
+    _bid_trends: dict = field(default_factory=dict, init=False)
+    _trend_readings: dict = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.state = EpisodeState(window_id=self.window_id)
@@ -261,12 +264,23 @@ class SettlementValueDriver:
         filled_episodes: int,
         latest_attempts: int,
         latest_state: str | None,
+        latest_posts: int = 0,
+        latest_prepare_failures: int = 0,
+        entry_started_at: str | None = None,
+        started_known: bool = False,
+        retry_not_before: str | None = None,
+        backoff_state: str = "unknown",
+        entry_side: str | None = None,
+        consecutive_service_failures: int | None = None,
     ) -> None:
         """Seed counters from the host's durable ledger after a restart in this window.
 
         The ledger stays the authority (the host re-checks every budget); this only keeps
         the strategy from proposing attempts the ledger would refuse, and from
-        restarting a used window as if it were fresh.
+        restarting a used window as if it were fresh. A retryable episode resumes only
+        when both the original start and the backoff deadline were recorded. Missing
+        timing blocks further attempts. ``backoff_state="none"`` means the record proves
+        no wait applies; a past deadline means the wait already elapsed.
         """
         st = self.state
         if episodes <= 0 or st.window_attempts >= attempts:
@@ -275,15 +289,30 @@ class SettlementValueDriver:
         st.attempt_seq = latest_attempts
         st.window_attempts = attempts
         st.window_posts = posts
+        st.episode_posts = latest_posts
+        st.episode_prepare_failures = latest_prepare_failures
         st.filled_episodes = filled_episodes
         if latest_state in ("NO_FILL", "NO_DISPATCH"):
-            if self.config.retry.enabled:
-                st.phase = P.REARMABLE
-                # The pre-restart start time is not durable: the elapsed budget restarts,
-                # while the durable attempt / POST ceilings still bound the episode.
-                st.episode_started_at = None
-            else:
+            if not self.config.retry.enabled:
                 self._close(R.RETRY_DISABLED)
+            elif (
+                not started_known
+                or not entry_started_at
+                or not entry_side
+                or backoff_state not in ("none", "deadline")
+                or (backoff_state == "deadline" and not retry_not_before)
+            ):
+                # Missing start or backoff is not "no wait" and not "already elapsed".
+                self._close(R.RETRY_CLOCK_UNRECOVERABLE)
+            else:
+                st.phase = P.REARMABLE
+                st.episode_started_at = entry_started_at
+                st.entry_side = entry_side
+                if consecutive_service_failures is not None:
+                    st.consecutive_service_failures = consecutive_service_failures
+                st.next_attempt_not_before = (
+                    None if backoff_state == "none" else retry_not_before
+                )
         elif latest_state == "SOLD":
             st.phase = P.IDLE
             st.episode_filled = True
@@ -323,6 +352,54 @@ class SettlementValueDriver:
         st.closed_reason = None
 
     # -- evaluation -------------------------------------------------------------------
+
+    def value_exit_refusal(self, snapshot, context, features, token_id, minimum_price):
+        """Recheck a value sale at the final gate without consuming an evaluation/attempt."""
+        cfg = self.config
+        tau = (snapshot.market.event_end - snapshot.observed_at).total_seconds()
+        if tau <= cfg.exit.exit_cutoff_tau_s:
+            return "value_exit_cutoff_at_dispatch"
+        if token_id not in (snapshot.market.yes.instrument_id.value,
+                            snapshot.market.no.instrument_id.value):
+            return "value_exit_token_changed_at_dispatch"
+        side = "UP" if token_id == snapshot.market.yes.instrument_id.value else "DOWN"
+        obs = self._observe(snapshot, context, features, tau, {})
+        if obs.prob is None or not obs.prob.ready:
+            return "value_exit_model_not_ready_at_dispatch"
+        up = side == "UP"
+        ready = obs.legs.up_ready if up else obs.legs.down_ready
+        book = obs.legs.up_book if up else obs.legs.down_book
+        if not ready or book is None:
+            return "value_exit_book_not_ready_at_dispatch"
+        hold = obs.prob.point(up=up)
+        if cfg.exit.value_exit_basis == "upper":
+            hold = obs.prob.p_up_high if up else (
+                None if obs.prob.p_up_low is None else 1 - obs.prob.p_up_low)
+        walk = exit_walk(book.bids, held_shares=context.position_quantity, hold_value=hold,
+                         margin=cfg.exit.value_exit_margin_per_share, fee_curve=self.fee_curve,
+                         min_order_shares=cfg.sizing.default_min_order_shares,
+                         min_price=cfg.exit.min_exit_price,
+                         share_increment=cfg.sizing.share_increment,
+                         max_levels=cfg.sizing.max_levels)
+        if (not walk.feasible or minimum_price - phi_taker_fee_per_share(
+                minimum_price, self.fee_curve) - Decimal(str(hold))
+                < cfg.exit.value_exit_margin_per_share):
+            return "value_exit_changed_at_dispatch"
+        if cfg.exit.value_exit_trend_enabled:
+            trend = self._bid_trends.get(side)
+            now = (context.monotonic_ns if context.monotonic_ns is not None
+                   else self.time_authority.view().monotonic_ns) / 1e9
+            epoch = None if snapshot.book_view is None else snapshot.book_view.connection_epoch
+            if (trend is None or not self._trend_readings.get(side, {}).get("confirmed")
+                    or epoch != trend.epoch or not trend.samples
+                    or now - trend.samples[-1][0] > trend.max_gap):
+                return "value_exit_trend_not_confirmed_at_dispatch"
+            anchors = [s for s in trend.samples if s[0] <= now - trend.lookback]
+            if (not anchors or now - trend.lookback - anchors[-1][0] > trend.max_gap
+                    or book.best_bid is None
+                    or anchors[-1][1] - book.best_bid.price < trend.min_drop):
+                return "value_exit_trend_changed_at_dispatch"
+        return None
 
     def _spot_path(self, features: FeatureBundle) -> SpotPathSnapshot | None:
         for key, value in features.values.items():
@@ -604,6 +681,22 @@ class SettlementValueDriver:
         # Observe first: model state is recorded on every evaluation (holding, outside
         # the band, pending) so decision records stay comparable; gating comes after.
         obs = self._observe(market_snapshot, context, features, tau_s, row, debit_cap=debit_cap)
+        if cfg.exit.value_exit_trend_enabled:
+            at_s = (context.monotonic_ns if context.monotonic_ns is not None
+                    else self.time_authority.view().monotonic_ns) / 1e9
+            epoch = (None if market_snapshot.book_view is None
+                     else market_snapshot.book_view.connection_epoch)
+            for side, book, ready_book in (("UP", obs.legs.up_book, obs.legs.up_ready),
+                                           ("DOWN", obs.legs.down_book, obs.legs.down_ready)):
+                if side not in self._bid_trends:
+                    self._bid_trends[side] = EvaluatedBidTrend(
+                        lookback_s=cfg.exit.value_exit_trend_lookback_s,
+                        min_drop=cfg.exit.value_exit_trend_min_drop,
+                        confirmation_s=cfg.exit.value_exit_trend_confirmation_s,
+                        max_gap_s=cfg.exit.value_exit_trend_max_gap_s)
+                bid = None if book is None or book.best_bid is None else book.best_bid.price
+                self._trend_readings[side] = self._bid_trends[side].observe(
+                    at_s, bid, ready=ready_book, epoch=epoch)
 
         # 1. Episode handling.
         if context.unknown_inventory:
@@ -994,7 +1087,11 @@ class SettlementValueDriver:
                 exit_reason=walk.reason,
                 exit_sell_shares=str(walk.sell_shares),
             )
-            if walk.feasible and walk.worst_price is not None:
+            trend = self._trend_readings.get(side, {})
+            if cfg.exit.value_exit_trend_enabled:
+                row["exit_trend"] = dict(trend)
+            trend_ok = not cfg.exit.value_exit_trend_enabled or trend.get("confirmed", False)
+            if walk.feasible and walk.worst_price is not None and trend_ok:
                 exit_reason = R.VALUE_EXIT
                 min_price = max(min_price, walk.worst_price)
         if exit_reason is None:

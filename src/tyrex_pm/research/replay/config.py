@@ -58,6 +58,14 @@ class Scenario:
     # The planner's spend is rounded down to this collateral precision before it is sent
     # (venue amount precision) [USDC]. Assumption, to verify against the SDK rounding.
     amount_buy_spend_quantum: str = "0.01"
+    # An invalid book stretch shorter than this, while holding exposure, is treated as a
+    # reconstruction blip, not a gap [ms]. 0 keeps the original rule: any invalidation
+    # with exposure disqualifies the window.
+    gap_tolerance_ms: int = 0
+    # How the strategy feed and the simulator rebuild books (closed-loop replay). "legacy"
+    # keeps earlier results reproducible; "venue_top_v1" reconciles with the venue's
+    # reported top of book and removes the millisecond crossed-book blips of legacy.
+    book_reconstruction: str = "legacy"
 
     def validate(self) -> None:
         if self.schema_version != 1 or self.adapter not in ADAPTERS:
@@ -72,6 +80,10 @@ class Scenario:
             raise ValueError("final_gate_delay_ms must be in [0, order_delay_ms]")
         if exact(self.amount_buy_share_quantum) <= 0 or exact(self.amount_buy_spend_quantum) <= 0:
             raise ValueError("amount quanta must be positive")
+        from tyrex_pm.data_warehouse.reconstruction.books import BOOK_POLICIES
+
+        if self.book_reconstruction not in BOOK_POLICIES:
+            raise ValueError("unknown book reconstruction policy")
         if self.quality_predicate not in ("valid_books_at_actions", "strategy_ready"):
             raise ValueError("unknown quality predicate")
         if self.maker_model not in ("no_fill", "queue_trade_assumption_v1"):
@@ -91,6 +103,7 @@ class Scenario:
                 self.cancel_delay_ms,
                 self.settlement_release_delay_ms,
                 self.feedback_delay_ms,
+                self.gap_tolerance_ms,
             )
         ):
             raise ValueError("negative delay")

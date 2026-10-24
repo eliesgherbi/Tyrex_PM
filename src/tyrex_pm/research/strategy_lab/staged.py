@@ -61,6 +61,8 @@ CODE_TREES = (
     # arbitration and protection triggers; they are result-affecting sources.
     "src/tyrex_pm/execution",
     "src/tyrex_pm/protection",
+    "src/tyrex_pm/market_data",
+    "src/tyrex_pm/data_warehouse/reconstruction",
     "config/research/scenarios",
 )
 # Evidence-labelled settings: shown with their provenance, never search knobs.

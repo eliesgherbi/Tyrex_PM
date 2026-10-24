@@ -76,20 +76,29 @@ class RunSpec:
         return label(self.parameters)
 
 
-_LABS: dict[tuple[str, str], Lab] = {}
+_LABS: dict[tuple[str, str, str | None], Lab] = {}
 
 
-def _lab(collection: Collection) -> Lab:
-    key = (collection.warehouse, collection.collection)
+def _lab(collection: Collection, parser: str | None = None) -> Lab:
+    key = (collection.warehouse, collection.collection, parser)
     if key not in _LABS:
-        _LABS[key] = Lab(warehouse=Path(collection.warehouse), collection=collection.collection)
+        extra = {} if parser is None else {"parser": parser}
+        _LABS[key] = Lab(
+            warehouse=Path(collection.warehouse), collection=collection.collection, **extra
+        )
     return _LABS[key]
 
 
 def _compact(result: dict) -> list[dict]:
     rows = []
     for row in result["decisions"]:
-        rows.append({k: row.get(k) for k in DECISION_COLUMNS})
+        compact = {k: row.get(k) for k in DECISION_COLUMNS}
+        for key in ("held_side", "held_p_point", "exit_hold_value", "exit_feasible",
+                    "exit_reason", "exit_sell_shares", "exit_trend"):
+            if key in row:
+                value = row[key]
+                compact[key] = json.dumps(value) if isinstance(value, dict) else value
+        rows.append(compact)
     return rows
 
 

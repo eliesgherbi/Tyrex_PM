@@ -52,6 +52,10 @@ def config_hash(strategy_kind: str, config: Any) -> str:
 
 
 _EXECUTION_SOURCES = (
+    "src/tyrex_pm/market_data/reconcile.py",
+    "src/tyrex_pm/market_data/book_store.py",
+    "src/tyrex_pm/market_data/depth_snapshot.py",
+    "src/tyrex_pm/data_warehouse/reconstruction/books.py",
     "src/tyrex_pm/execution/planner.py",
     "src/tyrex_pm/execution/final_gate.py",
     "src/tyrex_pm/execution/outcome_reasons.py",

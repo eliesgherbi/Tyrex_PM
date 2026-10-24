@@ -167,13 +167,15 @@ def plan_repair(window_id: str, ledger: SettlementLedger, states: dict[str, Any]
 async def run_repair(config: Any, window_id: str, *, apply: bool, connect_chain: bool,
                      dotenv: Any = None) -> dict:
     from tyrex_pm.execution.coordinator import AccountExecutionCoordinator
-    from tyrex_pm.execution.process_lock import StateDirectoryLock
+    from tyrex_pm.execution.process_lock import LedgerWriter, StateDirectoryLock
     from tyrex_pm.persistence.execution_journal import SqliteExecutionJournal
 
     lock = StateDirectoryLock(config.state_directory)
     lock.acquire()  # refuses while a live run owns the state
+    writer = LedgerWriter(config.settlement.ledger_path)
     try:
-        ledger = SettlementLedger(config.settlement.ledger_path)
+        writer.acquire()
+        ledger = writer.ledger()
         journal = SqliteExecutionJournal(config.state_directory / "execution.sqlite3")
 
         async def deny(_spec):
@@ -252,6 +254,7 @@ async def run_repair(config: Any, window_id: str, *, apply: bool, connect_chain:
         await coordinator.close()
         return report
     finally:
+        writer.release()
         lock.release()
 
 

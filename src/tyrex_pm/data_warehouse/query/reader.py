@@ -157,8 +157,9 @@ class Reader:
 
         yield from heapq.merge(*(tagged(d) for d in datasets), key=lambda item: order(item[1]))
 
-    def book_as_observed(self, instrument: str, received_at: int) -> dict:
-        state = Books()
+    def book_as_observed(self, instrument: str, received_at: int, *,
+                         reconstruction: str = "legacy") -> dict:
+        state = Books(reconstruction=reconstruction)
         for dataset, row in self.events(
             ("book_snapshots", "book_updates", "operational_events"), received_at
         ):

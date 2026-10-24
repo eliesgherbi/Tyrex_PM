@@ -48,6 +48,7 @@ DECISION_RECORD_SCHEMA = RecordSchema(
     RecordField("fee_provenance", "text"),
     RecordField("filled_episodes", "number"),
     RecordField("held_p_point", "number"),
+    RecordField("exit_trend", "json"),
     RecordField("held_side", "text"),
     RecordField("intended_debit", "number"),
     RecordField("intended_gross_shares", "number"),

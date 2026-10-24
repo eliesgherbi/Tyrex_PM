@@ -216,6 +216,54 @@ def test_run_limits_collateral_unredeemed_and_consecutive_losses(tmp_path: Path)
     assert "MAX_UNREDEEMED_COUNT" in capped.reasons
 
 
+def test_retry_clock_and_policy_survive_reload(tmp_path: Path) -> None:
+    path = tmp_path / "l.jsonl"
+    ledger = SettlementLedger(path)
+    reserve(
+        ledger, "e", "w1",
+        lifecycle_policy="hold_to_resolution",
+        entry_started_at="2026-10-20T12:00:00+00:00",
+    )
+    ledger.record(
+        "DISPATCH_NO_FILL", "e", posted=True, attempt=1,
+        retry_clock="deadline", retry_not_before="2026-10-20T12:00:01+00:00",
+        entry_started_at="2026-10-20T12:00:00+00:00", entry_side="UP",
+    )
+    restored = SettlementLedger(path).episodes["e"]
+    assert restored.lifecycle_policy == "hold_to_resolution"
+    assert restored.entry_started_at == "2026-10-20T12:00:00+00:00"
+    assert restored.retry_clock == "deadline"
+    assert restored.retry_not_before == "2026-10-20T12:00:01+00:00"
+    assert restored.entry_side == "UP"
+    assert restored.posts == 1
+    assert restored.consecutive_service_failures is None
+    ledger.record(
+        "ATTEMPT_REARMED", "e",
+        key=SettlementLedger.attempt_key("ATTEMPT_REARMED", "e", 2),
+        attempt=2, max_debit="5", max_fees="0",
+    )
+    ledger.record(
+        "DISPATCH_NOT_SENT", "e",
+        key=SettlementLedger.attempt_key("DISPATCH_NOT_SENT", "e", 2),
+        prepare_failed=True, attempt=2, retry_clock="deadline",
+        retry_not_before="2026-10-20T12:00:05+00:00", entry_side="UP",
+        consecutive_service_failures=2,
+    )
+    again = SettlementLedger(path).episodes["e"]
+    assert again.consecutive_service_failures == 2
+    assert again.prepare_failures == 1
+
+
+def test_older_no_fill_has_no_invented_backoff(tmp_path: Path) -> None:
+    path = tmp_path / "l.jsonl"
+    ledger = SettlementLedger(path)
+    reserve(ledger, "e", "w1")
+    ledger.record("DISPATCH_NO_FILL", "e", posted=True, attempt=1)
+    restored = SettlementLedger(path).episodes["e"]
+    assert restored.retry_clock is None
+    assert restored.opened_at
+
+
 def test_run_limits_require_utc_and_positive_values() -> None:
     with pytest.raises(ValueError, match="UTC"):
         RunLimits(daily_loss_limit=Decimal(1), max_open_worst_case_loss=Decimal(1),

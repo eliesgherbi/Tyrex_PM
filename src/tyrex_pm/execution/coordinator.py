@@ -157,6 +157,7 @@ class AccountExecutionCoordinator:
         default_factory=_ReentrantEvidenceGate, init=False
     )
     recovery_generation: str | None = None
+    applied_event_ids: dict[str, str] = field(default_factory=dict)
     recovery_now: Callable[[], datetime] | None = None
     # Latency of each submit stage by order id (prepare/sign, final gate, durable
     # authorization, POST), for run evidence. Bounded; never part of the journal.
@@ -217,6 +218,7 @@ class AccountExecutionCoordinator:
         state = ExecutionSessionState()
         for event in self.journal.load(session_id):
             state, _ = reduce_execution_event(state, event)
+            self.applied_event_ids[session_id] = event.event_id
         self.states[session_id] = state
         return state
 
@@ -246,6 +248,7 @@ class AccountExecutionCoordinator:
                 if inserted:
                     state, effects = reduce_execution_event(state, event)
                     self.states[event.session_id] = state
+                    self.applied_event_ids[event.session_id] = event.event_id
                     for listener in tuple(self.listeners):
                         listener(state, effects)
                 else:

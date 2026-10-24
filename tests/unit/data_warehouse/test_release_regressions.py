@@ -586,7 +586,7 @@ def test_live_command_returns_failure_for_incomplete_derived_drain(tmp_path, mon
         def __init__(self, *args, **kwargs):
             self.root, self.collection, self.session = tmp_path, "c", "s"
 
-        async def run(self, duration):
+        async def run(self, duration, **_closing):
             return {
                 "capture_clean": True,
                 "derived_processing_complete": False,

@@ -90,6 +90,8 @@ class Collector:
         self.normalizer_retry_at = 0.0
         self.normalizer_log = None
         self.quality_stop = self.collection_dir / "sessions" / f"{self.session}.quality-stop"
+        self.collector_stop = self.collection_dir / "sessions" / f"{self.session}.collector-stop"
+        self.generation = os.environ.get("TYREX_COLLECTION_GENERATION", "1")
         self.quality_worker = None
         self.quality_log = None
         self.quality_restarts = 0
@@ -99,6 +101,15 @@ class Collector:
         self.drop_counters: dict[str, int] = {}
         self.recent_gaps: list[dict] = []
         self.last_clock: dict | None = None
+        # Closing phases (see run): which part of the session is running and what it covers.
+        self.phase = "recording"
+        self.capture_until_ns: int | None = None
+        self.capture_ended_at: int | None = None
+        self.windows_until: int | None = None
+        self.outcome_scope: set[str] | None = None
+        self.outcome_wait_until: int | None = None
+        self.outcome_result: dict | None = None
+        self.kind = "capture"
 
     async def capture(self, body: str | bytes, **kwargs: Any) -> RawEnvelope:
         raw, future = self.writer.submit(body, **kwargs)
@@ -147,8 +158,13 @@ class Collector:
             or now <= m["closed_at"] + self.profile.coverage.post_close_tail_s * 10**9
         ]
 
+    def book_markets(self) -> list[dict]:
+        """Markets whose books are recorded now: open soon, open, or in the close tail."""
+        horizon = time.time_ns() + self.profile.coverage.book_subscribe_ahead_s * 10**9
+        return [m for m in self.active_markets() if m.get("window_start", 0) <= horizon]
+
     def tokens(self, shard: int | None = None) -> list[str]:
-        tokens = sorted({i["token_id"] for m in self.active_markets() for i in m["instruments"]})
+        tokens = sorted({i["token_id"] for m in self.book_markets() for i in m["instruments"]})
         if shard is None:
             return tokens
         assignment = assign_shards(
@@ -246,6 +262,8 @@ class Collector:
     async def metadata_cycle(self) -> None:
         now = time.time_ns()
         for mid, entity in list(self.markets.items()):
+            if self.outcome_scope is not None and mid not in self.outcome_scope:
+                continue
             hot = entity["window_start"] - self.profile.coverage.pre_window_capture_s * 10**9 <= now
             if entity.get("closed_at") and now > entity["closed_at"] + 120 * 10**9:
                 continue
@@ -317,7 +335,9 @@ class Collector:
         due = [
             m
             for m in self.markets.values()
-            if m.get("resolution_next_at") is not None and m["resolution_next_at"] <= now
+            if m.get("resolution_next_at") is not None
+            and m["resolution_next_at"] <= now
+            and (self.outcome_scope is None or m["market_id"] in self.outcome_scope)
         ]
         for index in range(0, len(due), 20):
             batch = due[index : index + 20]
@@ -499,6 +519,11 @@ class Collector:
             "uptime_s": (time.time_ns() - self.started_at) / 10**9,
             "markets": len(self.markets),
             "active_markets": len(self.active_markets()),
+            "book_markets": len(self.book_markets()),
+            "subscribed_tokens": 0 if self.phase == "awaiting_outcomes" else len(self.tokens()),
+            "phase": self.phase,
+            "capture_until": self.capture_until_ns,
+            "outcomes": self.outcome_progress(),
             "unresolved_markets": sum(
                 m["resolution_status"] != "PROVIDER_TERMINAL" for m in self.markets.values()
             ),
@@ -549,7 +574,131 @@ class Collector:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), interval)
 
-    async def run(self, duration: float | None = None) -> dict:
+    async def watch_collector_stop(self) -> None:
+        """Stop this session only when the request names its session and generation."""
+        if not self.collector_stop.exists():
+            return
+        try:
+            payload = read_json(self.collector_stop)
+        except (OSError, ValueError):
+            return
+        if collector_stop_matches(
+            payload, session_id=self.session, generation=self.generation
+        ):
+            await self.event(
+                "stop_requested", session_id=self.session, generation=self.generation
+            )
+            self.stop.set()
+
+    def window_boundary(self, deadline_ns: int) -> int:
+        """End of the window still open at the deadline (the deadline if none is)."""
+        return max(
+            (
+                m["window_end"]
+                for m in self.markets.values()
+                if m.get("window_start") is not None
+                and m.get("window_end") is not None
+                and m["window_start"] < deadline_ns < m["window_end"]
+            ),
+            default=deadline_ns,
+        )
+
+    def recorded_markets(self, spans: list[tuple[int, int]]) -> set[str]:
+        """Markets whose whole window lies inside a span of captured windows."""
+        return {
+            mid
+            for mid, m in self.markets.items()
+            if m.get("window_start") is not None
+            and m.get("window_end") is not None
+            and any(start <= m["window_start"] and m["window_end"] <= end for start, end in spans)
+        }
+
+    def previous_spans(self) -> list[tuple[int, int]]:
+        spans = []
+        for path in (self.collection_dir / "sessions").glob("*.json"):
+            if path == self.session_path:
+                continue
+            try:
+                state = read_json(path)
+            except (OSError, ValueError):
+                continue
+            start = state.get("started_at")
+            end = state.get("windows_until", state.get("stopped_at"))
+            if isinstance(start, int) and isinstance(end, int) and end > start:
+                spans.append((start, end))
+        return spans
+
+    def pending_outcomes(self) -> list[str]:
+        return sorted(
+            mid
+            for mid in self.outcome_scope or ()
+            if self.markets.get(mid, {}).get("resolution_status") != "PROVIDER_TERMINAL"
+        )
+
+    def outcome_progress(self) -> dict | None:
+        if self.outcome_scope is None:
+            return None
+        return {
+            "windows": len(self.outcome_scope),
+            "known": len(self.outcome_scope) - len(self.pending_outcomes()),
+            "wait_until": self.outcome_wait_until,
+        }
+
+    async def wait_tasks(self, tasks: list[asyncio.Task], timeout: float | None) -> bool:
+        """Wait; True when the session ended early (a stop request or a task that ended)."""
+        done, _ = await asyncio.wait(tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if not task.cancelled() and task.exception() is not None:
+                task.result()
+        return bool(done)
+
+    async def await_outcomes(self, tasks: list[asyncio.Task], wait_s: float) -> None:
+        """Poll the provider until every captured window has a winner, or the wait ends.
+
+        Only resolution and metadata polling run here; books and reference feeds are
+        stopped, so nothing new is captured for windows after the recording.
+        """
+        now = time.time_ns()
+        self.phase = "awaiting_outcomes"
+        self.outcome_wait_until = now + int(wait_s * 10**9)
+        for mid in self.pending_outcomes():
+            # Ask now rather than at the slower audit cadence of old windows.
+            self.markets[mid] = {**self.markets[mid], "resolution_next_at": now}
+        await self.event(
+            "awaiting_outcomes",
+            markets=self.pending_outcomes(),
+            wait_s=wait_s,
+            windows=len(self.outcome_scope or ()),
+        )
+        while self.pending_outcomes():
+            left = (self.outcome_wait_until - time.time_ns()) / 10**9
+            if left <= 0 or await self.wait_tasks(tasks, min(5.0, left)):
+                break
+        pending = self.pending_outcomes()
+        self.outcome_result = {
+            "windows": len(self.outcome_scope or ()),
+            "known": len(self.outcome_scope or ()) - len(pending),
+            "missing": pending,
+        }
+        await self.event("outcome_wait_finished", **self.outcome_result)
+
+    async def run(
+        self,
+        duration: float | None = None,
+        *,
+        finish_windows: bool = False,
+        outcome_wait_s: float = 0.0,
+        outcomes_only: bool = False,
+    ) -> dict:
+        """Record, optionally finish the open window, then optionally wait for winners.
+
+        ``finish_windows`` extends the capture past ``duration`` to the end of the window
+        still open, plus CLOSE_MARGIN_S, so the last window is complete. ``outcome_wait_s``
+        then keeps only resolution and metadata polling until every captured window has
+        a provider winner (or the wait ends). ``outcomes_only`` runs that wait alone, for
+        the windows of the collection's earlier sessions. A stop request ends any phase.
+        """
+        self.kind = "outcomes_only" if outcomes_only else "capture"
         atomic_json(
             self.session_path,
             {
@@ -557,6 +706,7 @@ class Collector:
                 "started_at": self.started_at,
                 "clean_stop": False,
                 "profile_hash": self.profile.hash,
+                "generation": self.generation,
             },
         )
         error = None
@@ -572,10 +722,11 @@ class Collector:
             await self.event(
                 "session_started", session_id=self.session, recovery=self.writer.recovery
             )
-            for source, feed in (
+            feeds = (
                 ("chainlink", "chainlink:btcusd:twap:60"),
                 ("binance", "binance:spot:BTCUSDT"),
-            ):
+            )
+            for source, feed in () if outcomes_only else feeds:
                 await self.event(
                     "feed_definition",
                     feed={
@@ -603,26 +754,57 @@ class Collector:
                 ("resolution", self.profile.resolution.poll_initial_s, self.resolution_cycle),
                 ("clock", 60, self.clocks),
                 ("heartbeat", self.profile.operations.heartbeat_s, self.heartbeat),
+                ("collector_stop", 0.5, self.watch_collector_stop),
             ]
-            self.tasks = [
-                asyncio.create_task(self.periodic(name, interval, action))
+            if outcomes_only:
+                actions = [item for item in actions if item[0] not in CAPTURE_ACTIONS]
+            named = {
+                name: asyncio.create_task(self.periodic(name, interval, action))
                 for name, interval, action in actions
-            ]
-            self.tasks.append(asyncio.create_task(record_stream(self, "binance", "binance-main")))
-            if self.credentials is not None:
-                self.tasks.append(
-                    asyncio.create_task(
+            }
+            if not outcomes_only:
+                named["binance_stream"] = asyncio.create_task(
+                    record_stream(self, "binance", "binance-main")
+                )
+                if self.credentials is not None:
+                    named["reference_stream"] = asyncio.create_task(
                         record_stream(self, "polybolt", "reference", credentials=self.credentials)
                     )
-                )
-            stop_task = asyncio.create_task(self.stop.wait())
-            self.tasks.append(stop_task)
-            done, _ = await asyncio.wait(
-                self.tasks, timeout=duration, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in done:
-                if task is not stop_task:
-                    task.result()
+            named["stop"] = asyncio.create_task(self.stop.wait())
+            self.tasks = list(named.values())
+            if outcomes_only:
+                self.capture_ended_at = self.windows_until = self.started_at
+                self.outcome_scope = {
+                    mid
+                    for mid in self.recorded_markets(self.previous_spans())
+                    if self.markets[mid]["window_end"] <= self.started_at
+                }
+                await self.await_outcomes(self.tasks, outcome_wait_s)
+            else:
+                ended = await self.wait_tasks(self.tasks, duration)
+                windows_until = None
+                if not ended and finish_windows and duration is not None:
+                    boundary = self.window_boundary(self.started_at + int(duration * 10**9))
+                    self.phase = "finishing_window"
+                    self.capture_until_ns = boundary + CLOSE_MARGIN_S * 10**9
+                    left = (self.capture_until_ns - time.time_ns()) / 10**9
+                    ended = left > 0 and await self.wait_tasks(self.tasks, left)
+                    windows_until = None if ended else boundary
+                self.capture_ended_at = time.time_ns()
+                self.windows_until = windows_until or self.capture_ended_at
+                if not ended and outcome_wait_s > 0:
+                    capture = [named.pop(name) for name in list(named) if name in CAPTURE_TASKS]
+                    shards = list(self.shards.values())
+                    for task in capture + shards:
+                        task.cancel()
+                    await asyncio.gather(*capture, *shards, return_exceptions=True)
+                    self.shards.clear()
+                    await self.event("capture_finished", windows_until=self.windows_until)
+                    self.outcome_scope = self.recorded_markets(
+                        [(self.started_at, self.windows_until)]
+                    )
+                    self.tasks = list(named.values())
+                    await self.await_outcomes(self.tasks, outcome_wait_s)
         except BaseException as exc:
             error = exc
         finally:
@@ -641,10 +823,17 @@ class Collector:
             except DurabilityError as exc:
                 error = exc
             self.catalog.close()
+            stopped_at = time.time_ns()
             session_status = {
                 "session_id": self.session,
+                "kind": self.kind,
                 "started_at": self.started_at,
-                "stopped_at": time.time_ns(),
+                "stopped_at": stopped_at,
+                # Windows starting before windows_until belong to this session; after it
+                # the session only polled outcomes (or had stopped).
+                "capture_ended_at": self.capture_ended_at or stopped_at,
+                "windows_until": self.windows_until or self.capture_ended_at or stopped_at,
+                "outcome_wait": self.outcome_result,
                 "clean_stop": error is None,
                 "capture_clean": error is None,
                 "derived_processing_complete": False,
@@ -707,6 +896,14 @@ class Collector:
 CLOCK_RESOLUTION_NS = {"binance_time": 1_000_000, "clob_time": 1_000_000_000}
 
 
+# The last window keeps this much data after its close (replay loads 30 s past the end).
+CLOSE_MARGIN_S = 30
+# Stopped when a session moves on to waiting for outcomes; resolution, metadata, clock,
+# heartbeat, the normalizer and the quality worker keep running.
+CAPTURE_ACTIONS = {"discovery", "scan", "shards", "books"}
+CAPTURE_TASKS = CAPTURE_ACTIONS | {"binance_stream", "reference_stream"}
+
+
 def clock_sample(
     endpoint: str, value: int, *, request_at: int, response_at: int, sample_id: str
 ) -> dict:
@@ -750,6 +947,14 @@ def assign_shards(previous: dict[str, int], tokens: list[str], size: int) -> dic
             assignment[token] = shard
             counts[shard] += 1
     return assignment
+
+
+def collector_stop_matches(payload: dict, *, session_id: str, generation: str) -> bool:
+    """A stop file applies only to the session and generation it names."""
+    return (
+        str(payload.get("session_id") or "") == str(session_id)
+        and str(payload.get("generation") or "") == str(generation)
+    )
 
 
 def resume_profile(root: Path, collection: str) -> Profile:

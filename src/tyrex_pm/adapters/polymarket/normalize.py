@@ -128,6 +128,8 @@ def normalize_price_change(
                 side=side,
                 price=Decimal(str(row["price"])),
                 size=Decimal(str(row.get("size", row.get("quantity", "0")))),
+                reported_best_bid=row.get("best_bid"),
+                reported_best_ask=row.get("best_ask"),
             )
         )
     if not changes:

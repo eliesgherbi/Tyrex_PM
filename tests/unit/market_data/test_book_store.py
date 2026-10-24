@@ -32,6 +32,45 @@ UP = InstrumentId("tok-up")
 DOWN = InstrumentId("tok-down")
 
 
+def test_venue_repair_matches_warehouse_and_preserves_prior_snapshot():
+    from tyrex_pm.data_warehouse.reconstruction.books import Book, Books
+
+    store = MarketStateStore(reconstruction="venue_top_v1")
+    original = BookSnapshot(
+        instrument_id=UP, ts_event=TS,
+        bids=(BookLevel(price=Decimal(".49"), quantity=Decimal(5)),),
+        asks=(BookLevel(price=Decimal(".50"), quantity=Decimal(5)),
+              BookLevel(price=Decimal(".53"), quantity=Decimal(8))))
+    store.on_snapshot(BookSnapshotReceived(**_evt(), book=original))
+    previous = store.get(UP).book
+    change = BookLevelDelta(instrument_id=UP, side=BookSide.BID, price=Decimal('.52'),
+                            size=Decimal(3), reported_best_bid=Decimal('.52'),
+                            reported_best_ask=Decimal('.53'))
+    store.on_delta(BookDeltaReceived(**_evt(), changes=(change,)))
+    current = store.get(UP)
+    assert current.sync_health is SyncHealth.READY
+    assert current.book.best_ask.price == Decimal('.53')
+    assert previous.best_ask.price == Decimal('.50')
+    wh = Books(reconstruction="venue_top_v1")
+    book = Book(UP.value, bids={Decimal('.49'): Decimal(5)},
+                asks={Decimal('.50'): Decimal(5), Decimal('.53'): Decimal(8)},
+                valid=True, source_id='clob', connection_id='c', session_id='s')
+    wh.streams[(UP.value, 's', 'c')] = book
+    wh.books[UP.value] = book
+    wh.apply('book_updates', {'source_id': 'clob', 'session_id': 's', 'connection_id': 'c',
+             'received_at': 1, 'changes': [{'instrument_id': UP.value, 'side': 'BUY',
+             'price': Decimal('.52'), 'new_quantity': Decimal(3),
+             'reported_best_bid': Decimal('.52'), 'reported_best_ask': Decimal('.53')}]})
+    assert book.valid and book.asks == {lv.price: lv.quantity for lv in current.book.asks}
+    # A size-only change must invalidate the lazy depth cache, not the old publication.
+    change = BookLevelDelta(instrument_id=UP, side=BookSide.BID, price=Decimal('.52'),
+                            size=Decimal(9), reported_best_bid=Decimal('.52'),
+                            reported_best_ask=Decimal('.53'))
+    store.on_delta(BookDeltaReceived(**_evt(), changes=(change,)))
+    assert store.get(UP).book.best_bid.quantity == 9
+    assert current.book.best_bid.quantity == 3
+
+
 def _evt(**extra):
     return dict(
         event_id=new_event_id(),

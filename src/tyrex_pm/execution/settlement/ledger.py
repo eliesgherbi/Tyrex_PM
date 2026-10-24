@@ -42,6 +42,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
+from time import time_ns
 from typing import Any
 
 SCHEMA_VERSION = 2
@@ -139,6 +140,19 @@ class Episode:
     receivable: Decimal = Decimal(0)
     credited: Decimal = Decimal(0)
     opened_at: str | None = None
+    # First-attempt time and the retry backoff deadline. ``retry_clock`` is
+    # ``deadline`` (wait until ``retry_not_before``), ``none`` (no backoff), or
+    # unset (required timing was not recorded — recovery must not invent it).
+    entry_started_at: str | None = None
+    retry_not_before: str | None = None
+    retry_clock: str | None = None
+    # Lifecycle policy in force when the episode was reserved. Recovery uses this,
+    # not whatever configuration happens to be loaded after a restart.
+    lifecycle_policy: str | None = None
+    entry_side: str | None = None
+    # Consecutive preparation/service failures at the last released attempt.
+    # None means the journal did not record it.
+    consecutive_service_failures: int | None = None
     completed_at: str | None = None
     # Ledger time the fill was recorded (cash left the account at about this time).
     filled_at: str | None = None
@@ -216,15 +230,20 @@ class WindowUsage:
 
 
 class SettlementLedger:
-    def __init__(self, path: Path, *, fsync: bool = True) -> None:
-        self.path = path
+    def __init__(self, path: Path, *, fsync: bool = True, writer=None,
+                 read_only: bool = False) -> None:
+        self.path = Path(path).resolve()
         self.fsync = fsync
+        self._writer = writer
+        self.read_only = read_only
+        self.snapshot_at = datetime.now(timezone.utc).isoformat()
         self.episodes: dict[str, Episode] = {}
         self.operator_records: list[dict] = []
         self._keys: dict[str, dict] = {}
         self._seq = 0
         self.torn_tail_skipped = False
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._recover()
 
     # -- persistence -----------------------------------------------------------------
@@ -232,7 +251,13 @@ class SettlementLedger:
     def _recover(self) -> None:
         if not self.path.exists():
             return
-        lines = self.path.read_bytes().split(b"\n")
+        captured = self.path.read_bytes()
+        if captured and not captured.endswith(b"\n"):
+            # A JSON object without its append terminator is not a committed record,
+            # even if it happens to parse. Otherwise the next append joins two objects.
+            captured = captured[:captured.rfind(b"\n") + 1]
+            self.torn_tail_skipped = True
+        lines = captured.split(b"\n")
         for index, raw in enumerate(lines):
             if not raw.strip():
                 continue
@@ -259,6 +284,25 @@ class SettlementLedger:
         self, event: str, episode_id: str, *, key: str | None = None, **payload: Any
     ) -> Episode | None:
         """Durably append one event (before its effect is relied upon) and apply it."""
+        if self.read_only:
+            raise LedgerError("read-only ledger snapshot cannot be modified")
+        if self._writer is None:
+            # Compatibility callers still get atomic read/check/append. The runtime
+            # holds one lifetime writer, avoiding per-event locks and recovery work.
+            from tyrex_pm.execution.process_lock import LedgerWriter
+
+            with LedgerWriter(self.path) as writer:
+                current = writer.ledger()
+                result = current.record(event, episode_id, key=key, **payload)
+                for name, episode in current.episodes.items():
+                    previous = self.episodes.get(name)
+                    if previous is not None:
+                        previous.__dict__.update(episode.__dict__)
+                        current.episodes[name] = previous
+                self.__dict__.update(current.__dict__)
+                self._writer = None
+                return None if result is None else self.episodes[result.episode_id]
+        self._writer.assert_owner(self)
         dedupe = key or f"{event}:{episode_id}"
         record = {
             "event": event,
@@ -278,6 +322,15 @@ class SettlementLedger:
         record["seq"] = self._seq
         record["schema"] = SCHEMA_VERSION
         record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        if self.torn_tail_skipped:
+            raw = self.path.read_bytes()
+            backup = self.path.with_name(self.path.name + f".torn-{time_ns()}.bak")
+            backup.write_bytes(raw)
+            with self.path.open("r+b") as handle:
+                handle.truncate(raw.rfind(b"\n") + 1)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.torn_tail_skipped = False
         self._append(record)
         self._apply(record, replay=False)
         return self.episodes.get(episode_id)
@@ -338,6 +391,8 @@ class SettlementLedger:
                 reserved_debit=_dec(payload.get("max_debit", 0)),
                 reserved_fees=_dec(payload.get("max_fees", 0)),
                 opened_at=at,
+                entry_started_at=payload.get("entry_started_at") or at,
+                lifecycle_policy=payload.get("lifecycle_policy") or None,
             )
         ep = self.episodes[episode_id]
         _, target = TRANSITIONS[event]
@@ -351,6 +406,16 @@ class SettlementLedger:
             ep.reserved_fees = _dec(payload.get("max_fees", 0))
         elif event in ("DISPATCH_NOT_SENT", "DISPATCH_NO_FILL"):
             ep.reserved_debit = ep.reserved_fees = Decimal(0)
+            clock = payload.get("retry_clock")
+            if clock in ("deadline", "none"):
+                ep.retry_clock = clock
+                ep.retry_not_before = payload.get("retry_not_before") or None
+            if payload.get("entry_started_at"):
+                ep.entry_started_at = payload["entry_started_at"]
+            if payload.get("entry_side"):
+                ep.entry_side = payload["entry_side"]
+            if "consecutive_service_failures" in payload:
+                ep.consecutive_service_failures = int(payload["consecutive_service_failures"])
         elif event == "FILL_CONFIRMED":
             # The reservation becomes spent capital exactly once.
             ep.net_shares = _dec(payload["net_shares"])

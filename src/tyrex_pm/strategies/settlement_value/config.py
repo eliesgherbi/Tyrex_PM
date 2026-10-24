@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from math import isfinite
 
 SUPPORTED_BACKENDS = frozenset({"endpoint_diffusion", "twap_proxy_diffusion"})
 SPOT_INPUTS = frozenset({"binance_spot", "aligned_reference"})
@@ -204,6 +205,13 @@ class SettlementExitConfig:
     # Hold value used by the economic exit: upper interval bound (conservative for a
     # sale: only sell when the bid beats even the optimistic value) or the point value.
     value_exit_basis: str = "upper"
+    # Experimental evaluated-bid confirmation; off preserves every existing policy.
+    value_exit_trend_enabled: bool = False
+    value_exit_trend_policy: str = "evaluated_bid_trend_v1"
+    value_exit_trend_lookback_s: float = 5.0
+    value_exit_trend_min_drop: Decimal = Decimal("0.02")
+    value_exit_trend_confirmation_s: float = 2.0
+    value_exit_trend_max_gap_s: float = 2.0
     # Declared risk rule (not an expected-value claim): exit when the point probability
     # of the held side falls below this [0, 1].
     thesis_stop_enabled: bool = False
@@ -354,6 +362,18 @@ def validate_settlement_value_config(cfg: SettlementValueConfig) -> None:
     if r.service_backoff_ms < 0 or r.service_backoff_max_ms < r.service_backoff_ms:
         raise ValueError("retry.service_backoff_max_ms must be >= service_backoff_ms >= 0")
     x = cfg.exit
+    if (not all(isfinite(v) for v in (x.value_exit_trend_lookback_s,
+                                     x.value_exit_trend_max_gap_s,
+                                     x.value_exit_trend_confirmation_s))
+            or not x.value_exit_trend_min_drop.is_finite()):
+        raise ValueError("value exit trend parameters must be finite")
+    if x.value_exit_trend_policy != "evaluated_bid_trend_v1":
+        raise ValueError("unknown value exit trend policy")
+    if (x.value_exit_trend_lookback_s <= 0 or x.value_exit_trend_max_gap_s <= 0
+            or x.value_exit_trend_confirmation_s < 0 or x.value_exit_trend_min_drop <= 0):
+        raise ValueError("invalid value exit trend durations or minimum drop")
+    if x.value_exit_trend_enabled and (not x.value_exit_enabled or x.policy != "managed_exit"):
+        raise ValueError("exit trend requires enabled value exit and managed_exit policy")
     if x.policy not in EXIT_POLICIES:
         raise ValueError(f"exit.policy must be one of {sorted(EXIT_POLICIES)}")
     if x.value_exit_basis not in EXIT_VALUE_BASES:

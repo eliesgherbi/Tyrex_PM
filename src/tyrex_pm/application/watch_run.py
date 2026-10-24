@@ -201,7 +201,7 @@ def snapshot(config_path: Path, run_id: str | None = None) -> str:
     if config.settlement is not None and config.settlement.ledger_path.exists():
         from tyrex_pm.execution.settlement.ledger import SettlementLedger
 
-        ledger = SettlementLedger(config.settlement.ledger_path, fsync=False)
+        ledger = SettlementLedger(config.settlement.ledger_path, fsync=False, read_only=True)
         totals = ledger.totals()
         lines += [
             "",

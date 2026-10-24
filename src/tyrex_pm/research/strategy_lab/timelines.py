@@ -49,6 +49,8 @@ TRACE_COLUMNS = (
     "down_ask",
     "chosen_side",
     "window_end_ns",
+    "held_side", "held_p_point", "exit_hold_value", "exit_feasible",
+    "exit_reason", "exit_sell_shares", "exit_trend",
 )
 AQUA = "#1baf7a"
 RED = "#d03b3b"  # book midpoint: a market price, not a model output
@@ -62,6 +64,7 @@ STATUS_STYLE = {
     "SKIP": ("SKIP (entry window closed)", "#ece3c8", ".."),
     "ENTER": ("ENTER", INK, ""),
     "HOLD": ("HOLD (position held)", "#cdeee0", "\\\\"),
+    "EXIT": ("EXIT requested (not a confirmed sale)", "#f3d2c4", "//"),
 }
 
 
@@ -148,6 +151,19 @@ def saved_execution(row: pd.Series) -> tuple[list[dict], list[dict]]:
     return data.get("orders", []), data.get("events", [])
 
 
+def exit_context_table(trace: Trace) -> pd.DataFrame:
+    """Recorded exit inputs only; no retrospective model calculation."""
+    frame = trace.frame
+    if "held_side" not in frame or not frame["held_side"].notna().any():
+        return pd.DataFrame()
+    rows = frame[frame["held_side"].notna()]
+    columns = ("at_ns", "tau_s", "action", "reason", "held_side", "held_p_point",
+               "exit_hold_value", "exit_feasible", "exit_reason", "exit_sell_shares", "exit_trend")
+    # Surface requests before surrounding waits, while retaining recorded order within each.
+    rows = pd.concat([rows[rows.action.eq("EXIT")], rows[~rows.action.eq("EXIT")]])
+    return rows[[c for c in columns if c in rows]].head(60)
+
+
 def load_original(dataset, row: pd.Series) -> Trace | None:
     if _kind(dataset) == "study":
         return load_study_trace(row)
@@ -184,6 +200,9 @@ def cache_key(row: pd.Series) -> str:
         row["market_id"],
         _row_value(row, "digest"),
     ]
+    policy = _row_policy(row) or {}
+    if policy.get("book_reconstruction", "legacy") != "legacy":
+        payload.append(json.dumps(policy, sort_keys=True))
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:24]
 
 
@@ -297,13 +316,31 @@ def _collection(collection: str):
     return None
 
 
-def _current_cache_key(collection: str, market_id: str) -> str:
+def _current_cache_key(collection: str, market_id: str, parser: str | None = None) -> str:
     from tyrex_pm.research.strategy_replay.cache import window_cache_key
 
     from .batch import _lab
 
-    lab = _lab(_collection(collection))
+    lab = _lab(_collection(collection), parser)
     return window_cache_key(lab.catalog, market_id, warmup_s=lab.warmup_s, after_s=30.0)
+
+
+# Normalization builds kept on disk after a re-normalization, newest first after current.
+_OLDER_PARSERS = ("1",)
+
+
+def _data_parser(dataset, row: pd.Series) -> str | None:
+    """Parser version whose builds reproduce the run's recorded data (None = current)."""
+    saved_key = _saved_cache_key(dataset, row)
+    if saved_key is None or saved_key == _current_cache_key(row["collection"], row["market_id"]):
+        return None
+    for parser in _OLDER_PARSERS:
+        try:
+            if saved_key == _current_cache_key(row["collection"], row["market_id"], parser):
+                return parser
+        except ValueError:  # no builds of that version for this window
+            continue
+    return None
 
 
 def _current_scenario(name: str) -> dict:
@@ -327,6 +364,9 @@ def replay_check(dataset, row: pd.Series) -> tuple[dict | None, list[str], list[
 
     problems, notes = [], []
     params = json.loads(row["config"])
+    if getattr(dataset.spec, "diagnostic", False):
+        return params, ["Use recording reconstruct for a trading capture; generic replay "
+                        "cannot replace its recorded execution context."], notes
     try:
         current_id = config_id(params)
     except Exception as exc:  # noqa: BLE001 - surfaced to the reader as a refusal
@@ -346,7 +386,12 @@ def replay_check(dataset, row: pd.Series) -> tuple[dict | None, list[str], list[
     if saved_key is None:
         notes.append("data identity was not recorded with this run; current recording used")
     elif saved_key != _current_cache_key(row["collection"], row["market_id"]):
-        problems.append("the recorded window data changed since the run (cache key differs)")
+        parser = _data_parser(dataset, row)
+        if parser is None:
+            problems.append("the recorded window data changed since the run (cache key differs)")
+        else:
+            notes.append(f"replayed on the parser-{parser} builds the run used (the warehouse "
+                         "was re-normalized since; same recorded data)")
     if _kind(dataset) == "study":
         notes.append("study variant replayed as strategy settings on the production path "
                      "(trading-equal by the migration check; decision labels of the veto "
@@ -356,6 +401,16 @@ def replay_check(dataset, row: pd.Series) -> tuple[dict | None, list[str], list[
                                          else "replay defaults (none recorded)"))
     saved_sc = _saved_scenario(dataset, row)
     current_sc = _current_scenario(row["scenario_name"])
+    if saved_sc is not None:
+        # A field added to Scenario after the run, still at its default, is not a change.
+        from tyrex_pm.research.replay.config import Scenario
+
+        defaults = dataclasses.asdict(Scenario())
+        current_sc = {
+            key: value
+            for key, value in current_sc.items()
+            if key in saved_sc or value != defaults.get(key)
+        }
     if saved_sc is None:
         notes.append("scenario settings were not recorded with this run; current file used")
     elif json.dumps(saved_sc, sort_keys=True, default=str) != json.dumps(
@@ -375,10 +430,10 @@ def _row_policy(row: Any) -> dict | None:
 
 
 def _replay(collection: str, market_id: str, params: dict, scenario: str,
-            execution_policy: dict | None = None) -> dict:
+            execution_policy: dict | None = None, parser: str | None = None) -> dict:
     from .batch import _lab
 
-    lab = _lab(_collection(collection))
+    lab = _lab(_collection(collection), parser)
     try:
         return lab.run(market_id, parameters=params, scenario=scenario,
                        execution_policy=execution_policy)
@@ -388,16 +443,17 @@ def _replay(collection: str, market_id: str, params: dict, scenario: str,
         lab._windows.pop(market_id, None)
 
 
-TEXT_COLUMNS = ("action", "reason", "chosen_side", "up_reason", "down_reason", "twap_reason")
+TEXT_COLUMNS = ("action", "reason", "chosen_side", "up_reason", "down_reason", "twap_reason",
+                "held_side", "exit_reason", "exit_feasible", "exit_trend")
 
 
 def replay_compact(collection: str, market_id: str, params: dict, scenario: str,
-                   execution_policy: dict | None = None) -> dict:
+                   execution_policy: dict | None = None, parser: str | None = None) -> dict:
     """Replay one run and keep only what the chart needs (picklable; runs in workers)."""
-    from .batch import DECISION_COLUMNS, execution_events
+    from .batch import _compact, execution_events
 
-    result = _replay(collection, market_id, params, scenario, execution_policy)
-    frame = pd.DataFrame([{k: d.get(k) for k in DECISION_COLUMNS} for d in result["decisions"]])
+    result = _replay(collection, market_id, params, scenario, execution_policy, parser)
+    frame = pd.DataFrame(_compact(result))
     for column in frame.columns:
         if column not in TEXT_COLUMNS:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -444,7 +500,7 @@ def generate(dataset, row: pd.Series, root: Path = TIMELINE_CACHE) -> Trace:
     if problems:
         raise RuntimeError("replay refused: " + "; ".join(problems))
     payload = replay_compact(row["collection"], row["market_id"], params, row["scenario_name"],
-                             _row_policy(row))
+                             _row_policy(row), _data_parser(dataset, row))
     return _save(row, params, notes, payload, root)
 
 
@@ -472,7 +528,7 @@ def generate_many(
         if problems:
             report.append({**status, "result": "refused: " + "; ".join(problems)})
         else:
-            todo.append((row, params, notes))
+            todo.append((row, params, notes, _data_parser(dataset, row)))
     print(f"{len(todo)} to replay, {len(runs) - len(todo)} skipped", flush=True)
 
     def record(row, params, notes, payload):
@@ -488,9 +544,9 @@ def generate_many(
 
     started = datetime.now(timezone.utc)
     if workers <= 1:
-        for i, (row, params, notes) in enumerate(todo, 1):
+        for i, (row, params, notes, parser) in enumerate(todo, 1):
             args = (row["collection"], row["market_id"], params, row["scenario_name"],
-                    _row_policy(row))
+                    _row_policy(row), parser)
             record(row, params, notes, replay_compact(*args))
             print(f"timelines {i}/{len(todo)}", flush=True)
     else:
@@ -503,8 +559,9 @@ def generate_many(
                     params,
                     row["scenario_name"],
                     _row_policy(row),
+                    parser,
                 ): (row, params, notes)
-                for row, params, notes in todo
+                for row, params, notes, parser in todo
             }
             try:
                 for i, future in enumerate(as_completed(futures), 1):
@@ -535,7 +592,7 @@ def explanations_for(dataset, row: pd.Series) -> pd.DataFrame:
     write ``explanations.parquet``). Never replays."""
     if _kind(dataset) != "batch" or dataset.root is None:
         return pd.DataFrame()
-    path = Path(dataset.root) / "explanations.parquet"
+    path = _bundle_dir(dataset, row) / "explanations.parquet"
     if not path.exists():
         return pd.DataFrame()
     frame = pd.read_parquet(path, filters=[("market_id", "=", row["market_id"]),
@@ -633,6 +690,15 @@ def markers(trace: Trace, row: pd.Series) -> list[dict]:
                 + ("" if trace.is_original_execution else " in this diagnostic replay"),
             }
         )
+    for r in frame[frame["action"] == "EXIT"].itertuples():
+        side = getattr(r, "held_side", None) or _row_value(row, "side")
+        p = getattr(r, "p_up_point", math.nan)
+        out.append({"kind": "exit_requested", "at_ns": int(r.at_ns), "side": side,
+                    "y": p if side == "UP" else 1 - p,
+                    "y_meaning": "held-side point probability at exit request",
+                    "label": f"EXIT requested ({side}); {getattr(r, 'reason', '')}"})
+    if _row_value(row, "diagnostic", False):
+        return out
     if not trace.is_original_execution:
         # A different replay's fills are not the saved run's execution: state the saved
         # outcome instead, without a time.
@@ -673,7 +739,8 @@ def markers(trace: Trace, row: pd.Series) -> list[dict]:
                     "side": side,
                     "y": float(e["price"]),
                     "y_meaning": "fill price per share",
-                    "label": f"{'partial fill' if partial else 'fill'} {q:g} sh @ "
+                    "label": ("SELL " if order.get("action") == "SELL" else "")
+                    + f"{'partial fill' if partial else 'fill'} {q:g} sh @ "
                     f"{float(e['price']):.2f}",
                 }
             )
@@ -836,6 +903,7 @@ def plot_timeline(
 
     styles = {
         "requested": dict(marker="^", ms=9, color=INK, mfc="white", mew=1.5),
+        "exit_requested": dict(marker="v", ms=9, color=INK, mfc="white", mew=1.5),
         "fill": dict(marker="o", ms=8, color=INK, mfc=INK),
         "partial": dict(marker="o", ms=8, color=INK, mfc="white", mew=1.5),
         "unfilled": dict(marker="x", ms=9, color=INK, mew=2),
@@ -845,12 +913,14 @@ def plot_timeline(
     }
     seen = set()
     status_lines = []
+    annotation_lanes = {}
     for m in markers(trace, row):
         if m["at_ns"] is None:
             status_lines.append(m["label"])
             continue
         t = _utc(m["at_ns"])
-        if m["kind"] == "requested":
+        requested = m["kind"] in ("requested", "exit_requested")
+        if requested:
             for ax in axes[:2]:
                 ax.axvline(t, color=INK, lw=0.9, ls=(0, (4, 3)))
         ax = axes[0] if m["side"] == "UP" else axes[1]
@@ -858,12 +928,17 @@ def plot_timeline(
         ax.plot([t], [y], ls="", **styles[m["kind"]])
         seen.add(m["kind"])
         if m["kind"] != "arrived":
+            # Stack nearby requests/fills so a multi-level sale stays readable.
+            lane_key = (m["side"], requested)
+            last_at, lane = annotation_lanes.get(lane_key, (None, -1))
+            lane = lane + 1 if last_at is not None and m["at_ns"] - last_at < 10e9 else 0
+            annotation_lanes[lane_key] = (m["at_ns"], lane)
             ax.annotate(
                 m["label"],
                 (t, y),
                 # decision labels above the point, execution labels below: they often
                 # share the same second
-                xytext=(6, 6) if m["kind"] == "requested" else (6, -14),
+                xytext=(6, 6 + 14 * lane) if requested else (6, -14 - 14 * lane),
                 textcoords="offset points",
                 fontsize=8,
                 color=INK,
@@ -873,6 +948,7 @@ def plot_timeline(
 
         names = {
             "requested": "ENTER requested\n(y = conservative\nmodel probability)",
+            "exit_requested": "EXIT requested\n(y = held-side\npoint probability)",
             "fill": "fill (y = fill price)",
             "partial": "partial fill\n(y = fill price)",
             "unfilled": "unfilled remainder\n(y = limit price)",
@@ -967,11 +1043,13 @@ estimates do not: Up uses the low bound, Down uses 1 − the high bound, so the 
 conservative values add up to less than 1. The gap is the model's uncertainty band.</li>
 <li><b>Midpoint vs ask vs fill.</b> A buyer pays the ask (above the midpoint), possibly
 worse after delays and adverse ticks; the fill marker shows the price actually paid.</li>
-<li><b>Markers.</b> ▲ ENTER requested is the strategy's recommendation, not a fill or
-venue acceptance. ● is a simulated fill, ○ a partial fill, × an unfilled remainder.
+<li><b>Markers.</b> ▲ ENTER and ▽ EXIT requested are recommendations, not fills or
+venue acceptance. Exit markers use the held-side point probability. ● is a simulated
+fill, ○ a partial fill, × an unfilled remainder. SELL labels identify early sales.
 When the file holds no event times, the outcome is written in a box instead of drawn.</li>
-<li><b>After entry.</b> The model keeps updating, but the strategy holds to settlement
-(HOLD) and allows one entry per window, so later changes trigger no purchase.</li>
+<li><b>After entry.</b> The model keeps updating. Hold profiles keep the position until
+settlement; managed profiles can request early sales. The selected run's configuration
+determines exits and whether further entries are allowed.</li>
 <li><b>Grey hatched strip.</b> Seconds where the host skipped evaluation (inputs
 unavailable). Lines join real evaluations up to 10 s apart (the title says so) and
 break at longer outages; a lone value between two long outages is not drawn. Tick

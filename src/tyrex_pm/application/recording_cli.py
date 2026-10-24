@@ -36,10 +36,12 @@ def add_parser(commands: Any) -> None:
                        help="sleep between evaluations (0 = burst)")
     rec = sub.add_parser(
         "reconstruct",
-        help="Import a raw-captured observation into its own warehouse collection and "
+        help="Import a raw-captured observation or supported trading run and "
         "reconstruct its decisions at the captured evaluation instants (offline)")
     rec.add_argument("--capture", type=Path, required=True,
-                     help="observation output folder (decisions.jsonl + recording/raw)")
+                     help="capture output folder, including recording/raw and execution export")
+    rec.add_argument("--mode", choices=("auto", "observation", "trading"), default="auto")
+    rec.add_argument("--book-reconstruction", choices=("legacy", "venue_top_v1"))
     rec.add_argument("--out", type=Path, default=None,
                      help="report folder (default: <capture>/reconstruction)")
 
@@ -81,7 +83,8 @@ def run(args: argparse.Namespace) -> int:
     if args.recording_command == "reconstruct":
         from tyrex_pm.research.strategy_replay.capture_replay import reconstruct
 
-        report = reconstruct(args.capture, out=args.out or args.capture / "reconstruction")
+        report = reconstruct(args.capture, out=args.out or args.capture / "reconstruction",
+                             mode=args.mode, book_reconstruction=args.book_reconstruction)
         summary = {
             "decisions_reconstructed_equal": report["decisions_reconstructed_equal"],
             "raw_completeness": report["raw_completeness"],
@@ -91,7 +94,7 @@ def run(args: argparse.Namespace) -> int:
                                    "field_mismatch_counts")}} for w in report["windows"]],
         }
         print(json.dumps(summary, indent=1, default=str))
-        return 0
+        return 0 if report["decisions_reconstructed_equal"] else 1
     from tyrex_pm.recording.benchmark import run_benchmark
 
     result = run_benchmark(out=args.out, records=args.records, bundle=args.bundle,

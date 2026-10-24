@@ -192,17 +192,30 @@ def explain_record(*, at_ns: int, window_id: Any, mode: str, run_id: str,
 
 
 def iter_records(directory: Any, stream: str) -> Iterable[dict]:
-    """Read a recorded stream back (all closed segments, in order)."""
+    """Read verified closed segments in order; an active segment has no manifest."""
+    import hashlib
     import io
     import json
     from pathlib import Path
 
     import zstandard
 
-    for path in sorted((Path(directory) / stream).glob("part-*.jsonl.zst")):
+    for manifest_path in sorted((Path(directory) / stream).glob("part-*.manifest.json")):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        name = manifest_path.name.removesuffix(".manifest.json") + ".jsonl.zst"
+        if manifest.get("file") != name:
+            raise ValueError(f"invalid recording segment filename: {manifest_path.name}")
+        path = manifest_path.with_name(name)
+        count = 0
         with path.open("rb") as raw:
+            if hashlib.file_digest(raw, "sha256").hexdigest() != manifest.get("sha256"):
+                raise ValueError(f"recording segment checksum mismatch: {name}")
+            raw.seek(0)
             reader = io.TextIOWrapper(zstandard.ZstdDecompressor().stream_reader(raw),
                                       encoding="utf-8")
             for line in reader:
                 if line.strip():
+                    count += 1
                     yield json.loads(line)
+        if count != manifest.get("records"):
+            raise ValueError(f"recording segment count mismatch: {name}")

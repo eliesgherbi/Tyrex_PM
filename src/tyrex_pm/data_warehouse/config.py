@@ -38,6 +38,11 @@ class Coverage:
     external_warmup_s: int = 900
     track_since_discovery: bool = True
     post_close_tail_s: int = 120
+    # Book (CLOB WebSocket) subscriptions start this long before a market opens. Discovery
+    # still looks lookahead_s ahead for metadata. Subscribing every discovered market grew
+    # the socket to ~700 tokens over a session and the venue then closed it every few
+    # minutes (6, 15 and 19 Oct recordings).
+    book_subscribe_ahead_s: int = 900
 
 
 @dataclass(frozen=True)
@@ -164,6 +169,8 @@ class Profile:
                 for name, value in section.items():
                     if type(value) is int and value < (0 if name == "min_free_disk_gib" else 1):
                         raise ValueError(f"invalid positive setting {name}")
+        if self.coverage.book_subscribe_ahead_s < self.coverage.pre_window_capture_s:
+            raise ValueError("books must be subscribed at least pre_window_capture_s ahead")
         if self.coverage.required_market_start != "window_start" or (
             self.coverage.required_market_end != "observed_trading_close"
         ):

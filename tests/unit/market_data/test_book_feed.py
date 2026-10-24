@@ -37,6 +37,27 @@ UP = "111"
 DOWN = "222"
 
 
+@pytest.mark.asyncio
+async def test_websocket_repair_before_debounce_avoids_rest():
+    from unittest.mock import Mock
+
+    store = MarketStateStore()
+    feed = BindingFeed(binding=_binding(), store=store, dispatcher=EventDispatcher(),
+                       resync_debounce_s=.01)
+    feed.connection_epoch = 1
+    store.invalidate(InstrumentId(UP), ts_event=TS, ts_received=TS)
+    feed.rest_fetcher = Mock(side_effect=AssertionError("healthy book must not fetch REST"))
+    feed._schedule_desync_recovery(connection_epoch=1)
+    # Simulate a valid full book repairing the token while REST is debounced.
+    store.on_snapshot(BookSnapshotReceived(
+        event_id=new_event_id(), correlation_id=new_correlation_id(), ts_event=TS,
+        ts_received=TS, source=EventSource.POLYMARKET_CLOB, connection_epoch=1,
+        book=BookSnapshot(instrument_id=InstrumentId(UP), ts_event=TS)))
+    await feed._resync_task
+    feed.rest_fetcher.assert_not_called()
+    assert store.tokens_needing_resync() == []
+
+
 def _binding() -> MarketBindingRecord:
     return MarketBindingRecord(
         binding_id=make_binding_id(window_slug="btc-updown-5m-9", condition_id="0xcond"),

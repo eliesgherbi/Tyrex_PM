@@ -186,6 +186,7 @@ class FinalExecutionGate:
         self.features_ready: Callable[[], bool | str] | None = None
         self.startup_buy_block: Callable[[], str | None] | None = None
         self.note_stream_gap: Callable[[], None] | None = None
+        self.strategy_sell_check: Callable[[OrderSpec], str | None] | None = None
 
     @property
     def policy(self) -> FinalGatePolicy:
@@ -221,6 +222,8 @@ class FinalExecutionGate:
             startup_buy_block=startup_block,
         )
         reason = dispatch_check(spec, view, facts, self._policy)
+        if reason is None and is_exit_spec(spec) and self.strategy_sell_check is not None:
+            reason = self.strategy_sell_check(spec)
         if is_entry and view is not None and self.note_stream_gap is not None:
             leg = leg_for_token(view, spec.token_id)
             if leg is not None and leg.sync_health is not SyncHealth.READY:

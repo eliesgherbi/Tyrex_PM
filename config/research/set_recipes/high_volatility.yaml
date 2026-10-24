@@ -1,0 +1,20 @@
+# Set cookbook recipe. A recipe is a named, versioned set of window filters; a set made
+# from it records the recipe, its version, the parameters used and a copy of this file.
+schema: set_recipe_v1
+id: high_volatility
+version: 1
+title: High-volatility windows
+summary: >-
+  The most volatile windows of the chosen recordings: realised volatility of the reference
+  over the window (standard deviation of 1-second log returns, in basis points) at or above
+  the 67th percentile of the windows that pass the data policy. The threshold is computed
+  when you preview and is saved with the set.
+why: >-
+  Large intra-window moves are where entry timing, price-to-beat crossings and exits are
+  stressed. Use it to test a strategy on its hardest windows.
+policy: research_v2_1
+filters: {}
+quantiles:
+  realised_vol_bp: [0.67, null]
+parameters:
+  - {path: quantiles.realised_vol_bp.0, label: From percentile, type: quantile}

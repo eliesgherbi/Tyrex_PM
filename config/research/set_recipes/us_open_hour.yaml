@@ -1,0 +1,22 @@
+# Set cookbook recipe. A recipe is a named, versioned set of window filters; a set made
+# from it records the recipe, its version, the parameters used and a copy of this file.
+schema: set_recipe_v1
+id: us_open_hour
+version: 1
+title: US open hour
+summary: >-
+  Windows that start in the first hour of the New York stock market session, 09:30 to
+  10:30 New York time, Monday to Friday. Daylight saving time follows the New York clock.
+  Exchange holidays are not removed.
+why: >-
+  The cash open brings volume and news into BTC. Use it to see how a strategy behaves
+  when the reference moves fast and books reprice quickly.
+policy: research_v2_1
+filters:
+  time_zone: America/New_York
+  daily_time: {enabled: true, start: "09:30", end: "10:30"}
+  weekdays: [1, 2, 3, 4, 5]
+quantiles: {}
+parameters:
+  - {path: daily_time.start, label: From (New York time), type: time}
+  - {path: daily_time.end, label: To (New York time), type: time}

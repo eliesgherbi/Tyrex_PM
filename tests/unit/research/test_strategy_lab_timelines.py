@@ -56,6 +56,25 @@ def test_up_down_formulas_and_independent_midpoints() -> None:
     assert c.up_conservative + c.down_conservative < 1
 
 
+@pytest.mark.parametrize("side,expected", [("UP", 0.7), ("DOWN", 0.3)])
+def test_exit_request_marker_uses_held_side_point_probability(side, expected):
+    trace = tl.Trace(frame(["EXIT"]), "original", "test")
+    marker = tl.markers(trace, summary_row(side=side))[0]
+    assert marker["kind"] == "exit_requested"
+    assert marker["y"] == pytest.approx(expected)
+    assert marker["label"].startswith("EXIT requested")
+
+
+def test_exit_context_table_keeps_saved_trend_evidence_and_prioritizes_requests():
+    data = frame(["HOLD", "EXIT"])
+    data["held_side"] = "UP"
+    data["exit_trend"] = ['{"confirmed":false}', '{"confirmed":true}']
+    rows = tl.exit_context_table(tl.Trace(data, "original", "test"))
+    assert rows.action.tolist() == ["EXIT", "HOLD"]
+    assert rows.iloc[0].exit_trend == '{"confirmed":true}'
+    assert tl.exit_context_table(tl.Trace(frame(), "original", "test")).empty
+
+
 def test_missing_values_are_kept_and_gaps_break_lines() -> None:
     c = tl.curves(frame())
     assert c.iloc[1][["up_point", "down_conservative", "up_mid", "down_mid"]].isna().all()
@@ -140,7 +159,7 @@ def fake_result(digest: str) -> dict:
 def replay_env(monkeypatch, tmp_path):
     calls = []
 
-    def fake_replay(collection, market_id, params, scenario, execution_policy=None):
+    def fake_replay(collection, market_id, params, scenario, execution_policy=None, parser=None):
         calls.append((collection, market_id, scenario))
         fake_replay.policies.append(execution_policy)
         return fake_result(fake_replay.digest)
@@ -149,6 +168,7 @@ def replay_env(monkeypatch, tmp_path):
     fake_replay.policies = []
     monkeypatch.setattr(tl, "_replay", fake_replay)
     monkeypatch.setattr(tl, "replay_check", lambda ds, row: ({"a": 1}, [], []))
+    monkeypatch.setattr(tl, "_data_parser", lambda ds, row: None)
     monkeypatch.setattr(staged, "code_identity", lambda: {"source_fingerprint": "x"})
     ds = SimpleNamespace(spec=SimpleNamespace(path=tmp_path / "summaries.parquet"), stages=None)
     return ds, tmp_path / "cache", calls, fake_replay
@@ -182,7 +202,7 @@ def test_refused_replay_never_runs(monkeypatch, tmp_path) -> None:
     calls = []
     monkeypatch.setattr(tl, "_replay", lambda *a: calls.append(a))
     monkeypatch.setattr(tl, "_collection", lambda c: object())
-    monkeypatch.setattr(tl, "_current_cache_key", lambda c, m: "k-now")
+    monkeypatch.setattr(tl, "_current_cache_key", lambda c, m, parser=None: "k-now")
     monkeypatch.setattr(tl, "_current_scenario", lambda name: {"name": name})
     monkeypatch.setattr(tl, "_holdout", lambda: {"m-hold"})
     monkeypatch.setattr(tl, "_saved_cache_key", lambda ds, row: "k-then")
@@ -195,6 +215,27 @@ def test_refused_replay_never_runs(monkeypatch, tmp_path) -> None:
     with pytest.raises(RuntimeError, match="refused"):
         tl.generate(ds, row, tmp_path)
     assert calls == []
+
+
+def test_run_before_renormalization_replays_on_its_parser_builds(monkeypatch, tmp_path) -> None:
+    calls = []
+    monkeypatch.setattr(tl, "_replay", lambda *a: calls.append(a) or {})
+    monkeypatch.setattr(tl, "replay_compact", lambda *a: calls.append(a) or {})
+    monkeypatch.setattr(tl, "_save", lambda *a: None)
+    monkeypatch.setattr(tl, "_collection", lambda c: object())
+    monkeypatch.setattr(tl, "_current_cache_key",
+                        lambda c, m, parser=None: "k-then" if parser == "1" else "k-now")
+    monkeypatch.setattr(tl, "_holdout", lambda: set())
+    monkeypatch.setattr(tl, "_saved_cache_key", lambda ds, row: "k-then")
+    monkeypatch.setattr(tl, "_saved_scenario", lambda ds, row: None)
+    monkeypatch.setattr(tl, "_current_scenario", lambda name: {"name": name})
+    ds = SimpleNamespace(spec=SimpleNamespace(path=tmp_path / "s.parquet"), stages=None)
+    row = summary_row(config=json.dumps({"entry": {"limit_buffer_ticks": 1}}))
+    row["config_hash"] = staged.config_id(json.loads(row["config"]))
+    _, problems, notes = tl.replay_check(ds, row)
+    assert problems == [] and any("parser-1 builds" in n for n in notes)
+    tl.generate(ds, row, tmp_path)
+    assert calls[-1][-1] == "1"  # the replay reads the builds the run used
 
 
 def test_plot_has_two_probability_panels_and_status_strip() -> None:
@@ -238,3 +279,7 @@ def test_generate_many_skips_available_and_resumes(replay_env) -> None:
 def test_cache_key_separates_runs_with_different_saved_digests() -> None:
     assert tl.cache_key(summary_row(digest="a")) != tl.cache_key(summary_row(digest="b"))
     assert tl.cache_key(summary_row(digest="a")) == tl.cache_key(summary_row(digest="a"))
+    original = summary_row(execution_policy=json.dumps({"book_reconstruction": "legacy"}))
+    revised = summary_row(execution_policy=json.dumps({"book_reconstruction": "venue_top_v1"}))
+    assert tl.cache_key(original) != tl.cache_key(revised)
+    assert tl.cache_key(original) == tl.cache_key(summary_row())

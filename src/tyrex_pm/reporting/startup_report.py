@@ -15,6 +15,8 @@ def startup_report_payload(
     run_name: str,
     live_requested: bool,
     mutations: int = 0,
+    venue: str | None = None,
+    real_orders_authorized: bool | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -23,6 +25,8 @@ def startup_report_payload(
         "summary": assessment.summary,
         "wallet_display": assessment.wallet_display,
         "live_requested": live_requested,
+        "venue": venue,
+        "real_orders_authorized": real_orders_authorized,
         "mutation_attempts": mutations,
         "issues": [
             {

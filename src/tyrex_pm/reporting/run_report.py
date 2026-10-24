@@ -430,6 +430,9 @@ PER_EVALUATION_EVENTS = frozenset({"STRATEGY_DECISION", "EVALUATION_SKIPPED"})
 class RunReportInput:
     run_instance_id: str
     configured_run_name: str
+    # Capability arming: the process may submit to its configured venue.
+    # Paper runs are armed so the simulator can trade. This is not real-order
+    # authorization; see ``venue`` and ``real_orders_authorized``.
     live_requested: bool
     state: ExecutionSessionState | None
     mutation_attempts: int | None
@@ -454,6 +457,8 @@ class RunReportInput:
     committed_session_ids: frozenset[str] = frozenset()
     # Decision/explain recording status (``recording.host``); None when not recorded.
     recording: Mapping[str, Any] | None = None
+    venue: str | None = None
+    real_orders_authorized: bool | None = None
 
 
 def _fill_completeness(
@@ -584,6 +589,8 @@ def build_run_report(source: RunReportInput) -> dict[str, Any]:
         "outcome": outcome,
         "ok": ok,
         "live_requested": source.live_requested,
+        "venue": source.venue,
+        "real_orders_authorized": source.real_orders_authorized,
         "mutation_attempts": (
             None if source.mutation_attempts is None else int(source.mutation_attempts)
         ),
@@ -731,6 +738,8 @@ def write_emergency_report(
     fatal_error: Mapping[str, Any] | None,
     reporting_error: BaseException,
     reproducibility: Mapping[str, Any] | None = None,
+    venue: str | None = None,
+    real_orders_authorized: bool | None = None,
 ) -> dict[str, Any]:
     """Write a primitive-only report if normal projection or serialization fails."""
     repro = None if reproducibility is None else dict(reproducibility)
@@ -744,6 +753,8 @@ def write_emergency_report(
         "outcome": "RUNTIME_FAILURE",
         "ok": False,
         "live_requested": bool(live_requested),
+        "venue": venue,
+        "real_orders_authorized": real_orders_authorized,
         "mutation_attempts": None if mutation_attempts is None else int(mutation_attempts),
         "execution": None,
         "fatal_error": None if fatal_error is None else dict(fatal_error),

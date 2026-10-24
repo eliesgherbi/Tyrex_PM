@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from tyrex_pm.core.clock import FakeClock
@@ -17,6 +18,30 @@ from tyrex_pm.research.strategy_replay.capture_replay import (
 from tyrex_pm.research.strategy_replay.clock_sync import RecordedClockAuthority
 
 RECEIVED = 1_792_413_497_302_000_000
+
+
+def test_applied_rest_sync_anchor_is_distinct_from_an_http_audit():
+    from tyrex_pm.data_warehouse.reconstruction.books import Books
+
+    payload = {"event_type": "book", "asset_id": "111", "market": "0xabc",
+               "timestamp": "1792413496000", "capture_sync_health": "SYNCING",
+               "bids": [{"price": ".4", "size": "5"}],
+               "asks": [{"price": ".6", "size": "5"}]}
+    envelope = replace(_env(json.dumps(payload), "clob"),
+                       stream_id="captured_applied_rest", transport="collector_event")
+    rows = [(name, row) for name, row in normalize(envelope) if name == "book_snapshots"]
+    assert rows[0][1]["snapshot_origin"] == "captured_rest_syncing"
+    books = Books(reconstruction="venue_top_v1")
+    books.apply(*rows[0])
+    iid = rows[0][1]["instrument_id"]
+    assert not books.books[iid].valid
+    payload = {"event_type": "price_change", "market": "0xabc", "timestamp": "1792413497000",
+               "price_changes": [{"asset_id": "111", "side": "BUY", "price": ".41",
+                                  "size": "5", "best_bid": ".41", "best_ask": ".6"}]}
+    for name, row in normalize(_env(json.dumps(payload), "clob")):
+        if name == "book_updates":
+            books.apply(name, row)
+    assert books.books[iid].valid
 
 
 def _env(body: str, source: str, **extra) -> RawEnvelope:
@@ -97,3 +122,96 @@ def test_decision_comparison_counts_fields_and_tolerates_tiny_numeric_noise() ->
     result = compare_decisions(live, replay)
     assert result["decision_equal"] == 1 and result["fully_equal"] == 1
     assert result["field_mismatch_counts"] == {"action": 1, "reason": 1, "p_up_point": 1}
+
+
+def test_missing_window_or_incomplete_capture_cannot_claim_reconstruction_equal():
+    from tyrex_pm.research.strategy_replay.capture_replay import _reconstruction_equal
+
+    complete = {"inputs_captured": True}
+    good = {"comparison": {"fully_equal": 2, "live_evaluations": 2,
+                           "replayed_evaluations": 2}}
+    assert _reconstruction_equal([good], complete)
+    assert not _reconstruction_equal([good, {"error": "no gamma metadata imported"}], complete)
+    assert not _reconstruction_equal([good], {"inputs_captured": False})
+    assert not _reconstruction_equal([], complete)
+
+
+def test_trading_import_has_its_own_identity_and_observation_identity_is_preserved(tmp_path):
+    from tyrex_pm.research.strategy_replay.capture_replay import capture_identity
+
+    raw = tmp_path / "recording/raw"
+    raw.mkdir(parents=True)
+    (raw / "part.manifest.json").write_text(json.dumps({"sha256": "example"}))
+    trading = capture_identity(tmp_path)
+    (tmp_path / "observation_manifest.json").write_text("{}")
+    observation = capture_identity(tmp_path)
+    import hashlib
+
+    expected = hashlib.sha256(json.dumps(["capture_import_v1", ["example"]]).encode())
+    assert observation == expected.hexdigest()[:16]
+    assert trading != observation
+
+
+def test_unsupported_trading_capture_has_a_saved_failure_report(tmp_path):
+    from tyrex_pm.research.strategy_replay.capture_replay import reconstruct
+
+    result = reconstruct(tmp_path / "old_capture", mode="trading", out=tmp_path / "report")
+    assert not result["decisions_reconstructed_equal"]
+    assert result["error"] == "unsupported or incomplete trading evidence"
+    assert (tmp_path / "report/reconstruction.json").exists()
+
+
+def test_capture_cursor_links_host_decision_to_the_imported_prefix(tmp_path):
+    from tyrex_pm.recording.config import RecordingConfig
+    from tyrex_pm.recording.raw import RawCapture
+    from tyrex_pm.recording.recorder import Recorder
+    from tyrex_pm.research.strategy_replay.capture_replay import capture_ingest_prefixes
+
+    recorder = Recorder(tmp_path / "recording", RecordingConfig(raw_inputs=True),
+                        streams={"raw": "tyrex_raw_input_v1"}, manifest={})
+    recorder.start()
+    raw = RawCapture(recorder)
+    raw.event("bindings", "activated", {"binding": {}})
+    raw.event("trading_context", "context", {"evaluation_id": 1})
+    raw.event("trading_decision", "decision", {"evaluation_id": 1})
+    raw.event("bindings", "activated", {"binding": {}})
+    recorder.close()
+    root = tmp_path / "warehouse"
+    (root / "collections/c").mkdir(parents=True)
+    assert capture_ingest_prefixes(tmp_path, {"root": str(root), "collection": "c",
+                                             "records_written": 2}) == {1: 1}
+
+
+def test_recorded_sequence_prevents_a_later_tied_input_from_leaking_into_a_decision():
+    from pathlib import Path
+
+    from tyrex_pm.research.replay.config import load_scenario
+    from tyrex_pm.research.replay.engine import DECISION, Engine, captured_priority
+
+    class ProbeEngine(Engine):
+        def observation(self, dataset, row):
+            pass
+
+    class ProbeAgent:
+        strategy_datasets = {"test_input"}
+
+        def __init__(self, ordered):
+            self.recorded_sequence_order = ordered
+            self.seen, self.at_decision = [], None
+
+        def start(self, engine, horizon):
+            priority = captured_priority(1, DECISION) if self.recorded_sequence_order else DECISION
+            engine.schedule(100, priority, "decision", None)
+
+        def handle(self, kind, payload):
+            if kind == "strategy_observation":
+                self.seen.append(payload[1]["ingest_sequence"])
+            elif kind == "decision":
+                self.at_decision = list(self.seen)
+
+    scenario = load_scenario(Path("config/research/scenarios/favorable.yaml"))
+    events = [("test_input", {"received_at": 100, "ingest_sequence": i}) for i in (1, 2)]
+    for ordered, expected in ((True, [1]), (False, [1, 2])):
+        agent = ProbeAgent(ordered)
+        ProbeEngine(scenario).run_closed_loop(events, agent)
+        assert agent.at_decision == expected

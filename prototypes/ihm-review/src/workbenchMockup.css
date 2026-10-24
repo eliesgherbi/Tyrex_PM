@@ -1,0 +1,82 @@
+.wb-banner{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;justify-content:space-between;padding:10px 22px;background:var(--surface-2);border-bottom:1px solid var(--line);color:var(--muted);font-size:11px;line-height:1.5}
+.wb-banner p{margin:0;max-width:920px}
+.wb-legend{display:flex;flex-wrap:wrap;gap:6px}
+.wb-layer{display:inline-flex;align-items:center;border-radius:99px;padding:3px 8px;font-size:9px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.wb-layer.exists{color:var(--muted);background:var(--surface);border:1px solid var(--line)}
+.wb-layer.changes{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+.wb-layer.new{color:var(--accent);background:var(--accent-soft)}
+.wb-layer.open{color:var(--warn);background:transparent;border:1px dashed var(--warn)}
+.wb-scene{min-width:220px;max-width:340px;background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:5px;height:32px;padding:0 8px;font-size:11px}
+.wb-phase{font-size:10px;color:var(--accent);letter-spacing:.08em;font-weight:650}
+.wb-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-end;margin:4px 0 16px}
+.wb-head p{color:var(--muted);font-size:12px;margin-top:8px;max-width:760px}
+.wb-steps{display:flex;gap:0;border-bottom:1px solid var(--line);margin-bottom:18px;overflow-x:auto}
+.wb-steps button{flex:1;min-width:88px;border:0;background:none;color:var(--muted);font-size:11px;padding:0 8px 12px;text-align:left}
+.wb-steps button.active{color:var(--accent);font-weight:650;box-shadow:inset 0 -2px 0 var(--accent)}
+.wb-steps small{display:block;font-size:9px;font-weight:500;letter-spacing:.04em}
+.wb-grid{display:grid;gap:16px}
+.wb-grid.main{grid-template-columns:minmax(0,1fr) 300px;align-items:start}
+.wb-grid.two{grid-template-columns:1fr 1fr}
+.wb-grid.three{grid-template-columns:1.4fr .8fr .8fr}
+.wb-stack{display:flex;flex-direction:column;gap:16px;min-width:0}
+.wb-sticky{position:sticky;top:16px}
+.wb-policy{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wb-policy button,.wb-choice{text-align:left;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:7px;padding:12px}
+.wb-policy button.selected,.wb-choice.selected{border-color:var(--accent);background:var(--accent-soft)}
+.wb-policy strong,.wb-choice strong{display:block;font-size:12px}
+.wb-policy span,.wb-choice span{display:block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.45}
+.wb-funnel{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:8px 0}
+.wb-funnel div{flex:1;min-width:110px;background:var(--surface-2);border-radius:7px;padding:12px}
+.wb-funnel b{display:block;font-size:26px;letter-spacing:-.6px;font-weight:600}
+.wb-funnel span{color:var(--muted);font-size:10px}
+.wb-cells{display:flex;flex-wrap:wrap;gap:3px}
+.wb-cells i{width:14px;height:14px;border-radius:2px;background:var(--line);display:block}
+.wb-cells i.on{background:var(--accent)}
+.wb-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.wb-card{text-align:left;border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:8px;padding:12px}
+.wb-card.on{border-color:var(--accent);background:var(--accent-soft)}
+.wb-card b{display:block;font-size:12px}
+.wb-card span{display:block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.4}
+.wb-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.wb-metric{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px}
+.wb-metric span{color:var(--muted);font-size:10px}
+.wb-metric strong{display:block;margin:8px 0 4px;font-size:22px;letter-spacing:-.5px;font-weight:600}
+.wb-metric p{color:var(--muted);font-size:10px}
+.wb-note{font-size:11px;color:var(--muted);line-height:1.55;margin:8px 0 0}
+.wb-callout{border-left:3px solid var(--warn);background:var(--surface-2);border-radius:6px;padding:12px 14px;font-size:12px;line-height:1.55}
+.wb-callout.accent{border-left-color:var(--accent)}
+.wb-callout strong{display:block;margin-bottom:4px}
+.wb-kv{display:flex;flex-direction:column;gap:8px;margin:0}
+.wb-kv div{display:flex;justify-content:space-between;gap:12px;font-size:11px}
+.wb-kv dt{color:var(--muted)}
+.wb-kv dd{margin:0;text-align:right}
+.wb-form{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wb-form label,.wb-field{display:flex;flex-direction:column;gap:5px;font-size:10px;color:var(--muted)}
+.wb-form input,.wb-form select,.wb-field input,.wb-field select,.wb-field textarea{background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:8px;font:inherit;font-size:12px}
+.wb-field textarea{min-height:72px;resize:vertical}
+.wb-bar{display:flex;height:10px;border-radius:99px;overflow:hidden;background:var(--line);margin:8px 0}
+.wb-bar i{display:block;height:100%}
+.wb-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
+.wb-timeline{display:flex;gap:4px;overflow-x:auto}
+.wb-timeline button{flex:1;min-width:72px;border:0;background:var(--surface-2);color:var(--muted);border-radius:4px;padding:8px 6px;font-size:10px}
+.wb-timeline button.on{background:var(--accent);color:#fff}
+:root[data-theme=dark] .wb-timeline button.on{color:#131720}
+.wb-heat{display:grid;grid-template-columns:88px repeat(3,1fr);gap:6px;align-items:stretch}
+.wb-heat b,.wb-heat span{display:flex;align-items:center;justify-content:center;min-height:42px;border-radius:6px;font-size:12px}
+.wb-heat span{background:var(--surface-2);color:var(--muted)}
+.wb-heat .pick{background:var(--accent);color:#fff;font-weight:650}
+:root[data-theme=dark] .wb-heat .pick{color:#131720}
+.wb-heat .near{background:var(--accent-soft);color:var(--accent);font-weight:650}
+.wb-rowbtn{border:0;background:none;color:var(--accent);padding:0;font-size:11px}
+tr.wb-dim td{opacity:.55}
+.wb-tag{font-size:10px;color:var(--muted)}
+.positive{color:var(--positive)}.negative{color:var(--negative)}
+@media(max-width:1100px){.wb-grid.main,.wb-grid.three{grid-template-columns:1fr}.wb-sticky{position:static}.wb-metrics{grid-template-columns:1fr 1fr}}
+@media(max-width:980px) and (min-width:721px){
+  .sidebar{width:214px;padding-left:18px;padding-right:18px}
+  .workspace{margin-left:214px}
+  .brand>span:last-child,.nav-label,.nav-item span,.sidebar-note{display:initial}
+  .sidebar-note{display:flex}
+  .nav-item{justify-content:flex-start;padding:12px 13px}
+}
+@media(max-width:720px){.wb-policy,.wb-grid.two,.wb-form,.wb-metrics{grid-template-columns:1fr}.wb-head{display:block}.wb-banner{padding:10px 12px}}

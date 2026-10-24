@@ -52,6 +52,8 @@ IDENTITY_LATER_SECTIONS: dict[str, Any] = {
 #   fields added later inside frozen sections: omitted while equal to the legacy value
 IDENTITY_LATER_FIELDS: dict[tuple[str, str], Any] = {
     ("volatility", "variance_time_policy"): "per_sample_v0",
+    **{("exit", f.name): f.default for f in dataclasses.fields(SettlementExitConfig)
+       if f.name.startswith("value_exit_trend_")},
 }
 # Backwards-compatible name for the v3 lifecycle sections.
 _LIFECYCLE_SECTIONS = ("retry", "exit", "reentry")

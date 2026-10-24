@@ -47,6 +47,42 @@ from tyrex_pm.execution.settlement.ledger import (
 )
 
 S = EpisodeState
+def startup_exposure_decision(
+    *,
+    has_exposure: bool,
+    episode_state: str | None,
+    stored_policy: str | None,
+    loaded_policy: str | None,
+) -> str:
+    """What startup may do with confirmed exposure from an earlier process.
+
+    ``continue`` — nothing to recover. ``stop`` — not a settlement-owned open
+    position; the documented safety stop still applies. ``commit_hold`` and
+    ``resume_managed`` continue the policy recorded when the episode was reserved.
+    ``track_hold`` — the episode is already committed; keep it and do not stop.
+    ``block`` — the original policy is missing or disagrees with the loaded
+    configuration, so startup must not commit, sell, or flatten it.
+    """
+    if not has_exposure:
+        return "continue"
+    if episode_state in (
+        "HOLD_COMMITTED",
+        "RESOLUTION_UNCERTAIN",
+        "PAYOUT_PROVEN",
+        "REDEMPTION_PENDING_OPERATOR",
+        "CASH_CONFIRMED",
+        "COMPLETED",
+    ):
+        return "track_hold"
+    if episode_state not in ("FILLED", "HOLD_REQUESTED"):
+        return "stop"
+    if stored_policy not in ("hold_to_resolution", "managed_exit") or stored_policy != loaded_policy:
+        return "block"
+    if stored_policy == "hold_to_resolution":
+        return "commit_hold"
+    return "resume_managed"
+
+
 COMMITTED_STATES = frozenset(
     {
         S.HOLD_COMMITTED,
@@ -103,7 +139,9 @@ class SettlementHooks:
             "managed_exit",
         ) or settlement is None:
             return None
-        return cls(config=config, ledger=SettlementLedger(settlement.ledger_path), **kwargs)
+        writer = kwargs.pop("ledger_writer", None)
+        ledger = writer.ledger() if writer is not None else SettlementLedger(settlement.ledger_path)
+        return cls(config=config, ledger=ledger, **kwargs)
 
     def episode_id(self, window_id: str, seq: int = 1) -> str:
         base = f"{self.config.run_name}:{window_id}"
@@ -172,6 +210,8 @@ class SettlementHooks:
         available_collateral: Decimal | None = None,
         collateral_read_started_at: datetime | None = None,
         today: date | None = None,
+        lifecycle_policy: str | None = None,
+        entry_started_at: str | None = None,
     ) -> EntryCheck:
         reasons: list[str] = list(self.startup_blockers())
         try:
@@ -283,14 +323,18 @@ class SettlementHooks:
                 outcome_index=outcome_index,
                 max_debit=str(proposed),
                 max_fees="0",
-                **(
-                    {}
-                    if episode_seq <= 1
-                    else {
-                        "episode_seq": episode_seq,
-                        "window_episode_cap": self.window_budget.max_episodes,
-                    }
-                ),
+                **{
+                    **({} if not lifecycle_policy else {"lifecycle_policy": lifecycle_policy}),
+                    **({} if not entry_started_at else {"entry_started_at": entry_started_at}),
+                    **(
+                        {}
+                        if episode_seq <= 1
+                        else {
+                            "episode_seq": episode_seq,
+                            "window_episode_cap": self.window_budget.max_episodes,
+                        }
+                    ),
+                },
             )
         return EntryCheck(True, (), evidence, episode_id, attempt_seq)
 
@@ -303,6 +347,11 @@ class SettlementHooks:
         episode_seq: int = 1,
         posted: bool | None = None,
         prepare_failed: bool = False,
+        entry_started_at: str | None = None,
+        retry_clock: str | None = None,
+        retry_not_before: str | None = None,
+        entry_side: str | None = None,
+        consecutive_service_failures: int | None = None,
     ) -> str:
         episode = self.episode_id(window_id, episode_seq)
         ep = self.ledger.episodes.get(episode)
@@ -314,6 +363,16 @@ class SettlementHooks:
         extra: dict[str, Any] = {}
         if posted is not None and (posted or prepare_failed or attempt > 1):
             extra = {"posted": posted, "prepare_failed": prepare_failed, "attempt": attempt}
+        if retry_clock in ("deadline", "none"):
+            extra["retry_clock"] = retry_clock
+            if entry_started_at:
+                extra["entry_started_at"] = entry_started_at
+            if retry_not_before:
+                extra["retry_not_before"] = retry_not_before
+            if entry_side:
+                extra["entry_side"] = entry_side
+            if consecutive_service_failures is not None:
+                extra["consecutive_service_failures"] = int(consecutive_service_failures)
 
         def key(event: str) -> str:
             return SettlementLedger.attempt_key(event, episode, attempt)

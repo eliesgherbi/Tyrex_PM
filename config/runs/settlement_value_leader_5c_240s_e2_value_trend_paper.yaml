@@ -1,0 +1,140 @@
+# EXPERIMENTAL PAPER ONLY. Provisional exit thresholds; not qualified for live.
+schema_version: 1
+run_name: settlement_value_leader_5c_240s_e2_value_trend_paper
+venue: paper
+paper:
+  initial_collateral: '100'
+  order_latency_ms: 300
+  participation: '1'
+  resolution_source: chain_read
+  auto_redeem_after_s: 300
+strategy:
+  kind: settlement_value
+  parameters:
+    settlement:
+      functional_id: twap60_at_close_vs_open
+      comparison: AT_OR_ABOVE_K
+      reference_series: polymarket_rtds:crypto_prices_twap_sixty:btc/usd
+      provenance_status: ASSUMED
+    model:
+      backend: twap_proxy_diffusion
+      averaging_window_s: 60.0
+      spot_input: binance_spot
+      sigma_band: 0.25
+      reference_band_bps: 1.0
+      tau_floor_s: 1.0
+    volatility:
+      half_life_s: 30.0
+      min_samples_s: 20.0
+      jump_threshold_sigma: 4.0
+      sample_interval_s: 1.0
+      tau_floor_s: 1.0
+      sigma_floor: 1.0e-05
+      sigma_scale: 1.0
+      variance_time_policy: per_sample_v0
+    entry:
+      tau_min_s: 30.0
+      tau_max_s: 240
+      min_edge_per_share: '0.05'
+      target_mode: cap_only
+      target_profit_usdc: '3'
+      max_entry_price: '0.97'
+      limit_buffer_ticks: 1
+    sizing:
+      max_debit_usdc: '5'
+      max_loss_usdc: '5'
+      depth_participation: '1'
+      max_levels: 32
+      share_increment: '0.01'
+      default_min_order_shares: '5'
+    quality:
+      accepted_k_qualities:
+      - CONFIRMED_CANONICAL
+      - PROVISIONAL
+      require_verified_settlement_spec: false
+      max_clock_uncertainty_ms: 250
+    fees:
+      rate: '0.07'
+      exponent: '1'
+      provenance: MUST_MATCH_PROVIDER_FEE_SCHEDULE
+    retry:
+      enabled: false
+      max_attempts_per_episode: 1
+      max_attempts_per_window: 1
+      max_prepare_failures_per_episode: 1
+      max_posts_per_episode: 1
+      max_posts_per_window: 1
+    exit:
+      policy: managed_exit
+      value_exit_enabled: true
+      thesis_stop_enabled: false
+      value_exit_basis: point
+      value_exit_margin_per_share: '0.02'
+      exit_cutoff_tau_s: 30.0
+      value_exit_trend_enabled: true
+      value_exit_trend_lookback_s: 5.0
+      value_exit_trend_min_drop: '0.02'
+      value_exit_trend_confirmation_s: 2.0
+      value_exit_trend_max_gap_s: 2.0
+    reentry:
+      max_trades_per_window: 1
+      opposite_side_allowed: false
+      max_window_debit_usdc: '5'
+market:
+  family: btc_updown_5m
+  binance_symbol: BTCUSDT
+  require_ssr_price_match: false
+  run_mode: continuous
+  preparation_lead_s: 45
+  evaluation_interval_s: 1
+  maximum_book_age_ms: 2000
+  maximum_candidate_age_ms: 5000
+  maximum_duration_s: 1800
+account:
+  refresh_interval_s: 5
+  snapshot_max_age_s: 15
+  read_timeout_s: 4
+  retry_attempts: 3
+  retry_base_delay_s: 0.25
+risk:
+  target_notional: '5'
+  maximum_total_debit: '5'
+  fee_reserve_rate: '0.02'
+lifecycle:
+  mode: managed_exit
+  mandatory_exit_before_end_s: 20
+  manual_deadline_before_end_s: 5
+  evidence_timeout_s: 15
+  reconciliation_interval_s: 0.25
+  exit_retry_limit: 3
+  exit_retry_budget_s: 10
+  minimum_exit_price: '0.01'
+  sell_size_increment: '0.01'
+  dust_abs_shares: '0.01'
+  dust_max_notional: '0.05'
+  prepare_budget_ms: 2000
+  refresh_wait_budget_ms: 500
+settlement:
+  ledger_path: var/runtime_state/paper/settlement_value_leader_5c_240s_e2_value_trend_paper/settlement.jsonl
+  hold_commit_budget_s: 10
+  redemption_mode: operator
+  resolution_poll_interval_s: 30
+  trial:
+    max_debit_per_episode: '5'
+    max_episodes: 1000
+    max_unresolved_count: 6
+    max_unresolved_cost: '30'
+    trial_loss_budget: '60'
+  run_limits:
+    daily_loss_limit: '40'
+    max_open_worst_case_loss: '30'
+    max_reserved_debit: '10'
+    max_unredeemed_count: 6
+    max_unredeemed_cost: '60'
+    max_consecutive_losses: 0
+state_directory: var/runtime_state/paper/settlement_value_leader_5c_240s_e2_value_trend_paper/execution
+report_directory: var/runs/settlement_value_leader_5c_240s_e2_value_trend_paper
+recording:
+  level: explain
+  explain_trigger: all
+  raw_inputs: false

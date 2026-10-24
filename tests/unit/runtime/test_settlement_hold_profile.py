@@ -15,7 +15,7 @@ from tyrex_pm.domain.polymarket.fees import FeeCurveParams
 from tyrex_pm.execution.session_state import ExecutionPhase
 from tyrex_pm.execution.settlement.ledger import EpisodeState, SettlementLedger
 from tyrex_pm.runtime.run_config import RunConfigError, load_trading_run_config
-from tyrex_pm.runtime.settlement_hooks import SettlementHooks
+from tyrex_pm.runtime.settlement_hooks import SettlementHooks, startup_exposure_decision
 
 ROOT = Path(__file__).resolve().parents[3]
 TRIAL = ROOT / "config" / "runs" / "settlement_value_trial.yaml"
@@ -197,6 +197,80 @@ def test_committed_hold_is_exempt_from_manual_deadline_and_mandatory_flatten(mon
     asyncio.run(cls.on_async_tick(runtime, SimpleNamespace(indicator_graph=None)))
     runtime.lifecycle.mark_manual.assert_not_called()
     assert runtime.stop_requested is False
+
+
+def test_managed_residual_cutoff_runs_without_model_evaluation(monkeypatch) -> None:
+    import tyrex_pm.runtime.trading_runtime as tr
+
+    monkeypatch.setattr(tr, "entry_tau_bounds", lambda config: (30, 240))
+    monkeypatch.setattr(tr, "strategy_entry_cutoff_s", lambda config: 30)
+    cls, runtime = _tick_runtime(committed=False, tau=25.0)
+    runtime.config.lifecycle_mode = "managed_exit"
+    runtime.config.strategy = SimpleNamespace(exit=SimpleNamespace(
+        residual_policy="hold_to_resolution", exit_cutoff_tau_s=30.0))
+    runtime._commit_hold = AsyncMock(return_value=True)
+    asyncio.run(cls.on_async_tick(runtime, SimpleNamespace(indicator_graph=None)))
+    runtime._commit_hold.assert_awaited_once_with("w1", source="host_exit_cutoff")
+    runtime.lifecycle.mark_manual.assert_not_called()
+
+
+def test_startup_exposure_follows_the_recorded_policy() -> None:
+    assert startup_exposure_decision(
+        has_exposure=True, episode_state="FILLED",
+        stored_policy="hold_to_resolution", loaded_policy="hold_to_resolution",
+    ) == "commit_hold"
+    assert startup_exposure_decision(
+        has_exposure=True, episode_state="FILLED",
+        stored_policy="managed_exit", loaded_policy="managed_exit",
+    ) == "resume_managed"
+    assert startup_exposure_decision(
+        has_exposure=True, episode_state="FILLED",
+        stored_policy=None, loaded_policy="hold_to_resolution",
+    ) == "block"
+    assert startup_exposure_decision(
+        has_exposure=True, episode_state="FILLED",
+        stored_policy="hold_to_resolution", loaded_policy="managed_exit",
+    ) == "block"
+    assert startup_exposure_decision(
+        has_exposure=True, episode_state="NO_FILL",
+        stored_policy="hold_to_resolution", loaded_policy="hold_to_resolution",
+    ) == "stop"
+    assert startup_exposure_decision(
+        has_exposure=False, episode_state=None, stored_policy=None, loaded_policy=None,
+    ) == "continue"
+    assert startup_exposure_decision(
+        has_exposure=True, episode_state="HOLD_COMMITTED",
+        stored_policy="hold_to_resolution", loaded_policy="hold_to_resolution",
+    ) == "track_hold"
+
+
+def test_shutdown_does_not_flatten_an_uncommitted_hold() -> None:
+    from tyrex_pm.runtime.trading_runtime import TradingRuntime
+
+    recorded = []
+    episode = SimpleNamespace(state=SimpleNamespace(value="FILLED"), lifecycle_policy="hold_to_resolution")
+    runtime = SimpleNamespace(
+        _cleanup_lock=asyncio.Lock(), _cleanup_done=False, stop_requested=False,
+        capabilities=SimpleNamespace(entry_window_open=True, set_blocker=lambda *a: None),
+        _stop_intent_dispatcher=AsyncMock(),
+        active_market=SimpleNamespace(window_id="w1"),
+        settlement_hooks=SimpleNamespace(
+            is_committed=lambda window: False,
+            current_episode=lambda window: episode,
+        ),
+        _cancel_for_hold=AsyncMock(),
+        _commit_hold=AsyncMock(return_value=False),
+        lifecycle=SimpleNamespace(drain_open_session=AsyncMock()),
+        run_recorder=SimpleNamespace(record=lambda kind, payload: recorded.append(kind)),
+        _recovery_policy_unresolved=False,
+    )
+    runtime._preserve_uncommitted_hold = (
+        lambda reason: TradingRuntime._preserve_uncommitted_hold(runtime, reason)
+    )
+    asyncio.run(TradingRuntime._shutdown_execution(runtime, "caller_requested"))
+    runtime.lifecycle.drain_open_session.assert_not_called()
+    runtime._commit_hold.assert_awaited()
+    assert "SHUTDOWN_HOLD_UNCOMMITTED" in recorded
 
 
 def test_shutdown_preserves_a_committed_hold() -> None:

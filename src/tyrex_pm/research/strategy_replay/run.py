@@ -133,6 +133,7 @@ class ReplayExecutionPolicy:
     # "reference_availability_v1" is the live rule (history rows only recover an exact
     # boundary tick at their actual arrival, within the recovery deadline).
     reference_availability: str = "legacy"
+    book_reconstruction: str = "legacy"
     # Replay execution contract (EXECUTION_CONTRACTS). v1 reproduces saved experiments.
     execution_contract: str = EXECUTION_CONTRACT_VERSION
 
@@ -142,6 +143,10 @@ class ReplayExecutionPolicy:
         if self.fee_reserve_rate < 0 or self.sell_size_increment <= 0:
             raise ValueError("fee_reserve_rate must be >= 0 and sell_size_increment > 0")
         self.reference_policy()  # validates the policy id
+        from tyrex_pm.market_data.reconcile import BOOK_POLICIES
+
+        if self.book_reconstruction not in BOOK_POLICIES:
+            raise ValueError("unknown book reconstruction policy")
         if self.execution_contract not in EXECUTION_CONTRACTS:
             raise ValueError(f"execution_contract must be one of {sorted(EXECUTION_CONTRACTS)}")
 
@@ -156,6 +161,8 @@ class ReplayExecutionPolicy:
 
     def identity(self) -> dict:
         out = asdict(self)
+        if out.get("book_reconstruction") == "legacy":
+            out.pop("book_reconstruction")
         # Explicit compatibility: the contract field was added later; v1 identities are
         # unchanged, v2 is always part of the identity.
         if out.get("execution_contract") == EXECUTION_CONTRACT_VERSION:
@@ -219,6 +226,11 @@ class ReplayAgent:
     evaluation_instants: tuple[int, ...] | None = None
     observe_only: bool = False
     recommendations: list[dict] = field(default_factory=list)
+    recorded_contexts: dict = field(default_factory=dict)
+    recorded_sequence_order: bool = False
+    recorded_feedback: list = field(default_factory=list)
+    _feedback_index: int = 0
+    _recorded_intent_ids: dict = field(default_factory=dict)
     # Framework recording (opt-in): input timing on decisions + selected explanations.
     record_inputs: bool = False
     explain_selector: Any = None
@@ -236,7 +248,13 @@ class ReplayAgent:
             for instant in self.evaluation_instants:
                 if first <= instant <= horizon_ns:
                     # After every same-nanosecond observation (decision priority).
-                    engine.schedule(instant, DECISION, "decision", None)
+                    priority = DECISION
+                    if self.recorded_sequence_order:
+                        from tyrex_pm.research.replay.engine import captured_priority
+
+                        priority = captured_priority(
+                            self.recorded_contexts[instant]["ingest_prefix"], DECISION)
+                    engine.schedule(instant, priority, "decision", None)
         # Clock observations apply from their own receive time; the latest one received
         # before the range is already known at its start.
         prior = [r for r in self.clock_observations if r["received_at"] < first]
@@ -244,7 +262,12 @@ class ReplayAgent:
             self._apply_clock(prior[-1])
         for row in self.clock_observations:
             if first <= row["received_at"] <= horizon_ns:
-                engine.schedule(row["received_at"], STRATEGY_OBSERVATION, "clock", row)
+                priority = STRATEGY_OBSERVATION
+                if self.recorded_sequence_order:
+                    from tyrex_pm.research.replay.engine import captured_priority
+
+                    priority = captured_priority(row["ingest_sequence"], STRATEGY_OBSERVATION)
+                engine.schedule(row["received_at"], priority, "clock", row)
 
     def handle(self, kind: str, payload: Any) -> None:
         assert self.engine is not None
@@ -296,7 +319,7 @@ class ReplayAgent:
 
     def _context(self, ready) -> DecisionContext:
         pos = self.position
-        return decision_context(
+        base = decision_context(
             ready,
             run_id=f"replay:{self.window.ref.slug}",
             target_notional=self.runtime.driver.target_notional,
@@ -309,6 +332,14 @@ class ReplayAgent:
             exit_pending=bool(pos.pending_exit_ids),
             last_exit_reason=pos.last_exit_reason,
         )
+        recorded = self.recorded_contexts.get(self.clock.monotonic_ns())
+        if recorded is not None:
+            from tyrex_pm.recording.trading import apply_context
+
+            if recorded["context"] is None:
+                raise ValueError("captured skipped evaluation became ready in reconstruction")
+            return apply_context(base, recorded["context"])
+        return base
 
     def _record_framework(self, ready: Any, now: int) -> None:
         """Same record builders as live and observation (recording.records)."""
@@ -330,14 +361,32 @@ class ReplayAgent:
                 tau_s=row.get("tau_s")))
 
     def _decide(self, now: int) -> None:
+        captured = self.recorded_contexts.get(now)
+        if captured is not None:
+            from tyrex_pm.recording.trading import restore_feedback
+
+            while (self._feedback_index < len(self.recorded_feedback)
+                   and self.recorded_feedback[self._feedback_index]["seq"] < captured["seq"]):
+                restore_feedback(self._driver(), self.recorded_feedback[self._feedback_index],
+                                 self._recorded_intent_ids)
+                self._feedback_index += 1
         mono_s = now / NS
         self.scheduler.mark_evaluated(mono_s=mono_s)
         self.feed.flush(now)  # the store is read only here: apply pending book state
         ready = self.runtime.prepare_aligned_eval()
+        record_at = now
+        if captured is not None:
+            from tyrex_pm.recording.trading import restore_evaluation_clock
+
+            ready = restore_evaluation_clock(ready, captured)
+            if ready.snapshot is not None and captured.get("snapshot_observed_at") is not None:
+                record_at = int(ready.snapshot.observed_at.timestamp() * NS)
         end_ns = self.window.ref.window_end_ns
         protective = self._protection_intent(now)
         if not ready.ok or ready.snapshot is None or ready.binding is None:
-            self.decisions.append(skipped_record(ready, at_ns=now, window_end_ns=end_ns))
+            self.decisions.append(skipped_record(ready, at_ns=record_at, window_end_ns=end_ns))
+            if captured is not None:
+                self.decisions[-1]["evaluation_id"] = captured["evaluation_id"]
             self._record_framework(ready, now)
             if protective is not None:
                 self._submit_exit(protective, now, protective=True)
@@ -354,7 +403,19 @@ class ReplayAgent:
             features=features,
         )
         self.evaluate_seconds += time.perf_counter() - started
-        self.decisions.append(evaluated_record(ready, result, at_ns=now, window_end_ns=end_ns))
+        self.decisions.append(evaluated_record(
+            ready, result, at_ns=record_at, window_end_ns=end_ns))
+        if captured is not None:
+            self.decisions[-1]["evaluation_id"] = captured["evaluation_id"]
+            expected = captured["intents"]
+            actual = list(result.intents)
+            actual_semantics = [(type(i).__name__, i.reason_code) for i in actual]
+            if [(i["kind"], i["reason"]) for i in expected] != actual_semantics:
+                raise ValueError("reconstructed intent semantics differ at evaluation "
+                                 f"{captured['evaluation_id']}: captured={expected}; "
+                                 f"reconstructed={actual_semantics}")
+            self._recorded_intent_ids.update({a["id"]: b.intent_id.value
+                                             for a, b in zip(expected, actual)})
         self._record_framework(ready, now)
         if self.observe_only:
             for intent in result.intents:
@@ -586,6 +647,15 @@ class ReplayAgent:
             minimum_entry_depth_shares=self.policy.minimum_entry_depth_shares,
         )
         reason = None if spec is None else dispatch_check(spec, view, facts, gate_policy)
+        if reason is None and attempt.get("exit_reason") == "VALUE_EXIT":
+            ready = self.runtime.prepare_aligned_eval()
+            check = getattr(self._driver(), "value_exit_refusal", None)
+            if not ready.ok or ready.snapshot is None:
+                reason = "value_exit_inputs_unavailable"
+            elif check is not None:
+                reason = check(ready.snapshot, self._context(ready),
+                               self.runtime.indicator_graph.snapshot(),
+                               spec.token_id, spec.minimum_price)
         attempt["gate_reason"] = reason
         if reason is None:
             self._send(attempt)
@@ -893,6 +963,9 @@ def run_window(
     recording: Any = None,
     evaluation_instants: list[int] | None = None,
     observe_only: bool = False,
+    recorded_contexts: dict | None = None,
+    recorded_feedback: list | None = None,
+    recorded_sequence_order: bool = False,
 ) -> dict:
     """Replay one window. Returns a JSON-friendly result bundle (Decimals as strings).
 
@@ -903,6 +976,8 @@ def run_window(
     if scenario.adapter != "strategy_closed_loop_v1":
         raise ValueError("strategy replay requires a strategy_closed_loop_v1 scenario")
     policy = execution_policy or ReplayExecutionPolicy()
+    if recorded_sequence_order and not observe_only:
+        raise ValueError("captured sequence ordering requires recorded decisions without orders")
     _check_lifecycle_policy(strategy_config, policy)
     started = time.perf_counter()
     clock = FakeClock(_wall=utc(window.range_start_ns))
@@ -965,11 +1040,18 @@ def run_window(
         planner=planner,
     )
     _configure_recording(agent, plugin, strategy_config, recording)
+    from tyrex_pm.data_warehouse.reconstruction.books import Books
+
+    feed.books = Books(retain_epochs=False, reconstruction=policy.book_reconstruction)
     if evaluation_instants is not None:
         agent.evaluation_instants = tuple(sorted(int(i) for i in evaluation_instants))
     agent.observe_only = observe_only
+    agent.recorded_contexts = recorded_contexts or {}
+    agent.recorded_sequence_order = recorded_sequence_order
+    agent.recorded_feedback = recorded_feedback or []
     label = proxy_outcome(window)
     engine = Engine(scenario)
+    engine.books = Books(reconstruction=policy.book_reconstruction)
     result = engine.run_closed_loop(
         window.events,
         agent,
@@ -1092,6 +1174,9 @@ def assemble_result(
                     "net_equity_change",
                     "qualified",
                     "limitations",
+                    "qualification_level",
+                    "qualification_notes",
+                    "gap_blips_ignored",
                     "fee_provenance",
                     "ledger",
                 )

@@ -28,6 +28,7 @@ from .plots import BLUE, GRID, INK, MUTED, ORANGE
 
 S2 = REPO / "var" / "research" / "strategy_runs" / "s2"
 STAGED = REPO / "var" / "research" / "strategy_runs" / "staged"
+QUALIFICATION_ROOT = REPO / "var" / "research" / "p7_qualification"
 STAGED_PREFIX = "staged:"
 NEUTRAL = "#8a8985"
 SMALL_SAMPLE = 10  # resolved fills below this are drawn faded and flagged
@@ -42,6 +43,8 @@ class DatasetSpec:
     scope: str
     limitations: tuple[str, ...]
     traces: str
+    evidence_split: str = "development"
+    diagnostic: bool = False
 
 
 CLOCK_V1_LIMITATION = (
@@ -212,7 +215,7 @@ _CACHE: dict[tuple[str, float], Dataset] = {}
 BATCH_PREFIX = "batch:"
 STUDY_PREFIX = "study:"
 # Experiment records whose results are batch bundles (one per scenario folder), not stages.
-BATCH_KINDS = frozenset({"v3_verification", "v3_feature", "v3_shared_account"})
+BATCH_KINDS = frozenset({"v3_verification", "v3_feature", "v3_shared_account", "exit_cases"})
 
 
 def _kind(exp_file: Path) -> str | None:
@@ -225,18 +228,27 @@ def _kind(exp_file: Path) -> str | None:
 def batch_experiments() -> list[tuple[str, Path]]:
     """v3 verification / feature / shared-account runs and case runs, with results."""
     from .case_runs import CASE_RUNS
+    from .exit_cases import ROOT as EXIT_ROOT
     from .v3 import FEATURE_ROOT, SHARED_ROOT
 
     found: list[tuple[str, Path]] = []
-    for root in (STAGED, FEATURE_ROOT, SHARED_ROOT):
+    for root in (STAGED, FEATURE_ROOT, SHARED_ROOT, EXIT_ROOT):
         for exp_file in sorted(root.glob("*/experiment.json")):
             kind = _kind(exp_file)
             if kind in BATCH_KINDS and _batch_dirs(exp_file.parent):
                 title = {"v3_verification": "v3 verification", "v3_feature": "v3 feature run",
-                         "v3_shared_account": "v3 shared account"}[kind]
+                         "v3_shared_account": "v3 shared account",
+                         "exit_cases": "Exit cases (experimental)"}[kind]
                 found.append((f"{title} {exp_file.parent.name}", exp_file.parent))
     for summaries in sorted(CASE_RUNS.glob("cases-*/summaries.parquet")):
         found.append((f"Case run {summaries.parent.name}", summaries.parent))
+    for record in sorted(QUALIFICATION_ROOT.glob("*/qualification.json")):
+        if _kind(record) != "p7_qualification":
+            continue
+        for split in ("development", "evaluation"):
+            path = record.parent / split
+            if _batch_dirs(path):
+                found.append((f"P7 {split} {record.parent.name}", path))
     return found
 
 
@@ -424,13 +436,20 @@ def load_batch(path: Path | str) -> Dataset:
     dirs = _batch_dirs(path)
     if not dirs:
         raise FileNotFoundError(f"no summaries.parquet under {path}")
+    exp_file = path / "experiment.json"
+    qualification_file = path.parent / "qualification.json"
+    qualification = (path.name in ("development", "evaluation")
+                     and _kind(qualification_file) == "p7_qualification")
+    record_file = qualification_file if qualification else exp_file
     watched = [d / "summaries.parquet" for d in dirs]
+    if record_file.exists():
+        watched.append(record_file)
     cache_key = (str(path), sum(f.stat().st_mtime for f in watched))
     if cache_key in _CACHE:
         return _CACHE[cache_key]
-    exp_file = path / "experiment.json"
-    record = json.loads(exp_file.read_text(encoding="utf-8")) if exp_file.exists() else {}
-    fallback = json.dumps(_record_policy(record), sort_keys=True) if record else None
+    record = json.loads(record_file.read_text(encoding="utf-8")) if record_file.exists() else {}
+    policy = record.get("execution", {}) if qualification else _record_policy(record)
+    fallback = json.dumps(policy, sort_keys=True) if record else None
     frames = []
     for folder in dirs:
         frame = pd.read_parquet(folder / "summaries.parquet")
@@ -446,7 +465,7 @@ def load_batch(path: Path | str) -> Dataset:
         frame = pd.concat(frames, ignore_index=True)
     labels = _candidate_labels(record)
     case_run = not record and "tag" in frame
-    if case_run:
+    if case_run or qualification or record.get("kind") == "exit_cases":
         for (cfg_hash, tag) in frame[["config_hash", "tag"]].drop_duplicates().itertuples(
                 index=False):
             parts = str(tag).split("--")
@@ -454,9 +473,12 @@ def load_batch(path: Path | str) -> Dataset:
                 labels[str(cfg_hash)] = f"{parts[1]} · {parts[2]}"
     policies = sorted(set(frame["execution_policy"].dropna()))
     kind = record.get("kind", "case_run" if case_run else "batch")
+    if kind == "recorded_execution":
+        labels = {str(value): "Recorded strategy policy" for value in frame["config_hash"].unique()}
     spec = DatasetSpec(
         key=_relative_key(BATCH_PREFIX, path),
-        title=f"{kind.replace('_', ' ')} {path.name}",
+        title=(f"P7 {path.name} {path.parent.name}" if qualification
+               else f"{kind.replace('_', ' ')} {path.name}"),
         path=path,
         scope=(f"{kind.replace('_', ' ')}: {frame['market_id'].nunique()} windows, "
                f"{frame['config_hash'].nunique()} configurations, scenarios "
@@ -469,12 +491,19 @@ def load_batch(path: Path | str) -> Dataset:
             *(("Case runs vary strategy settings (variance time policy, disagreement "
                "veto) on deliberately selected development cases; not a parameter search "
                "and not evaluation evidence.",) if case_run else ()),
+            *((f"P7 {path.name} results only; development and evaluation are kept separate. "
+               + ("These evaluation windows have now been used; viewing saved results "
+                  "does not rerun the evaluation." if path.name == "evaluation"
+                  else "Policies were compared here before the evaluation freeze."),)
+              if qualification else ()),
         ),
+        evidence_split=path.name if qualification else "development",
+        diagnostic=kind == "recorded_execution",
         traces=("Saved per-decision timelines exist for this run"
                 if any((d / "decisions.parquet").exists() for d in dirs)
                 else "Only summary rows were saved; timelines must be regenerated")
         + (" and indicator explanations (recording level explain)."
-           if (path / "explanations.parquet").exists() else "."),
+           if any((d / "explanations.parquet").exists() for d in dirs) else "."),
     )
     dataset = prepare(frame, spec, labels=labels)
     dataset.kind, dataset.root = "batch", path
@@ -847,7 +876,13 @@ def scope_html(dataset: Dataset) -> str:
         if per_cell.min() == per_cell.max()
         else f"{per_cell.min()}–{per_cell.max()}"
     )
-    items = "".join(f"<li>{t}</li>" for t in (*dataset.spec.limitations, *COMMON_LIMITATIONS))
+    common = COMMON_LIMITATIONS
+    if dataset.spec.diagnostic:
+        common = ("Recorded execution context; no alternative fills are simulated. "
+                  "This dataset establishes reconstruction fidelity, not profitability.",)
+    if dataset.spec.evidence_split == "evaluation":
+        common = (*common[:-1], "Evaluation evidence alone does not establish profitability.")
+    items = "".join(f"<li>{t}</li>" for t in (*dataset.spec.limitations, *common))
     return (
         f"<div style='border-left:4px solid {MUTED};padding:6px 12px;margin:4px 0'>"
         f"<b>{dataset.spec.title}</b><br>{dataset.spec.scope}<br>"
@@ -1174,8 +1209,11 @@ class Explorer:
         from IPython.display import display
 
         self._display = display
+        options = available_datasets()
+        if dataset not in {key for _, key in options}:
+            options.append((load_dataset(dataset).spec.title, dataset))
         self.w_dataset = w.Dropdown(
-            options=available_datasets(),
+            options=options,
             value=dataset,
             description="Dataset",
             layout=w.Layout(width="560px"),
@@ -1332,7 +1370,8 @@ class Explorer:
         self._timeline_count = (len(ready), len(rows))
         return [
             (
-                f"{r.window_label}  ·  {STATUS_TEXT[r.status]}"
+                f"{r.window_label}  ·  "
+                + ("diagnostic" if self.dataset.spec.diagnostic else STATUS_TEXT[r.status])
                 + ("  ·  📈 timeline" if r.market_id in ready else ""),
                 r.market_id,
             )
@@ -1362,6 +1401,18 @@ class Explorer:
 
     def render(self) -> None:
         ds, scenario, cid = self.dataset, self.w_scenario.value, self.w_config.value
+        diagnostic = ds.spec.diagnostic
+        self.w_metric.disabled = self.w_min.disabled = diagnostic
+        if diagnostic:
+            columns = ["slug", "scenario_name", "live_evaluations", "replayed_evaluations",
+                       "fully_equal", "field_mismatches"]
+            self._show(self.out_compare, obj=ds.runs[columns],
+                       text="Reconstruction comparison; monetary metrics do not apply.")
+            self._show(self.out_summary, obj=overrides_table(ds, cid))
+            self._show(self.out_windows, obj=windows_for(ds, cid, scenario)[["window_label"]])
+            self._show(self.out_dist, text="No P&L distribution for a diagnostic reconstruction.")
+            self._render_detail()
+            return
         label = ds.configs.set_index("config_id").loc[cid, "label"]
         all_rows = comparison(ds, scenario)
         table = comparison(ds, scenario, self.w_min.value)
@@ -1411,6 +1462,12 @@ class Explorer:
         hit = rows[rows["market_id"] == self.w_window.value]
         if hit.empty:
             self._show(self.out_detail, text="No window selected.")
+            return
+        if self.dataset.spec.diagnostic:
+            columns = ["slug", "scenario_name", "live_evaluations", "replayed_evaluations",
+                       "fully_equal", "field_mismatches"]
+            self._show(self.out_detail, obj=hit[columns])
+            self._render_timeline()
             return
         fields, reasons = window_detail(hit.iloc[0])
         self._show(
@@ -1472,7 +1529,8 @@ class Explorer:
             self._show(
                 self.out_timeline,
                 fig=fig,
-                more=(timelines.reason_counts(trace, row).to_frame(),),
+                more=(timelines.reason_counts(trace, row).to_frame(),
+                      timelines.exit_context_table(trace)),
             )
             return
         if key not in self._checks:

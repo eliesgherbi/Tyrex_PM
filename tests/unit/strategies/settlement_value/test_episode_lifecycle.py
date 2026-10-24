@@ -208,11 +208,20 @@ def test_late_outcome_for_an_old_attempt_is_ignored() -> None:
     assert d.state.entry_intent_id == second.intent_id.value
 
 
+def _known_retry(**extra):
+    base = dict(
+        episodes=1, attempts=2, posts=2, filled_episodes=0, latest_attempts=2,
+        latest_state="NO_FILL", latest_posts=2, started_known=True,
+        entry_started_at=AT.isoformat(), backoff_state="none", entry_side="UP",
+    )
+    base.update(extra)
+    return base
+
+
 def test_restart_restores_window_counters_from_the_ledger() -> None:
     d = driver(retry={"enabled": True, "max_attempts_per_episode": 3,
                       "min_retry_interval_ms": 0})
-    d.restore_window_usage(episodes=1, attempts=2, posts=2, filled_episodes=0,
-                           latest_attempts=2, latest_state="NO_FILL")
+    d.restore_window_usage(**_known_retry())
     (third,) = run(d, AT).intents
     assert third.evidence["attempt_id"] == "e1a3"
     d.on_entry_outcome(zero_fill(third, AT))
@@ -221,6 +230,93 @@ def test_restart_restores_window_counters_from_the_ledger() -> None:
     off.restore_window_usage(episodes=1, attempts=1, posts=1, filled_episodes=0,
                              latest_attempts=1, latest_state="NO_FILL")
     assert run(off, AT).decision.reason_code == R.EPISODE_CONSUMED
+
+
+def test_default_retry_ceiling_is_three_attempts_including_the_first() -> None:
+    d = driver(retry={"enabled": True, "min_retry_interval_ms": 0, "service_backoff_ms": 0})
+    at = AT
+    emitted = 0
+    for _ in range(5):
+        result = run(d, at)
+        if not result.intents:
+            break
+        emitted += 1
+        d.on_entry_outcome(zero_fill(result.intents[0], at))
+        at += timedelta(seconds=1)
+    assert emitted == 3
+    assert result.decision.reason_code == R.RETRY_ATTEMPTS_EXHAUSTED
+
+
+def test_restart_without_retry_timing_blocks_further_attempts() -> None:
+    d = driver(retry={"enabled": True, "min_retry_interval_ms": 0})
+    d.restore_window_usage(episodes=1, attempts=1, posts=1, filled_episodes=0,
+                           latest_attempts=1, latest_state="NO_FILL")
+    result = run(d, AT)
+    assert result.decision.reason_code == R.RETRY_CLOCK_UNRECOVERABLE
+    assert not result.intents
+    assert d.state.phase is EpisodePhase.CLOSED
+
+
+def test_restart_continues_the_service_failure_backoff_ladder() -> None:
+    restored = driver(retry={"enabled": True, "min_retry_interval_ms": 0,
+                             "service_backoff_ms": 1000, "service_backoff_max_ms": 8000,
+                             "max_attempts_per_episode": 9, "max_attempts_per_window": 9,
+                             "max_prepare_failures_per_episode": 9})
+    restored.restore_window_usage(**_known_retry(
+        attempts=2, posts=0, latest_attempts=2, latest_posts=0,
+        backoff_state="none", consecutive_service_failures=2,
+    ))
+    (third,) = run(restored, AT).intents
+    restored.on_entry_outcome(not_sent(third, AT))
+    assert restored.state.consecutive_service_failures == 3
+    assert run(restored, AT + timedelta(milliseconds=3900)).decision.reason_code == R.RETRY_BACKOFF
+    assert run(restored, AT + timedelta(milliseconds=4000)).intents
+
+    fresh = driver(retry={"enabled": True, "min_retry_interval_ms": 0,
+                          "service_backoff_ms": 1000, "max_attempts_per_episode": 9,
+                          "max_attempts_per_window": 9, "max_prepare_failures_per_episode": 9})
+    fresh.restore_window_usage(**_known_retry(
+        attempts=2, posts=0, latest_attempts=2, latest_posts=0, backoff_state="none",
+    ))
+    (again,) = run(fresh, AT).intents
+    fresh.on_entry_outcome(not_sent(again, AT))
+    assert fresh.state.consecutive_service_failures == 1
+    assert run(fresh, AT + timedelta(milliseconds=1000)).intents
+
+
+def test_restart_keeps_remaining_backoff_and_counts_downtime() -> None:
+    waiting = driver(retry={"enabled": True, "min_retry_interval_ms": 0})
+    waiting.restore_window_usage(**_known_retry(
+        attempts=1, posts=1, latest_attempts=1, latest_posts=1,
+        backoff_state="deadline",
+        retry_not_before=(AT + timedelta(seconds=10)).isoformat(),
+    ))
+    held = run(waiting, AT + timedelta(seconds=3))
+    assert held.decision.reason_code == R.RETRY_BACKOFF and not held.intents
+    (again,) = run(waiting, AT + timedelta(seconds=10)).intents
+    assert again.evidence["attempt_id"] == "e1a2"
+
+    expired = driver(retry={"enabled": True, "min_retry_interval_ms": 0,
+                            "max_retry_duration_s": 30})
+    expired.restore_window_usage(**_known_retry(
+        attempts=1, posts=1, latest_attempts=1, latest_posts=1,
+        entry_started_at=(AT - timedelta(seconds=31)).isoformat(),
+        backoff_state="none",
+    ))
+    assert run(expired, AT).decision.reason_code == R.RETRY_DURATION_EXHAUSTED
+
+
+def test_restart_of_a_fill_keeps_the_position_and_an_unknown_dispatch_blocks() -> None:
+    held = driver()
+    held.restore_window_usage(episodes=1, attempts=1, posts=1, filled_episodes=1,
+                              latest_attempts=1, latest_state="FILLED")
+    managed = run(held, AT, ctx_kwargs={"qty": "3"})
+    assert [type(i) for i in managed.intents] == [HoldToResolutionIntent]
+
+    unknown = driver(retry={"enabled": True, "min_retry_interval_ms": 0})
+    unknown.restore_window_usage(**_known_retry(latest_state="DISPATCH_UNKNOWN"))
+    blocked = run(unknown, AT)
+    assert blocked.decision.reason_code == R.OUTCOME_UNCERTAIN and not blocked.intents
 
 
 def test_model_readiness_does_not_depend_on_entry_permission() -> None:
@@ -291,6 +387,36 @@ def test_value_exit_sells_only_when_the_bid_beats_hold_value() -> None:
     assert sell.min_price == Decimal("0.98")
 
 
+@pytest.mark.parametrize("side", ["UP", "DOWN"])
+def test_point_value_exit_with_trend_is_shared_causal_and_rechecked(side) -> None:
+    from test_settlement_value import context, snapshot, vol
+
+    d = driver(exit={"policy": "managed_exit", "value_exit_enabled": True,
+                     "value_exit_basis": "point", "value_exit_trend_enabled": True,
+                     "value_exit_trend_lookback_s": 1.0,
+                     "value_exit_trend_confirmation_s": 1.0})
+    prices = {"up_ask": ".30", "down_ask": ".75"} if side == "UP" else {
+        "up_ask": ".75", "down_ask": ".30"}
+    (entry,) = run(d, AT, **prices).intents
+    _filled(d, entry, AT)
+    for seconds, ask in ((1, ".99"), (2, ".95"), (3, ".91")):
+        d.time_authority.clock.set_monotonic_ns(seconds * 10**9)
+        prices["up_ask" if side == "UP" else "down_ask"] = ask
+        result = run(d, AT + timedelta(seconds=seconds), ctx_kwargs={"qty": "10"}, **prices)
+        if seconds < 3:
+            assert not result.intents
+    (sell,) = result.intents
+    assert sell.reason_code == R.VALUE_EXIT and sell.instrument_id.value == side.lower()
+    assert result.reporting_context["decision_row"]["exit_trend"]["confirmed"]
+    snap = snapshot(AT + timedelta(seconds=3), **prices)
+    assert d.value_exit_refusal(snap, context(snap, qty="10"), vol(),
+                                side.lower(), sell.min_price) is None
+    prices["up_ask" if side == "UP" else "down_ask"] = ".99"
+    rebound = snapshot(AT + timedelta(seconds=3), **prices)
+    assert "trend_changed" in d.value_exit_refusal(
+        rebound, context(rebound, qty="10"), vol(), side.lower(), sell.min_price)
+
+
 # -- re-entry --------------------------------------------------------------------------
 
 REENTRY = {
@@ -319,6 +445,20 @@ def test_reentry_after_confirmed_closure_with_cooldown_and_cap() -> None:
     run(d, AT + timedelta(seconds=9), ctx_kwargs={"qty": "10"})
     done = _close_by_sale(d, AT + timedelta(seconds=10))
     assert done.decision.reason_code == R.MAX_TRADES_PER_WINDOW and not done.intents
+
+
+def test_sale_proceeds_do_not_restore_the_window_debit() -> None:
+    params = {**REENTRY, "reentry": {**REENTRY["reentry"], "max_window_debit_usdc": "3"}}
+    d = driver(**params)
+    (intent,) = run(d, AT).intents
+    _filled(d, intent, AT)
+    assert Decimal(d.state.window_debit) == Decimal("3")
+    run(d, AT + timedelta(seconds=1), ctx_kwargs={"qty": "10"})
+    _close_by_sale(d, AT + timedelta(seconds=2))
+    assert Decimal(d.state.window_debit) == Decimal("3")
+    blocked = run(d, AT + timedelta(seconds=8))
+    assert blocked.decision.reason_code == R.REENTRY_WINDOW_DEBIT_EXHAUSTED
+    assert not blocked.intents
 
 
 def test_protective_stop_locks_the_window() -> None:

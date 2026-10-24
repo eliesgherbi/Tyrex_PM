@@ -1,0 +1,45 @@
+import fs from "node:fs";
+import assert from "node:assert/strict";
+import ts from "typescript";
+function load(file,requireMock=()=>{throw new Error("Unexpected runtime import");}) {
+ const code=ts.transpileModule(fs.readFileSync(new URL(file,import.meta.url),"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+ const module={exports:{}};new Function("exports","module","require",code)(module.exports,module,requireMock);return module.exports;
+}
+const mock=load("./src/mock.ts"),options=load("./src/options.ts",id=>id==="./mock"?mock:(()=>{throw new Error(id)})());
+const rows=mock.windowsFor("reference","friction","settlement_value"),m=mock.metrics(rows);
+assert.equal(m.windows,8);assert.equal(m.requests,6);assert.equal(m.fills,5);assert.equal(m.resolved,4);assert.equal(m.unresolved,1);
+assert.equal(m.wins,3);assert.equal(m.losses,1);assert(Math.abs(m.pnl-7.99)<1e-9);
+assert.equal(mock.metrics([rows[5]]).pnl,null);assert.equal(mock.metrics([rows[2]]).pnl,0);
+const trace=mock.makeTrace(0,"settlement_value",rows[0]),events=mock.eventsFor(rows[0],trace,"settlement_value");
+const request=events.find(e=>e.kind==="request"),fill=events.find(e=>e.kind==="fill"),at52=trace.find(t=>t.t===52);
+assert.equal(request.y,at52.upLow);assert.equal(fill.y,rows[0].price);assert.notEqual(fill.y,request.y);
+assert.equal(events.find(e=>e.kind==="arrival").y,null);
+const args={trace,events,row:rows[0],strategy:"settlement_value",windowIndex:0,warmup:false,strict:true,showAsk:false,point:true,conservative:true,provenance:"saved",palette:options.light,range:"all"};
+const opt=options.timelineOption(args);
+const series=(name,panel)=>opt.series.find(s=>s.name===name&&s.xAxisIndex===panel);
+const tick=trace.find(t=>t.t===120),value=(name,panel)=>series(name,panel).data.find(v=>v[0]===tick.ms)[1];
+assert.equal(value("Point estimate P̂",1),1-tick.upPoint);
+assert.equal(value("Conservative estimate",1),1-tick.upHigh);
+assert.notEqual(value("Conservative estimate",1),1-tick.upLow);
+assert.equal(value("Book midpoint",1),tick.downMid);assert(Math.abs(tick.downMid-(1-tick.upMid))>1e-4);
+assert.equal(series("Book midpoint",1).yAxisIndex,3);
+const relaxed=options.timelineOption({...args,strict:false});
+const gaps=o=>o.series.find(s=>s.name==="Point estimate P̂"&&s.xAxisIndex===0).data.filter(v=>v[1]===null).length;
+assert(gaps(opt)>gaps(relaxed));
+const diagnostic=options.timelineOption({...args,provenance:"diagnostic"});
+assert(!diagnostic.series.some(s=>["Fill","Cancelled remainder","Host sale"].includes(s.name)));
+assert.equal(mock.eventsFor(rows[2],mock.makeTrace(2,"settlement_value",rows[2]),"settlement_value").length,0);
+assert.equal(mock.makeTrace(4,"settlement_value",rows[4]).find(t=>t.t===120).action,"CLOSED_NO_FILL");
+const askRows=mock.windowsFor("reference","friction","ask70"),askTrace=mock.makeTrace(0,"ask70",askRows[0]),askEvents=mock.eventsFor(askRows[0],askTrace,"ask70");
+const ask=options.timelineOption({...args,trace:askTrace,events:askEvents,row:askRows[0],strategy:"ask70"});
+assert(ask.series.some(s=>s.name==="Entry ask threshold"));
+assert(!ask.series.some(s=>s.name==="Point estimate P̂"||s.name==="Conservative estimate"));
+const sale=askEvents.find(e=>e.kind==="exit");
+assert.equal(sale.y,askRows[0].salePrice);
+assert(Math.abs(askRows[0].pnl-(askRows[0].qty*(sale.y-askRows[0].price)-askRows[0].fee))<1e-4);
+const unknownTrace=mock.makeTrace(5,"ask70",askRows[5]);
+assert.equal(unknownTrace.find(t=>t.t===285).action,"EXIT_PENDING");
+assert.equal(mock.eventsFor(askRows[5],unknownTrace,"ask70").find(e=>e.kind==="exit").y,null);
+assert.equal(mock.baseWindows[0].price,.47);assert.equal(mock.windowsFor("tighter","friction","settlement_value")[1].qty,0);
+console.log("Fixture/visualization checks passed: counts and denominators, unknown P&L, request vs fill coordinates, independent books, Down conservative bound, gaps, diagnostic provenance, no-fill state and ask70 availability/uncertain exits.");
+

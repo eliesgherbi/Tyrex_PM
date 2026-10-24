@@ -33,7 +33,25 @@ def live_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=duration)
     parser.add_argument("--validate-config", action="store_true")
     parser.add_argument("--no-normalize", action="store_true")
+    parser.add_argument(
+        "--finish-windows",
+        action="store_true",
+        help="record past --duration until the open window has closed",
+    )
+    parser.add_argument(
+        "--outcome-wait",
+        type=duration,
+        default=None,
+        help="after recording, poll only for the winners of the recorded windows this long",
+    )
+    parser.add_argument(
+        "--outcomes-only",
+        action="store_true",
+        help="with --resume: poll the winners of earlier sessions' windows, record nothing else",
+    )
     args = parser.parse_args(argv)
+    if args.outcomes_only and not args.resume:
+        parser.error("--outcomes-only needs --resume COLLECTION")
     try:
         if args.resume:
             from .supervisor import resume_profile
@@ -41,7 +59,9 @@ def live_main(argv: list[str] | None = None) -> int:
             profile = resume_profile(args.root, args.resume)
         else:
             profile = load_profile(args.config)
-        credentials = load_credentials(args.dotenv, required=profile.reference.required)
+        credentials = load_credentials(
+            args.dotenv, required=profile.reference.required and not args.outcomes_only
+        )
         if args.validate_config:
             print(
                 canonical(
@@ -72,7 +92,14 @@ def live_main(argv: list[str] | None = None) -> int:
             ),
             flush=True,
         )
-        result = asyncio.run(collector.run(args.duration))
+        result = asyncio.run(
+            collector.run(
+                args.duration,
+                finish_windows=args.finish_windows,
+                outcome_wait_s=args.outcome_wait or 0.0,
+                outcomes_only=args.outcomes_only,
+            )
+        )
         print(canonical(result))
         # 3 stays reserved for raw durability; derived lag is recoverable offline.
         return 5 if result.get("derived_processing_error") else 0

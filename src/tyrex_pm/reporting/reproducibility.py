@@ -133,6 +133,7 @@ def capture_reproducibility(
         "effective_config_sha256": sha256_text(canonical_json(effective)),
         "cli_flags": {
             "live": bool(cli_flags.get("live")),
+            "paper": bool(cli_flags.get("paper")),
             "out_dir": None if cli_flags.get("out_dir") is None else str(cli_flags.get("out_dir")),
         },
         "run_instance_id": run_instance_id,

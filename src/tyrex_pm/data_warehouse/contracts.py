@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
 SCHEMA_VERSION = "1"
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"  # 2: metadata minimum order size unit recorded as shares
 QUALITY_VERSION = "4"
 
 

@@ -28,8 +28,15 @@ class BookLevelDelta:
     side: BookSide
     price: Decimal
     size: Decimal
+    reported_best_bid: Decimal | None = None
+    reported_best_ask: Decimal | None = None
 
     def __post_init__(self) -> None:
+        for field in ("reported_best_bid", "reported_best_ask"):
+            value = getattr(self, field)
+            if value is not None:
+                object.__setattr__(self, field, require_polymarket_price(
+                    as_decimal(value, field_name=field)))
         object.__setattr__(
             self,
             "price",

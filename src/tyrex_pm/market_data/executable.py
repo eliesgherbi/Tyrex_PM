@@ -19,7 +19,7 @@ class ExecutableQuote:
 
 
 def book_quote(book: BookSnapshot | None) -> ExecutableQuote:
-    if book is None or (not book.bids and not book.asks):
+    if book is None or (book.best_bid is None and book.best_ask is None):
         return ExecutableQuote(
             best_bid=None,
             best_ask=None,

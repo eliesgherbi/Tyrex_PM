@@ -22,6 +22,11 @@ TIMER = 4
 DECISION = 5
 
 
+def captured_priority(sequence: int, phase: int) -> int:
+    """Same-timestamp causal order for recorded execution, never simulated orders."""
+    return int(sequence) * 8 + phase
+
+
 @dataclass
 class Order:
     intent: Intent
@@ -43,6 +48,13 @@ class Engine:
         self.orders: dict[str, Order] = {}
         self.ledger: list[dict] = []
         self.invalid_reasons: set[str] = set()
+        # Informational facts that did not change any computed number (qualification v2).
+        self.notes: dict[str, list] = {}
+        # Open book gaps while exposed: instrument -> [start_ns, order arrived during gap].
+        self.exposure_gaps: dict[str, list] = {}
+        self.blips_ignored = 0
+        # Latest venue tick_size_change per instrument; older metadata cannot undo it.
+        self.tick_events: dict[str, Decimal] = {}
         self.consumed: dict[tuple, Decimal] = {}
         self.constraint: dict[str, dict] = {}
         self.market_by_instrument: dict[str, str] = {}
@@ -82,6 +94,8 @@ class Engine:
 
     def submit(self, intent: Intent) -> None:
         intent.validate()
+        if intent.instrument_id in self.exposure_gaps:
+            self.exposure_gaps[intent.instrument_id][1] = True
         if intent.action == "CANCEL":
             order = self.orders.get(intent.order_id)
             if order and order.active:
@@ -304,12 +318,19 @@ class Engine:
                 self.inventory.get(iid, 0)
                 or any(o.active and o.intent.instrument_id == iid for o in self.orders.values())
             ):
-                self.invalid_reasons.add("gap_with_exposure")
+                if self.scenario.gap_tolerance_ms:
+                    self.exposure_gaps.setdefault(iid, [self.now, False])
+                else:
+                    self.invalid_reasons.add("gap_with_exposure")
+        for iid in [i for i in self.exposure_gaps if self.books.books[i].valid]:
+            self._close_gap(iid)
         if dataset == "market_changes" and row.get("change_type") == "tick_size_change":
             from tyrex_pm.data_warehouse.contracts import decode
 
             value = decode(row["new_value"])
-            self.constraint.setdefault(row["entity_id"], {})["tick"] = exact(value["new_tick_size"])
+            tick = exact(value["new_tick_size"])
+            self.tick_events[row["entity_id"]] = tick
+            self.constraint.setdefault(row["entity_id"], {})["tick"] = tick
         if dataset != "trade_prints" or self.scenario.maker_model == "no_fill":
             return
         # This side interpretation is explicitly an assumption, never inferred private queue data.
@@ -338,10 +359,30 @@ class Engine:
         from tyrex_pm.data_warehouse.contracts import decode
 
         constraints = self.constraint.setdefault(iid, {})
-        if row.get("tick_size") is not None:
+        # A venue tick_size_change outranks any metadata snapshot that still carries the
+        # earlier tick, whatever order they arrive in.
+        if row.get("tick_size") is not None and iid not in self.tick_events:
             constraints["tick"] = row["tick_size"]
-        if row.get("minimum_order_size_unit") == "shares":
-            constraints["minimum_shares"] = row["minimum_order_size_value"]
+        unit = row.get("minimum_order_size_unit")
+        value = row.get("minimum_order_size_value")
+        if unit == "shares":
+            constraints["minimum_shares"] = value
+        elif (
+            unit == "UNKNOWN"
+            and value is not None
+            and str(row.get("entity_id") or "").startswith("polymarket:")
+            and "minimum_shares" not in constraints
+        ):
+            # Builds normalized before the unit was recorded. Polymarket's orderMinSize is
+            # a number of shares; the interpretation is written to the ledger.
+            constraints["minimum_shares"] = value
+            self.record(
+                "minimum_size_unit_interpreted",
+                instrument_id=iid,
+                unit="shares",
+                value=value,
+                basis="polymarket_order_min_size",
+            )
         schedule = decode(row.get("fee_schedule") or "null")
         if not isinstance(schedule, dict):
             return
@@ -463,9 +504,29 @@ class Engine:
             receivables, marked, unmarked = self._settle(labels, ("PROVIDER_TERMINAL",))
         return self._result(receivables, marked, unmarked)
 
+    def _close_gap(self, iid: str) -> None:
+        start, acted = self.exposure_gaps.pop(iid)
+        duration_ms = (self.now - start) / 10**6
+        if duration_ms < self.scenario.gap_tolerance_ms:
+            self.blips_ignored += 1
+            return
+        if acted:
+            self.invalid_reasons.add("gap_with_exposure")
+        else:
+            self.notes.setdefault("held_through_gap", []).append(
+                {"instrument_id": iid, "start_ns": start, "duration_ms": round(duration_ms, 3)}
+            )
+
+    def qualification_level(self) -> str:
+        if self.invalid_reasons:
+            return "unqualified"
+        return "qualified_with_notes" if self.notes else "qualified"
+
     def _result(
         self, receivables: dict[str, Decimal], marked: Decimal, unmarked: list[str]
     ) -> dict:
+        for iid in list(self.exposure_gaps):
+            self._close_gap(iid)
         return {
             "scenario": asdict(self.scenario),
             "cash": self.cash,
@@ -484,6 +545,9 @@ class Engine:
             else None,
             "qualified": not self.invalid_reasons,
             "limitations": sorted(self.invalid_reasons),
+            "qualification_level": self.qualification_level(),
+            "qualification_notes": self.notes,
+            "gap_blips_ignored": self.blips_ignored,
             "fee_provenance": self.scenario.fee_policy.provenance,
             "maker_fills_are_scenario_conditional": True,
             "liquidity_replenishment_policy": "no_reuse_within_book_epoch",
@@ -537,13 +601,15 @@ class Engine:
         horizon = max((row["received_at"] for _, row in events), default=0)
         info_delay = self.scenario.feed_delay_ms * 10**6
         wanted = set(agent.strategy_datasets)
+        capture_ordered = bool(getattr(agent, "recorded_sequence_order", False))
         for dataset, row in events:
             self._serial += 1
             heapq.heappush(
                 self._timeline,
                 (
                     row["received_at"],
-                    MARKET_OBSERVATION,
+                    (captured_priority(row["ingest_sequence"], MARKET_OBSERVATION)
+                     if capture_ordered else MARKET_OBSERVATION),
                     self._serial,
                     "observation",
                     (dataset, row),
@@ -555,7 +621,8 @@ class Engine:
                     self._timeline,
                     (
                         row["received_at"] + info_delay,
-                        STRATEGY_OBSERVATION,
+                        (captured_priority(row["ingest_sequence"], STRATEGY_OBSERVATION)
+                         if capture_ordered else STRATEGY_OBSERVATION),
                         self._serial,
                         "strategy_observation",
                         (dataset, row),

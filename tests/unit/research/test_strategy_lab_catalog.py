@@ -60,6 +60,48 @@ def test_a_recorded_row_policy_is_never_overwritten(tmp_path: Path) -> None:
     assert tl._row_policy(dataset.runs.iloc[0]) == {"reference_availability": "legacy"}
 
 
+def test_p7_splits_are_discovered_separately_with_saved_traces(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(ex, "QUALIFICATION_ROOT", tmp_path)
+
+    def no_replay(*args, **kwargs):
+        pytest.fail("Browsing P7 must not launch a replay")
+
+    monkeypatch.setattr(tl, "_replay", no_replay)
+    root = tmp_path / "p7-test"
+    root.mkdir()
+    policy = {"execution_contract": "replay_execution_contract_v2",
+              "reference_availability": "reference_availability_v1"}
+    (root / "qualification.json").write_text(json.dumps({
+        "kind": "p7_qualification", "execution": policy}))
+    for split, market in (("development", "dev-window"), ("evaluation", "eval-window")):
+        for scenario in ("friction", "favorable"):
+            folder = root / split / scenario
+            folder.mkdir(parents=True)
+            pd.DataFrame([_summary_row(
+                market, scenario, tag=f"{market}--default--legacy_volatility")]
+            ).to_parquet(folder / "summaries.parquet")
+            pd.DataFrame([{"market_id": market, "scenario_name": scenario,
+                           "config": CONFIG, "at_ns": 1, "action": "WAIT"}]
+            ).to_parquet(folder / "decisions.parquet")
+
+    menu = dict((key, title) for title, key in ex.available_datasets())
+    for split, market in (("development", "dev-window"), ("evaluation", "eval-window")):
+        key = ex.dataset_key(root / split)
+        assert menu[key] == f"P7 {split} p7-test"
+        dataset = ex.load_dataset(key)
+        assert dataset.spec.title == menu[key]
+        assert set(dataset.runs["market_id"]) == {market}
+        assert dataset.spec.evidence_split == split
+        assert dataset.counts["runs"] == 2
+        assert dataset.configs["label"].tolist() == ["default · legacy_volatility"]
+        row = dataset.runs.iloc[0]
+        assert tl._row_policy(row) == policy
+        assert tl.get_trace(dataset, row).source == "original"
+        if split == "evaluation":
+            assert "These are development windows" not in ex.scope_html(dataset)
+            assert "evaluation windows have now been used" in ex.scope_html(dataset)
+
+
 def test_case_run_explanations_are_found_for_exactly_the_selected_run(tmp_path) -> None:
     path = tmp_path / "cases-abc"
     path.mkdir()

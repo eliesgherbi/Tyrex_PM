@@ -87,10 +87,15 @@ def test_every_field_is_frozen_or_explicitly_registered() -> None:
 
 
 @pytest.mark.parametrize("path", _settlement_value_run_configs(), ids=lambda p: p.name)
-def test_run_template_identities_are_unchanged(path: Path) -> None:
+def test_run_template_identities_preserve_legacy_or_identify_new_behavior(path: Path) -> None:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     cfg = settlement_value_config_from_parameters(raw["strategy"]["parameters"])
-    assert settlement_value_config_as_parameters(cfg) == _legacy_payload(cfg)
+    changed = any(getattr(getattr(cfg, section), name) != default
+                  for (section, name), default in IDENTITY_LATER_FIELDS.items())
+    if changed:
+        assert settlement_value_config_as_parameters(cfg) != _legacy_payload(cfg)
+    else:
+        assert settlement_value_config_as_parameters(cfg) == _legacy_payload(cfg)
 
 
 def test_frozen_candidate_ids_are_unchanged() -> None:

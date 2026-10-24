@@ -60,11 +60,30 @@ def holdout_windows() -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
-def holdout_untouched(exclude: Path | None = None) -> dict:
-    """Saved results (summaries, decisions, timeline caches) that use holdout windows."""
-    hold = set(frozen_split()["holdout"])
+def holdout_untouched(
+    exclude: Path | None = None,
+    *,
+    research_root: Path | None = None,
+    split_file: Path | None = None,
+) -> dict:
+    """Saved results that already use holdout windows."""
+    root = research_root or (REPO / "var" / "research")
+    split = frozen_split(path=split_file) if split_file else frozen_split()
+    hold = set(split["holdout"])
     used: dict[str, int] = {}
-    for path in (REPO / "var" / "research").rglob("summaries.parquet"):
+    if root.exists():
+        for path in root.rglob("workflow_usage.json"):
+            if exclude is not None and Path(exclude) in path.parents:
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                ids = set(payload.get("market_ids") or [])
+            except (OSError, ValueError, TypeError):
+                used[str(path)] = -1
+                continue
+            if ids & hold:
+                used[str(path)] = len(ids & hold)
+    for path in root.rglob("summaries.parquet") if root.exists() else []:
         if exclude is not None and Path(exclude) in path.parents:
             continue
         try:
@@ -74,7 +93,7 @@ def holdout_untouched(exclude: Path | None = None) -> dict:
             continue
         if ids & hold:
             used[str(path)] = len(ids & hold)
-    cache = REPO / "var" / "research" / "strategy_replay" / "timelines"
+    cache = root / "strategy_replay" / "timelines"
     cached = sum(1 for meta in cache.glob("*.json")
                  if json.loads(meta.read_text("utf-8")).get("run", {}).get("market_id") in hold)
     return {"untouched": not used and not cached, "summaries_using_holdout": used,

@@ -1,0 +1,44 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import ts from 'typescript';
+function load(file){const code=ts.transpileModule(fs.readFileSync(new URL(file,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;const module={exports:{}};new Function('exports','module','require',code)(module.exports,module,()=>{throw new Error('Unexpected runtime dependency');});return module.exports;}
+const f=load('./src/windowSetFilters.ts'),data=load('./src/dataLibraryMock.ts');
+const defaults=()=>({...f.defaultWindowFilters,weekdays:[1,2,3,4,5,6,7]});
+const sample=(start,extra={})=>({...data.libraryWindows.find(w=>!w.reserved),start,outcome:'UP',labelSource:'Provider confirmed',reserved:false,...extra});
+const daytime={...defaults(),dailyTime:true,fromTime:'08:00',untilTime:'20:00'};
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T07:55:00Z'),daytime),false);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T08:00:00Z'),daytime),true);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T19:55:00Z'),daytime),true);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T20:00:00Z'),daytime),false);
+const overnight={...daytime,fromTime:'20:00',untilTime:'08:00'};
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T23:55:00Z'),overnight),true);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T07:55:00Z'),overnight),true);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T08:00:00Z'),overnight),false);
+const paris={...daytime,timeZone:'Europe/Paris'};
+assert.equal(f.clockFor('2026-10-21T18:00:00Z','Europe/Paris').time,'20:00');
+assert.equal(f.clockFor('2026-10-26T19:00:00Z','Europe/Paris').time,'20:00');
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T18:00:00Z'),paris),false);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T06:00:00Z'),paris),true);
+assert.equal(f.matchesWindowFilters(sample('2026-10-20T22:00:00Z'),{...defaults(),timeZone:'Europe/Paris',weekdays:[3]}),true); // Wednesday locally.
+assert.equal(f.matchesWindowFilters(sample('2026-10-20T22:00:00Z'),{...defaults(),weekdays:[3]}),false); // Tuesday UTC.
+const upOnly={...daytime,outcome:'UP',labelSource:'provider'};
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T08:00:00Z'),upOnly),true);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T08:00:00Z',{outcome:'DOWN'}),upOnly),false);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T08:00:00Z',{labelSource:'Payout-derived proxy'}),upOnly),false);
+assert.equal(f.matchesWindowFilters(sample('2026-10-21T08:00:00Z',{outcome:'unknown'}),upOnly),false);
+const guarded=sample('2026-10-21T08:00:00Z',{reserved:true});
+Object.defineProperty(guarded,'outcome',{get(){throw new Error('Reserved outcome read');}});
+Object.defineProperty(guarded,'labelSource',{get(){throw new Error('Reserved label source read');}});
+assert.equal(f.filterReason(guarded,upOnly),'Reserved evaluation · protected');
+assert(f.filtersError({...defaults(),weekdays:[]}));
+assert(f.filtersError({...daytime,untilTime:'08:00'}));
+assert(f.filtersError({...daytime,fromTime:''}));
+assert.equal(f.outcomeConditioned(upOnly),true);
+assert.equal(f.outcomeConditioned(daytime),false);
+const eligible=data.libraryWindows.filter(w=>f.matchesWindowFilters(w,upOnly));
+assert.equal(eligible.length,3);assert(eligible.every(w=>w.start.slice(11,16)==='08:00'));
+assert.equal(new Set(data.libraryWindows.map(w=>w.id)).size,data.libraryWindows.length);
+assert.equal(data.libraryWindows.find(w=>w.id==='DEMO-BTC-20-06').start,'2026-10-20T10:25:00Z');
+const saved={ids:eligible.map(w=>w.id),filters:structuredClone(upOnly)};
+upOnly.fromTime='09:00';assert.equal(saved.filters.fromTime,'08:00');assert.equal(saved.ids.length,3);
+console.log('Custom filter checks passed: daytime/overnight bounds, timezone and DST, weekdays, outcome/provenance AND rules, protected-label short circuit, invalid input, stable original identities and saved filter snapshots.');

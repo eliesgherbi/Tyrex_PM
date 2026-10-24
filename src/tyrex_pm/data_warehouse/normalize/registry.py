@@ -156,7 +156,8 @@ def dispatch(raw: RawEnvelope, path: str, item: dict) -> list[tuple[str, dict]]:
     def emit(dataset: str, values: dict, suffix: str = "", **timing: Any) -> None:
         rows.append((dataset, {**envelope(raw, path + suffix, dataset, **timing), **values}))
 
-    if raw.transport == "collector_event":
+    if raw.transport == "collector_event" and not (
+            raw.source_id == "clob" and raw.stream_id == "captured_applied_rest"):
         emit(
             "operational_events",
             {
@@ -280,7 +281,12 @@ def dispatch(raw: RawEnvelope, path: str, item: dict) -> list[tuple[str, dict]]:
                 {
                     "instrument_id": instrument_id(str(item["asset_id"])),
                     "market_id": market_id(str(item["market"])),
-                    "snapshot_origin": "rest_audit" if raw.transport == "http" else "websocket",
+                    "snapshot_origin": (
+                        "captured_rest_syncing" if item.get("capture_sync_health") == "SYNCING"
+                        else "captured_rest_ready")
+                    if raw.stream_id == "captured_applied_rest"
+                    and raw.transport == "collector_event"
+                    else ("rest_audit" if raw.transport == "http" else "websocket"),
                     "depth_scope": "published_aggregated",
                     "provider_book_hash": item.get("hash"),
                     "bids": levels(item["bids"], reverse=True, probability=True),
@@ -509,7 +515,8 @@ def emit_metadata(emit: Callable, mid: str, item: dict, entity: dict) -> None:
             "negative_risk": item.get("negRisk", item.get("neg_risk")),
             "tick_size": exact(tick) if tick is not None else None,
             "minimum_order_size_value": exact(minimum) if minimum is not None else None,
-            "minimum_order_size_unit": "UNKNOWN",
+            # Polymarket's orderMinSize / mos is a number of shares (outcome tokens).
+            "minimum_order_size_unit": "shares" if minimum is not None else "UNKNOWN",
             "fees_enabled": item.get("feesEnabled"),
             "fee_schedule": canonical(
                 item.get("fd", item.get("fee_schedule", item.get("feeSchedule")))

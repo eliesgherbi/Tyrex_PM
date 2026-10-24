@@ -215,6 +215,8 @@ def sdk_market_event_to_tyrex(
                     side=side,
                     price=price if isinstance(price, Decimal) else Decimal(str(price)),
                     size=size if isinstance(size, Decimal) else Decimal(str(size)),
+                    reported_best_bid=getattr(row, "best_bid", None),
+                    reported_best_ask=getattr(row, "best_ask", None),
                 )
             )
         if not changes:

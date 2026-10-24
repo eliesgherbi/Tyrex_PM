@@ -95,6 +95,7 @@ class BindingFeed:
     buffer_max_age_s: float = DEFAULT_BUFFER_MAX_AGE_S
     # Raw input capture (recording/raw.py RawCapture); None = no capture.
     raw_capture: Any = None
+    resync_debounce_s: float = 0.25
 
     phase: FeedSyncPhase = FeedSyncPhase.UNINITIALIZED
     connection_health: ConnectionHealth = ConnectionHealth.CLOSED
@@ -113,9 +114,9 @@ class BindingFeed:
 
     @property
     def is_book_ready(self) -> bool:
-        up = self.store.get(self.binding.up_instrument_id)
-        down = self.store.get(self.binding.down_instrument_id)
-        return up.sync_health in {SyncHealth.READY, SyncHealth.STALE} and down.sync_health in {
+        up = self.store.sync_health(self.binding.up_instrument_id)
+        down = self.store.sync_health(self.binding.down_instrument_id)
+        return up in {SyncHealth.READY, SyncHealth.STALE} and down in {
             SyncHealth.READY,
             SyncHealth.STALE,
         }
@@ -229,7 +230,7 @@ class BindingFeed:
         return ok_all
 
     def _all_books_present(self) -> bool:
-        return all(self.store.get(InstrumentId(t)).book is not None for t in self.binding.asset_ids)
+        return all(self.store.has_book(InstrumentId(t)) for t in self.binding.asset_ids)
 
     def seed_binding_trading_parameters(self) -> None:
         """Seed missing tick/min-size from discovery binding onto both tokens."""
@@ -291,8 +292,14 @@ class BindingFeed:
             return
         if self._resync_task is not None and not self._resync_task.done():
             return
+        async def delayed_recovery():
+            await asyncio.sleep(max(0.0, self.resync_debounce_s))
+            if self._stop.is_set() or connection_epoch != self.connection_epoch:
+                return
+            await self._resync_desynced_tokens(connection_epoch=connection_epoch)
+
         self._resync_task = asyncio.create_task(
-            self._resync_desynced_tokens(connection_epoch=connection_epoch),
+            delayed_recovery(),
             name=f"book-resync-{self.binding.binding_id[:16]}",
         )
 

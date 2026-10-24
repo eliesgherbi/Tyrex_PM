@@ -140,6 +140,15 @@ def run_replay(dataset: Path, scenario_path: Path, output: Path) -> dict:
     }
 
 
+def _workflow(args: argparse.Namespace) -> int:
+    from tyrex_pm.research.workflows.api import call
+
+    request = read_json(args.request)
+    envelope = call(args.operation, request, root=args.root)
+    print(canonical(envelope))
+    return 0 if envelope["ok"] else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tyrex-research")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -147,7 +156,27 @@ def main(argv: list[str] | None = None) -> int:
     replay.add_argument("--dataset", type=Path, required=True)
     replay.add_argument("--scenario", type=Path, required=True)
     replay.add_argument("--output", type=Path, required=True)
+    workflow = sub.add_parser("workflow")
+    workflow.add_argument("operation")
+    workflow.add_argument("--request", type=Path, required=True)
+    workflow.add_argument("--root", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "workflow":
+        try:
+            return _workflow(args)
+        except (OSError, ValueError) as exc:
+            print(
+                canonical(
+                    {
+                        "schema": "workflow_result_v1",
+                        "operation": args.operation,
+                        "ok": False,
+                        "result": None,
+                        "error": {"code": "request", "reason": str(exc), "fields": {}},
+                    }
+                )
+            )
+            return 2
     try:
         print(canonical(run_replay(args.dataset, args.scenario, args.output)))
         return 0
