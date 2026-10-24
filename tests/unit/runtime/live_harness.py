@@ -24,6 +24,7 @@ from tyrex_pm.execution.account_state import AccountSnapshotStatus
 from tyrex_pm.execution.coordinator import GatewaySubmissionResult, PreparedOrder
 from tyrex_pm.runtime.run_config import load_trading_run_config
 from tyrex_pm.runtime.trading_runtime import TradingRuntime
+from tyrex_pm.strategies.base import BaseDriver
 from tyrex_pm.strategies.settlement_value.schema import settlement_value_config_from_parameters
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -159,7 +160,7 @@ class AccountStub:
         return None
 
 
-class DriverStub:
+class DriverStub(BaseDriver):
     def __init__(self) -> None:
         self.entry_outcomes: list[Any] = []
         self.exit_outcomes: list[Any] = []

@@ -191,9 +191,12 @@ decisions; `test_settlement_value_recorded_window.py`, `test_replay_v3_mechanics
 - Results of v1 jobs stay readable; the Results page labels them "made with the pre-v1 engine".
 - Interrupted v1 jobs: resume refused with "the replay engine changed; start a new run" (the
   source fingerprint check already refuses; the message is made explicit).
-- Parity gate V1-p: re-run the reference settlement_value jobs (`4b70f7da…`, 46 units; `7fb99d52…`,
-  2 units); decision digests and economics must match, except for differences documented as
-  intended (for example the crossed-book rule).
+- Parity gate V1-p: `python tools/v1_parity_check.py 01777c96afdd42018eddf95ceab82383
+  55815caba25b48929fc7b624d2e68d1e` (settlement_value, friction_v3, 32 units each, run on 24
+  October with the current engine). Decision digests and economics must match, except for
+  differences documented as intended (for example the crossed-book rule). Jobs from 23 October
+  already differ in decision digest only (entries, fills, P&L, qualification and K equal),
+  because the engine's decision records changed later that day; they are not parity references.
 
 ## Step 4: features and shared models
 

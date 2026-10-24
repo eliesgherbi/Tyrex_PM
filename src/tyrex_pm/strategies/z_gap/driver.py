@@ -14,6 +14,7 @@ from tyrex_pm.facts.contract import EligibilityFacts
 from tyrex_pm.indicators.ewma_volatility import VolatilitySnapshot
 from tyrex_pm.indicators.graph import FeatureBundle, empty_volatility_snapshot
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
+from tyrex_pm.strategies.base import BaseDriver
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
 from tyrex_pm.strategies.z_gap.assemble import assemble_zgap_decision_snapshot
@@ -27,7 +28,7 @@ __all__ = ["StrategyEvaluation", "ZGapDriver", "create_z_gap_driver"]
 
 
 @dataclass
-class ZGapDriver:
+class ZGapDriver(BaseDriver):
     strategy: ZGapStrategy
     time_authority: TimeAuthority
     ptb_store: PtbLockStore

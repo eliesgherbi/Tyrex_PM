@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from tyrex_pm.facts.contract import InputContract
@@ -29,6 +30,11 @@ class StrategyPlugin:
     # Declared decision-record fields (tyrex_pm.recording.records.RecordSchema). None:
     # the host records the strategy's decision row as is.
     decision_record_schema: Callable[[Any], Any] | None = None
+    # Largest total debit the strategy's own sizing may spend in a window. Hosts without a
+    # run-level cap (replay) use it; None means the host default.
+    max_entry_debit: Callable[[Any], Decimal | None] | None = None
+    # Book levels per side the strategy reads; replay checks its recorded depth covers it.
+    required_depth_levels: Callable[[Any], int | None] | None = None
 
 
 def register_strategy(plugin: StrategyPlugin) -> None:

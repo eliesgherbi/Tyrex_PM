@@ -31,6 +31,7 @@ from tyrex_pm.market_data.freshness import FreshnessAssessment, FreshnessReason,
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
 from tyrex_pm.strategies.registry import StrategyPlugin, plugin_indicator_specs
+from tyrex_pm.strategies.triggers import EvaluationTrigger
 
 LAB_SCHEMA = "lab_evaluate_v1"
 
@@ -96,8 +97,8 @@ def evaluate_replay(
         target_notional=target_notional,
         window_id=window_id,
     )
-    configure_ptb = getattr(driver, "configure_ptb", None)
-    if callable(configure_ptb) and ptb:
+    configure_ptb = driver.configure_ptb
+    if ptb:
         from tyrex_pm.domain.polymarket.ptb import make_fixture_ptb
 
         if hasattr(ptb, "k"):
@@ -174,7 +175,7 @@ def evaluate_replay(
                 causation_id=snapshot.causation_id,
                 correlation_id=snapshot.correlation_id,
                 context=context,
-                trigger="feed",
+                trigger=EvaluationTrigger.FEED,
                 features=graph.snapshot(),
             )
         )

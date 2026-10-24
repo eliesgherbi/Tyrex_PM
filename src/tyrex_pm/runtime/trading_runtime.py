@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from tyrex_pm.core.clock import SystemClock
-from tyrex_pm.core.ids import InstrumentId, RunId
+from tyrex_pm.core.ids import InstrumentId
 from tyrex_pm.core.intents import (
     CancelIntent,
     EnterIntent,
@@ -84,6 +84,7 @@ from tyrex_pm.reporting.run_report import (
     write_run_report,
 )
 from tyrex_pm.runtime.capabilities import CapabilityController
+from tyrex_pm.runtime.decision_records import decision_context
 from tyrex_pm.runtime.market_data_runtime import MarketDataSummary, run_market_data_runtime
 from tyrex_pm.runtime.market_runtime import MarketSessionRuntime, ZGapMarketRuntime
 from tyrex_pm.runtime.run_config import (
@@ -94,9 +95,8 @@ from tyrex_pm.runtime.run_config import (
     strategy_entry_cutoff_s,
 )
 from tyrex_pm.runtime.settlement_hooks import SettlementHooks, startup_exposure_decision
+from tyrex_pm.strategies.base import EpisodeView
 from tyrex_pm.strategies.context import (
-    DecisionContext,
-    ReferenceFacts,
     StrategyLifecycleSnapshot,
     StrategyPositionPhase,
 )
@@ -107,6 +107,7 @@ from tyrex_pm.strategies.outcomes import (
     ExitOutcomeKind,
     RetryClass,
 )
+from tyrex_pm.strategies.triggers import EvaluationTrigger
 
 # Late-evidence watch of released entry attempts in the current window [s].
 LATE_EVIDENCE_WATCH_S = 60.0
@@ -944,27 +945,26 @@ class TradingRuntime:
         )
         return True
 
-    def _driver_episode_started_at(self, window_id: str) -> str | None:
+    def _episode_view(self, window_id: str | None) -> EpisodeView | None:
         driver = self._driver_for(window_id)
-        state = getattr(driver, "state", None)
-        return None if state is None else getattr(state, "episode_started_at", None)
+        return None if driver is None else driver.episode_view()
+
+    def _driver_episode_started_at(self, window_id: str) -> str | None:
+        view = self._episode_view(window_id)
+        return None if view is None else view.episode_started_at
 
     def _retry_clock_payload(self) -> dict[str, Any]:
         window_id = None if self.active_market is None else self.active_market.window_id
-        driver = self._driver_for(window_id)
-        state = getattr(driver, "state", None)
-        phase = getattr(state, "phase", None)
-        if getattr(phase, "value", phase) != "REARMABLE":
+        view = self._episode_view(window_id)
+        if view is None or view.phase != "REARMABLE":
             return {}
-        deadline = getattr(state, "next_attempt_not_before", None)
+        deadline = view.next_attempt_not_before
         return {
-            "entry_started_at": getattr(state, "episode_started_at", None),
-            "entry_side": getattr(state, "entry_side", None),
+            "entry_started_at": view.episode_started_at,
+            "entry_side": view.entry_side,
             "retry_clock": "none" if not deadline else "deadline",
             "retry_not_before": deadline,
-            "consecutive_service_failures": int(
-                getattr(state, "consecutive_service_failures", 0) or 0
-            ),
+            "consecutive_service_failures": view.consecutive_service_failures,
         }
 
     def _market_data_ready(self) -> bool:
@@ -1316,7 +1316,7 @@ class TradingRuntime:
         if runtime is None or self.active_market is None:
             return None
         driver = runtime._strategy_by_window.get(self.active_market.window_id) or runtime.driver
-        return getattr(driver, "fee_curve", None)
+        return None if driver is None else driver.fee_curve
 
     async def _settlement_before_entry(
         self, intent: Any, token_id: str, instrument: Any, *, account_state: Any = None
@@ -1432,28 +1432,20 @@ class TradingRuntime:
             state, instrument_id=None if instrument is None else instrument.instrument_id
         )
         caps = self.capabilities.snapshot(exposed=exposed)
-        context = DecisionContext(
+        context = decision_context(
+            ready,
             monotonic_ns=time.monotonic_ns(),
-            run_id=RunId(self.config.run_name),
-            snapshot=ready.snapshot,
+            run_id=self.config.run_name,
             target_notional=self.config.risk.target_notional,
             lifecycle=life,
             position_quantity=Decimal("0") if state is None else state.confirmed_position_shares,
             position_cost_total=self._position_cost(state),
-            now=ready.snapshot.observed_at,
             entry_allowed=caps.entry_executable and not exposed and state is None,
             entry_block_reason=None if caps.entry_executable else ",".join(caps.blockers),
             exit_allowed=caps.exit_executable,
             exit_block_reason=None if caps.exit_executable else ",".join(caps.blockers),
             unknown_inventory=not self.capabilities.prior_scope_clear,
             kill_switch_active=self.capabilities.kill_switch_active,
-            references=ReferenceFacts(
-                chainlink_raw=None if ready.dyn is None else ready.dyn.chainlink_raw,
-                chainlink_fresh=ready.dyn is not None and ready.dyn.chainlink_raw is not None,
-                sealed_k=None if ready.sealed is None else ready.sealed.ptb_k,
-                trading_reference_raw=ready.binance_raw,
-                chainlink_source_ts=None if ready.dyn is None else ready.dyn.chainlink_source_ts,
-            ),
             last_exit_reason=(
                 None
                 if ready.session is None
@@ -1469,10 +1461,9 @@ class TradingRuntime:
             window_id = self.active_market.window_id
             if window_id not in self._capture_seeded_windows:
                 driver = self._driver_for(window_id)
-                seed = getattr(driver, "persistence_slice", None)
                 capture.event("strategy_feedback", "feedback", {
                     "window_id": window_id, "kind": "seed",
-                    "payload": {} if seed is None else seed()})
+                    "payload": {} if driver is None else driver.persistence_slice()})
                 self._capture_seeded_windows[window_id] = True
                 if len(self._capture_seeded_windows) > 64:
                     self._capture_seeded_windows.pop(next(iter(self._capture_seeded_windows)))
@@ -1504,7 +1495,7 @@ class TradingRuntime:
             market_snapshot=ready.snapshot,
             causation_id=ready.snapshot.causation_id,
             correlation_id=ready.snapshot.correlation_id,
-            trigger="feed",
+            trigger=EvaluationTrigger.FEED,
             context=context,
             features=features,
         )
@@ -2166,9 +2157,8 @@ class TradingRuntime:
                 {"window_id": window_id, "reason": outcome.reason},
             )
         driver = self._driver_for(window_id)
-        handler = getattr(driver, "on_entry_outcome", None)
-        if handler is not None:
-            handler(outcome)
+        if driver is not None:
+            driver.on_entry_outcome(outcome)
             self._capture_feedback(window_id, "entry", outcome)
 
     def _capture_feedback(self, window_id, kind, payload) -> None:
@@ -2507,15 +2497,12 @@ class TradingRuntime:
         ready = runtime.prepare_aligned_eval()
         if not ready.ok or ready.snapshot is None:
             return "value_exit_inputs_unavailable"
-        from tyrex_pm.runtime.decision_records import decision_context
-
         state = self.lifecycle.state
         context = decision_context(
             ready, run_id=self.config.run_name, target_notional=self.config.risk.target_notional,
             position_quantity=Decimal(0) if state is None else state.confirmed_position_shares)
         driver = runtime.window_driver()
-        check = getattr(driver, "value_exit_refusal", None)
-        return None if check is None else check(
+        return None if driver is None else driver.value_exit_refusal(
             ready.snapshot, context, runtime.indicator_graph.snapshot(),
             spec.token_id, spec.minimum_price)
 
@@ -2539,13 +2526,12 @@ class TradingRuntime:
             },
         )
         driver = self._driver_for(window_id)
-        handler = getattr(driver, "on_exit_outcome", None)
-        if handler is not None:
+        if driver is not None:
             outcome = ExitOutcome(
                 kind, intent.intent_id.value, self._corrected_now(), reason=reason,
                 remaining_shares=Decimal("0") if state is None else state.confirmed_position_shares,
                 sold_shares=sold or Decimal("0"))
-            handler(outcome)
+            driver.on_exit_outcome(outcome)
             self._capture_feedback(window_id, "exit", outcome)
 
     async def _consume_hold(self, intent: HoldToResolutionIntent) -> None:
@@ -2606,9 +2592,8 @@ class TradingRuntime:
             return False
         self._pending_hold_commit = None
         driver = self._driver_for(window_id)
-        note = getattr(driver, "on_hold_committed", None)
-        if callable(note):
-            note()
+        if driver is not None:
+            driver.on_hold_committed()
             self._capture_feedback(window_id, "hold", {})
         state = self.lifecycle.state
         if state is not None:
@@ -2757,8 +2742,7 @@ class TradingRuntime:
         """Restart in the middle of a window: restore its durable attempt counters."""
         hooks = self.settlement_hooks
         driver = self._driver_for(window_id)
-        restore = getattr(driver, "restore_window_usage", None)
-        if hooks is None or restore is None:
+        if hooks is None or driver is None:
             return
         usage = hooks.ledger.window_usage(window_id)
         if usage.episodes == 0:
@@ -2789,7 +2773,7 @@ class TradingRuntime:
                 None if latest is None else latest.consecutive_service_failures
             ),
         )
-        restore(**usage_input)
+        driver.restore_window_usage(**usage_input)
         self._capture_feedback(window_id, "usage", usage_input)
         self.run_recorder.record(
             "WINDOW_BUDGET_RESTORED",
@@ -2898,19 +2882,14 @@ class TradingRuntime:
                     for e in hooks.ledger.window_episodes(window_id)
                 ],
             )
-        driver = self._driver_for(window_id)
-        episode_state = getattr(driver, "state", None)
+        view = self._episode_view(window_id)
         # Only report strategy state that belongs to this window (the driver may already
         # have been reset for the next one).
-        if (
-            episode_state is not None
-            and hasattr(episode_state, "phase")
-            and getattr(episode_state, "window_id", window_id) == window_id
-        ):
+        if view is not None and view.window_id == window_id:
             summary.update(
-                strategy_phase=episode_state.phase.value,
-                strategy_closed_reason=getattr(episode_state, "closed_reason", None),
-                strategy_window_attempts=getattr(episode_state, "window_attempts", None),
+                strategy_phase=view.phase,
+                strategy_closed_reason=view.closed_reason,
+                strategy_window_attempts=view.window_attempts,
             )
         self.window_summaries.append(summary)
         self.run_recorder.record("WINDOW_SUMMARY", summary)
@@ -4017,7 +3996,7 @@ def build_paper_venue(config: TradingRunConfig) -> Any:
     )
     plugin = get_strategy_plugin(config.strategy_kind)
     driver = plugin.create_driver(config=config.strategy, clock=SystemClock())
-    curve = getattr(driver, "fee_curve", None)
+    curve = driver.fee_curve
     if curve is None:
         raise ValueError("paper venue needs the strategy's fee curve")
     return PaperVenue(

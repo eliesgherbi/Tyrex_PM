@@ -308,7 +308,7 @@ class MarketSessionRuntime:
             "target_notional": self.driver.target_notional,
             "config": self.driver.config,
         }
-        fee_curve = getattr(self.driver, "fee_curve", None)
+        fee_curve = self.driver.fee_curve
         if fee_curve is not None:
             kwargs["fee_curve"] = fee_curve
         return plugin.create_driver(**kwargs)
@@ -402,14 +402,12 @@ class MarketSessionRuntime:
         for sess in (self.active, self.prepared_next):
             if sess is not None and sess.window_id == window_id:
                 sess.sealed = sealed
-        zg = self._strategy_by_window.get(window_id)
-        if zg is not None:
-            configure = getattr(zg, "configure_ptb", None)
-            if callable(configure):
-                state = self.ptb_engine.get_window(market_id, window_id)
-                if state is None or state.ptb_snapshot is None:
-                    raise RuntimeError("sealed PTB has no authoritative snapshot")
-                configure(state.ptb_snapshot)
+        driver = self._strategy_by_window.get(window_id)
+        if driver is not None:
+            state = self.ptb_engine.get_window(market_id, window_id)
+            if state is None or state.ptb_snapshot is None:
+                raise RuntimeError("sealed PTB has no authoritative snapshot")
+            driver.configure_ptb(state.ptb_snapshot)
         return sealed
 
     def window_driver(self, window_id: str | None = None) -> Any:

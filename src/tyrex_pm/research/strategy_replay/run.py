@@ -77,7 +77,12 @@ from tyrex_pm.strategies.outcomes import (
     ExitOutcomeKind,
     RetryClass,
 )
-from tyrex_pm.strategies.registry import get_strategy_plugin
+from tyrex_pm.strategies.registry import (
+    get_strategy_plugin,
+    plugin_lifecycle_modes,
+    plugin_requires_protection,
+)
+from tyrex_pm.strategies.triggers import EvaluationTrigger
 
 from .clock_sync import RecordedClockAuthority
 from .feed import StrategyFeed, utc
@@ -235,6 +240,10 @@ class ReplayAgent:
     record_inputs: bool = False
     explain_selector: Any = None
     explanations: list[dict] = field(default_factory=list)
+
+    @property
+    def plugin(self) -> Any:
+        return get_strategy_plugin(self.strategy_kind)
 
     # -- timeline hooks ----------------------------------------------------------------
 
@@ -398,7 +407,7 @@ class ReplayAgent:
             market_snapshot=ready.snapshot,
             causation_id=ready.snapshot.causation_id,
             correlation_id=ready.snapshot.correlation_id,
-            trigger="replay",
+            trigger=EvaluationTrigger.REPLAY,
             context=context,
             features=features,
         )
@@ -627,7 +636,8 @@ class ReplayAgent:
         end_ns = self.window.ref.window_end_ns
         cutoff = self.policy.entry_cutoff_s
         if cutoff is None:
-            cutoff = float(getattr(getattr(self.strategy_config, "entry", None), "tau_min_s", 0))
+            # The strategy's earliest-to-close entry time, as live uses it.
+            cutoff = float(self.plugin.entry_tau_bounds(self.strategy_config)[0])
         spec = attempt["_spec"] or attempt.get("_exit_spec")
         features_ready: bool | str = True
         if self.policy.execution_contract == EXECUTION_CONTRACT_V2:
@@ -649,13 +659,12 @@ class ReplayAgent:
         reason = None if spec is None else dispatch_check(spec, view, facts, gate_policy)
         if reason is None and attempt.get("exit_reason") == "VALUE_EXIT":
             ready = self.runtime.prepare_aligned_eval()
-            check = getattr(self._driver(), "value_exit_refusal", None)
             if not ready.ok or ready.snapshot is None:
                 reason = "value_exit_inputs_unavailable"
-            elif check is not None:
-                reason = check(ready.snapshot, self._context(ready),
-                               self.runtime.indicator_graph.snapshot(),
-                               spec.token_id, spec.minimum_price)
+            else:
+                reason = self._driver().value_exit_refusal(
+                    ready.snapshot, self._context(ready),
+                    self.runtime.indicator_graph.snapshot(), spec.token_id, spec.minimum_price)
         attempt["gate_reason"] = reason
         if reason is None:
             self._send(attempt)
@@ -907,16 +916,18 @@ def _initial_constraints(window: WindowData) -> tuple[Decimal | None, Decimal | 
     return tick, minimum
 
 
-def _check_lifecycle_policy(strategy_config: Any, policy: ReplayExecutionPolicy) -> None:
-    exit_cfg = getattr(strategy_config, "exit", None)
-    hold = exit_cfg is None or getattr(exit_cfg, "policy", "hold_to_resolution") == (
-        "hold_to_resolution"
-    )
-    if hold and policy.protection is not None:
+def _check_lifecycle_policy(
+    plugin: Any, strategy_config: Any, policy: ReplayExecutionPolicy
+) -> None:
+    """The same lifecycle and protection rules as a live run config (run_config)."""
+    modes = plugin_lifecycle_modes(plugin, strategy_config)
+    if modes == frozenset({"hold_to_resolution"}) and policy.protection is not None:
         raise ValueError(
             "a protection spec requires exit.policy: managed_exit; hold_to_resolution "
             "never sells a position before resolution"
         )
+    if plugin_requires_protection(plugin, strategy_config) and policy.protection is None:
+        raise ValueError(f"{plugin.kind} requires a protection spec (as a live run does)")
 
 
 def _full_strategy_config(strategy_config: Any) -> Any:
@@ -978,11 +989,11 @@ def run_window(
     policy = execution_policy or ReplayExecutionPolicy()
     if recorded_sequence_order and not observe_only:
         raise ValueError("captured sequence ordering requires recorded decisions without orders")
-    _check_lifecycle_policy(strategy_config, policy)
     started = time.perf_counter()
     clock = FakeClock(_wall=utc(window.range_start_ns))
     clock.advance_to_epoch_ns(window.range_start_ns)
     plugin = get_strategy_plugin(strategy_kind)
+    _check_lifecycle_policy(plugin, strategy_config, policy)
     # With recorded clock observations, corrected time follows them (as live clock sync);
     # without, raw receive time is used and the result says so.
     authority = (
@@ -1003,9 +1014,12 @@ def run_window(
         maximum_trade_age_ms=maximum_trade_age_ms,
         freshness_clock=clock,
     )
-    max_levels = getattr(getattr(strategy_config, "sizing", None), "max_levels", None)
+    max_levels = (
+        None if plugin.required_depth_levels is None
+        else plugin.required_depth_levels(strategy_config)
+    )
     if max_levels is not None and max_levels > depth_levels:
-        raise ValueError("depth_levels must cover the strategy's sizing.max_levels")
+        raise ValueError("depth_levels must cover the book levels the strategy reads")
     feed = StrategyFeed.create(window, runtime, clock, depth_levels=depth_levels)
     feed.eager_books = eager_books
     feed.reference_policy = policy.reference_policy()
@@ -1016,8 +1030,10 @@ def run_window(
         derived_ready=lambda fact: fact != "ptb.sealed"
         or (runtime.active is not None and runtime.active.sealed is not None),
     )
-    sizing = getattr(strategy_config, "sizing", None)
-    cap = policy.maximum_total_debit or getattr(sizing, "max_debit_usdc", None) or Decimal("5")
+    strategy_cap = (
+        None if plugin.max_entry_debit is None else plugin.max_entry_debit(strategy_config)
+    )
+    cap = policy.maximum_total_debit or strategy_cap or Decimal("5")
     planner = IntentOrderPlanner(
         ExecutionRiskPolicy(
             maximum_total_debit=cap,

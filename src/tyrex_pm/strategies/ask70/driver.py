@@ -13,12 +13,13 @@ from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.ask70.config import Ask70Config
 from tyrex_pm.strategies.ask70.strategy import Ask70Strategy
+from tyrex_pm.strategies.base import BaseDriver
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
 
 
 @dataclass
-class Ask70Driver:
+class Ask70Driver(BaseDriver):
     strategy: Ask70Strategy
     time_authority: TimeAuthority
     target_notional: Decimal

@@ -45,6 +45,7 @@ from tyrex_pm.runtime.decision_records import (
     skipped_record,
 )
 from tyrex_pm.strategies.registry import get_strategy_plugin
+from tyrex_pm.strategies.triggers import EvaluationTrigger
 
 OBSERVATION_MODE = "observe"
 LIVE_REFERENCE_SERIES = "polymarket_rtds:crypto_prices_twap_sixty:btc/usd"
@@ -241,7 +242,7 @@ class ObservationSession:
             causation_id=ready.snapshot.causation_id,
             correlation_id=ready.snapshot.correlation_id,
             context=context,
-            trigger="observe",
+            trigger=EvaluationTrigger.OBSERVE,
             features=features,
         )
         self.evaluate_ms.append((time.perf_counter() - started) * 1000.0)

@@ -71,10 +71,7 @@ def restore_feedback(driver, item, intent_ids):
     )
     kind, data = item["kind"], dict(item["payload"])
     if kind == "seed":
-        restore = getattr(driver, "restore_persistence_slice", None)
-        if restore is None:
-            raise ValueError("strategy cannot restore its captured initial state")
-        restore(data)
+        driver.restore_persistence_slice(data)
         for name in ("entry_intent_id", "exit_intent_id"):
             if data.get(name):
                 intent_ids[data[name]] = data[name]

@@ -46,6 +46,7 @@ from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.indicators.spot_path import SpotPathSnapshot
 from tyrex_pm.market_data.book_health import SyncHealth
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
+from tyrex_pm.strategies.base import BaseDriver, EpisodeView
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext, StrategyPositionPhase
 from tyrex_pm.strategies.decisions import StrategyAction, StrategyDecision
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
@@ -148,7 +149,7 @@ def _parse(value: str | None) -> datetime | None:
 
 
 @dataclass
-class SettlementValueDriver:
+class SettlementValueDriver(BaseDriver):
     config: SettlementValueConfig
     time_authority: TimeAuthority
     fee_curve: FeeCurveParams
@@ -181,6 +182,19 @@ class SettlementValueDriver:
 
     def restore_persistence_slice(self, data: dict[str, Any]) -> None:
         self.state.restore(data)
+
+    def episode_view(self) -> EpisodeView:
+        st = self.state
+        return EpisodeView(
+            window_id=st.window_id,
+            phase=st.phase.value,
+            episode_started_at=st.episode_started_at,
+            next_attempt_not_before=st.next_attempt_not_before,
+            entry_side=st.entry_side,
+            consecutive_service_failures=int(st.consecutive_service_failures or 0),
+            closed_reason=st.closed_reason,
+            window_attempts=st.window_attempts,
+        )
 
     # -- execution feedback ----------------------------------------------------------
 

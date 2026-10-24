@@ -1,8 +1,10 @@
-"""One decision-context builder and one decision-record schema for replay and observation.
+"""One decision-context builder and one decision-record schema for every host.
 
-Offline replay (``research.strategy_replay``) and signal-only live observation
-(``runtime.observation``) both build the strategy's ``DecisionContext`` and the
-recorded row through these functions, so their outputs can be compared directly.
+Live and paper trading (``runtime.trading_runtime``), signal-only observation
+(``runtime.observation``) and offline replay (``research.strategy_replay``) all build the
+strategy's ``DecisionContext`` through ``decision_context``, so their inputs to the
+strategy can be compared directly. Trading hosts pass their execution capabilities;
+observation and replay keep the defaults (entries allowed when flat and idle).
 """
 
 from __future__ import annotations
@@ -43,8 +45,20 @@ def decision_context(
     pending: bool = False,
     exit_pending: bool = False,
     last_exit_reason: str | None = None,
+    lifecycle: StrategyLifecycleSnapshot | None = None,
+    entry_allowed: bool | None = None,
+    entry_block_reason: str | None = None,
+    exit_allowed: bool = True,
+    exit_block_reason: str | None = None,
+    unknown_inventory: bool = False,
+    kill_switch_active: bool = False,
+    monotonic_ns: int | None = None,
 ) -> DecisionContext:
-    """Context from the host's aligned evaluation and an execution-derived position view."""
+    """Context from the host's aligned evaluation and an execution-derived position view.
+
+    ``lifecycle`` and ``entry_allowed`` override the view derived from the position flags
+    (a trading host knows its execution session and capabilities; replay derives them).
+    """
     held = position_quantity > 0
     if exit_pending:
         phase = StrategyPositionPhase.EXIT_PENDING
@@ -55,16 +69,25 @@ def decision_context(
     else:
         phase = StrategyPositionPhase.FLAT
     busy = pending or exit_pending
+    if entry_allowed is None:
+        entry_allowed = not busy and not held
+        entry_block_reason = "pending_order" if busy else None
     return DecisionContext(
+        monotonic_ns=monotonic_ns,
         run_id=RunId(run_id),
         snapshot=ready.snapshot,
         target_notional=target_notional,
-        lifecycle=StrategyLifecycleSnapshot(phase=phase, instrument_id=position_instrument),
+        lifecycle=lifecycle
+        or StrategyLifecycleSnapshot(phase=phase, instrument_id=position_instrument),
         position_quantity=position_quantity,
         position_cost_total=position_cost_total,
         now=ready.snapshot.observed_at,
-        entry_allowed=not busy and not held,
-        entry_block_reason="pending_order" if busy else None,
+        entry_allowed=entry_allowed,
+        entry_block_reason=entry_block_reason,
+        exit_allowed=exit_allowed,
+        exit_block_reason=exit_block_reason,
+        unknown_inventory=unknown_inventory,
+        kill_switch_active=kill_switch_active,
         references=reference_facts(ready),
         last_exit_reason=last_exit_reason,
     )

@@ -11,6 +11,7 @@ from tyrex_pm.core.time_authority import ClockTimeAuthority, FakeTimeAuthority, 
 from tyrex_pm.facts.contract import EligibilityFacts
 from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
+from tyrex_pm.strategies.base import BaseDriver
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
 from tyrex_pm.strategies.feature_probe.config import FeatureProbeConfig
@@ -18,7 +19,7 @@ from tyrex_pm.strategies.feature_probe.strategy import FeatureProbeStrategy
 
 
 @dataclass
-class FeatureProbeDriver:
+class FeatureProbeDriver(BaseDriver):
     strategy: FeatureProbeStrategy
     time_authority: TimeAuthority
     target_notional: Decimal
