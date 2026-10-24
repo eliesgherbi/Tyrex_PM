@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, StrategyId
-from tyrex_pm.core.intents import EnterIntent, LiquidityRole, new_intent_id
 from tyrex_pm.core.instruments import OutcomeSide
+from tyrex_pm.core.intents import EnterIntent, LiquidityRole, new_intent_id
 from tyrex_pm.execution.coordinator import (
     AccountExecutionCoordinator,
     GatewaySubmissionResult,

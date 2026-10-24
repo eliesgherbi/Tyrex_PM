@@ -13,7 +13,12 @@ from tyrex_pm.protection.spec import (
     protection_spec_from_mapping,
 )
 from tyrex_pm.protection.state import ArmedProtection, ProtectionPhase
-from tyrex_pm.protection.triggers import ResolvedThresholds, TriggerDecision, evaluate_triggers, resolve_thresholds
+from tyrex_pm.protection.triggers import (
+    ResolvedThresholds,
+    TriggerDecision,
+    evaluate_triggers,
+    resolve_thresholds,
+)
 
 __all__ = [
     "ArmedProtection",

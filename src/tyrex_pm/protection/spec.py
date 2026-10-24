@@ -135,7 +135,9 @@ class ProtectionSpec:
             )
 
 
-def protection_spec_from_mapping(raw: Mapping[str, Any], *, where: str = "protection") -> ProtectionSpec:
+def protection_spec_from_mapping(
+    raw: Mapping[str, Any], *, where: str = "protection"
+) -> ProtectionSpec:
     data = dict(raw)
     _reject_unknown(
         data,
@@ -161,7 +163,11 @@ def protection_spec_from_mapping(raw: Mapping[str, Any], *, where: str = "protec
         _reject_unknown(tp, {"style", "absolute", "pct_from_entry"}, f"{where}.take_profit")
         if "style" not in tp:
             raise ProtectionSpecError(f"{where}.take_profit.style is required")
-        absolute = None if tp.get("absolute") is None else _decimal(tp["absolute"], f"{where}.take_profit.absolute")
+        absolute = (
+            None
+            if tp.get("absolute") is None
+            else _decimal(tp["absolute"], f"{where}.take_profit.absolute")
+        )
         pct = (
             None
             if tp.get("pct_from_entry") is None
@@ -177,7 +183,11 @@ def protection_spec_from_mapping(raw: Mapping[str, Any], *, where: str = "protec
         _reject_unknown(sl, {"style", "absolute", "pct_from_entry"}, f"{where}.stop_loss")
         if "style" not in sl:
             raise ProtectionSpecError(f"{where}.stop_loss.style is required")
-        absolute = None if sl.get("absolute") is None else _decimal(sl["absolute"], f"{where}.stop_loss.absolute")
+        absolute = (
+            None
+            if sl.get("absolute") is None
+            else _decimal(sl["absolute"], f"{where}.stop_loss.absolute")
+        )
         pct = (
             None
             if sl.get("pct_from_entry") is None
@@ -209,10 +219,14 @@ def protection_spec_from_mapping(raw: Mapping[str, Any], *, where: str = "protec
         if "mark" not in tr:
             raise ProtectionSpecError(f"{where}.trailing.mark is required")
         trail_abs = (
-            None if tr.get("trail_abs") is None else _decimal(tr["trail_abs"], f"{where}.trailing.trail_abs")
+            None
+            if tr.get("trail_abs") is None
+            else _decimal(tr["trail_abs"], f"{where}.trailing.trail_abs")
         )
         trail_pct = (
-            None if tr.get("trail_pct") is None else _decimal(tr["trail_pct"], f"{where}.trailing.trail_pct")
+            None
+            if tr.get("trail_pct") is None
+            else _decimal(tr["trail_pct"], f"{where}.trailing.trail_pct")
         )
         activation_profit_abs = (
             None

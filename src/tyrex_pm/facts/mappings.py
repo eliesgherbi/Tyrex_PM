@@ -81,7 +81,9 @@ Q_EDGE_INPUT_CONTRACT = InputContract(
     optional=(F.REFERENCE_ALIGNED,),
     indicators=(
         IndicatorSpec(name="distance_to_k", source=F.CHAINLINK_TWAP, extra_sources=(F.PTB_SEALED,)),
-        IndicatorSpec(name="spot_cl_gap", source=F.BINANCE_SPOT_MID, extra_sources=(F.CHAINLINK_TWAP,)),
+        IndicatorSpec(
+            name="spot_cl_gap", source=F.BINANCE_SPOT_MID, extra_sources=(F.CHAINLINK_TWAP,)
+        ),
         IndicatorSpec(
             name="imbalance",
             source=F.BINANCE_SPOT_L2,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from tyrex_pm.execution.evidence import ExecutionRole, TradeStatus
+from tyrex_pm.execution.exit_sizing import remaining_exit_shares, venue_legal_sell_shares
 from tyrex_pm.execution.orders import LimitOrderSpec, TimeInForce
 from tyrex_pm.execution.planner import ExecutionRiskPolicy, IntentOrderPlanner
 from tyrex_pm.execution.session_state import (
@@ -13,8 +15,6 @@ from tyrex_pm.execution.session_state import (
     SessionIdentity,
     TradeRecord,
 )
-from tyrex_pm.execution.evidence import ExecutionRole, TradeStatus
-from tyrex_pm.execution.exit_sizing import remaining_exit_shares, venue_legal_sell_shares
 from tyrex_pm.protection.reasons import ProtectionReason
 from tyrex_pm.protection.spec import protection_spec_from_mapping
 from tyrex_pm.protection.triggers import evaluate_triggers, resolve_thresholds

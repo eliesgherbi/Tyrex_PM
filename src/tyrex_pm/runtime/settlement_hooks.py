@@ -76,7 +76,10 @@ def startup_exposure_decision(
         return "track_hold"
     if episode_state not in ("FILLED", "HOLD_REQUESTED"):
         return "stop"
-    if stored_policy not in ("hold_to_resolution", "managed_exit") or stored_policy != loaded_policy:
+    if (
+        stored_policy not in ("hold_to_resolution", "managed_exit")
+        or stored_policy != loaded_policy
+    ):
         return "block"
     if stored_policy == "hold_to_resolution":
         return "commit_hold"

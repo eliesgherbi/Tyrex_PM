@@ -930,9 +930,10 @@ class TradingRuntime:
         if state_value not in ("FILLED", "HOLD_REQUESTED"):
             return False
         policy = getattr(episode, "lifecycle_policy", None)
-        if policy != "hold_to_resolution" and not getattr(self, "_recovery_policy_unresolved", False):
+        unresolved = getattr(self, "_recovery_policy_unresolved", False)
+        if policy != "hold_to_resolution" and not unresolved:
             return False
-        if policy == "hold_to_resolution" and not getattr(self, "_recovery_policy_unresolved", False):
+        if policy == "hold_to_resolution" and not unresolved:
             await self._commit_hold(market.window_id, source="shutdown_recovery")
         preserved = _hold_committed(self)
         if preserved:
@@ -1256,7 +1257,9 @@ class TradingRuntime:
                     if self.settlement_hooks is None or self.active_market is None
                     else self.settlement_hooks.current_episode(self.active_market.window_id)
                 )
-                episode_state = None if episode is None or episode.state is None else episode.state.value
+                episode_state = (
+                    None if episode is None or episode.state is None else episode.state.value
+                )
                 decision = startup_exposure_decision(
                     has_exposure=True,
                     episode_state=episode_state,
@@ -1274,12 +1277,17 @@ class TradingRuntime:
                 )
                 if decision == "commit_hold" and self.active_market is not None:
                     self._pending_hold_commit = self.active_market.window_id
-                elif decision == "track_hold" and self.continuous and self.active_market is not None:
+                elif (
+                    decision == "track_hold"
+                    and self.continuous
+                    and self.active_market is not None
+                ):
                     self._pending_detach = self.active_market.window_id
                 elif decision == "block":
                     self.capabilities.set_blocker(
                         "RECOVERY_POLICY_UNRESOLVED",
-                        "original lifecycle policy is missing or disagrees with the loaded configuration",
+                        "original lifecycle policy is missing or disagrees with the "
+                        "loaded configuration",
                     )
                 elif decision == "stop":
                     self.capabilities.set_blocker(

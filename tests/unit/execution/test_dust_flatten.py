@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, StrategyId
-from tyrex_pm.core.intents import EnterIntent, ExitIntent, new_intent_id
 from tyrex_pm.core.instruments import OutcomeSide
+from tyrex_pm.core.intents import EnterIntent, ExitIntent, new_intent_id
 from tyrex_pm.execution.coordinator import (
     AccountExecutionCoordinator,
     GatewaySubmissionResult,
@@ -103,7 +103,9 @@ def _exit() -> ExitIntent:
     )
 
 
-def _state_with_buy(*, buy: Decimal, sellable: Decimal, exit_hwm: Decimal = Decimal("0")) -> ExecutionSessionState:
+def _state_with_buy(
+    *, buy: Decimal, sellable: Decimal, exit_hwm: Decimal = Decimal("0")
+) -> ExecutionSessionState:
     state = ExecutionSessionState()
     state.identity = SessionIdentity(
         session_id="s1",

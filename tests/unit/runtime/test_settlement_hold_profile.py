@@ -248,7 +248,9 @@ def test_shutdown_does_not_flatten_an_uncommitted_hold() -> None:
     from tyrex_pm.runtime.trading_runtime import TradingRuntime
 
     recorded = []
-    episode = SimpleNamespace(state=SimpleNamespace(value="FILLED"), lifecycle_policy="hold_to_resolution")
+    episode = SimpleNamespace(
+        state=SimpleNamespace(value="FILLED"), lifecycle_policy="hold_to_resolution"
+    )
     runtime = SimpleNamespace(
         _cleanup_lock=asyncio.Lock(), _cleanup_done=False, stop_requested=False,
         capabilities=SimpleNamespace(entry_window_open=True, set_blocker=lambda *a: None),

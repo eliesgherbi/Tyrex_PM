@@ -152,7 +152,8 @@ def test_settlement_cli_acknowledges_a_loss_pause(tmp_path: Path, capsys) -> Non
     assert main(["settlement", "--config", str(cfg), "status"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["consecutive_losses"] == 0 and status["run_limits"]["accounting_timezone"]
-    assert status["accounting_day_utc"] and status["reported_at_paris"].endswith(("+01:00", "+02:00"))
+    assert status["accounting_day_utc"]
+    assert status["reported_at_paris"].endswith(("+01:00", "+02:00"))
     assert main(["settlement", "--config", str(cfg), "ack-loss-pause", "--reason", "review"]) == 0
     assert json.loads(capsys.readouterr().out)["acknowledged_losses"] == 0
 

@@ -60,8 +60,12 @@ def test_stop_loss_fires_before_take_profit() -> None:
     spec = ProtectionSpec(
         mark="bid",
         size_mode="full",
-        take_profit=TakeProfitSpec(style="reactive_fak", absolute=Decimal("0.30"), pct_from_entry=None),
-        stop_loss=StopLossSpec(style="stop_market_fak", absolute=Decimal("0.40"), pct_from_entry=None),
+        take_profit=TakeProfitSpec(
+            style="reactive_fak", absolute=Decimal("0.30"), pct_from_entry=None
+        ),
+        stop_loss=StopLossSpec(
+            style="stop_market_fak", absolute=Decimal("0.40"), pct_from_entry=None
+        ),
         trailing=TrailingSpec(
             enabled=False,
             activation="immediate",

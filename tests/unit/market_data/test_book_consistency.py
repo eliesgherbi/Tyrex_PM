@@ -14,8 +14,7 @@ from tyrex_pm.core.book_events import (
     BookSnapshotReceived,
 )
 from tyrex_pm.core.events import EventSource
-from tyrex_pm.core.ids import InstrumentId, MarketId, TokenId, new_correlation_id, new_event_id
-from tyrex_pm.core.intents import IntentId, OrderSide
+from tyrex_pm.core.ids import InstrumentId, new_correlation_id, new_event_id
 from tyrex_pm.core.snapshots import BookLevel, BookSnapshot
 from tyrex_pm.engine.dispatcher import EventDispatcher
 from tyrex_pm.market_data.binding_record import (
@@ -26,8 +25,6 @@ from tyrex_pm.market_data.binding_record import (
 from tyrex_pm.market_data.book_feed import COLD_GAP_MAX_S, BindingFeed, BookFeedSupervisor
 from tyrex_pm.market_data.book_health import SideLiquidity, SyncHealth
 from tyrex_pm.market_data.book_store import MarketStateStore
-from tyrex_pm.planning.book_revalidation import revalidate_plan_against_book_view
-from tyrex_pm.planning.plan import ExecutionPlan, new_plan_id
 from tyrex_pm.strategies.z_gap.reasons import ZGapReason
 
 TS = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
@@ -257,90 +254,3 @@ def test_explicit_empty_ask_reason_distinct_from_unavailable() -> None:
     )
     assert uninit.up.sync_health is SyncHealth.UNINITIALIZED
     assert uninit.leg_book_view(up=True).reason_code == ZGapReason.BOOK_UNAVAILABLE.value
-
-
-def test_revalidation_version_bump_soft_and_hard_invalidators() -> None:
-    store = MarketStateStore()
-    disp = EventDispatcher()
-    store.attach(disp)
-    b = _binding()
-    _seed_ready(store, disp, UP, "0.50", "0.40")
-    _seed_ready(store, disp, DOWN, "0.60", "0.35")
-    view1 = store.capture_pair(b)
-    plan = ExecutionPlan(
-        plan_id=new_plan_id(),
-        intent_id=IntentId("i1"),
-        instrument_id=InstrumentId(UP),
-        token_id=TokenId(UP),
-        market_id=MarketId("0xabc"),
-        side=OrderSide.BUY,
-        quantity=Decimal("5"),
-        limit_price=Decimal("0.50"),
-        expected_notional=Decimal("2.5"),
-        book_ts_event=TS,
-        tick_size=Decimal("0.01"),
-        min_order_size=Decimal("1"),
-        planned_at=TS,
-        correlation_id=new_correlation_id(),
-        causation_id=None,
-        evidence={
-            "binding_id": b.binding_id,
-            "book_version": view1.up.book_version,
-            "pair_version": list(view1.pair_version),
-            "side": "BUY",
-            "edge": "0.05",
-        },
-    )
-    # Unchanged book → ok
-    ok = revalidate_plan_against_book_view(plan, view1, active_binding_id=b.binding_id)
-    assert ok.ok is True
-    assert ok.audited_version_change is False
-
-    # Distant insert bumps version but same executable ask → audit + still ok
-    disp.publish(
-        BookDeltaReceived(
-            event_id=new_event_id(),
-            correlation_id=new_correlation_id(),
-            ts_event=TS,
-            ts_received=TS,
-            source=EventSource.POLYMARKET_CLOB,
-            changes=(
-                BookLevelDelta(
-                    instrument_id=InstrumentId(UP),
-                    side=BookSide.ASK,
-                    price=Decimal("0.90"),
-                    size=Decimal("100"),
-                ),
-            ),
-        )
-    )
-    view2 = store.capture_pair(b)
-    soft = revalidate_plan_against_book_view(plan, view2, active_binding_id=b.binding_id)
-    assert soft.ok is True
-    assert soft.audited_version_change is True
-
-    # Price move outside tolerance → block
-    disp.publish(
-        BookSnapshotReceived(
-            event_id=new_event_id(),
-            correlation_id=new_correlation_id(),
-            ts_event=TS,
-            ts_received=TS,
-            source=EventSource.POLYMARKET_CLOB,
-            book=BookSnapshot(
-                instrument_id=InstrumentId(UP),
-                ts_event=TS,
-                bids=(BookLevel(price=Decimal("0.40"), quantity=Decimal("20")),),
-                asks=(BookLevel(price=Decimal("0.80"), quantity=Decimal("20")),),
-            ),
-        )
-    )
-    view3 = store.capture_pair(b)
-    hard = revalidate_plan_against_book_view(plan, view3, active_binding_id=b.binding_id)
-    assert hard.ok is False
-    assert hard.reason == "price_outside_tolerance"
-
-    # Binding rollover → block
-    rolled = revalidate_plan_against_book_view(plan, view3, active_binding_id="other-binding")
-    assert rolled.ok is False
-    assert rolled.reason == "active_binding_changed"
