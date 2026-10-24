@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from support.runtime import bare_runtime
 
 from tyrex_pm.execution.evidence import (
     DispatchAuthorized,
@@ -26,7 +27,6 @@ from tyrex_pm.execution.orders import LimitOrderSpec, OrderSide, TimeInForce
 from tyrex_pm.execution.reducer import reduce_execution_event
 from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
 from tyrex_pm.runtime.capabilities import CapabilityController
-from tyrex_pm.runtime.trading_runtime import TradingRuntime
 
 NOW = datetime(2026, 9, 20, 16, 0, tzinfo=timezone.utc)
 
@@ -291,7 +291,7 @@ async def test_f15_same_market_live_maker_inspects_resume_cancel() -> None:
             status="live",
         ),
     )
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.known_dust_residuals = []
     runtime.capabilities = CapabilityController()
     runtime.run_recorder = type("Rec", (), {"record": staticmethod(lambda *_a, **_k: None)})()

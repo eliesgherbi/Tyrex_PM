@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from support.runtime import bare_runtime, stand_in_runtime
 
 import tyrex_pm.runtime.trading_runtime as trading_runtime_module
 from tyrex_pm.application.cli import main
@@ -232,7 +233,7 @@ async def test_degraded_public_data_does_not_starve_queued_exit() -> None:
         runtime.intent_queue.task_done()
         consumed.set()
 
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         intent_queue=asyncio.Queue(),
         intent_wake=asyncio.Event(),
         _intent_dispatcher_stop=asyncio.Event(),
@@ -258,7 +259,7 @@ async def test_intent_enqueue_wakes_dispatcher_without_one_hertz_tick() -> None:
         self.intent_queue.task_done()
         consumed.set()
 
-    runtime = TradingRuntime.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.intent_queue = asyncio.Queue()
     runtime.intent_wake = asyncio.Event()
     runtime.intent_candidate_monotonic_ns = {}
@@ -283,7 +284,7 @@ async def test_manual_deadline_is_enforced_with_open_exposure() -> None:
         exit_requested_reason="MANDATORY_FLATTEN",
     )
     lifecycle = SimpleNamespace(state=state, mark_manual=AsyncMock())
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         _bind_pending_market=AsyncMock(),
         _market_data_ready=lambda: False,
         active_market=SimpleNamespace(
@@ -553,7 +554,7 @@ def test_market_data_summary_makes_no_execution_authority_claims() -> None:
 
 def test_entry_evaluation_refreshes_account_projection_first() -> None:
     snapshot = object()
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         active_market=SimpleNamespace(
             market=SimpleNamespace(
                 condition_id="condition",
@@ -824,8 +825,10 @@ async def test_report_projection_failure_writes_emergency_report(
         "run_market_data_runtime",
         _completed_market_data,
     )
+    import tyrex_pm.runtime.host.reporting as reporting_module
+
     monkeypatch.setattr(
-        trading_runtime_module,
+        reporting_module,
         "build_run_report",
         lambda _source: (_ for _ in ()).throw(ValueError("projection failed")),
     )
@@ -863,7 +866,7 @@ async def test_r2_nonzero_clock_correction_aligns_tick_consume_and_gate() -> Non
             primary_source="test",
         )
     )
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.config = config
     runtime.time_authority = auth
     runtime.active_market = SimpleNamespace(
@@ -915,7 +918,7 @@ def _window_runtime(
         exit_requested_reason=None,
         session_id="session",
     )
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         _bind_pending_market=AsyncMock(),
         _market_data_ready=lambda: False,
         active_market=SimpleNamespace(
@@ -1031,7 +1034,7 @@ async def _consume_entry(
             working_maker_entry=False,
         )
     )
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.config = config
     runtime.intent_queue = queue
     runtime.intent_candidate_monotonic_ns = {}

@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import tyrex_pm.runtime.trading_runtime as tr
+# Order-metadata warming lives in the host component (runtime/host/metadata.py).
+import tyrex_pm.runtime.host.metadata as tr
 from tyrex_pm.execution.polymarket.gateway import (
     OrderMetadataWarmResult,
     OrderMetadataWarmTokenResult,

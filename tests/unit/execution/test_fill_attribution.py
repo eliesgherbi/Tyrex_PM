@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from support.runtime import bare_runtime
 
 from tyrex_pm.execution.account_state import AccountStateAuthority, AccountStatePolicy
 from tyrex_pm.execution.evidence import (
@@ -384,7 +385,7 @@ class _ScopedGateway:
 
 
 async def _inspect_runtime(gateway: _ScopedGateway) -> TradingRuntime:
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.account_state_authority = AccountStateAuthority(
         gateway, policy=AccountStatePolicy()
     )

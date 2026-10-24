@@ -133,7 +133,7 @@ def execution_prefixes(path):
     from tyrex_pm.execution.evidence import evidence_from_dict
     from tyrex_pm.execution.reducer import reduce_execution_event
     from tyrex_pm.execution.session_state import ExecutionSessionState
-    from tyrex_pm.runtime.trading_runtime import _lifecycle_view
+    from tyrex_pm.runtime.host.shared import _lifecycle_view
 
     states, prefixes = {}, {}
     with sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True) as db:

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from support.runtime import bare_runtime
 
 from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, StrategyId, TokenId
 from tyrex_pm.core.instruments import Instrument, OutcomeSide
@@ -222,7 +223,7 @@ def _dispatch_runtime(lifecycle: ExecutionLifecycle) -> TradingRuntime:
         blockers=(),
         read_attempt=1,
     )
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.lifecycle = lifecycle
     runtime.capabilities = lifecycle.capabilities
     runtime.config = load_trading_run_config(Path("config/runs/z_gap_tiny_live.yaml"))
@@ -396,7 +397,7 @@ async def test_f17_and_f_int_wait_drain_once_before_feeds(tmp_path, monkeypatch)
 async def test_f_int_prepare_closes_buy_gate(tmp_path, monkeypatch) -> None:
     venue = _HangVenue("prepare")
     lifecycle = _lifecycle(venue)
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.lifecycle = lifecycle
     runtime.capabilities = lifecycle.capabilities
     runtime.stop_requested = False

@@ -8,6 +8,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from support.runtime import bare_runtime
 
 from tyrex_pm.core.ids import CorrelationId, InstrumentId, MarketId, StrategyId
 from tyrex_pm.core.instruments import OutcomeSide
@@ -34,7 +35,6 @@ from tyrex_pm.execution.reducer import ReducerInvariantError, reduce_execution_e
 from tyrex_pm.execution.session_state import ExecutionPhase, ExecutionSessionState
 from tyrex_pm.persistence.execution_journal import MemoryExecutionJournal
 from tyrex_pm.runtime.capabilities import CapabilityController
-from tyrex_pm.runtime.trading_runtime import TradingRuntime
 
 NOW = datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc)
 
@@ -344,7 +344,7 @@ async def test_recovery_failure_remains_blocked() -> None:
 
 @pytest.mark.asyncio
 async def test_incomplete_scoped_evidence_blocks(monkeypatch) -> None:
-    runtime = object.__new__(TradingRuntime)
+    runtime = bare_runtime()
     runtime.known_dust_residuals = []
     runtime.capabilities = CapabilityController()
     records: list[tuple[str, dict]] = []

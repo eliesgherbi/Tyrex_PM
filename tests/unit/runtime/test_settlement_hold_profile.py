@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from support.runtime import stand_in_runtime
 
 from tyrex_pm.domain.polymarket.fees import FeeCurveParams
 from tyrex_pm.execution.session_state import ExecutionPhase
@@ -166,7 +167,7 @@ def _tick_runtime(committed: bool, tau: float):
     lifecycle = SimpleNamespace(state=SimpleNamespace(has_exposure=True, exit_requested_reason=None,
                                                       needs_venue_followup=False),
                                 mark_manual=AsyncMock())
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         _bind_pending_market=AsyncMock(),
         active_market=SimpleNamespace(window_id="w1", entry_enabled=True,
                                       market=SimpleNamespace(condition_id="c", event_end=object(),
@@ -189,7 +190,7 @@ def _tick_runtime(committed: bool, tau: float):
 
 
 def test_committed_hold_is_exempt_from_manual_deadline_and_mandatory_flatten(monkeypatch) -> None:
-    import tyrex_pm.runtime.trading_runtime as tr
+    import tyrex_pm.runtime.host.deadlines as tr
 
     monkeypatch.setattr(tr, "entry_tau_bounds", lambda config: (30, 240))
     monkeypatch.setattr(tr, "strategy_entry_cutoff_s", lambda config: 30)
@@ -200,7 +201,7 @@ def test_committed_hold_is_exempt_from_manual_deadline_and_mandatory_flatten(mon
 
 
 def test_managed_residual_cutoff_runs_without_model_evaluation(monkeypatch) -> None:
-    import tyrex_pm.runtime.trading_runtime as tr
+    import tyrex_pm.runtime.host.deadlines as tr
 
     monkeypatch.setattr(tr, "entry_tau_bounds", lambda config: (30, 240))
     monkeypatch.setattr(tr, "strategy_entry_cutoff_s", lambda config: 30)
@@ -251,7 +252,7 @@ def test_shutdown_does_not_flatten_an_uncommitted_hold() -> None:
     episode = SimpleNamespace(
         state=SimpleNamespace(value="FILLED"), lifecycle_policy="hold_to_resolution"
     )
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         _cleanup_lock=asyncio.Lock(), _cleanup_done=False, stop_requested=False,
         capabilities=SimpleNamespace(entry_window_open=True, set_blocker=lambda *a: None),
         _stop_intent_dispatcher=AsyncMock(),
@@ -279,7 +280,7 @@ def test_shutdown_preserves_a_committed_hold() -> None:
     from tyrex_pm.runtime.trading_runtime import TradingRuntime
 
     recorded = []
-    runtime = SimpleNamespace(
+    runtime = stand_in_runtime(
         _cleanup_lock=asyncio.Lock(), _cleanup_done=False, stop_requested=False,
         capabilities=SimpleNamespace(entry_window_open=True, set_blocker=lambda *a: None),
         _stop_intent_dispatcher=AsyncMock(),
