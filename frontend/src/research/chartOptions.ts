@@ -1,6 +1,6 @@
 // Ported from the approved mockup (prototypes/ihm-review/src/options.ts).
 // Same palette, axes, legend and markers; times are the saved replay clock in UTC.
-import type { Option } from "../../../prototypes/ihm-review/src/Chart";
+import type { Option } from "../design/Chart";
 import { utc, type EventRow, type ResultRow, type Tick, asNumber, windowLabel } from "./model";
 
 export type Palette = { text: string; muted: string; grid: string; blue: string; teal: string; market: string; surface: string; green: string; red: string };

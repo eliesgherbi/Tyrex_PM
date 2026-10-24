@@ -1,7 +1,7 @@
 // Ported from the approved mockup (prototypes/ihm-review/src/ReplayExplorer.tsx).
 // Every line, marker and inspector value is read from the saved trace of one window.
 import { useEffect, useMemo, useState } from "react";
-import { Button, Field, Notice, Pair, Panel, Tag } from "../../../prototypes/ihm-review/src/WorkflowReviewUI";
+import { Button, Field, Notice, Pair, Panel, Tag } from "../design/WorkflowReviewUI";
 import { Chart } from "./Chart";
 import { paletteFor, timelineBounds, timelineOption } from "./chartOptions";
 import { eventsFrom, executionText, explain, fmtMoney, fmtPrice, fmtShares, heldGapText, kCheckText, nsToMs, pnlText, policyLabel, show, ticksFrom, utcMs, windowDay, windowLabel, type EventRow, type ResultView, type Tick, type Trace } from "./model";

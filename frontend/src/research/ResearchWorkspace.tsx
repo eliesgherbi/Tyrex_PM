@@ -1,7 +1,7 @@
 // The Research workbench: ported from the approved mockup (ResearchWorkbench.tsx) without its shell.
 // Saved sets, configurations, previews, jobs, results and traces come from workflow operations.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Field, Notice, Pair, Panel, Tag } from "../../../prototypes/ihm-review/src/WorkflowReviewUI";
+import { Button, Field, Notice, Pair, Panel, Tag } from "../design/WorkflowReviewUI";
 import { call, type Envelope } from "../api";
 import { ReplayBuilder } from "./ReplayBuilder";
 import { ReplayExplorer, type TraceState } from "./ReplayExplorer";

@@ -16,7 +16,6 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 4173,
     strictPort: true,
-    fs: { allow: [".."] },
   },
   build: { outDir: "dist", emptyOutDir: false },
 });

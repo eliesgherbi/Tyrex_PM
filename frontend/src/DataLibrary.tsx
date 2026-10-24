@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Chart } from "../../prototypes/ihm-review/src/Chart";
-import { dark, light, type Palette } from "../../prototypes/ihm-review/src/options";
+import { Chart } from "./design/Chart";
+import { dark, light, type Palette } from "./design/palette";
 import { call, type Envelope } from "./api";
 import { DeleteControl, TrashPanel, setStatusText } from "./research/Trash";
 import { CookbookCards, RecipeParameters, ResolvedThresholds, SaveAsRecipe, useCookbook, type CookbookRecipe, type CookbookRecord, type CookbookSpec } from "./data/Cookbook";

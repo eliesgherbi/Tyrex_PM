@@ -1,0 +1,7 @@
+// A scalable cat silhouette inspired by the reference supplied for Tyrex.
+// Even-odd eye cutouts remain transparent in light and dark themes.
+export function BrandMark({ className = "" }: { className?: string }) {
+ return <svg className={className} viewBox="0 0 64 64" fill="currentColor" aria-hidden="true" focusable="false">
+  <path fillRule="evenodd" clipRule="evenodd" d="M16.1 17.3C11.7 15.6 14.3 11.3 20.4 7.9C35.1-.4 53.2 7.4 58.1 23.1C64 41.9 50.4 60.6 31.4 60.6C14.3 60.6 2.1 48.7 2.1 32.7C2.1 25.2 4.6 19 7.6 17.4C8.8 16.9 9.6 20.5 10.1 22.2C13 21.6 16.7 21.6 19.8 22.4L22.9 18.7C24.9 16.3 25.7 20.8 26.3 24.2L27.4 29.9C28.2 33.7 30.5 34.5 32.9 30.7C37.7 23.4 43.6 18.9 50.2 21.5C43.6 11.5 32.2 9.2 21.7 15.5C19.1 17 17.7 17.9 16.1 17.3ZM12.1 30A1.85 1.85 0 1 0 8.4 30A1.85 1.85 0 1 0 12.1 30ZM21.7 30A1.85 1.85 0 1 0 18 30A1.85 1.85 0 1 0 21.7 30Z"/>
+ </svg>;
+}

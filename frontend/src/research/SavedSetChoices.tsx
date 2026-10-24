@@ -1,5 +1,5 @@
 // Ported from the approved mockup (prototypes/ihm-review/src/SavedSetChoices.tsx) with real saved sets.
-import { Button, Tag } from "../../../prototypes/ihm-review/src/WorkflowReviewUI";
+import { Button, Tag } from "../design/WorkflowReviewUI";
 import { dateRange, policyLabel, replayablePolicy, type SetSummary } from "./model";
 import { setStatusText } from "./Trash";
 

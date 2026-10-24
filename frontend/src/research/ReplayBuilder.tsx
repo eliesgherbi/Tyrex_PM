@@ -1,7 +1,7 @@
 // Ported from the approved mockup (prototypes/ihm-review/src/ReplayBuilder.tsx).
 // Fields, defaults, bases and validation come from the workflow backend.
 import { useEffect, useMemo, useState } from "react";
-import { Button, Field, Notice, Panel, Tag } from "../../../prototypes/ihm-review/src/WorkflowReviewUI";
+import { Button, Field, Notice, Panel, Tag } from "../design/WorkflowReviewUI";
 import { call } from "../api";
 import { dateRange, flatten, nest, policyLabel, replayablePolicy, same, show, type Base, type Capabilities, type FieldMeta, type Flat, type ReplayConfig, type SetSummary } from "./model";
 

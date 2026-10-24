@@ -1,7 +1,7 @@
 // Ported from the approved mockup (prototypes/ihm-review/src/ReplayResults.tsx).
 // Totals come from the server's full-population summary; history is paged on the server.
 import { useEffect, useMemo, useRef } from "react";
-import { Button, Field, Notice, Panel, Tag } from "../../../prototypes/ihm-review/src/WorkflowReviewUI";
+import { Button, Field, Notice, Panel, Tag } from "../design/WorkflowReviewUI";
 import { Chart } from "./Chart";
 import { outcomesOption, paletteFor } from "./chartOptions";
 import { DeleteControl, runStatusText } from "./Trash";

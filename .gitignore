@@ -16,3 +16,9 @@ dist/
 build/
 .coverage
 htmlcov/
+
+# Frontend and design mockup: dependencies and build output
+node_modules/
+frontend/dist/
+prototypes/ihm-review/dist/
+prototypes/ihm-review/dist-research/

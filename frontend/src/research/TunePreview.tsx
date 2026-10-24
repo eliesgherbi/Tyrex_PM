@@ -1,6 +1,6 @@
 // Copied from the approved mockup (ResearchWorkbench.tsx). Phase 3 design preview only: no tuning job can launch.
 import { useEffect, useRef, useState } from "react";
-import { Button, Field, Notice, Panel, Tag } from "../../../prototypes/ihm-review/src/WorkflowReviewUI";
+import { Button, Field, Notice, Panel, Tag } from "../design/WorkflowReviewUI";
 
 export function TunePreview() {
   const previewPanel = useRef<HTMLDivElement>(null);

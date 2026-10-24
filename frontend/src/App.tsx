@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { BrandMark } from "../../prototypes/ihm-review/src/BrandMark";
-import "../../prototypes/ihm-review/src/style.css";
-import "../../prototypes/ihm-review/src/dataLibrary.css";
-import "../../prototypes/ihm-review/src/researchJourney.css";
-import "../../prototypes/ihm-review/src/workflowReview.css";
+import { BrandMark } from "./design/BrandMark";
+import "./design/style.css";
+import "./design/dataLibrary.css";
+import "./design/researchJourney.css";
+import "./design/workflowReview.css";
 import "./workspace.css";
 import { bootstrap, type Bootstrap } from "./api";
 import { DataLibrary } from "./DataLibrary";
