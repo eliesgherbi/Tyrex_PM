@@ -159,9 +159,21 @@ class Collector:
         ]
 
     def book_markets(self) -> list[dict]:
-        """Markets whose books are recorded now: open soon, open, or in the close tail."""
-        horizon = time.time_ns() + self.profile.coverage.book_subscribe_ahead_s * 10**9
-        return [m for m in self.active_markets() if m.get("window_start", 0) <= horizon]
+        """Markets whose books are recorded now: open soon, open, or in the close tail.
+
+        The tail ends at the window's own end, not at Gamma's ``closed`` flag: that flag can
+        stay false long after the window (24 Oct recording), and closed windows then piled
+        up on the socket until the venue dropped it every minute.
+        """
+        now = time.time_ns()
+        horizon = now + self.profile.coverage.book_subscribe_ahead_s * 10**9
+        tail = self.profile.coverage.post_close_tail_s * 10**9
+        return [
+            m
+            for m in self.active_markets()
+            if m.get("window_start", 0) <= horizon
+            and (m.get("window_end") is None or now <= m["window_end"] + tail)
+        ]
 
     def tokens(self, shard: int | None = None) -> list[str]:
         tokens = sorted({i["token_id"] for m in self.book_markets() for i in m["instruments"]})
@@ -632,7 +644,7 @@ class Collector:
         return sorted(
             mid
             for mid in self.outcome_scope or ()
-            if self.markets.get(mid, {}).get("resolution_status") != "PROVIDER_TERMINAL"
+            if self.markets.get(mid, {}).get("resolution_status") not in OUTCOME_REPORTED
         )
 
     def outcome_progress(self) -> dict | None:
@@ -896,6 +908,11 @@ class Collector:
 CLOCK_RESOLUTION_NS = {"binance_time": 1_000_000, "clob_time": 1_000_000_000}
 
 
+# Resolution states in which the provider has reported a payout for the market. Waiting
+# for winners stops there: PROVIDER_TERMINAL also needs an attested payout contract
+# (provider policy), which recordings normally lack, so the reported payout is labelled
+# UNSUPPORTED; the research labels read that same reported payout (24 Oct recording).
+OUTCOME_REPORTED = frozenset({"PROVIDER_TERMINAL", "UNSUPPORTED", "CONFLICTING"})
 # The last window keeps this much data after its close (replay loads 30 s past the end).
 CLOSE_MARGIN_S = 30
 # Stopped when a session moves on to waiting for outcomes; resolution, metadata, clock,

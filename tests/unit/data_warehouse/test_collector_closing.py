@@ -91,6 +91,25 @@ async def test_open_window_is_finished_then_its_winner_awaited(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_reported_payout_counts_without_an_attested_contract(tmp_path, monkeypatch):
+    # Without a provider policy the reported payout is assessed UNSUPPORTED; the winner is
+    # still known (24 Oct recording waited 15 minutes for 0 of 73 otherwise).
+    collector = _collector(tmp_path, monkeypatch)
+    start = collector.started_at
+    collector.markets = {"open": _market("open", start + 10 * MS, start + 100 * MS)}
+
+    async def reported():
+        for mid in collector.outcome_scope or ():
+            collector.markets[mid] = {**collector.markets[mid], "resolution_status": "UNSUPPORTED"}
+
+    collector.resolution_cycle = reported
+    began = time.monotonic()
+    await collector.run(0.05, finish_windows=True, outcome_wait_s=30)
+    assert read_json(collector.session_path)["outcome_wait"]["known"] == 1
+    assert time.monotonic() - began < 10  # did not wait out the 30 s limit
+
+
+@pytest.mark.asyncio
 async def test_outcome_wait_ends_at_its_limit(tmp_path, monkeypatch) -> None:
     collector = _collector(tmp_path, monkeypatch)
     start = collector.started_at
