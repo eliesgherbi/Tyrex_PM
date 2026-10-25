@@ -30,25 +30,30 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import ROUND_DOWN, Decimal
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from tyrex_pm.domain.polymarket.fees import FeeCurveParams, phi_taker_fee_per_share
+from tyrex_pm.domain.polymarket.fees import FeeCurveParams
 from tyrex_pm.execution.coordinator import GatewaySubmissionResult, PreparedOrder
+from tyrex_pm.execution.fill_model import bought_shares, taker_fee, walk_shares, walk_spend
 from tyrex_pm.execution.orders import MarketBuyOrderSpec, MarketSellOrderSpec
 
-PAPER_FILL_MODEL = "paper_live_book_taker_v1"
-SHARE_QUANTUM = Decimal("0.01")
+# v2: the shared fill rule of execution.fill_model (fees rounded as in replay).
+PAPER_FILL_MODEL = "paper_live_book_taker_v2"
 
 
 class PaperVenueError(RuntimeError):
     pass
 
 
-def _floor(value: Decimal, step: Decimal = SHARE_QUANTUM) -> Decimal:
-    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+def _levels(levels: Any) -> dict[Decimal, Decimal]:
+    """Book levels (objects with price and quantity) as {price: displayed size}."""
+    out: dict[Decimal, Decimal] = {}
+    for level in levels or ():
+        out[level.price] = out.get(level.price, Decimal(0)) + level.quantity
+    return out
 
 
 @dataclass
@@ -157,7 +162,8 @@ class PaperVenue:
         leg = self._leg(spec.token_id)
         book = None if leg is None else leg.book
         curve = self.fee_curve(spec.token_id)
-        fills: list[tuple[Decimal, Decimal]] = []
+        # The same fill rule as the replay engine (execution.fill_model); the live book is
+        # re-read for every order, so no depletion is carried between orders.
         if isinstance(spec, MarketBuyOrderSpec):
             if spec.spend_amount > self.account.collateral:
                 self.account.save()
@@ -165,43 +171,31 @@ class PaperVenue:
                     accepted=False, venue_order_id=None, status="rejected",
                     error_code="not enough balance / allowance",
                 )
-            remaining = spec.spend_amount
-            for level in sorted(() if book is None else book.asks, key=lambda lv: lv.price):
-                if level.price > spec.worst_price or remaining <= 0:
-                    break
-                take = _floor(min(level.quantity * self.participation, remaining / level.price))
-                if take <= 0:
-                    continue
-                fills.append((take, level.price))
-                remaining -= take * level.price
+            fills, _unspent = walk_spend(
+                _levels(None if book is None else book.asks), spend=spec.spend_amount,
+                limit=spec.worst_price, participation=self.participation,
+            )
         else:
             held = self.account.balances.get(spec.token_id, Decimal(0))
-            remaining = min(spec.shares, held)
-            for level in sorted(
-                () if book is None else book.bids, key=lambda lv: lv.price, reverse=True
-            ):
-                if level.price < spec.minimum_price or remaining <= 0:
-                    break
-                take = _floor(min(level.quantity * self.participation, remaining))
-                if take <= 0:
-                    continue
-                fills.append((take, level.price))
-                remaining -= take
+            fills = walk_shares(
+                _levels(None if book is None else book.bids), side="SELL",
+                quantity=min(spec.shares, held), limit=spec.minimum_price,
+                participation=self.participation,
+            )
         trade_ids = []
         matched = Decimal(0)
         side = "BUY" if isinstance(spec, MarketBuyOrderSpec) else "SELL"
         now = datetime.now(timezone.utc)
-        for shares, price in fills:
-            fee_per_share = phi_taker_fee_per_share(price, curve)
+        for item in fills:
+            shares, price = item.shares, item.price
+            fee = taker_fee(shares, price, curve)
             if side == "BUY":
                 self.account.collateral -= shares * price
-                net = shares * (Decimal(1) - fee_per_share / price)
                 self.account.balances[spec.token_id] = (
-                    self.account.balances.get(spec.token_id, Decimal(0)) + net
+                    self.account.balances.get(spec.token_id, Decimal(0))
+                    + bought_shares(shares, price, fee)
                 )
-                fee = shares * fee_per_share
             else:
-                fee = shares * fee_per_share
                 self.account.collateral += shares * price - fee
                 self.account.balances[spec.token_id] = (
                     self.account.balances.get(spec.token_id, Decimal(0)) - shares

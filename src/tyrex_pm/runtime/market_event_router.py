@@ -112,6 +112,8 @@ def route_trading_reference(
             receive_monotonic_ns=0 if meta is None else meta.receive_monotonic_ns,
             identity=TradingReferenceIdentity.BINANCE_SPOT,
             ingress=meta,
+            quantity=event.reference.quantity,
+            aggressor=event.reference.aggressor,
         )
     )
     return True

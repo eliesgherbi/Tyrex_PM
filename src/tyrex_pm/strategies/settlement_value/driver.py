@@ -370,8 +370,8 @@ class SettlementValueDriver(BaseDriver):
     def value_exit_refusal(self, snapshot, context, features, token_id, minimum_price):
         """Recheck a value sale at the final gate without consuming an evaluation/attempt."""
         cfg = self.config
-        tau = (snapshot.market.event_end - snapshot.observed_at).total_seconds()
-        if tau <= cfg.exit.exit_cutoff_tau_s:
+        tau = context.tau_s
+        if tau is None or tau <= cfg.exit.exit_cutoff_tau_s:
             return "value_exit_cutoff_at_dispatch"
         if token_id not in (snapshot.market.yes.instrument_id.value,
                             snapshot.market.no.instrument_id.value):
@@ -630,7 +630,7 @@ class SettlementValueDriver(BaseDriver):
         now = market_snapshot.observed_at
         market = market_snapshot.market
         st.decision_epoch += 1
-        tau_s = None if market.event_end is None else (market.event_end - now).total_seconds()
+        tau_s = context.tau_s
         row: dict[str, Any] = {
             "observed_at": now.isoformat(),
             "trigger": trigger,

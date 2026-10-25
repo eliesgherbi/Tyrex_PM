@@ -19,6 +19,7 @@ ASK70_INPUT_CONTRACT = InputContract(
 Z_GAP_EWMA_VOL = IndicatorSpec(
     name="ewma_vol",
     source=F.BINANCE_SPOT_TRADES,
+    gates_entry=True,
 )
 
 FEATURE_PROBE_IMBALANCE = IndicatorSpec(

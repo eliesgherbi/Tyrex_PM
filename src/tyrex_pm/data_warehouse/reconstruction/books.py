@@ -4,7 +4,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from tyrex_pm.market_data.reconcile import BOOK_POLICIES, LEGACY, VENUE_TOP_V1, reconcile_top
+from tyrex_pm.market_data.reconcile import (
+    BOOK_POLICIES,
+    LEGACY,
+    VENUE_TOP_V1,
+    is_crossed,
+    reconcile_top,
+)
 
 from ..contracts import decode, identity
 
@@ -288,5 +294,5 @@ class Books:
         self._reselect(list(touched.values()))
 
     def _crossed(self, book: Book, at: int) -> None:
-        if book.bids and book.asks and max(book.bids) >= min(book.asks):
+        if is_crossed(book.bids, book.asks):
             self.invalidate(book, at, "crossed_book")

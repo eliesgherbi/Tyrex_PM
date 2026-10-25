@@ -35,7 +35,7 @@ from tyrex_pm.market_data.book_view import (
 )
 from tyrex_pm.market_data.depth_snapshot import DepthSnapshot, materialize
 from tyrex_pm.market_data.executable import book_quote
-from tyrex_pm.market_data.reconcile import BOOK_POLICIES, VENUE_TOP_V1, reconcile_top
+from tyrex_pm.market_data.reconcile import BOOK_POLICIES, VENUE_TOP_V1, is_crossed, reconcile_top
 
 
 @dataclass
@@ -688,6 +688,6 @@ class MarketStateStore:
             # reports may legitimately differ within the same atomic message.
             last = changes[-1]
             reconcile_top(bids, asks, last.reported_best_bid, last.reported_best_ask)
-        if bids and asks and max(bids) > min(asks):
+        if is_crossed(bids, asks):
             raise ValueError("crossed book")
         return DepthSnapshot(book.instrument_id, ts_event, bids, asks)

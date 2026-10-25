@@ -126,6 +126,9 @@ class ReferencePriceSnapshot:
     price: Decimal
     ts_event: datetime
     venue: str = "binance"
+    # Trade size and taker side ("buy" | "sell") when the source reports them.
+    quantity: Decimal | None = None
+    aggressor: str | None = None
 
     def __post_init__(self) -> None:
         if not self.symbol.strip():

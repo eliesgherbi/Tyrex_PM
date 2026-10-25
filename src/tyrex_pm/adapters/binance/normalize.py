@@ -89,11 +89,16 @@ def normalize_trade_message(
             raise ValueError(
                 "IngressMeta.receive_wall_raw_utc must equal Event.ts_received (raw wall)"
             )
+    quantity = data.get("q")
+    # Binance "m": the buyer is the maker, so the taker (aggressor) sold.
+    maker_is_buyer = data.get("m")
     snap = ReferencePriceSnapshot(
         symbol=sym,
         price=Decimal(str(price)),
         ts_event=ts_event,
         venue="binance",
+        quantity=None if quantity is None else Decimal(str(quantity)),
+        aggressor=None if maker_is_buyer is None else ("sell" if maker_is_buyer else "buy"),
     )
     return ReferencePriceUpdated(
         event_id=new_event_id(),

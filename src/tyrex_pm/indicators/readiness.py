@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 EWMA_NOT_READY = "EWMA_NOT_READY"
+# Refusal reason per indicator name; other gating indicators use FEATURE_NOT_READY.
+NOT_READY_REASONS = {"ewma_vol": EWMA_NOT_READY}
+FEATURE_NOT_READY = "FEATURE_NOT_READY"
 
 
 def required_feature_specs(specs: Iterable[Any]) -> tuple[Any, ...]:
-    """Indicator specs whose readiness gates an entry (today: ``ewma_vol``)."""
-    return tuple(spec for spec in specs if spec.name == "ewma_vol")
+    """Indicator specs whose readiness gates an entry (``IndicatorSpec.gates_entry``)."""
+    return tuple(spec for spec in specs if getattr(spec, "gates_entry", False))
 
 
 def features_ready_reason(graph: Any, required: Iterable[Any]) -> bool | str:
@@ -20,11 +23,9 @@ def features_ready_reason(graph: Any, required: Iterable[Any]) -> bool | str:
     required = tuple(required)
     if not required:
         return True
-    if graph is None:
-        return EWMA_NOT_READY
-    bundle = graph.snapshot()
+    bundle = None if graph is None else graph.snapshot()
     for spec in required:
-        snap = bundle.get(spec.instance_id)
+        snap = None if bundle is None else bundle.get(spec.instance_id)
         if snap is None or not bool(getattr(snap, "ready", False)):
-            return EWMA_NOT_READY
+            return NOT_READY_REASONS.get(spec.name, FEATURE_NOT_READY)
     return True

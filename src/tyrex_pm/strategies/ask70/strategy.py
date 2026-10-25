@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from tyrex_pm.core.ids import StrategyId
@@ -12,6 +11,7 @@ from tyrex_pm.core.intents import EnterIntent, LiquidityRole, new_intent_id
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.strategies.ask70.config import Ask70Config
 from tyrex_pm.strategies.ask70.reasons import Ask70Reason
+from tyrex_pm.strategies.common import capped_entry_price, outcome_instrument
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.decisions import IntentLike, StrategyAction, StrategyDecision
 
@@ -55,7 +55,8 @@ class Ask70Strategy:
         market_snapshot: DecisionSnapshot,
         context: DecisionContext,
     ) -> tuple[StrategyDecision, list[IntentLike]]:
-        now = context.now if context.now.tzinfo else datetime.now(timezone.utc)
+        # Decision time is the host's (context, else the snapshot); never the wall clock.
+        now = context.now if context.now is not None else market_snapshot.observed_at
         up_ask = market_snapshot.yes_quote.best_ask
         down_ask = market_snapshot.no_quote.best_ask
         books_ok = up_ask is not None and down_ask is not None
@@ -140,12 +141,8 @@ class Ask70Strategy:
             )
 
         outcome, ask = selected
-        instrument = (
-            market_snapshot.market.yes if outcome is OutcomeSide.YES else market_snapshot.market.no
-        )
-        max_price = ask + self.config.max_price_pad
-        if max_price > Decimal("0.99"):
-            max_price = Decimal("0.99")
+        instrument = outcome_instrument(market_snapshot.market, outcome)
+        max_price = capped_entry_price(ask, self.config.max_price_pad)
         role = (
             LiquidityRole.MAKER
             if self.config.liquidity_role == "maker"

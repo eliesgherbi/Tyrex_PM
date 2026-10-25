@@ -50,3 +50,10 @@ def test_every_strategy_replays_a_recorded_window(window, kind: str) -> None:
     # Every attempt the strategy made got an outcome back (no orphan attempts).
     assert all(attempt.get("outcome") for attempt in out["attempts"]), out["attempts"]
     assert decision_digest(out)
+    # One truth for P&L: the window economics agree with the engine's own settled books.
+    pnl = out["economics"].get("realized_pnl")
+    if pnl is not None:
+        from decimal import Decimal
+
+        engine_pnl = Decimal(str(out["engine"]["realized_pnl"]))
+        assert abs(Decimal(str(pnl)) - engine_pnl) < Decimal("1e-18")

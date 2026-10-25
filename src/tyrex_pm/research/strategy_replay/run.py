@@ -26,7 +26,7 @@ reproduces the v2 share-denominated, ungated order contract for attribution.
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
@@ -52,6 +52,7 @@ from tyrex_pm.execution.final_gate import (
 )
 from tyrex_pm.execution.outcome_reasons import classify_reason
 from tyrex_pm.execution.planner import ExecutionRiskPolicy, IntentOrderPlanner
+from tyrex_pm.facts import ids as F
 from tyrex_pm.indicators.readiness import features_ready_reason, required_feature_specs
 from tyrex_pm.protection import (
     ArmedProtection,
@@ -62,6 +63,7 @@ from tyrex_pm.protection import (
 )
 from tyrex_pm.research.replay.config import Intent, Scenario
 from tyrex_pm.research.replay.engine import DECISION, STRATEGY_OBSERVATION, TIMER, Engine
+from tyrex_pm.runtime.composition import starts_adapter
 from tyrex_pm.runtime.decision_records import (
     decision_context,
     evaluated_record,
@@ -138,6 +140,9 @@ class ReplayExecutionPolicy:
     # "reference_availability_v1" is the live rule (history rows only recover an exact
     # boundary tick at their actual arrival, within the recovery deadline).
     reference_availability: str = "legacy"
+    # Book rebuild rule. The scenario sets it (Scenario.book_reconstruction); a value here
+    # other than "legacy" overrides the scenario (captured-run reconstruction does).
+    # run_window records the rule it used here, so the replay identity names it.
     book_reconstruction: str = "legacy"
     # Replay execution contract (EXECUTION_CONTRACTS). v1 reproduces saved experiments.
     execution_contract: str = EXECUTION_CONTRACT_VERSION
@@ -987,6 +992,8 @@ def run_window(
     if scenario.adapter != "strategy_closed_loop_v1":
         raise ValueError("strategy replay requires a strategy_closed_loop_v1 scenario")
     policy = execution_policy or ReplayExecutionPolicy()
+    if policy.book_reconstruction == "legacy" and scenario.book_reconstruction != "legacy":
+        policy = replace(policy, book_reconstruction=scenario.book_reconstruction)
     if recorded_sequence_order and not observe_only:
         raise ValueError("captured sequence ordering requires recorded decisions without orders")
     started = time.perf_counter()
@@ -1022,6 +1029,7 @@ def run_window(
         raise ValueError("depth_levels must cover the book levels the strategy reads")
     feed = StrategyFeed.create(window, runtime, clock, depth_levels=depth_levels)
     feed.eager_books = eager_books
+    feed.spot_depth = starts_adapter(plugin.input_contract, F.BINANCE_SPOT_L2)  # as live
     feed.reference_policy = policy.reference_policy()
     tick, minimum = _initial_constraints(window)
     feed.seed_constraints(tick, None)
@@ -1059,6 +1067,7 @@ def run_window(
     from tyrex_pm.data_warehouse.reconstruction.books import Books
 
     feed.books = Books(retain_epochs=False, reconstruction=policy.book_reconstruction)
+    # The strategy feed and the engine's fills rebuild books with the same rule.
     if evaluation_instants is not None:
         agent.evaluation_instants = tuple(sorted(int(i) for i in evaluation_instants))
     agent.observe_only = observe_only

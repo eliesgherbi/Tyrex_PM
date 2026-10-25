@@ -321,6 +321,8 @@ class MarketSessionRuntime:
             source=F.BINANCE_SPOT_TRADES,
             price=tick.value,
             ts_event=tick.source_ts,
+            quantity=tick.quantity,
+            aggressor=tick.aggressor,
             generation=generation,
         )
         return evaluate_dynamic_alignment(

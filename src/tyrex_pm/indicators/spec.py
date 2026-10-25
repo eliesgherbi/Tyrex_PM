@@ -15,6 +15,9 @@ class IndicatorSpec:
     horizons_ms: tuple[int, ...] = ()
     levels: tuple[int, ...] = ()
     params: tuple[tuple[str, str], ...] = ()
+    # An entry is not sent until this indicator is ready (host final gate, live and replay).
+    # Not part of the instance id: it is a host rule about the value, not the value.
+    gates_entry: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():

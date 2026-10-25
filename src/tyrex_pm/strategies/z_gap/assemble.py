@@ -21,6 +21,7 @@ from tyrex_pm.indicators.ewma_volatility import (
 from tyrex_pm.indicators.reference_basis import compute_basis_bps
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.market_data.executable import ExecutableQuote
+from tyrex_pm.strategies.context import time_to_close_s
 from tyrex_pm.strategies.z_gap.config import ZGapConfig
 from tyrex_pm.strategies.z_gap.decision_input import ZGapDecisionSnapshot
 from tyrex_pm.strategies.z_gap.snapshots import DecisionEpoch, build_model_snapshot
@@ -75,9 +76,9 @@ def assemble_zgap_decision_snapshot(
     S = None if market_snapshot.reference is None else market_snapshot.reference.price
     K = None if ptb is None else ptb.k
 
-    tau_s: float | None = None
-    if market.event_end is not None:
-        tau_s = max(0.0, (market.event_end - now).total_seconds())
+    # The host's time to close (one formula, strategies.context), floored at zero.
+    remaining = time_to_close_s(market_snapshot)
+    tau_s: float | None = None if remaining is None else max(0.0, remaining)
 
     fv = compute_fair_value(
         FairValueInput(

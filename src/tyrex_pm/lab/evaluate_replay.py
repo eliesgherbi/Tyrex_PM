@@ -1,4 +1,10 @@
-"""Deterministic evaluate() replay from fixtures — no gateway, no --live."""
+"""Strategy decision harness: evaluate() on synthetic fixture packs (``tyrex-pm eval``).
+
+No gateway, no ``--live``, no execution: each step sets hand-written books, trades or
+depth and calls the strategy's ``evaluate`` with the host's shared decision-context
+builder. It checks decision logic in isolation; it is not a replay engine. Recorded data
+is replayed, with execution simulated, by ``research.strategy_replay`` only.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +34,8 @@ from tyrex_pm.indicators.graph import IndicatorGraph
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
 from tyrex_pm.market_data.executable import ExecutableQuote
 from tyrex_pm.market_data.freshness import FreshnessAssessment, FreshnessReason, TimestampBasis
-from tyrex_pm.strategies.context import DecisionContext, StrategyContext
+from tyrex_pm.runtime.decision_records import decision_context
+from tyrex_pm.strategies.context import StrategyContext
 from tyrex_pm.strategies.evaluation import StrategyEvaluation
 from tyrex_pm.strategies.registry import StrategyPlugin, plugin_indicator_specs
 from tyrex_pm.strategies.triggers import EvaluationTrigger
@@ -159,11 +166,10 @@ def evaluate_replay(
                 else StrategyPositionPhase.FLAT,
                 instrument_id=InstrumentId(instrument_id),
             )
-        context = DecisionContext(
-            run_id=RunId("lab"),
-            snapshot=snapshot,
+        context = decision_context(
+            _LabReady(snapshot),
+            run_id="lab",
             target_notional=target_notional,
-            now=step.ts,
             entry_allowed=entry_allowed,
             lifecycle=lifecycle,
             position_quantity=position_quantity,
@@ -180,6 +186,16 @@ def evaluate_replay(
             )
         )
     return tuple(results)
+
+
+@dataclass(frozen=True)
+class _LabReady:
+    """The part of an aligned evaluation the context builder reads (no reference feeds)."""
+
+    snapshot: DecisionSnapshot
+    dyn: None = None
+    sealed: None = None
+    binance_raw: None = None
 
 
 def load_lab_pack(path: Path | str) -> LabPack:

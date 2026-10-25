@@ -53,6 +53,16 @@ class ReferenceFacts:
     chainlink_source_ts: datetime | None = None
 
 
+def time_to_close_s(snapshot: DecisionSnapshot) -> float | None:
+    """Seconds from ``snapshot.observed_at`` to its market's ``event_end`` (the TAU fact)."""
+    market = getattr(snapshot, "market", None)
+    end = getattr(market, "event_end", None)
+    observed = getattr(snapshot, "observed_at", None)
+    if end is None or observed is None:
+        return None
+    return (end - observed).total_seconds()
+
+
 @dataclass(frozen=True, kw_only=True)
 class DecisionContext:
     """Immutable context for on_signal — no mutable stores."""
@@ -90,3 +100,10 @@ class DecisionContext:
     last_exit_reason: str | None = None
     # Host elapsed-time clock; captured across decision reconstruction, never venue time.
     monotonic_ns: int | None = None
+    # Seconds from the snapshot's observation to the market's scheduled end (negative after
+    # it); None for markets without an end. Derived from the snapshot when not given.
+    tau_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.tau_s is None:
+            object.__setattr__(self, "tau_s", time_to_close_s(self.snapshot))

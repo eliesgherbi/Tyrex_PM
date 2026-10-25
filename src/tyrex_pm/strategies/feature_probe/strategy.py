@@ -12,6 +12,7 @@ from tyrex_pm.core.instruments import OutcomeSide
 from tyrex_pm.core.intents import EnterIntent, LiquidityRole, new_intent_id
 from tyrex_pm.indicators.graph import FeatureBundle
 from tyrex_pm.market_data.decision_snapshot import DecisionSnapshot
+from tyrex_pm.strategies.common import capped_entry_price, outcome_instrument
 from tyrex_pm.strategies.context import DecisionContext, StrategyContext
 from tyrex_pm.strategies.decisions import IntentLike, StrategyAction, StrategyDecision
 from tyrex_pm.strategies.feature_probe.config import FeatureProbeConfig
@@ -154,12 +155,8 @@ class FeatureProbeStrategy:
             )
 
         outcome, ask = selected
-        instrument = (
-            market_snapshot.market.yes if outcome is OutcomeSide.YES else market_snapshot.market.no
-        )
-        max_price = ask + self.config.max_price_pad
-        if max_price > Decimal("0.99"):
-            max_price = Decimal("0.99")
+        instrument = outcome_instrument(market_snapshot.market, outcome)
+        max_price = capped_entry_price(ask, self.config.max_price_pad)
         self._decision_epoch_counter += 1
         self._entry_lineage_consumed = True
         intent = EnterIntent(

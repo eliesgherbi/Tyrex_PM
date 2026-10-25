@@ -44,6 +44,7 @@ from tyrex_pm.domain.polymarket.reference_availability import (
     selected_boundary_tick,
 )
 from tyrex_pm.facts import ids as F
+from tyrex_pm.indicators.depth import DepthLevel, DepthSnapshot
 from tyrex_pm.market_data.binding_record import (
     BindingLifecycleRole,
     MarketBindingRecord,
@@ -67,6 +68,11 @@ RTDS_REFERENCE_SERIES = "polymarket_rtds:crypto_prices_twap_sixty:btc/usd"
 def reference_series_of(row: dict) -> str:
     return RTDS_REFERENCE_SERIES if row.get("source_id") == "rtds" else (
         REPLAYED_REFERENCE_SERIES)
+
+
+def _aggressor(side: str | None) -> str | None:
+    value = (side or "").lower()
+    return value if value in ("buy", "sell") else None
 
 
 def utc(ns: int) -> datetime:
@@ -160,6 +166,9 @@ class StrategyFeed:
     reference_series: str = REPLAYED_REFERENCE_SERIES
     # True publishes every book change immediately (reference mode for equivalence tests).
     eager_books: bool = False
+    # Rebuild Binance spot depth for the indicator graph (contract reads BINANCE_SPOT_L2),
+    # as the live depth adapter does. Off: Binance book rows are not applied at all.
+    spot_depth: bool = False
     _pending: dict[str, tuple[str, dict, bool]] = field(default_factory=dict)
     _served: dict[str, bool] = field(default_factory=dict)
     _level_cache: dict[tuple[Decimal, Decimal], BookLevel] = field(default_factory=dict)
@@ -235,6 +244,8 @@ class StrategyFeed:
 
     def apply(self, dataset: str, row: dict) -> str | None:
         """Apply one strategy-visible row; returns the fact it updated, if any."""
+        if dataset in ("book_snapshots", "book_updates") and row.get("source_id") == "binance":
+            return self._apply_spot_depth(dataset, row) if self.spot_depth else None
         if dataset in ("book_snapshots", "book_updates", "operational_events"):
             return self._apply_book(dataset, row)
         if dataset == "trade_prints" and row.get("source_id") == "binance":
@@ -244,6 +255,26 @@ class StrategyFeed:
         if dataset == "market_changes" and row.get("change_type") == "tick_size_change":
             return self._apply_tick_change(row)
         return None
+
+    def _apply_spot_depth(self, dataset: str, row: dict) -> str | None:
+        """Live semantics of BinanceDepthWsAdapter: a valid depth state reaches the graph."""
+        self.books.apply(dataset, row)
+        instrument = row.get("instrument_id") or next(
+            (c.get("instrument_id") for c in row.get("changes") or ()), None
+        )
+        book = self.books.books.get(instrument)
+        if book is None or not book.valid:
+            return None
+        self._bump("binance_l2")
+        # Same snapshot type and instrument id (upper-case symbol) as the live adapter.
+        snapshot = DepthSnapshot(
+            instrument_id=InstrumentId(str(instrument).rsplit(":", 1)[-1].upper()),
+            ts_event=utc(row["received_at"]),
+            bids=tuple(DepthLevel(price=p, quantity=q) for p, q in book.bids.items()),
+            asks=tuple(DepthLevel(price=p, quantity=q) for p, q in book.asks.items()),
+        )
+        self.runtime.indicator_graph.on_depth(snapshot, source=F.BINANCE_SPOT_L2)
+        return F.BINANCE_SPOT_L2
 
     def _apply_tick_change(self, row: dict) -> str | None:
         """Live semantics: the store records the new tick and marks the token DESYNCED
@@ -386,6 +417,9 @@ class StrategyFeed:
                 price=row["price"],
                 ts_event=utc(row.get("source_time") or row["received_at"]),
                 venue="binance",
+                # Recordings keep the size; the taker side only when it was normalized.
+                quantity=row.get("quantity"),
+                aggressor=_aggressor(row.get("reported_side")),
             ),
             ingress=self._ingress(row, FeedRole.TRADING_REFERENCE),
         )

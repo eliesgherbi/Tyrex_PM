@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from tyrex_pm.execution.process_lock import StateDirectoryBusy
+from tyrex_pm.research.strategy_replay.engine_version import ENGINE_BEFORE_VERSIONING, REPLAY_ENGINE
 
 from .artifacts import acquire, now_iso, plan_digest, read, slice_page, write_json
 from .contracts import WorkflowError
@@ -459,6 +460,8 @@ def results_open(request: dict, root: Path) -> dict[str, Any]:
         "configurations": experiment.get("configurations") or [],
         "execution": experiment.get("execution") or {},
         "strategy_kind": experiment.get("strategy_kind"),
+        "engine": experiment.get("engine") or ENGINE_BEFORE_VERSIONING,
+        "engine_current": (experiment.get("engine") or ENGINE_BEFORE_VERSIONING) == REPLAY_ENGINE,
         "batch_id": batch.get("batch_id"),
         "created_at": body.get("created_at"),
         "selection_window_count": len(selection.get("included") or []) or None,

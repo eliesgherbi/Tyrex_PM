@@ -42,6 +42,9 @@ class PriceTickView:
     event_id: str | None = None
     raw_fingerprint: str | None = None
     late_or_out_of_order: str | None = None
+    # Trade size and taker side ("buy" | "sell") for trade-based indicators; None if unknown.
+    quantity: Decimal | None = None
+    aggressor: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_ts", require_utc(self.source_ts, field_name="source_ts"))

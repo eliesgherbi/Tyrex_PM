@@ -221,6 +221,83 @@ def _arrow_rows(
                     yield row
 
 
+def _binance_files(reader: Reader, dataset: str, start: int | None, until: int):
+    """Parts of ``dataset`` overlapping [start, until] (start None: from the beginning)."""
+    for build in reader.manifests:
+        if build["first_received_at"] > until or (
+            start is not None and build["last_received_at"] < start
+        ):
+            continue
+        for file in build["files"]:
+            if file["dataset"] != dataset:
+                continue
+            left = file.get("first_received_at", build["first_received_at"])
+            right = file.get("last_received_at", build["last_received_at"])
+            if left > until or (start is not None and right < start):
+                continue
+            yield left, file
+
+
+def _binance_rows(reader: Reader, file: dict, start: int | None, until: int) -> list[dict]:
+    path = within(reader.root, file["path"])
+    if file_digest(path) != file["sha256"]:
+        raise ValueError("normalized part checksum mismatch")
+    table = pq.ParquetFile(path).read()
+    received = table["received_at"].cast(pa.int64())
+    mask = pc.and_(pc.equal(table["source_id"], "binance"), pc.less_equal(received, until))
+    if start is not None:
+        mask = pc.and_(mask, pc.greater_equal(received, start))
+    return list(exact_rows(table.filter(pc.fill_null(mask, False))))
+
+
+def _spot_depth_rows(reader: Reader, start: int, until: int):
+    """Binance spot depth for one range: a seed snapshot at ``start``, then recorded rows.
+
+    The recorder keeps Binance depth as one snapshot per connection and then updates, so
+    the state at ``start`` is rebuilt from the latest snapshot before it and every update
+    in between, and emitted as one snapshot row received at ``start`` (origin
+    ``replay_seed``). Without a snapshot before ``start`` no seed is emitted and the book
+    stays unavailable until a recorded snapshot arrives, as live would be.
+    """
+    from tyrex_pm.data_warehouse.reconstruction.books import Books
+
+    last = None
+    # Newest parts first: stop at the first part holding a Binance snapshot before start.
+    for _left, file in sorted(
+        _binance_files(reader, "book_snapshots", None, start), key=lambda item: -item[0]
+    ):
+        rows = _binance_rows(reader, file, None, start)
+        if rows:
+            last = max(rows, key=order)
+            break
+    if last is not None:
+        books = Books(retain_epochs=False)
+        books.apply("book_snapshots", last)
+        updates = [
+            row
+            for _left, file in _binance_files(reader, "book_updates", last["received_at"], start)
+            for row in _binance_rows(reader, file, last["received_at"], start)
+            if row["received_at"] > last["received_at"]
+        ]
+        for row in sorted(updates, key=order):
+            books.apply("book_updates", row)
+        book = books.books.get(last["instrument_id"])
+        if book is not None and book.valid:
+            yield "book_snapshots", {
+                **last,
+                "record_id": f"replay_seed:{last['record_id']}:{start}",
+                "received_at": start,
+                "snapshot_origin": "replay_seed",
+                "bids": [{"price": p, "quantity": q} for p, q in sorted(book.bids.items())],
+                "asks": [{"price": p, "quantity": q} for p, q in sorted(book.asks.items())],
+            }
+    for dataset in ("book_snapshots", "book_updates"):
+        for _left, file in _binance_files(reader, dataset, start, until):
+            for row in _binance_rows(reader, file, start, until):
+                if row["received_at"] > start:
+                    yield dataset, row
+
+
 def load_window(
     catalog: WindowCatalog,
     market_id: str,
@@ -228,9 +305,14 @@ def load_window(
     warmup_s: float = 300.0,
     after_s: float = 30.0,
     method: str = "arrow",
+    spot_depth: bool = False,
 ) -> WindowData:
     """Load one window. ``arrow`` filters before Decimal decoding; ``reader`` uses the
-    warehouse Reader row by row. Both yield identical events (tested)."""
+    warehouse Reader row by row. Both yield identical events (tested).
+
+    ``spot_depth`` adds Binance spot depth (for strategies whose contract reads
+    ``binance.spot.l2``): see ``_spot_depth_rows``.
+    """
     started = time.perf_counter()
     reader = catalog.reader
     gamma = catalog.gamma_rows(market_id)
@@ -289,6 +371,9 @@ def load_window(
         )
     else:
         raise ValueError(f"unknown load method {method!r}")
+    if spot_depth:
+        for dataset, row in _spot_depth_rows(reader, start, until):
+            add(dataset, (row,))
     # Identity/metadata state: everything known before the end of the range.
     add(
         "instruments",

@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import asdict, dataclass
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
+from decimal import Decimal, localcontext
 from typing import Any
 
 from tyrex_pm.data_warehouse.contracts import exact
 from tyrex_pm.data_warehouse.reconstruction.books import Books
-from tyrex_pm.domain.polymarket.fees import FeeCurveParams, phi_taker_fee_per_share
+from tyrex_pm.domain.polymarket.fees import FeeCurveParams
+from tyrex_pm.execution.fill_model import (
+    LevelFill,
+    bought_shares,
+    eligible_prices,
+    level_capacity,
+    taker_fee,
+    walk_shares,
+    walk_spend,
+)
 
 from .config import Intent, Scenario
 
@@ -40,7 +49,7 @@ class Engine:
     def __init__(self, scenario: Scenario):
         scenario.validate()
         self.scenario = scenario
-        self.books = Books()
+        self.books = Books(reconstruction=scenario.book_reconstruction)
         self.cash = exact(scenario.initial_cash)
         self.inventory: dict[str, Decimal] = {}
         self.cost_basis: dict[str, Decimal] = {}
@@ -148,7 +157,6 @@ class Engine:
             self.reject(intent, "insufficient_unreserved_inventory")
             return
         side = book.asks if intent.action == "BUY" else book.bids
-        prices = sorted(side, reverse=intent.action == "SELL")
         # Friction scenario: each fill pays this many ticks worse than the displayed level,
         # never beyond the order's limit.
         adverse = Decimal(0)
@@ -157,32 +165,26 @@ class Engine:
                 self.reject(intent, "adverse_ticks_without_tick")
                 return
             adverse = tick * self.scenario.adverse_price_ticks
-        if intent.action == "BUY":
-            eligible = [p for p in prices if p + adverse <= limit]
-        else:
-            eligible = [p for p in prices if p - adverse >= limit]
+        eligible = eligible_prices(side, side=intent.action, limit=limit, adverse=adverse)
         if intent.post_only and eligible:
             self.reject(intent, "post_only_would_cross")
             return
-        capacity = {}
-        for price in eligible:
-            key = (book.epoch_id, intent.action, price)
-            capacity[price] = max(
-                Decimal(0), side[price] * self.participation - self.consumed.get(key, Decimal(0))
-            )
-        if intent.lifetime == "FOK" and sum(capacity.values()) < quantity:
+        consumed = self._consumed_in(book, intent.action)
+        if intent.lifetime == "FOK" and sum(
+            level_capacity(side, price, participation=self.participation, consumed=consumed)
+            for price in eligible
+        ) < quantity:
             self.reject(intent, "fok_insufficient_depth")
             return
         order = Order(intent, quantity, self.now)
         self.orders[intent.order_id] = order
         self.record("arrived", order_id=intent.order_id, intent=asdict(intent))
-        for price in eligible:
-            take = min(order.remaining, capacity[price])
-            if take:
-                paid = price + adverse if intent.action == "BUY" else price - adverse
-                self.fill(order, take, paid, maker=False)
-                key = (book.epoch_id, intent.action, price)
-                self.consumed[key] = self.consumed.get(key, Decimal(0)) + take
+        for item in walk_shares(
+            side, side=intent.action, quantity=quantity, limit=limit,
+            participation=self.participation, adverse=adverse, consumed=consumed,
+        ):
+            self.fill(order, item.shares, item.price, maker=False)
+            self._consume(book, intent.action, item)
         if order.remaining and intent.lifetime == "GTC":
             own_side = book.bids if intent.action == "BUY" else book.asks
             order.queue_ahead = own_side.get(limit, Decimal(0)) * exact(
@@ -212,28 +214,16 @@ class Engine:
                 return
             adverse = tick * self.scenario.adverse_price_ticks
         quantum = exact(self.scenario.amount_buy_share_quantum)
-        prices = sorted(book.asks)
-        eligible = [p for p in prices if p + adverse <= limit]
         order = Order(intent, spend / limit, self.now)
         self.orders[intent.order_id] = order
         self.record("arrived", order_id=intent.order_id, intent=asdict(intent))
-        remaining = spend
-        for price in eligible:
-            key = (book.epoch_id, "BUY", price)
-            capacity = max(
-                Decimal(0),
-                book.asks[price] * self.participation - self.consumed.get(key, Decimal(0)),
-            )
-            paid = price + adverse
-            take = min(capacity, remaining / paid)
-            take = (take / quantum).to_integral_value(rounding=ROUND_DOWN) * quantum
-            if take <= 0:
-                continue
-            self.fill(order, take, paid, maker=False)
-            remaining -= take * paid
-            self.consumed[key] = self.consumed.get(key, Decimal(0)) + take
-            if remaining < quantum * paid:
-                break
+        fills, remaining = walk_spend(
+            book.asks, spend=spend, limit=limit, participation=self.participation,
+            adverse=adverse, share_quantum=quantum, consumed=self._consumed_in(book, "BUY"),
+        )
+        for item in fills:
+            self.fill(order, item.shares, item.price, maker=False)
+            self._consume(book, "BUY", item)
         order.active = False
         order.remaining = Decimal(0)
         # A remainder that cannot buy one share quantum at the limit is rounding, not an
@@ -246,11 +236,21 @@ class Engine:
                 unspent_amount=remaining,
             )
 
+    def _consumed_in(self, book: Any, action: str):
+        """Shares earlier orders already took from each level of this book epoch."""
+        return lambda price: self.consumed.get((book.epoch_id, action, price), Decimal(0))
+
+    def _consume(self, book: Any, action: str, item: LevelFill) -> None:
+        key = (book.epoch_id, action, item.level_price)
+        self.consumed[key] = self.consumed.get(key, Decimal(0)) + item.shares
+
     def fill(self, order: Order, quantity: Decimal, price: Decimal, *, maker: bool) -> None:
         curve = self.curves.get(order.intent.instrument_id, self.curve)
-        fee = Decimal(0) if maker else (quantity * phi_taker_fee_per_share(price, curve))
-        quantum = exact(self.scenario.fee_policy.quantum)
-        fee = (fee / quantum).quantize(Decimal(1), rounding=ROUND_HALF_UP) * quantum
+        fee = (
+            Decimal(0)
+            if maker
+            else taker_fee(quantity, price, curve, quantum=exact(self.scenario.fee_policy.quantum))
+        )
         cost = quantity * price
         iid = order.intent.instrument_id
         held = self.inventory.get(iid, Decimal(0))
@@ -258,7 +258,7 @@ class Engine:
         net_quantity = quantity
         if order.intent.action == "BUY":
             if self.scenario.fee_policy.buy_fee_unit == "shares":
-                net_quantity -= fee / price
+                net_quantity = bought_shares(quantity, price, fee)
             else:
                 cost += fee
             if net_quantity < 0 or cost > self.cash:
