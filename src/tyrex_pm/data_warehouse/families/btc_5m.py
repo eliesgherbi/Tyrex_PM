@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from tyrex_pm.domain.polymarket.outcome_map import map_up_down_outcomes
+from tyrex_pm.domain.polymarket.window_families import WindowFamily, window_family
 
 from ..contracts import canonical, decode, digest, epoch_ns, instrument_id, market_id
 
@@ -15,35 +15,46 @@ def array(value: Any) -> list:
     return result
 
 
-class BtcFiveMinute:
+class RecurringWindow:
+    """One recurring up/down window family (domain.polymarket.window_families) to collect.
+
+    The BTC 5-minute family reproduces the original collector exactly (same slugs, ids,
+    windows and metadata). Normalized metadata names the family's asset and duration.
+    """
+
+    def __init__(self, family: WindowFamily) -> None:
+        self.spec = family
+
     def matches(self, metadata: dict[str, Any]) -> bool:
-        return re.fullmatch(r"btc-updown-5m-\d+", str(metadata.get("slug", ""))) is not None
+        return self.spec.slug_epoch(str(metadata.get("slug", ""))) is not None
 
     def expected_windows(self, now_s: int, lookahead_s: int) -> list[tuple[str, int]]:
-        current = now_s // 300 * 300
+        step = self.spec.window_duration_s
+        current = now_s // step * step
         return [
-            (f"btc-updown-5m-{candidate}", candidate * 1_000_000_000)
-            for candidate in range(current - 300, current + lookahead_s + 1, 300)
+            (self.spec.slug(candidate), candidate * 1_000_000_000)
+            for candidate in range(current - step, current + lookahead_s + 1, step)
         ]
 
     def probe_windows(
         self, now_s: int, lookahead_s: int, cursor: int
     ) -> tuple[list[tuple[str, int]], int]:
-        current = now_s // 300 * 300
-        horizon = max(1, lookahead_s // 300)
-        starts = sorted({current - 300, current, current + 300, current + cursor * 300})
+        step = self.spec.window_duration_s
+        current = now_s // step * step
+        horizon = max(1, lookahead_s // step)
+        starts = sorted({current - step, current, current + step, current + cursor * step})
         return (
-            [(f"btc-updown-5m-{start}", start * 1_000_000_000) for start in starts],
+            [(self.spec.slug(start), start * 1_000_000_000) for start in starts],
             (cursor + 1) % horizon,
         )
 
     def identify(self, metadata: dict[str, Any]) -> dict[str, Any]:
         slug = str(metadata.get("slug", ""))
-        match = re.fullmatch(r"btc-updown-5m-(\d+)", slug)
-        if not match:
-            raise ValueError("not a BTC five-minute slug")
-        start = int(match[1]) * 1_000_000_000
-        end = start + 300_000_000_000
+        epoch = self.spec.slug_epoch(slug)
+        if epoch is None:
+            raise ValueError(f"not a {self.spec.slug_prefix} slug")
+        start = epoch * 1_000_000_000
+        end = start + self.spec.window_duration_s * 1_000_000_000
         if metadata.get("endDate") and epoch_ns(metadata["endDate"], "iso") != end:
             raise ValueError("provider end and slug schedule disagree")
         condition = str(metadata.get("conditionId") or metadata.get("condition_id") or "")
@@ -75,8 +86,8 @@ class BtcFiveMinute:
             "venue_market_id": str(metadata.get("id", "")),
             "slug": slug,
             "family": "recurring_price_window",
-            "underlying_asset": "BTC",
-            "duration_s": 300,
+            "underlying_asset": self.spec.asset,
+            "duration_s": self.spec.window_duration_s,
             "window_start": start,
             "window_end": end,
             "instruments": instruments,
@@ -109,3 +120,19 @@ class BtcFiveMinute:
             "description": metadata.get("description"),
             "resolution_source": metadata.get("resolutionSource"),
         }
+
+
+def BtcFiveMinute() -> RecurringWindow:  # noqa: N802 - name kept for existing importers
+    """The original BTC 5-minute family."""
+    return RecurringWindow(window_family("btc_updown_5m"))
+
+
+def normalized_families() -> list[RecurringWindow]:
+    """Families whose metadata the normalizer recognizes: the enabled ones.
+
+    Enabling a family changes what the normalizer extracts from the same raw records, so
+    it goes with a PARSER_VERSION bump (builds are immutable per parser version).
+    """
+    from tyrex_pm.domain.polymarket.window_families import window_families
+
+    return [RecurringWindow(f) for f in window_families().values() if f.enabled and f.supported]

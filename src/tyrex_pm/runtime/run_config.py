@@ -371,6 +371,30 @@ def _paper_config(raw: Any) -> PaperRuntimeConfig:
     return paper
 
 
+def market_window_family(market_raw: dict) -> Any:
+    """The market family of a ``market`` config block (default BTC 5-minute).
+
+    The Binance symbol comes from the family; an explicit one must agree with it.
+    """
+    from tyrex_pm.domain.polymarket.window_families import DEFAULT_FAMILY, window_family
+
+    try:
+        family = window_family(str(market_raw.get("family", DEFAULT_FAMILY)))
+    except ValueError as exc:
+        raise RunConfigError(str(exc)) from exc
+    if not family.supported:
+        raise RunConfigError(
+            f"market family {family.family_id} ({family.asset}) has no reference feeds wired yet"
+        )
+    symbol = str(market_raw.get("binance_symbol", family.binance_symbol)).upper()
+    if symbol != family.binance_symbol:
+        raise RunConfigError(
+            f"market.binance_symbol {symbol} disagrees with family {family.family_id} "
+            f"({family.binance_symbol})"
+        )
+    return family
+
+
 def entry_tau_bounds(config: TradingRunConfig) -> tuple[float, float]:
     plugin = get_strategy_plugin(config.strategy_kind)
     return plugin.entry_tau_bounds(config.strategy)
@@ -507,15 +531,18 @@ def load_trading_run_config(path: Path) -> TradingRunConfig:
     else:
         # One evaluation interval, taken from the same config. Not a hidden constant.
         entry_dispatch_margin_s = evaluation_interval_s
+    family = market_window_family(market_raw)
     market = MarketRuntimeConfig(
-        family=str(market_raw.get("family", "btc_updown_5m")),
-        binance_symbol=str(market_raw.get("binance_symbol", "BTCUSDT")),
+        family=family.family_id,
+        binance_symbol=family.binance_symbol,
         require_ssr_price_match=_boolean(
             market_raw.get("require_ssr_price_match", False),
             "market.require_ssr_price_match",
         ),
         preparation_lead_s=float(market_raw.get("preparation_lead_s", 45.0)),
-        maximum_duration_s=float(market_raw.get("maximum_duration_s", 300.0)),
+        maximum_duration_s=float(
+            market_raw.get("maximum_duration_s", float(family.window_duration_s))
+        ),
         run_mode=str(market_raw.get("run_mode", RUN_SINGLE_WINDOW)),
         maximum_duration_explicit="maximum_duration_s" in market_raw,
         evaluation_interval_s=evaluation_interval_s,

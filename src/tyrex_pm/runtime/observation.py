@@ -114,13 +114,19 @@ def load_observation_config(path: Path) -> ObservationConfig:
     output = dict(raw.get("output") or {})
     if set(output) - {"directory"}:
         raise ObservationConfigError("output accepts only directory")
+    from tyrex_pm.runtime.run_config import RunConfigError, market_window_family
+
+    try:
+        _family = market_window_family(market)
+    except RunConfigError as exc:
+        raise ObservationConfigError(str(exc)) from exc
     config = ObservationConfig(
         run_name=str(raw.get("run_name") or "observe"),
         strategy_kind=str(strategy.get("kind") or ""),
         strategy_parameters=dict(strategy.get("parameters") or {}),
         output_directory=Path(str(output.get("directory") or "var/observation")),
-        market_family=str(market.get("family", "btc_updown_5m")),
-        binance_symbol=str(market.get("binance_symbol", "BTCUSDT")),
+        market_family=_family.family_id,
+        binance_symbol=_family.binance_symbol,
         require_ssr_price_match=bool(market.get("require_ssr_price_match", False)),
         max_windows=int(obs.get("max_windows", 12)),
         max_duration_s=float(obs.get("max_duration_s", 3900.0)),

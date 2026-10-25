@@ -133,16 +133,28 @@ class Profile:
     def hash(self) -> str:
         return digest(canonical(asdict(self)))
 
+    def window_family(self) -> Any:
+        """The configured window family this profile collects (asset + window length)."""
+        from tyrex_pm.domain.polymarket.window_families import family_for_duration
+
+        family = family_for_duration(self.selector.asset, self.selector.duration_s)
+        if family is None:
+            raise ValueError(
+                f"no market family for {self.selector.asset} {self.selector.duration_s}s "
+                "(config/markets)"
+            )
+        return family
+
     def validate(self) -> None:
         if self.schema_version != 1 or self.profile_version < 1:
             raise ValueError("unsupported profile version")
-        if (self.family, self.selector.venue, self.selector.asset, self.selector.duration_s) != (
-            "recurring_price_window",
-            "polymarket",
-            "BTC",
-            300,
-        ):
-            raise ValueError("live v1 supports BTC five-minute collection only")
+        if (self.family, self.selector.venue) != ("recurring_price_window", "polymarket"):
+            raise ValueError("live v1 collects recurring Polymarket price windows only")
+        family = self.window_family()
+        if not family.supported:
+            raise ValueError(f"{family.family_id}: no reference feeds wired for {family.asset}")
+        if not re.fullmatch(self.selector.slug_pattern, family.slug(1_800_000_000)):
+            raise ValueError(f"selector.slug_pattern does not match {family.slug_prefix} slugs")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.profile_id):
             raise ValueError("invalid profile identity")
         re.compile(self.selector.slug_pattern)
@@ -152,7 +164,7 @@ class Profile:
             raise ValueError("credential prefix must be TYREX_DATA_PM")
         b = self.external.binance_spot
         if (b.symbol, b.trades, b.depth, b.bootstrap_levels) != (
-            "BTCUSDT",
+            family.binance_symbol,
             "individual",
             "diff_100ms",
             5000,

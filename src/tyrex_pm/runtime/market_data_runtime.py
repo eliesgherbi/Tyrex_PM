@@ -167,10 +167,6 @@ class MarketDataSummary:
         }
 
 
-def _window_epoch(dt: datetime) -> int:
-    return int(dt.timestamp()) // 300 * 300
-
-
 def _trading_elapsed_s(
     *,
     now: datetime,
@@ -1084,10 +1080,3 @@ def _write_summary(out_dir: Path, summary: MarketDataSummary) -> None:
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(summary.to_dict(), indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
-
-
-def seconds_until_next_boundary(now: datetime | None = None) -> float:
-    now = now or datetime.now(timezone.utc)
-    epoch = int(now.timestamp())
-    nxt = (epoch // 300 + 1) * 300
-    return float(nxt - epoch)

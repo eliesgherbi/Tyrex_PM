@@ -1,0 +1,10 @@
+# Recurring Polymarket market family. Slugs are "<slug_prefix>-<window start epoch>".
+schema: window_family_v1
+family_id: btc_updown_5m
+asset: BTC
+slug_prefix: btc-updown-5m
+window_duration_s: 300
+resolution_stream: https://data.chain.link/streams/btc-usd
+binance_symbol: BTCUSDT
+outcomes: [UP, DOWN]
+enabled: true

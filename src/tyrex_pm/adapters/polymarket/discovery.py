@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -12,7 +11,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from tyrex_pm.adapters.polymarket.btc_5m_window import (
-    BTC_5M_WINDOW_S,
     parse_slug_epoch,
     window_from_slug_epoch,
 )
@@ -33,10 +31,13 @@ from tyrex_pm.domain.polymarket.outcome_map import (
     map_yes_no_outcomes,
     rule_fingerprint,
 )
+from tyrex_pm.domain.polymarket.window_families import (
+    DEFAULT_FAMILY,
+    family_for_slug,
+    window_family,
+)
 
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-CHAINLINK_BTC_USD_STREAM = "https://data.chain.link/streams/btc-usd"
-_BTC_5M_SLUG = re.compile(r"^btc-updown-5m-(\d{10,})$", re.IGNORECASE)
 
 MappingLike = dict[str, Any]
 
@@ -311,8 +312,11 @@ def bind_btc_5m_gamma_event(
         raise ValueError(
             f"wrong_window:MARKET_SLUG_MISMATCH: returned slug={slug!r} expected={expected_slug!r}"
         )
-    if not _BTC_5M_SLUG.match(slug):
-        raise ValueError(f"wrong_window:MARKET_SLUG_MALFORMED: not a btc-updown-5m slug: {slug!r}")
+    family = family_for_slug(slug)
+    if family is None:
+        raise ValueError(
+            f"wrong_window:MARKET_SLUG_MALFORMED: not a recurring window family slug: {slug!r}"
+        )
 
     try:
         slug_epoch = parse_slug_epoch(slug)
@@ -320,10 +324,10 @@ def bind_btc_5m_gamma_event(
         raise ValueError(
             f"wrong_window:MARKET_SLUG_MALFORMED: missing/invalid epoch in {slug!r}"
         ) from exc
-    if slug_epoch % BTC_5M_WINDOW_S != 0:
+    if slug_epoch % family.window_duration_s != 0:
         raise ValueError(
             f"wrong_window:MARKET_WINDOW_ALIGNMENT_INVALID: slug epoch {slug_epoch} "
-            f"not aligned to {BTC_5M_WINDOW_S}s"
+            f"not aligned to {family.window_duration_s}s"
         )
     start, end = window_from_slug_epoch(slug, slug_epoch)
     if expected_window_start is not None:
@@ -388,17 +392,18 @@ def bind_btc_5m_gamma_event(
     ).strip()
     description = str(selected.get("description") or event.get("description") or "")
     rule_ok = True
+    stream = family.resolution_stream
     if require_chainlink_source:
-        if CHAINLINK_BTC_USD_STREAM not in resolution_source and (
+        if stream not in resolution_source and (
             "chainlink" not in resolution_source.lower()
             or "btc" not in (resolution_source + description).lower()
         ):
             rule_ok = False
             raise ValueError(f"market_rule_source_mismatch: resolutionSource={resolution_source!r}")
-        if "chainlink" not in description.lower() and CHAINLINK_BTC_USD_STREAM not in description:
+        if "chainlink" not in description.lower() and stream not in description:
             # Soft: Gamma description usually cites Chainlink; if absent but
             # resolutionSource is exact, still accept.
-            if resolution_source.rstrip("/") != CHAINLINK_BTC_USD_STREAM.rstrip("/"):
+            if resolution_source.rstrip("/") != stream.rstrip("/"):
                 rule_ok = False
                 raise ValueError("market_rule_source_mismatch: description lacks Chainlink")
 
@@ -514,7 +519,7 @@ class GammaMarketDiscovery:
                 event = data[0] if isinstance(data, list) else data
             else:
                 event = _fetch_gamma_event_via_sdk(slug, public_client=self._public_client)
-            is_btc = bool(_BTC_5M_SLUG.match(slug))
+            is_btc = family_for_slug(slug) is not None
             use_btc = require_btc_5m_rules if require_btc_5m_rules is not None else is_btc
             if use_btc:
                 expected_start = None
@@ -609,47 +614,45 @@ class GammaMarketDiscovery:
         window_start: datetime | None = None,
         slug: str | None = None,
         session_role: DiscoverySessionRole = DiscoverySessionRole.CANDIDATE,
+        family_id: str = DEFAULT_FAMILY,
     ) -> DiscoveredMarketBinding:
-        """Deterministic slug construction + exact Gamma lookup + validation."""
+        """Deterministic slug construction + exact Gamma lookup + validation.
+
+        Works for every recurring window family (the name predates the families).
+        """
         if slug is None:
+            family = window_family(family_id)
             if window_start is None:
                 raise ValueError("window_start or slug required")
             if window_start.tzinfo is None:
                 window_start = window_start.replace(tzinfo=timezone.utc)
             epoch = int(window_start.timestamp())
-            if epoch % BTC_5M_WINDOW_S != 0:
-                raise ValueError("window_start must align to 300s boundary")
-            slug = f"btc-updown-5m-{epoch}"
+            if epoch % family.window_duration_s != 0:
+                raise ValueError(
+                    f"window_start must align to a {family.window_duration_s}s boundary"
+                )
+            slug = family.slug(epoch)
         return await self.resolve_binding(
             MarketRequest(event_slug=slug),
             session_role=session_role,
             require_btc_5m_rules=True,
         )
 
-    async def prepare_next_btc_5m(self, *, now: datetime | None = None) -> DiscoveredMarketBinding:
-        """Discover the next window without activating it."""
-        slug = next_btc_updown_slug(now)
+    async def prepare_next_btc_5m(
+        self, *, now: datetime | None = None, family_id: str = DEFAULT_FAMILY
+    ) -> DiscoveredMarketBinding:
+        """Discover the next window of a family without activating it."""
+        slug = window_family(family_id).next_slug(now)
         return await self.resolve_btc_5m_window(
             slug=slug, session_role=DiscoverySessionRole.PREPARED_NEXT
         )
 
 
-def next_btc_updown_slug(now: datetime | None = None) -> str:
-    """BTC Up/Down 5m window slug for the next boundary (operations boundary)."""
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    epoch = int(now.timestamp())
-    window = 300
-    next_start = ((epoch // window) + 1) * window
-    return f"btc-updown-5m-{next_start}"
+def next_btc_updown_slug(now: datetime | None = None, family_id: str = DEFAULT_FAMILY) -> str:
+    """Slug of the next window of a family (default BTC 5-minute)."""
+    return window_family(family_id).next_slug(now)
 
 
-def current_btc_updown_slug(now: datetime | None = None) -> str:
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    epoch = int(now.timestamp())
-    window = 300
-    start = (epoch // window) * window
-    return f"btc-updown-5m-{start}"
+def current_btc_updown_slug(now: datetime | None = None, family_id: str = DEFAULT_FAMILY) -> str:
+    """Slug of the current window of a family (default BTC 5-minute)."""
+    return window_family(family_id).current_slug(now)

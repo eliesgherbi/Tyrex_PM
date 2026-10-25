@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from .capture.writer import DurabilityError
-from .families.btc_5m import BtcFiveMinute
+from .families.btc_5m import RecurringWindow
 from .families.registry import FamilyRegistry
 
 
@@ -14,7 +14,9 @@ class DiscoveryService:
     def __init__(self, host: Any):
         self.host = host
         registry = FamilyRegistry()
-        registry.register("recurring_price_window", BtcFiveMinute())
+        registry.register(
+            "recurring_price_window", RecurringWindow(host.profile.window_family())
+        )
         self.family = registry.get(host.profile.family)
         self.next_probe = 0
 

@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from tyrex_pm.domain.polymarket.window_families import family_for_slug
+
+# The default family's window length; any family's comes from domain.polymarket.window_families.
 BTC_5M_WINDOW_S = 300
-_BTC_5M_SLUG_TS = re.compile(r"btc-updown-5m-(\d{10,})$", re.IGNORECASE)
 # Title like: "... July 17, 2:15AM-2:20AM ET"
 _TITLE_WINDOW = re.compile(
     r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)"
@@ -123,17 +125,25 @@ class LifecycleDeadlines:
     max_hold_s: float
 
 
-def parse_slug_epoch(slug: str) -> int:
-    m = _BTC_5M_SLUG_TS.search(slug.strip())
-    if not m:
+def _family(slug: str):
+    family = family_for_slug(slug)
+    if family is None:
         raise MarketWindowError("INVALID_MARKET_WINDOW")
-    return int(m.group(1))
+    return family
+
+
+def parse_slug_epoch(slug: str) -> int:
+    epoch = _family(slug).slug_epoch(slug)
+    if epoch is None:
+        raise MarketWindowError("INVALID_MARKET_WINDOW")
+    return epoch
 
 
 def window_from_slug_epoch(slug: str, epoch: int | None = None) -> tuple[datetime, datetime]:
+    family = _family(slug)
     start_ts = epoch if epoch is not None else parse_slug_epoch(slug)
     start = datetime.fromtimestamp(start_ts, tz=timezone.utc)
-    end = start + timedelta(seconds=BTC_5M_WINDOW_S)
+    end = start + timedelta(seconds=family.window_duration_s)
     return start, end
 
 
@@ -200,7 +210,7 @@ def resolve_btc_5m_window(
 
     epoch = parse_slug_epoch(slug)
     market_start, market_end = window_from_slug_epoch(slug, epoch)
-    if (market_end - market_start).total_seconds() != BTC_5M_WINDOW_S:
+    if (market_end - market_start).total_seconds() != _family(slug).window_duration_s:
         raise MarketWindowError("MARKET_DURATION_MISMATCH")
     if market_start >= market_end:
         raise MarketWindowError("INVALID_MARKET_WINDOW")

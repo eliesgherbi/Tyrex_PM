@@ -31,33 +31,41 @@ def register_market_family(family: MarketFamily) -> None:
 
 
 def ensure_market_families_registered() -> None:
+    """One runtime family per configured recurring window family (config/markets/)."""
     if _REGISTRY:
         return
-    from tyrex_pm.adapters.polymarket.discovery import (
-        GammaMarketDiscovery,
-        current_btc_updown_slug,
-    )
+    from tyrex_pm.adapters.polymarket.discovery import GammaMarketDiscovery
     from tyrex_pm.domain.polymarket.discovery_binding import DiscoverySessionRole
+    from tyrex_pm.domain.polymarket.window_families import window_families
 
-    async def resolve_active(discovery: GammaMarketDiscovery | None = None) -> Any:
-        client = discovery or GammaMarketDiscovery()
-        return await client.resolve_btc_5m_window(
-            slug=current_btc_updown_slug(),
-            session_role=DiscoverySessionRole.ACTIVE,
+    for spec in window_families().values():
+        if not spec.supported:
+            continue  # No reference feeds for this asset yet (see window_families).
+
+        async def resolve_active(
+            discovery: GammaMarketDiscovery | None = None, *, _spec=spec
+        ) -> Any:
+            client = discovery or GammaMarketDiscovery()
+            return await client.resolve_btc_5m_window(
+                slug=_spec.current_slug(),
+                session_role=DiscoverySessionRole.ACTIVE,
+                family_id=_spec.family_id,
+            )
+
+        async def prepare_next(
+            discovery: GammaMarketDiscovery | None = None, *, _spec=spec
+        ) -> Any:
+            client = discovery or GammaMarketDiscovery()
+            return await client.prepare_next_btc_5m(family_id=_spec.family_id)
+
+        register_market_family(
+            MarketFamily(
+                family_id=spec.family_id,
+                window_duration_s=spec.window_duration_s,
+                resolve_active=resolve_active,
+                prepare_next=prepare_next,
+            )
         )
-
-    async def prepare_next(discovery: GammaMarketDiscovery | None = None) -> Any:
-        client = discovery or GammaMarketDiscovery()
-        return await client.prepare_next_btc_5m()
-
-    register_market_family(
-        MarketFamily(
-            family_id="btc_updown_5m",
-            window_duration_s=300,
-            resolve_active=resolve_active,
-            prepare_next=prepare_next,
-        )
-    )
 
 
 def get_market_family(family_id: str) -> MarketFamily:

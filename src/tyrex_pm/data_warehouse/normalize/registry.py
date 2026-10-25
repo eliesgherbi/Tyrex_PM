@@ -17,10 +17,10 @@ from ..contracts import (
     instrument_id,
     market_id,
 )
-from ..families.btc_5m import BtcFiveMinute
+from ..families.btc_5m import normalized_families
 from ..families.event_driven import EventQuestion
 
-FAMILIES = [BtcFiveMinute(), EventQuestion()]
+FAMILIES = [*normalized_families(), EventQuestion()]
 
 
 def match_family(item: dict):
