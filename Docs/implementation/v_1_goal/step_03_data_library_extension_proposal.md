@@ -1,5 +1,7 @@
 # Proposal — Data Library and scenario workflows
 
+> **History.** Superseded by [STATUS.md](STATUS.md) and `Docs/latest/`. Kept as the record of how this was decided.
+
 Date: 21 October 2026. Status: review proposal, not an implementation instruction or acceptance of Step 3. Code inspection only; no processing, collection, replay, or trading was started. The existing Step 2 follow-up remains deferred.
 
 ## Intended outcome

@@ -1,251 +1,146 @@
-# Adding a strategy (or enhancing the host)
+# Adding a strategy (or a market, or a host enhancement)
 
-A strategy integration supplies only strategy-specific behavior. One host (`TradingRuntime`) owns feeds, readiness, execution, protection, persistence, and reporting. Do not copy that host. Do not add `if strategy_kind == ...` in `run_config.py`, `market_data_runtime.py`, `trading_runtime.py`, or `market_runtime.py`.
+A strategy supplies only strategy-specific behaviour. One host owns feeds, readiness, execution, protection, persistence and reporting, and the same host components serve live, paper, observation and replay. Do not copy the host. Do not add `if strategy_kind == ...` anywhere outside `strategies/<name>/`.
 
-Read this page before writing code. Ownership and live adapters: [architecture.md](architecture.md), [strategy_inputs.md](strategy_inputs.md). YAML field roles: [config_guide.md](config_guide.md). Operator CLI: [running.md](running.md).
+Read this page before writing code. Ownership and the v1 pipeline: [architecture.md](architecture.md). Facts and adapters: [strategy_inputs.md](strategy_inputs.md). YAML roles: [config_guide.md](config_guide.md). Research workspace: [research_workspace.md](research_workspace.md).
 
-## Locked patterns
+The acceptance test `tests/integration/test_v1_new_strategy.py` proves the claim of this page: a strategy defined only in `tests/support/demo_strategy.py`, registered at test time, runs in the decision harness, is offered by the research workspace and replays a recorded window, with no framework edit.
 
-1. Declare facts; the host starts only that source closure.
-2. Subscribe indicators with parameters; the host owns one `IndicatorGraph` and passes a `FeatureBundle`.
-3. Implement one `evaluate()` shape for every plugin (below). Private snapshots (z_gap fair value, etc.) stay inside `strategies/<name>/`.
-4. Emit generic intents only. No SDK, no account reads, no fill inference from `strategies/`.
-5. Prove `evaluate()` on a lab fixture **before** any `--live` run.
+## The contract (what every strategy implements)
+
+| Piece | Where | What |
+|---|---|---|
+| Plugin | `strategies/<name>/plugin.py` | `StrategyPlugin` (`strategies/registry.py`): `kind`, `input_contract`, `load_config`, `create_driver`, `entry_tau_bounds`, `max_clock_uncertainty_ms`. Optional: `requires_protection`, `validate_run_config`, `indicator_specs`, `lifecycle_modes`, `decision_record_schema`, `max_entry_debit`, `required_depth_levels`, `research`. |
+| Driver | `strategies/<name>/driver.py` | A dataclass inheriting `strategies/base.py:BaseDriver`, satisfying `strategies/protocol.py:StrategyDriver`. |
+| Config | `strategies/<name>/schema.py` | `load_config(parameters, file)`; unknown keys fail. |
+| Inputs | `facts/mappings.py` | The `InputContract` (facts read, indicators, what wakes `evaluate`). |
+| Research | `ResearchSchema` on the plugin | How the workspace offers it (defaults, form layout, policy fields). |
+
+Driver attributes the hosts read: `strategy_id`, `config`, `time_authority`, `target_notional`, `window_id`, `fee_curve` (None when the strategy has no fee estimate).
 
 ```text
 evaluate(
     market_snapshot,   # books, quotes, freshness, optional trading reference
-    context,           # position, caps, notional, now, references
-    features,          # subscribed indicators only
-    trigger,           # "feed" or "timer"
+    context,           # DecisionContext: position, capabilities, now, tau_s, references
+    features,          # FeatureBundle of the subscribed indicators
+    trigger,           # EvaluationTrigger: feed | timer | replay | observe
     causation_id,
     correlation_id,
-) -> StrategyEvaluation
+) -> StrategyEvaluation   # decision + generic intents + EligibilityFacts
 ```
 
-Last Chainlink / sealed K, when aligned-eval has them, live on `DecisionContext.references` (`ReferenceFacts`). They are not `evaluate()` kwargs. `ReferenceFacts.trading_reference_raw` carries the latest raw Binance spot print behind the aligned estimate (`None` without a trading reference); `DecisionSnapshot.reference` stays the aligned estimate.
+Feedback methods (defaults in `BaseDriver`; override what the strategy uses). Hosts call them directly, never through `getattr`:
 
-**Offline check of a new plugin.** Besides the fixture lab, a plugin can run on recorded warehouse windows through `research.strategy_replay.run_window`: recorded rows feed the real `MarketSessionRuntime` / `MarketStateStore` / `IndicatorGraph` through the shared `runtime/market_event_router.py`, on virtual time (`FakeClock` injected into freshness paths), and intents become orders in the replay engine's closed-loop timeline under a named `strategy_closed_loop_v1` scenario. `settlement_value` is the first plugin wired this way. Intent translation (in `strategy_replay/run.py`) covers TAKER `EnterIntent` (FAK BUY at `max_price` for the intent's `intended_gross_shares`) and `HoldToResolutionIntent` (no order; held to the label). Other intents are counted as unsupported, never dropped silently.
+| Method | Called when |
+|---|---|
+| `on_entry_outcome(EntryOutcome)` / `on_exit_outcome(ExitOutcome)` | Every entry or exit intent got an outcome (not sent, zero fill, partial, filled, uncertain). |
+| `configure_ptb(PtbSnapshot)` | The window's price to beat was sealed. |
+| `on_hold_committed()` | The host committed the position to resolution. |
+| `restore_window_usage(**usage)` | Restart inside a window already traded (attempt counters from the ledger). |
+| `value_exit_refusal(...) -> str | None` | Final-gate recheck of a value exit. |
+| `episode_view() -> EpisodeView | None` | Host reports and retry clocks read the current entry episode. |
+| `persistence_slice()` / `restore_persistence_slice(data)` | Captured runs and reconstruction. |
+
+Rules:
+
+1. Declare facts; the host starts only that source closure.
+2. Subscribe indicators with parameters; the host owns one `IndicatorGraph`. Mark an indicator `gates_entry=True` when no entry may be sent before it is ready (`ewma_vol` in z_gap and settlement_value).
+3. Read time from the host: `context.now`, `context.tau_s` (seconds to the market's end). Never the wall clock.
+4. Emit generic intents only. No SDK, no account reads, no fill inference in `strategies/`.
+5. Accept every `EvaluationTrigger` value; do not branch behaviour on the trigger.
+6. Shared helpers: `strategies/common.py` (entry price cap, outcome instrument), `indicators/binary_fair_value.py` (fair value), `execution/fill_model.py` (fills and fees, host side).
 
 ## Checklist (new strategy)
 
-1. **Fact contract** — reuse ids in `facts/ids.py`. New source: id + producer edge if derived + live adapter (or leave it in `UNIMPLEMENTED_ADAPTERS`) + mapping in `facts/mappings.py`.
-2. **Package** — `strategies/<name>/` with `config.py`, `schema.py` (unknown keys fail), `reasons.py`, `strategy.py`, `driver.py`, `plugin.py`.
-3. **Plugin** — `StrategyPlugin` with `kind`, `input_contract`, `load_config`, `create_driver`, `entry_tau_bounds`, `max_clock_uncertainty_ms`. Optional: `requires_protection` (bool or `config -> bool`), `validate_run_config`, `indicator_specs(config)` (default is `input_contract.indicators`). Register from `ensure_strategies_registered()`.
-4. **Driver** — `evaluate(...)` → `StrategyEvaluation` with `EligibilityFacts` plus zero or more generic intents.
-5. **YAML** — `config/runs/<name>_….yaml` with `strategy.kind` matching the plugin. If protection is required, include a full `protection:` block.
-6. **Lab fixture** — `tests/fixtures/lab/<name>_….json` (`lab_evaluate_v1`) and a unit test that calls `evaluate_replay` / `tyrex-pm eval`. See [Lab fixture before live](#lab-fixture-before-live).
-7. **Docs** — this page, [strategy_inputs.md](strategy_inputs.md) contract section, [running.md](running.md) config table, [config_guide.md](config_guide.md) parameters subsection. Do not rewrite historical `Docs/implementation/` “current code” sections.
+1. **Inputs** — reuse ids in `facts/ids.py`; put the `InputContract` in `facts/mappings.py`. A new source needs an id, a live adapter (or it stays in `UNIMPLEMENTED_ADAPTERS`) and a replay route in `research/strategy_replay/feed.py`.
+2. **Package** — `strategies/<name>/` with `config.py`, `schema.py`, `reasons.py`, `strategy.py`, `driver.py`, `plugin.py`.
+3. **Driver** — inherit `BaseDriver`; define `strategy_id`; implement `evaluate`; override the feedback methods you use.
+4. **Plugin** — fill the required fields; add `research=ResearchSchema(...)` to offer it in the workspace (start with `default_parameters` taken from your run YAML, `essentials` for the first form section, `default_protection` if `requires_protection`).
+5. **Register** — import the plugin in `ensure_strategies_registered()` (`strategies/registry.py`). That is the only host line.
+6. **YAML** — `config/runs/<name>_….yaml` with `strategy.kind`; a full `protection:` block if required.
+7. **Tests** — add the kind to `tests/support/strategy_configs.py`. The contract test (`tests/unit/strategies/test_driver_contract.py`) and V1-a (`tests/integration/test_v1_all_strategies_replay.py`) then cover it automatically. Add a lab fixture and unit tests for the decision logic.
+8. **Docs** — this page's reference list, [strategy_inputs.md](strategy_inputs.md), [config_guide.md](config_guide.md).
 
-## Module-by-module: how to proceed
+## Proving a strategy, from cheapest to closest to live
 
-Touch the **smallest** owner. If the change is strategy math, it belongs in `strategies/<name>/`, not in the host.
+| Step | Command | Proves |
+|---|---|---|
+| Decision harness | `tyrex-pm eval --config <yaml> --fixture tests/fixtures/lab/<pack>.json` | `evaluate()` logic on hand-written books, depth, trades. No execution. |
+| Replay | Research workspace, or `research.strategy_replay.run_window(window, strategy_kind=..., ...)` | The full host pipeline on recorded windows: scheduler, indicators, planner, final gate, simulated fills, outcomes back to the driver. |
+| Observe | `tyrex-pm observe --config <yaml> --connect-public-feeds` | Live public feeds, signal only. |
+| Paper | `tyrex-pm run --config <paper yaml> --paper` | The live host with the simulated venue (same fill rule as replay). |
+| Live | `tyrex-pm run --config <live yaml> --live` | Real orders under the run's debit cap. |
 
-### `facts/`
+### Lab fixture (`lab_evaluate_v1`)
 
-**When:** a new fact id, derived producer, or `InputContract`.
-
-**How:** add the id to `facts/ids.py` (`SOURCE_FACTS` or derived). If derived, declare upstreams in `facts/producers.py`. Put the contract in `facts/mappings.py` and on the plugin. Tests: `tests/unit/facts/test_input_contracts.py` — what adapters start, what does **not** start, scheduler wake.
-
-**Do not:** start Binance/Chainlink “because other strategies do.” ask70 must still run if those feeds are down.
-
-### `indicators/`
-
-**When:** a reusable producer (OFI, imbalance, EWMA, …) or new `IndicatorSpec` params.
-
-**How:** add or parameterize the producer. `ewma_vol` requires explicit `SigmaConfig` fields on the spec — no silent defaults. The plugin builds specs from YAML (`indicator_specs(config)`). The host constructs one `IndicatorGraph` and calls `on_trade` / `on_depth`. Strategies read `FeatureBundle` keys; they do not ingest tapes.
-
-**Do not:** give the driver a private EWMA/L2 store. Do not import Polymarket `BookSnapshot` into indicator unit tests.
-
-### `strategies/<name>/`
-
-**When:** model, policy, reasons, typed config.
-
-**How:** keep `DecisionSnapshot` generic (books + market). Assemble private snapshots inside the package (see `z_gap/assemble.py`). Map `features` → your types in the **driver**. `schema.py` rejects unknown YAML keys.
-
-**Do not:** import the SDK, gateway, or `TradingRuntime`. Do not add `settlement_reference` kwargs.
-
-### `strategies/registry.py`
-
-**When:** a new kind.
-
-**How:** import the plugin in `ensure_strategies_registered()` and `register_strategy(...)`. That is the only host registration line.
-
-**Do not:** add kind switches in `run_config.py`.
-
-### `runtime/composition.py`
-
-**When:** a new **live** adapter exists.
-
-**How:** add the source fact to `LIVE_ADAPTERS`. Until then it stays in `UNIMPLEMENTED_ADAPTERS` and composition fails closed.
-
-**Do not:** start perp/funding because a guide contract (`q_edge`) names them.
-
-### `runtime/run_config.py` / `protection/spec.py`
-
-**When:** a **shared** YAML key (market, risk, lifecycle, protection).
-
-**How:** add the field, reject-unknown, document in [config_guide.md](config_guide.md) and `config/runs/generic_parameter_catalog.yaml`. Strategy-only leaves go in `strategies/<name>/schema.py`. `requires_protection` may be a callable of loaded config (`feature_probe` + `emit_entry`).
-
-**Do not:** `if strategy_kind == ...`.
-
-### `runtime/market_runtime.py` / `market_data_runtime.py` / `trading_runtime.py`
-
-**When:** a host capability every plugin needs (graph ingest, `ReferenceFacts`, scheduler).
-
-**How:** branch on `input_contract.requires(...)` or `starts_adapter(...)`, never on kind. `evaluate()` stays the generic signature. Lab and live call the same driver method.
-
-**Do not:** copy `TradingRuntime` into a second host, Observe/Shadow path, or Nautilus.
-
-### `runtime/market_family.py`
-
-**When:** a new discovery/window model (not a new strategy).
-
-**How:** register a `MarketFamily`. YAML `market.family` must match.
-
-**Do not:** hardcode slugs in the trading host.
-
-### `protection/`
-
-**When:** overlay trigger styles or YAML fields.
-
-**How:** `ProtectionSpec` is framework-owned. Strategies declare thresholds; they do not POST SL/TP. See [protection.md](protection.md).
-
-**Do not:** fold protection math into ask70 or a new entry harness.
-
-### `execution/` / `persistence/` / `reporting/`
-
-**When:** OMS, journal, or report behavior.
-
-**How:** intents in → planner → coordinator → gateway. Journal is authority; reports are projections. Tick/size come from books, not strategy YAML.
-
-**Do not:** let a strategy POST or infer fills.
-
-### `lab/`
-
-**When:** proving `evaluate()` without venue mutation.
-
-**How:** add a `lab_evaluate_v1` JSON pack and call `evaluate_replay` / `replay_configured_run`. Do not import `execution.polymarket.gateway`.
-
-### `Docs/latest/` and tests
-
-**When:** any of the above ships.
-
-**How:** correct **this folder** (not historical `Docs/implementation/` “current code” sections). Add unit tests next to the owner (`tests/unit/strategies/<name>/`, `tests/unit/facts/`, `tests/unit/lab/`).
-
-## Lab fixture before live
-
-The lab calls the **same** `evaluate()` as production. It does not start adapters, sign, or POST. `--live` is rejected. Use it to prove the door (books + features + intents) before a $5 live run.
-
-### 1. Add `tests/fixtures/lab/<name>_<scenario>.json`
-
-Schema must be `lab_evaluate_v1`. Copy `tests/fixtures/lab/ask70_books.json` or `feature_probe_l2.json`.
-
-```json
-{
-  "schema": "lab_evaluate_v1",
-  "target_notional": "5",
-  "window": {
-    "market_id": "lab-mykind",
-    "condition_id": "lab-mykind-condition",
-    "question": "mykind lab",
-    "window_id": "lab-mykind",
-    "event_start": "2026-09-13T12:00:00+00:00",
-    "event_end": "2026-09-13T12:05:00+00:00"
-  },
-  "steps": [
-    {
-      "ts": "2026-09-13T12:01:00+00:00",
-      "evaluate": true,
-      "books": { "up_ask": "0.71", "down_ask": "0.30" },
-      "depth": {
-        "source": "binance.spot.l2",
-        "instrument_id": "btcusdt",
-        "bids": [["64000", "4"]],
-        "asks": [["64010", "1"]]
-      },
-      "trade": { "source": "binance.spot.trades", "price": "64000" },
-      "reference_price": "64000"
-    }
-  ]
-}
-```
+Copy `tests/fixtures/lab/ask70_books.json` or `feature_probe_l2.json`. Steps are applied in order; `evaluate: true` calls the driver after that step's ingest.
 
 | Step field | Use when |
-|------------|----------|
-| `books` | Plugin reads Polymarket asks/bids (`ask70`, most entries) |
-| `depth` | Plugin subscribed L2 indicators (`feature_probe` imbalance) |
-| `trade` | Plugin subscribed trade indicators (z_gap EWMA) |
-| `reference_price` | Trading reference on `DecisionSnapshot` (z_gap `S`) |
-| `evaluate: true` | Call `driver.evaluate()` after applying this step’s ingest |
+|---|---|
+| `books` | The plugin reads Polymarket asks/bids |
+| `depth` | L2 indicators (`feature_probe` imbalance) |
+| `trade` | Trade indicators (EWMA) |
+| `reference_price` | Trading reference on `DecisionSnapshot` |
 
-Omit unused fields. Steps are applied in order; later evaluates reuse the last books / last reference / graph state. Set `event_end` so remaining tau sits inside the plugin’s `tau_min_s` / `tau_max_s`.
-
-Shipped packs: [`tests/fixtures/lab/README.md`](../../tests/fixtures/lab/README.md).
-
-### 2. Pair the fixture with a run YAML
-
-`eval` loads `strategy.kind` + `parameters` from `--config`. The fixture does not replace YAML.
-
-### 3. Add a unit test
-
-`tests/unit/lab/test_evaluate_replay.py` (or `tests/unit/strategies/<name>/`):
-
-```python
-from tyrex_pm.lab.evaluate_replay import replay_configured_run
-
-results = replay_configured_run(
-    config_path="config/runs/<name>_catalog.yaml",
-    fixture_path="tests/fixtures/lab/<name>_….json",
-)
-assert results  # action, eligibility, intents as appropriate
-```
-
-Assert eligibility and intents. Do not assert live-edge economics unless that is the point of the fixture. Do not import the gateway.
-
-### 4. Run locally (no `--live`)
-
-```bash
-python -m tyrex_pm.application.cli run \
-  --config config/runs/<name>_….yaml \
-  --validate-config
-
-python -m tyrex_pm.application.cli eval \
-  --config config/runs/<name>_….yaml \
-  --fixture tests/fixtures/lab/<name>_….json
-
-python -m pytest -q tests/unit/lab tests/unit/strategies/<name> tests/unit/facts/test_input_contracts.py
-```
-
-`--validate-config` proves the YAML and kind load. `eval` prints a JSON list: `action`, `reason_code`, `strategy_inputs_eligible`, `blockers`, `intent_kinds`. Optional `--out decisions.json`.
-
-Only after those are green consider `--live` with the $5 cap. Lab success is **not** OMS proof (fills, SL print, dust). That remains a tiny-live operator run. See [running.md](running.md).
+Set `event_end` so the remaining time sits inside the plugin's entry band. Pair the pack with a run YAML: `eval` loads `strategy.kind` and parameters from `--config`.
 
 ## Intents the host understands
 
-| Intent | Host behavior today |
-|--------|---------------------|
-| `EnterIntent` + `TAKER` | Plan `MarketBuyOrderSpec` FAK; POST through the lifecycle. |
-| `EnterIntent` + `MAKER` | Plan post-only `LimitOrderSpec` GTC; POST; stay working until fill / cancel / expire (`MAKER_LIMIT_POSTED`). |
-| `ExitIntent` / `FlattenIntent` | Cancel any session-owned live ids, then plan `MarketSellOrderSpec`; bounded FAK retries. |
-| `CancelIntent` | Cancel the named venue id; reconcile before any following sell. Never `cancel_all`. |
-| `HoldToResolutionIntent` | Record `HOLD_TO_RESOLUTION`; no venue mutation. Automatic redeem is not implemented. z_gap rejects `resolution_capability_default: true` at config load. |
+| Intent | Host behaviour |
+|---|---|
+| `EnterIntent` + `TAKER` | `MarketBuyOrderSpec` FAK through the lifecycle (replay: simulated amount BUY). |
+| `EnterIntent` + `MAKER` | Post-only `LimitOrderSpec` GTC; stays working until fill, cancel or expire (live only). |
+| `ExitIntent` / `FlattenIntent` | Cancel session-owned orders, then `MarketSellOrderSpec`; bounded FAK retries. |
+| `CancelIntent` | Cancel the named venue id; reconcile before any following sell. |
+| `HoldToResolutionIntent` | Hold the position to resolution (settlement lifecycle: ledger, payout tracking, redemption worklist). |
+
+## Adding a market family
+
+A recurring up/down market (asset + window length) is configuration: add `config/markets/<family_id>.yaml`.
+
+```yaml
+schema: window_family_v1
+family_id: btc_updown_15m
+asset: BTC
+slug_prefix: btc-updown-15m
+window_duration_s: 900
+resolution_stream: https://data.chain.link/streams/btc-usd
+binance_symbol: BTCUSDT
+outcomes: [UP, DOWN]
+enabled: false
+```
+
+Discovery, the runtime family registry, run configs (`market.family`), the warehouse collector profile and replay read it (`domain/polymarket/window_families.py`). Acceptance: `tests/unit/runtime/test_market_family_config.py`.
+
+- `enabled: false` keeps a family out of implicit discovery and out of the normalizer. **Enabling** a family changes what the normalizer extracts from raw records: raise `PARSER_VERSION` in the same change.
+- Only BTC reference feeds are wired. A family for another asset is refused until the collector's Binance and Chainlink streams and the RTDS reference symbol take the family's symbols (`data_warehouse/supervisor.py`, `data_warehouse/connectors/streams.py`, `adapters/polymarket/rtds_normalize.py`).
+- Multi-outcome or windowless markets need a new market/session abstraction (`BinaryMarket` is two-outcome); not in v1.
+
+## Module by module
+
+Touch the smallest owner. Strategy math belongs in `strategies/<name>/`.
+
+- **`facts/`** — new fact id, derived producer or contract. Tests: `tests/unit/facts/test_input_contracts.py`.
+- **`indicators/`** — reusable producers and `IndicatorSpec` parameters. Strategies read `FeatureBundle` keys; they do not keep private tapes.
+- **`runtime/composition.py`** — a new live adapter goes into `LIVE_ADAPTERS`; until then it fails closed.
+- **`runtime/run_config.py`, `protection/spec.py`** — shared YAML keys only; strategy leaves go in the strategy's `schema.py`.
+- **`runtime/host/`** — host components of the trading runtime (see [architecture.md](architecture.md)). Branch on `input_contract` or plugin fields, never on kind.
+- **`execution/`, `persistence/`, `reporting/`** — intents in, planner, coordinator, gateway; the journal is the authority; reports are projections.
+- **`research/strategy_replay/`** — the replay engine. A new source fact needs a route in `feed.py` (live semantics).
+- **`research/workflows/`** — the workspace API. It reads `StrategyPlugin.research`; do not add strategy-specific code here.
 
 ## What not to do
 
-- Do not start Binance/Chainlink “because the host always did.”
-- Do not wake `evaluate()` from every ingest. Use `EvaluationScheduler`.
-- Do not treat protection as strategy code.
-- Do not import Polymarket SDK from `strategies/`.
-- Do not add a market family by hardcoding slugs in the host.
-- Do not treat `q_edge` as runnable (guide contract; perp adapters unimplemented).
-- Do not skip the lab fixture and go straight to `--live`.
+- Do not start Binance/Chainlink "because other strategies do".
+- Do not wake `evaluate()` from every ingest; the `EvaluationScheduler` does.
+- Do not read `driver.state` or probe drivers with `getattr` from a host: add a contract method.
+- Do not compute time to close or wall-clock time in a strategy.
+- Do not hardcode slugs, window lengths or symbols: use the market family.
+- Do not treat `q_edge` as runnable (guide contract only).
 
 ## Reference
 
-- Live plugins: `strategies/ask70/plugin.py`, `strategies/z_gap/plugin.py`, `strategies/feature_probe/plugin.py`.
-- Guide contract (not a plugin): `Q_EDGE_INPUT_CONTRACT` in `facts/mappings.py`.
-- Lab helper: `src/tyrex_pm/lab/evaluate_replay.py`.
-- Inputs and adapters: [strategy_inputs.md](strategy_inputs.md).
-- Protection YAML: [protection.md](protection.md).
-- Parameter roles: [config_guide.md](config_guide.md).
+- Plugins: `strategies/ask70/plugin.py`, `strategies/feature_probe/plugin.py`, `strategies/settlement_value/plugin.py`, `strategies/z_gap/plugin.py`.
+- Contract and defaults: `strategies/protocol.py`, `strategies/base.py`, `strategies/triggers.py`, `strategies/research.py`.
+- Test-only example strategy: `tests/support/demo_strategy.py`.
+- Decision harness: `src/tyrex_pm/lab/evaluate_replay.py`. Replay: `src/tyrex_pm/research/strategy_replay/run.py`.

@@ -1,5 +1,7 @@
 # Implementation plan: `settlement_value` from research to supervised live execution
 
+> **History.** settlement_value now runs in observation, paper and hold-to-resolution trials; see `Docs/latest/running.md`. This plan records how it got there.
+
 Date: 11 October 2026 (revision 4). Status: **S0 second pass, S1/M1, S2 tooling and experiments, S3 (proxy backend), S4 observation infrastructure and S5 minimum lifecycle implemented in code. No observation, recording or trading has been run. S6 trials are an operator step.** Nothing has been recorded or traded under this plan. Module paths are relative to `src/tyrex_pm/` unless they start with `Docs/`, `config/`, `tests/` or `var/`.
 
 ## 0. Implementation progress — 11 October 2026

@@ -1,5 +1,7 @@
 # Step 4 — Frontend over complete workflows
 
+> **History.** Superseded by [STATUS.md](STATUS.md) and `Docs/latest/`. Kept as the record of how this was decided.
+
 Status: draft for review. Screens may be sketched during Steps 1 and 2. Implement each offline interface slice once its corresponding Step 3 operation is repeatable without the interface. The user has deferred the remaining [Step 2 follow-up](02_step2_follow_up.md) while independent Step 3/4 work proceeds; paper execution/restart/reconstruction acceptance and full trading completion remain open.
 
 ## Goal

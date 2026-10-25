@@ -1,5 +1,7 @@
 # Research IHM enhancement
 
+> **History.** Superseded by [STATUS.md](STATUS.md) and `Docs/latest/`. Kept as the record of how this was decided.
+
 Date: 22 October 2026. Status: design agreed, not implemented. This document is the single reference for the research workbench from this date. The earlier Step 3 and Step 4 documents, the Data Library backlog, the 21 October review, and the implementation record remain as history and are not the plan any more. Nothing here authorizes a collector start, a paper session, or an order.
 
 ## 1. Why this document exists

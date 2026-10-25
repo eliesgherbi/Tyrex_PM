@@ -1,5 +1,7 @@
 # Data Library and set creation: enhancement proposals
 
+> **Status (25 Oct 2026).** Implemented: see the "Implemented" sections at the end and [STATUS.md](STATUS.md).
+
 Date: 23 October 2026. Status: proposals for review. Nothing here is implemented.
 
 Scope: the path from recordings to a saved window set, and from a set to a replay. Each proposal has an id, the evidence behind it, the expected gain, and a rough size (S: under a day, M: one to three days, L: a week or more). Measurements are from the four warehouses (5 recordings, 214 windows inside a capture) on this machine.

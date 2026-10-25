@@ -81,6 +81,12 @@ Indicator: L1 `imbalance` on spot L2.
 Wake: book updates and spot L2 (1 s coalesce).  
 **Does not** start Chainlink, spot trades, or perp. Shipped YAML is validate-only (`emit_entry: false`).
 
+### settlement_value (plugin)
+
+Required: books, Binance spot trades, Chainlink TWAP, clock, account, `ptb.sealed`, `reference.aligned`, market meta.
+Indicators: EWMA vol (gates entry) and the spot path, parameterized from its config.
+Wake: Binance spot trades or book updates **after** `ptb.sealed` (1 s coalesce) and a 1 s timer.
+
 ### q_edge (guide only)
 
 Mapped in `facts/mappings.py` for a future multi-venue strategy. **Not** a registered plugin. It names L2 / perp / funding facts whose adapters are not implemented. Do not treat it as runnable.
@@ -89,7 +95,7 @@ Mapped in `facts/mappings.py` for a future multi-venue strategy. **Not** a regis
 
 `src/tyrex_pm/indicators/` owns reusable producers over a generic instrument-keyed L2/trade store (`DepthSnapshot` / `DepthStore`). That store is **not** the Polymarket `[0,1]` `BookSnapshot`.
 
-z_gap EWMA vol is one `IndicatorSpec` instance. The registered plugin supplies YAML `volatility.*` as spec `params`; the host runs `IndicatorGraph` and passes a `FeatureBundle` into `evaluate()`. Trade-tape freshness for that graph uses `market.maximum_book_age_ms` (not a hardcoded 2000 ms). A reconnect increments the Binance trade `connection_generation` and invalidates the estimator; eligibility returns only after `min_samples_s` on the new generation. The final BUY gate re-reads the bound graph snapshot (`features_ready`) and fails closed if EWMA is stale, invalidated, or unready. It does not re-run `evaluate()`. SELL and protective flatten ignore EWMA unreadiness. ask70’s empty indicator graph is a no-op at the gate.
+z_gap EWMA vol is one `IndicatorSpec` instance. The registered plugin supplies YAML `volatility.*` as spec `params`; the host runs `IndicatorGraph` and passes a `FeatureBundle` into `evaluate()`. Trade-tape freshness for that graph uses `market.maximum_book_age_ms` (not a hardcoded 2000 ms). A reconnect increments the Binance trade `connection_generation` and invalidates the estimator; eligibility returns only after `min_samples_s` on the new generation. The final BUY gate re-reads the bound graph snapshot (`features_ready`) and fails closed if any indicator declared with `gates_entry=True` (EWMA in z_gap and settlement_value) is stale, invalidated, or unready. It does not re-run `evaluate()`. SELL and protective flatten ignore EWMA unreadiness. ask70’s empty indicator graph is a no-op at the gate.
 
 `feature_probe` does the same graph wiring for L1 `imbalance` on `binance.spot.l2`. Consume-time L2 age and L2 reconnect invalidation are **deferred (F-L2)** and are not a first-release pass criterion. Producers for OFI, imbalance, trade imbalance, and realized vol exist for later strategies; they do not start connectors by themselves.
 
@@ -97,6 +103,6 @@ The lab (`tyrex_pm.lab.evaluate_replay`) rebuilds that graph from the same `indi
 
 ## Market families
 
-`src/tyrex_pm/runtime/market_family.py` owns discovery and window duration independently of strategy. The only registered family today is `btc_updown_5m` (300 s). YAML `market.family` must match a registered family.
+Families are configuration: `config/markets/*.yaml` (`domain/polymarket/window_families.py`), one runtime family each in `runtime/market_family.py`. `btc_updown_5m` (300 s) is enabled; `btc_updown_15m` (900 s) is defined. YAML `market.family` must name one.
 
-`market.binance_symbol` remains on the run config (default `BTCUSDT`) for families that use a spot reference. ask70 YAML may still set it; composition will not start Binance unless the contract requires `binance.spot.trades`.
+The Binance symbol comes from the family; an explicit `market.binance_symbol` must agree with it. Composition still starts Binance only when the contract requires a Binance fact. Live trade ticks carry size and taker side to the indicator graph, so `trade_imbalance` computes live; recordings keep the size but not the side, so it stays unavailable in replay until the normalizer records the side.

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from tyrex_pm.facts import ids as F
-from tyrex_pm.facts.contract import InputContract, OnFact, OnTimer
+from tyrex_pm.facts.mappings import SETTLEMENT_VALUE_INPUT_CONTRACT
 from tyrex_pm.indicators.spec import IndicatorSpec
 from tyrex_pm.strategies.registry import StrategyPlugin
 from tyrex_pm.strategies.settlement_value.config import (
@@ -17,26 +17,6 @@ from tyrex_pm.strategies.settlement_value.driver import create_settlement_value_
 from tyrex_pm.strategies.settlement_value.record_schema import decision_record_schema
 from tyrex_pm.strategies.settlement_value.research import SETTLEMENT_VALUE_RESEARCH
 from tyrex_pm.strategies.settlement_value.schema import settlement_value_config_from_parameters
-
-SETTLEMENT_VALUE_INPUT_CONTRACT = InputContract(
-    required=(
-        F.POLYMARKET_BOOKS,
-        F.BINANCE_SPOT_TRADES,
-        F.CHAINLINK_TWAP,
-        F.CLOCK_SYNC,
-        F.ACCOUNT_SNAPSHOT,
-        F.PTB_SEALED,
-        F.REFERENCE_ALIGNED,
-        F.POLYMARKET_MARKET_META,
-    ),
-    optional=(),
-    indicators=(IndicatorSpec(name="ewma_vol", source=F.BINANCE_SPOT_TRADES, gates_entry=True),),
-    evaluate_on=(
-        OnFact(F.BINANCE_SPOT_TRADES, coalesce_s=1.0, after_ready=F.PTB_SEALED),
-        OnFact(F.POLYMARKET_BOOKS, coalesce_s=1.0, after_ready=F.PTB_SEALED),
-        OnTimer(interval_s=1.0),
-    ),
-)
 
 HOLD_TO_RESOLUTION = "hold_to_resolution"
 MANAGED_EXIT = "managed_exit"

@@ -30,7 +30,37 @@ Account-state authority -> capabilities -> execution lifecycle -> async gateway
 Book updates also wake the protection overlay (independent of evaluate()).
 ```
 
-Registered live plugins: `z_gap`, `ask70`, and `feature_probe`. `q_edge` is a guide mapping only. Session state lives in `MarketSessionRuntime` (`ZGapMarketRuntime` is a compatibility alias). Adding a plugin or a host enhancement: [extending.md](extending.md).
+Registered plugins: `ask70`, `feature_probe`, `settlement_value`, `z_gap`. `q_edge` is a guide mapping only. Session state lives in `MarketSessionRuntime` (`ZGapMarketRuntime` is a compatibility alias). Adding a plugin, a market family or a host enhancement: [extending.md](extending.md).
+
+## v1: one contract, one pipeline, three clocks
+
+Live, paper, observation and replay run the same host components. Only the source of data, the clock and the venue differ.
+
+```text
+Source (live feeds | warehouse | capture) -> feed router -> MarketSessionRuntime
+   (books, reference, PTB seal, IndicatorGraph) -> decision_context() -> driver.evaluate()
+   -> planner + final-gate checks -> venue -> outcomes -> driver.on_*_outcome()
+
+            clock              venue
+live        wall               Polymarket gateway
+paper       wall               PaperVenue      ┐ same fill rule:
+replay      recorded           replay Engine   ┘ execution/fill_model.py
+```
+
+| Concern | One place |
+|---|---|
+| Strategy contract | `strategies/protocol.py` (`StrategyDriver`), defaults in `strategies/base.py` (`BaseDriver`); hosts call it directly, never through `getattr` |
+| Evaluation triggers | `strategies/triggers.py` (`feed`, `timer`, `replay`, `observe`) |
+| Decision context | `runtime/decision_records.decision_context` (live, paper, observation, replay, lab); `DecisionContext.tau_s` is the time to close |
+| Entry readiness | `IndicatorSpec.gates_entry` read by `indicators/readiness.py` |
+| Fills and fees (simulated) | `execution/fill_model.py` |
+| Book rebuild rule | the scenario's `book_reconstruction`; crossed books: `market_data/reconcile.is_crossed` |
+| Market families | `config/markets/*.yaml` via `domain/polymarket/window_families.py` |
+| Research offering | `StrategyPlugin.research` (`strategies/research.py`) |
+
+The trading host is `runtime/trading_runtime.py` (fields, market-data callbacks, run loop, CLI entry points) composed from `runtime/host/`: `composition` (build), `readiness`, `metadata` (order-metadata warming), `window_binding` (rotation, restored sessions, summaries), `decisions` (evaluation and recording), `intents` (dispatcher, entries, exits, outcomes), `protection`, `deadlines`, `settlement_lifecycle` (hold commit and detach), `startup` (assessment and recovery) and `reporting`. A guard test keeps each component under 700 lines and the host under 800.
+
+Replay of recorded data is `research/strategy_replay/run.py` (`run_window`) on the simulator `research/replay/engine.py`. Its release is `research/strategy_replay/engine_version.py` (`replay_v2`); experiments record it. `tools/v1_parity_check.py` re-runs saved workspace jobs and compares decision digests and economics.
 
 ## Ownership rules
 
@@ -39,11 +69,11 @@ Registered live plugins: `z_gap`, `ask70`, and `feature_probe`. `q_edge` is a gu
 - `strategies/registry.py` owns `StrategyPlugin` registration. `run_config.py` loads kind via the registry; it has no `if strategy_kind == ...` branches.
 - `runtime/scheduler.py` owns when `evaluate()` runs. Feed ingest never implies evaluation.
 - `runtime/composition.py` owns which live adapters exist vs catalogued-but-unimplemented (Binance perp trades / L2 / funding). Spot L2 is live.
-- `runtime/market_family.py` owns discovery/window model per family (`btc_updown_5m` today).
+- `runtime/market_family.py` registers one runtime family (discovery of the current and next window) per configured window family in `config/markets/` (`btc_updown_5m` enabled; `btc_updown_15m` defined).
 - `market_data/` owns normalized books, synchronization, freshness, and immutable views.
 - `runtime/market_runtime.py` (`MarketSessionRuntime`) owns window preparation, optional PTB sealing / reference alignment as derived producers, and strategy-ready snapshots. PTB seal runs only when the contract requires `ptb.sealed`.
-- `strategies/<name>/` owns only strategy calculations, intent decisions, and an `InputContract` plugin. Every plugin implements the same `evaluate(market_snapshot, context, features, trigger, causation_id, correlation_id)` signature. Last Chainlink / sealed K, when aligned-eval has them, live on `DecisionContext.references` (`ReferenceFacts`), not extra kwargs.
-- `lab/` owns deterministic `evaluate()` replay from `lab_evaluate_v1` JSON packs. It constructs the same `FeatureBundle` + driver call as production and never imports the gateway. Prove a new strategy here before `--live`. See [extending.md](extending.md).
+- `strategies/<name>/` owns only strategy calculations, intent decisions, and an `InputContract` plugin. Every driver inherits `BaseDriver` and implements the same `evaluate(market_snapshot, context, features, trigger, causation_id, correlation_id)` signature; execution feedback arrives through the contract's `on_entry_outcome` / `on_exit_outcome` / `on_hold_committed` methods. Last Chainlink / sealed K, when aligned-eval has them, live on `DecisionContext.references` (`ReferenceFacts`), not extra kwargs.
+- `lab/` is the decision harness: `evaluate()` on synthetic `lab_evaluate_v1` packs with the shared context builder, no execution, no gateway. Recorded data is replayed (with simulated execution) only by `research/strategy_replay`. See [extending.md](extending.md).
 - `protection/` owns `ProtectionSpec`, arming, and bid-mark triggers. See [protection.md](protection.md).
 - `runtime/capabilities.py` owns readiness facts; the strategy cannot override them.
 - `execution/account_state.py` owns continuous authenticated balance, allowance, token-inventory, and open-order observations. It publishes immutable `READY`, `INSUFFICIENT`, `UNAVAILABLE`, or `STALE` snapshots and never converts a failed read into a zero balance.
@@ -55,7 +85,7 @@ Registered live plugins: `z_gap`, `ask70`, and `feature_probe`. `q_edge` is a gu
 - `persistence/execution_journal.py` is the durable source for replay and mutation-attempt audit.
 - `persistence/run_evidence_journal.py` durably records explanatory readiness, decision, and runtime-error evidence; it never authorizes orders or derives positions.
 - `reporting/run_report.py` is a read-only projection over market-data evidence, run evidence, and the execution aggregate.
-- `runtime/trading_runtime.py` composes these modules; it contains no venue-specific order semantics. It warms order metadata on bind, gates entry on `ORDER_METADATA_READY`, and drains intents via an event-woken serial dispatcher (not the 1 Hz market-data tick).
+- `runtime/trading_runtime.py` composes these modules through the host components in `runtime/host/`; it contains no venue-specific order semantics. It warms order metadata on bind, gates entry on `ORDER_METADATA_READY`, and drains intents via an event-woken serial dispatcher (not the 1 Hz market-data tick).
 
 There are no numbered milestone runtimes, simulated execution backends, or fallback hosts in the supported graph.
 
@@ -131,7 +161,7 @@ These exist as types, catalog entries, or recorded intents — they are not live
 
 - `q_edge` strategy plugin (guide contract only)
 - Binance perp trades/L2 and funding adapters (spot L2 + derived mid are live)
-- Automatic on-chain redeem / merge / hold-to-resolution execution
-- Market families other than `btc_updown_5m`
-- Historical backtester (the `eval` lab is fixture replay of `evaluate()`, not a research simulator)
+- Automatic on-chain redeem / merge (hold-to-resolution itself runs: settlement ledger, payout proof, operator redemption worklist)
+- Window families for assets other than BTC (collector and runtime feeds take BTC symbols only) and multi-outcome or windowless markets
+- Tune (parameter search) in the research workspace
 

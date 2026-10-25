@@ -55,7 +55,7 @@ tyrex-data export-market --root var/warehouse --market <market-id> --output var/
 tyrex-data compact --root var/warehouse --collection <collection-id>
 ```
 
-`verify` checks archive checksums and normalization coverage. Exit 0 means the archive matches its manifests. `--require-ready` uses quality policy v2: verified archive integrity, complete normalization, usable required-feed intervals including warm-up, observed closure, supported semantics, provider-terminal settlement and an unambiguous payout mapping are all required. Use `--market <market-id>` to qualify a selected completed window; the whole collection includes future and incomplete windows and will normally fail that stricter gate. An empty root fails verification. With the default policy, that flag returns 1 because the official threshold is unattested.
+`verify` checks archive checksums and normalization coverage. Exit 0 means the archive matches its manifests. `--require-ready` uses readiness predicate version 2 (`quality/readiness.py`), evaluated on quality reports of version 4 (`QUALITY_VERSION`): verified archive integrity, complete normalization, usable required-feed intervals including warm-up, observed closure, supported semantics, provider-terminal settlement and an unambiguous payout mapping are all required. Use `--market <market-id>` to qualify a selected completed window; the whole collection includes future and incomplete windows and will normally fail that stricter gate. An empty root fails verification. With the default policy, that flag returns 1 because the official threshold is unattested.
 
 `export-market` writes an immutable bundle: observation parquet, derived `boundary_observations`, `book_epochs`, `resolution_assessments`, `coverage_intervals` and `market_coverage`, plus `quality.json`, `boundaries.json` and `source_context.json`. The context pins the effective profile, source-contract version, provider policy and archive evidence. Earlier snapshot/bridge dependencies are included, with original reception times, so the book can be rebuilt at the export boundary. Post-interval metadata cannot extend the decision horizon; outcome labels remain separate. An existing output directory is rejected. `created_at` is the window horizon, and boundary `computed_at` is that same horizon. Compaction streams input parts, bounds each output by a row cap and the configured size target, supersedes older builds and records logical checksums. A single large record or input batch can exceed the soft byte target; memory does not grow by loading the entire collection. Pinned old readers remain valid. It does not delete raw segments.
 
@@ -118,7 +118,7 @@ The sealer preserves the original journal until compressed publication commits. 
 
 Provider policies are operator-supplied evidence, not an automatic verification service. Do not mark a policy supported to make a test pass. A semantic flag does not supply a numerical threshold to a strategy. Official boundary candidates remain separately labeled; constructing the new strategy’s probability inputs remains outside this collector.
 
-See the [live validation commands](../implementation/pm_data_warhouse/operator_validation.md) for the operator-run smoke, restart, soak and load checks. A 5-minute connectivity capture is recorded there. The 45-minute smoke, restart, and 24-hour soak are still ahead.
+See the [live validation commands](../implementation/pm_data_warhouse/operator_validation.md) for the operator-run smoke, restart, soak and load checks. Recordings of 20 minutes to 6 hours were made in October 2026 (`var/warehouse*`); the 24-hour soak is still ahead.
 
 ## What lands on disk
 
@@ -192,4 +192,10 @@ derived completion stays false until the operator processes the archive separate
 Do not run an additional quality worker concurrently against the same root. A
 locked-root error means the existing worker must finish or be stopped before the
 new one-shot command can publish. Raw data does not need to be recorded again.
+
+## Parser versions, market families and research replay
+
+- **Parser version 2** (`data_warehouse/contracts.py:PARSER_VERSION`) records the metadata minimum order size in shares. Readers use builds of the current parser version only. Builds of version 1 stay on disk so window sets and studies pinned to them still open and replay; this roughly doubles the normalized footprint until those sets are retired.
+- **Market families** come from `config/markets/` (`domain/polymarket/window_families.py`). A collector profile names an asset and a window length; the warehouse family, slugs and window bounds follow from the matching family. The normalizer recognizes enabled families only, so enabling one goes with a parser version bump.
+- **Scenarios** for strategy replay are in `config/research/scenarios/`: `friction_v3` (default) and `friction_stress_v2` rebuild books with `venue_top_v1` (reconciled with the venue's reported top of book); earlier scenarios stay for reproduction. The scripted replay above (`tyrex-research replay`) is the simulator's own harness; strategies are replayed through `research/strategy_replay` and the research workspace ([research_workspace.md](research_workspace.md)).
 

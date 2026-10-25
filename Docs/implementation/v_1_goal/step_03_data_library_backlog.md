@@ -1,5 +1,7 @@
 # Data Library backlog
 
+> **History.** Superseded by [STATUS.md](STATUS.md) and `Docs/latest/`. Kept as the record of how this was decided.
+
 Date: 21 October 2026. Status: DL-1 through DL-5 are implemented and checked on fixtures, with a live-warehouse browse. The workspace lists five finished capture sessions across four warehouse roots. A window belongs to a recording only when its start falls inside that capture. Exploratory coverage at 95% saved 15 windows from the 6 October recording; complete coverage on that recording includes 0. The saved exploratory set is `7470720940814968bac80839d60e1636`. The older partial-coverage set `a623f7b6d3cc4525b5310d3613072020` is unchanged and is not the research path. A collection-wide quality run returned the existing publication and did not assess the 280 windows that start after `2026-10-06T19:36:34Z`. This is not Data Library acceptance and does not qualify live trading. `safe_stop` remains `unsupported`. The 20 October evidence stays in [step_03_implementation_record.md](step_03_implementation_record.md).
 
 Do not edit `prototypes/ihm-review/` as part of these increments. Bind a screen only after the increment named below has passed. Do not launch a collector, a paper session, or an order.

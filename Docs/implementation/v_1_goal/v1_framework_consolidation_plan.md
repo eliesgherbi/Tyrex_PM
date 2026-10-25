@@ -1,7 +1,7 @@
 # Tyrex v1: framework consolidation plan
 
-Status: plan, 24 October 2026. Implementation follows the step order below; each step ends green
-(unit + integration tests) and is committed on its own.
+Status: implemented 24–25 October 2026 (steps 0–7); outcome, re-scoping and open items in
+[STATUS.md](STATUS.md). Each step ended green (unit + integration tests) and was committed on its own.
 
 Source: the review of 24 October (replay engines, `trading_runtime.py` anatomy, data-to-execution
 pipeline across strategies and markets). File references are to `src/tyrex_pm/` unless stated.
@@ -197,6 +197,35 @@ decisions; `test_settlement_value_recorded_window.py`, `test_replay_v3_mechanics
   differences documented as intended (for example the crossed-book rule). Jobs from 23 October
   already differ in decision digest only (entries, fills, P&L, qualification and K equal),
   because the engine's decision records changed later that day; they are not parity references.
+
+### Step 3 as implemented (24 October)
+
+- **Shared fill model** `execution/fill_model.py` (`walk_shares`, `walk_spend`, `taker_fee`,
+  `bought_shares`): the replay engine and the paper venue both use it. V1-b proves identical
+  fills, fees and cash on the same book (holdings agree to 18 decimals; the engine computes at
+  a higher decimal precision). Paper's fill-model label is now `paper_live_book_taker_v2`
+  (fees rounded to 0.00001 as in replay; share orders no longer floored).
+- **One book rule.** The scenario sets it; `ReplayExecutionPolicy.book_reconstruction` only
+  overrides (captured-run reconstruction) and records the rule used. The worker no longer maps
+  it. One predicate `market_data.reconcile.is_crossed` (bid >= ask invalid) for live and
+  recorded books: under `venue_top_v1`, one hour of recorded books (6.1 million checks) had no
+  locked and no crossed book, so the stricter rule changes nothing measured.
+- **Binance depth in replay.** `load_window(spot_depth=True)` rebuilds the depth state at the
+  window start from the last recorded snapshot and the updates since (seed row
+  `replay_seed`), then streams the recorded rows; `StrategyFeed` passes it to the indicator
+  graph with the live snapshot type when the contract starts the L2 adapter. Cost: about
+  3 minutes per window (snapshots are rare: 7 in 5 hours). feature_probe now observes features.
+- **One P&L.** The window economics are derived from the engine's own fill ledger and agree
+  with the engine's settled books (checked in V1-a).
+- **Engine version.** `research/strategy_replay/engine_version.py`: new experiments record
+  `engine: replay_v2` in their identity; older ones read as `replay_v1` and the Results page
+  says so.
+- **Re-scoped:** the fixture lab (`tyrex-pm eval`) stays a strategy *decision harness* (no
+  execution) instead of becoming a replay source: its packs are synthetic and would have to be
+  rewritten as recording-like data to pass live readiness rules, with no information gained.
+  It now builds its context with the shared builder. The engine's scripted mode stays: it is
+  the simulator's own unit-test harness. Unused `Scenario` fields stay because saved
+  experiment snapshots carry them.
 
 ## Step 4: features and shared models
 

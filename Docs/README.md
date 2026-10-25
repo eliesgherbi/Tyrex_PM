@@ -9,10 +9,17 @@
 | Area | Status |
 |------|--------|
 | Unified live runtime (one YAML, `--live`) | Implemented |
+| `settlement_value` plugin (hold to resolution / managed exit; paper and live templates) | Implemented |
 | `z_gap` plugin (PTB + spot trades + books) | Implemented |
 | `ask70` plugin (books-only entry harness + protection overlay) | Implemented |
 | `feature_probe` plugin (spot L2 imbalance seam proof) | Implemented (validate-only catalog) |
-| `eval` lab (`lab_evaluate_v1` fixtures, no gateway) | Implemented |
+| `eval` decision harness (`lab_evaluate_v1` fixtures, no gateway) | Implemented |
+| Strategy driver contract (`StrategyDriver` / `BaseDriver`), one context builder | Implemented (v1) |
+| Research replay of recorded data for every strategy (`research/strategy_replay`) | Implemented (v1) |
+| Research workspace (Data, Replay, Results, Compare, Candidates) | Implemented; Tune planned |
+| Paper venue (shared fill rule with replay) | Implemented |
+| Data warehouse collector and normalizer (parser v2) | Implemented |
+| Market families from configuration (`config/markets/`) | BTC up/down windows; other assets need feed wiring |
 | InputContract / plugin registry / evaluation scheduler | Implemented |
 | Live Polymarket OMS (tiny debit cap) | Implemented |
 | Position protection (reactive FAK SL/TP/trailing; resting GTD/GTC TP) | Implemented |
@@ -20,7 +27,7 @@
 | Binance spot L2 + derived mid | Implemented (contract-scoped) |
 | `q_edge` / Binance perp trades/L2/funding | Catalogued; perp fail-closed; `q_edge` not registered |
 | On-chain redeem / merge / cleanup | Unsupported |
-| Legacy archive under `old/` | Reference only — never imported |
+| Legacy archive | Removed from the tree; tag `archive/pre-v1-2026-10-24` |
 
 ## Documentation layers
 
@@ -44,6 +51,7 @@ If documents disagree, trust code/tests, correct `latest/`, and leave historical
 | Reader | Start |
 |--------|-------|
 | New user / operator | [`latest/running.md`](latest/running.md) |
+| Researcher (recordings, window sets, replay) | [`latest/research_workspace.md`](latest/research_workspace.md) |
 | YAML parameter roles | [`latest/config_guide.md`](latest/config_guide.md) |
 | Strategy developer | [`latest/extending.md`](latest/extending.md) (per-module + lab fixture) → [`latest/strategy_inputs.md`](latest/strategy_inputs.md) |
 | Framework developer | [`latest/architecture.md`](latest/architecture.md) → [`latest/execution_lifecycle.md`](latest/execution_lifecycle.md) |

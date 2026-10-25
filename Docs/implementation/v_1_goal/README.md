@@ -1,6 +1,6 @@
 # V1 goal: dependable use
 
-Drafts for review. Nothing in this folder authorizes implementation until that document has been reviewed and tightened.
+**Current state: [STATUS.md](STATUS.md)** (what v1 delivered, decisions, open items). Framework plan: [v1_framework_consolidation_plan.md](v1_framework_consolidation_plan.md). The numbered documents below are the original roadmap and are kept as history.
 
 Two goals share one roadmap and keep separate completion criteria:
 

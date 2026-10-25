@@ -4,7 +4,7 @@
 
 Each run is one YAML file. Unknown keys and invalid bounds fail validation. The current live safety ceiling in the shipped configs is $5 total entry debit. Field-by-field roles: [config_guide.md](config_guide.md).
 
-Registered kinds: `z_gap`, `ask70`, `feature_probe`. Unknown `strategy.kind` fails at load.
+Registered kinds: `ask70`, `feature_probe`, `settlement_value`, `z_gap`. Unknown `strategy.kind` fails at load. A config's `venue` is `live` or `paper`; `run` refuses `--live` on a paper config and `--paper` on a live one. `market.family` names a market family from `config/markets/` (default `btc_updown_5m`); the Binance symbol and the default run duration come from it.
 
 | Config | Strategy | Extra connectors | Protection |
 |--------|----------|------------------|------------|
@@ -12,6 +12,9 @@ Registered kinds: `z_gap`, `ask70`, `feature_probe`. Unknown `strategy.kind` fai
 | `config/runs/ask70_protection_tiny_live.yaml` | `ask70` | Polymarket books + clock + account only | **required** SL 0.55 + resting GTD TP 0.85 (trailing off for SL proof) |
 | `config/runs/ask70_maker_tiny_live_danger.yaml` | `ask70` | same as ask70 | far-bid maker POST then cancel (optional extra run) |
 | `config/runs/feature_probe_catalog.yaml` | `feature_probe` | Binance spot L2 + L1 imbalance | validate-only; `emit_entry: false`; no `protection:` |
+| `config/runs/settlement_value_*_paper.yaml` | `settlement_value` | Binance spot trades, Chainlink TWAP, PTB seal | paper venue; hold-to-resolution or managed exit per file |
+| `config/runs/settlement_value_*_live.template.yaml` | `settlement_value` | same | live templates: copy, review, then run with `--live` |
+| `config/runs/settlement_value_trial.yaml` | `settlement_value` | same | one-episode hold-to-resolution trial (see below) |
 
 CLI default `--config` is `config/runs/z_gap_tiny_live.yaml`.
 
@@ -147,7 +150,33 @@ Two processes cannot share one `state_directory`. The lock is released on shutdo
 
 In-run emergency flatten and shutdown drain are unchanged. They are not a substitute for this startup decision.
 
-`--continue` is not a first-release operator step. Discovery is current + next 5m only.
+Discovery covers the current and the next window of the run's market family. A continuous run (`market.run_mode: continuous`) rotates to the next window itself; there is no separate continue command.
+
+## Paper runs
+
+```bash
+python -m tyrex_pm.application.cli run --config config/runs/settlement_value_continuous_paper.yaml --paper
+```
+
+Live public data, a simulated account (`execution/paper.py`), no signing. Fills follow the same rule as research replay (`execution/fill_model.py`). State and report paths must contain `paper`.
+
+## Watching a run
+
+```bash
+python -m tyrex_pm.application.cli watch-run --config <run yaml> --refresh 5
+```
+
+Read-only view of the run's SQLite journal and settlement ledger (latest run, or `--run-id`).
+
+## Recordings captured by a run
+
+```bash
+python -m tyrex_pm.application.cli recording prune          # list old recordings (--apply deletes)
+python -m tyrex_pm.application.cli recording benchmark      # capture cost, writer CPU, memory, disk
+python -m tyrex_pm.application.cli recording reconstruct ... # rebuild decisions offline (--book-reconstruction legacy|venue_top_v1)
+```
+
+Market-data recording for research (the warehouse) is separate: `run_data_collection_live` or the research workspace (see [research_workspace.md](research_workspace.md)).
 
 ## Signal-only observation (`settlement_value`)
 
@@ -207,7 +236,12 @@ tyrex-pm settlement --config config/runs/settlement_value_trial.yaml confirm-red
     --episode settlement_value_trial:<window_slug> --tx-hash 0x... --connect-chain
 tyrex-pm settlement --config config/runs/settlement_value_trial.yaml mark-manual \
     --episode <id> --reason "<text>"
+tyrex-pm settlement --config <run yaml> discover-redemptions --connect-chain     # dry run unless --apply
+tyrex-pm settlement --config <run yaml> ack-loss-pause                          # acknowledge a loss pause
+tyrex-pm settlement --config <run yaml> repair-attempt-ownership --connect-chain # dry run unless --apply
 ```
+
+`discover-redemptions` finds redemptions made in the venue UI and proves them on chain; it is refused while a runner owns the ledger (the runner discovers them itself). `repair-attempt-ownership` corrects a window whose fill was attributed to a never-sent attempt; it never trades or redeems.
 
 **`reconcile`** reads `payoutNumerators/payoutDenominator` at the **finalized** block. With a zero payout the episode completes; with a positive payout it moves to the redemption worklist (`REDEMPTION_PENDING_OPERATOR`). Proceeds stay a receivable, not cash.
 

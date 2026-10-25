@@ -142,3 +142,25 @@ REFERENCE_CONTRACTS: dict[str, InputContract] = {
     "q_edge": Q_EDGE_INPUT_CONTRACT,
     "z_gap": Z_GAP_INPUT_CONTRACT,
 }
+
+
+# settlement_value: books, Binance trades, Chainlink TWAP and the sealed price to beat.
+SETTLEMENT_VALUE_INPUT_CONTRACT = InputContract(
+    required=(
+        F.POLYMARKET_BOOKS,
+        F.BINANCE_SPOT_TRADES,
+        F.CHAINLINK_TWAP,
+        F.CLOCK_SYNC,
+        F.ACCOUNT_SNAPSHOT,
+        F.PTB_SEALED,
+        F.REFERENCE_ALIGNED,
+        F.POLYMARKET_MARKET_META,
+    ),
+    optional=(),
+    indicators=(IndicatorSpec(name="ewma_vol", source=F.BINANCE_SPOT_TRADES, gates_entry=True),),
+    evaluate_on=(
+        OnFact(F.BINANCE_SPOT_TRADES, coalesce_s=1.0, after_ready=F.PTB_SEALED),
+        OnFact(F.POLYMARKET_BOOKS, coalesce_s=1.0, after_ready=F.PTB_SEALED),
+        OnTimer(interval_s=1.0),
+    ),
+)

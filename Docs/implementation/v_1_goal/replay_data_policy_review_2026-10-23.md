@@ -1,5 +1,7 @@
 # Replay data policies: from raw recordings to a qualified result
 
+> **Status (25 Oct 2026).** Sections 1–8 are the analysis. The decisions were implemented with a 20 s hole cap (`replay_research_v2_1`) and scenarios `friction_v3` / `friction_stress_v2`; see [STATUS.md](STATUS.md).
+
 Date: 23 October 2026. Status: analysis only. Nothing here is implemented or authorises a collector, a paper session or an order.
 
 ## 1. Why this review

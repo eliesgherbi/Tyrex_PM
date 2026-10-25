@@ -1,5 +1,7 @@
 # Step 3 — Reusable workflows
 
+> **History.** Superseded by [STATUS.md](STATUS.md) and `Docs/latest/`. Kept as the record of how this was decided.
+
 Status: workflow specification. The 20 October 2026 review remains the original contract. The offline catalog implemented after that review is recorded in [step_03_implementation_record.md](step_03_implementation_record.md) and does not by itself accept the Data Library journey. Section 11, added 21 October 2026, is the agreed Data Library extension and supersedes W1–W3 where they differ on warehouse discovery, saved inputs, and experiment units. Step 2's remaining work stays deferred. This document update authorizes no processing, collection, replay, or trading.
 
 Review companion: [Step 3 workflow proposal](C:/Users/windo/.cursor/projects/e-polymarket-Tyrex-PM/canvases/step-3-workflow-proposal.canvas.tsx). Codebase findings: [Step 3 codebase review](C:/Users/windo/.cursor/projects/e-polymarket-Tyrex-PM/canvases/step-3-codebase-review.canvas.tsx). This document is the work specification. Canvas notes are retained discussion history; changed proposals require reconfirmation rather than silently inheriting an earlier agreement.
