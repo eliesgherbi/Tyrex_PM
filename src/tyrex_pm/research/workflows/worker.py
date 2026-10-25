@@ -100,11 +100,19 @@ _WINDOWS: dict[tuple, Any] = {}
 
 def _strategy_replay(unit: dict) -> dict:
     from tyrex_pm.data_warehouse.query.reader import Reader
+    from tyrex_pm.facts import ids as F
+    from tyrex_pm.protection import protection_spec_from_mapping
     from tyrex_pm.research.replay.config import load_scenario
     from tyrex_pm.research.strategy_replay.loader import WindowCatalog, load_window
     from tyrex_pm.research.strategy_replay.results import decision_digest
-    from tyrex_pm.research.strategy_replay.run import run_window
-    from tyrex_pm.strategies.settlement_value.schema import settlement_value_config_from_parameters
+    from tyrex_pm.research.strategy_replay.run import ReplayExecutionPolicy, run_window
+    from tyrex_pm.runtime.composition import starts_adapter
+    from tyrex_pm.strategies.registry import get_strategy_plugin
+
+    kind = str(unit.get("strategy_kind") or "settlement_value")
+    plugin = get_strategy_plugin(kind)
+    # Binance depth is rebuilt only for strategies whose contract reads it (as live).
+    spot_depth = starts_adapter(plugin.input_contract, F.BINANCE_SPOT_L2)
 
     # One catalog per pinned build set and the last loaded window are kept for the life of
     # the process: configurations of the same window, and later windows of the same
@@ -124,25 +132,26 @@ def _strategy_replay(unit: dict) -> dict:
         )
         catalog = WindowCatalog(reader)
         _CATALOGS[catalog_key] = catalog
-    window_key = (catalog_key, unit["market_id"])
+    window_key = (catalog_key, unit["market_id"], spot_depth)
     window = _WINDOWS.get(window_key)
     if window is None:
         _WINDOWS.clear()
-        window = load_window(catalog, unit["market_id"])
+        window = load_window(catalog, unit["market_id"], spot_depth=spot_depth)
         _WINDOWS[window_key] = window
     scenario = load_scenario(Path(unit["scenario_path"]))
-    config = settlement_value_config_from_parameters(unit.get("parameters") or {}, file="workflow")
+    config = plugin.load_config(unit.get("parameters") or {}, "workflow")
+    # The scenario's book rule applies through run_window (one setting).
     policy = None
-    if scenario.book_reconstruction != "legacy":
-        from tyrex_pm.research.strategy_replay.run import ReplayExecutionPolicy
-
-        policy = ReplayExecutionPolicy(book_reconstruction=scenario.book_reconstruction)
+    if unit.get("protection"):
+        policy = ReplayExecutionPolicy(
+            protection=protection_spec_from_mapping(dict(unit["protection"]), where="protection")
+        )
     result = run_window(
         window,
         strategy_config=config,
         scenario=scenario,
         execution_policy=policy,
-        strategy_kind="settlement_value",
+        strategy_kind=kind,
         clock_observations=catalog.clock_observations_for(
             window.range_start_ns, window.range_end_ns
         ),

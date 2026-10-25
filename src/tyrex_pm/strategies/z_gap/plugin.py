@@ -9,6 +9,7 @@ from tyrex_pm.facts import ids as F
 from tyrex_pm.facts.mappings import Z_GAP_INPUT_CONTRACT
 from tyrex_pm.indicators.spec import IndicatorSpec
 from tyrex_pm.strategies.registry import StrategyPlugin
+from tyrex_pm.strategies.research import ResearchSchema
 from tyrex_pm.strategies.z_gap.config import ZGapVolatilityConfig
 from tyrex_pm.strategies.z_gap.driver import create_z_gap_driver
 from tyrex_pm.strategies.z_gap.schema import zgap_config_from_parameters
@@ -37,6 +38,7 @@ def ewma_vol_spec_from_volatility(volatility: ZGapVolatilityConfig) -> Indicator
     return IndicatorSpec(
         name="ewma_vol",
         source=F.BINANCE_SPOT_TRADES,
+        gates_entry=True,
         params=(
             ("half_life_s", str(volatility.half_life_s)),
             ("min_samples_s", str(volatility.min_samples_s)),
@@ -52,8 +54,29 @@ def _indicator_specs(config: Any) -> tuple[IndicatorSpec, ...]:
     return (ewma_vol_spec_from_volatility(config.volatility),)
 
 
+ZGAP_RESEARCH = ResearchSchema(
+    label="z_gap (fair-value gap)",
+    essentials=(
+        "entry.theta_take", "entry.z_min", "entry.z_max", "entry.tau_min_s", "entry.tau_max_s",
+        "volatility.half_life_s",
+    ),
+    groups=(
+        {"id": "entry", "name": "Entry", "description": "Edge, z-score band and timing.",
+         "sections": ["entry"]},
+        {"id": "model", "name": "Model & volatility", "description": "Volatility estimator.",
+         "sections": ["volatility"]},
+        {"id": "exit", "name": "Exit & thesis", "description": "Realization, stop and timing.",
+         "sections": ["realization", "thesis", "time_resolution"]},
+        {"id": "inputs", "name": "Inputs & friction",
+         "description": "Price-to-beat quality, fees and resolution penalty.",
+         "sections": ["ptb_time_quality", "friction"]},
+    ),
+)
+
+
 ZGAP_PLUGIN = StrategyPlugin(
     kind="z_gap",
+    research=ZGAP_RESEARCH,
     input_contract=Z_GAP_INPUT_CONTRACT,
     load_config=_load_config,
     create_driver=create_z_gap_driver,

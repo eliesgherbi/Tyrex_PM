@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
-from tyrex_pm.core.ids import CorrelationId, EventId
+from tyrex_pm.core.ids import CorrelationId, EventId, StrategyId
 from tyrex_pm.core.time_authority import TimeAuthority
 from tyrex_pm.domain.polymarket.ptb import PtbSnapshot
 from tyrex_pm.indicators.graph import FeatureBundle
@@ -27,6 +27,8 @@ from tyrex_pm.strategies.triggers import EvaluationTrigger
 class StrategyDriver(Protocol):
     """Per-window strategy adapter used by every host."""
 
+    # Stable identity of the strategy in contexts, intents and records.
+    strategy_id: StrategyId
     config: Any
     time_authority: TimeAuthority
     target_notional: Decimal

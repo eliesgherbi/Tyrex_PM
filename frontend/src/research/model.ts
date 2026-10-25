@@ -9,6 +9,9 @@ export type ExecutionField = { key: string; label: string; unit: string; type: s
 export type Scenario = { name: string; label: string; source: string; values: Flat; locked: string[]; fields: ExecutionField[] };
 export type Base = { id: string; group: "source" | "saved" | "candidate"; label: string; source: string; parameters: Nested; scenario?: string | null; execution?: Flat; fingerprint?: string };
 export type Capabilities = {
+  strategy_kind?: string;
+  // Protection block the strategy requires (null when it needs none).
+  protection?: Record<string, unknown> | null;
   strategies: { kind: string; label: string; available: boolean; reason: string }[];
   essentials: string[];
   groups: { id: string; name: string; description: string; sections: string[] }[];
@@ -36,7 +39,7 @@ export type SetSummary = {
   status?: string;
 };
 
-export type ReplayConfig = { id: string; name: string; strategy: string; base: string; baseLabel: string; parameters: Nested; scenario: string; execution: Flat; fingerprint: string; validatedAt: string };
+export type ReplayConfig = { id: string; name: string; strategy: string; protection?: Record<string, unknown> | null; base: string; baseLabel: string; parameters: Nested; scenario: string; execution: Flat; fingerprint: string; validatedAt: string };
 
 export type HistoryRun = {
   batch_id: string;
@@ -114,6 +117,8 @@ export type ResultView = {
   recordings?: number | null;
   research_policy?: string | null;
   scenario_name?: string;
+  engine?: string;
+  engine_current?: boolean;
   strategy_kind?: string;
   created_at?: string;
   window_count?: number;
@@ -140,21 +145,28 @@ export const replayablePolicy = (policy?: string | null) => policy === "explorat
 export const policyLabel = (policy?: string | null) => (policy ? policyNames[policy] || policy : "No named policy");
 export const strategyName = (kind?: string) => (kind === "settlement_value" ? "Settlement value" : String(kind || "").replaceAll("_", " "));
 
+// Parameter trees are sections of fields (settlement_value, z_gap) or flat fields
+// (ask70, feature_probe). Form keys are "section.field" or just "field".
+const isSection = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 export function flatten(parameters: Nested): Flat {
   const flat: Flat = {};
-  for (const [section, values] of Object.entries(parameters || {})) for (const [name, value] of Object.entries(values || {})) flat[`${section}.${name}`] = value;
+  for (const [section, values] of Object.entries(parameters || {})) {
+    if (isSection(values)) for (const [name, value] of Object.entries(values)) flat[`${section}.${name}`] = value;
+    else flat[section] = values;
+  }
   return flat;
 }
 export function nest(flat: Flat): Nested {
-  const nested: Nested = {};
+  const nested: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(flat)) {
     const dot = key.indexOf(".");
-    if (dot < 0) continue;
+    if (dot < 0) { nested[key] = value; continue; }
     const section = key.slice(0, dot), name = key.slice(dot + 1);
-    nested[section] = nested[section] || {};
-    nested[section][name] = value;
+    const part = isSection(nested[section]) ? (nested[section] as Record<string, unknown>) : {};
+    part[name] = value;
+    nested[section] = part;
   }
-  return nested;
+  return nested as Nested;
 }
 export const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export function show(value: unknown): string {

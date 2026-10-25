@@ -22,6 +22,7 @@ def test_driver_satisfies_the_contract(kind: str) -> None:
     driver = plugin.create_driver(config=strategy_config(kind), clock=SystemClock())
     assert isinstance(driver, BaseDriver)
     assert isinstance(driver, StrategyDriver)
+    assert str(driver.strategy_id)  # hosts put it in every context and record
     # The optional half has working defaults: hosts call them without probing.
     driver.on_hold_committed()
     assert callable(driver.restore_window_usage)

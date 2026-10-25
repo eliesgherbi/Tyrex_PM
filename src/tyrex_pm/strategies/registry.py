@@ -35,6 +35,9 @@ class StrategyPlugin:
     max_entry_debit: Callable[[Any], Decimal | None] | None = None
     # Book levels per side the strategy reads; replay checks its recorded depth covers it.
     required_depth_levels: Callable[[Any], int | None] | None = None
+    # How the research workspace offers this strategy (strategies.research). None: the
+    # strategy runs in the CLI, lab and replay API but is not offered in the workspace.
+    research: Any = None
 
 
 def register_strategy(plugin: StrategyPlugin) -> None:

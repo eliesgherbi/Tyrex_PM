@@ -60,7 +60,8 @@ export function ResearchWorkspace({ screen, onScreen, theme, handoff, onOpenData
 
   useEffect(() => { store.set("set", setId); store.set("generation", generation); store.set("step", step); store.set("preview", preview); store.set("jobs", jobs); store.set("job", selectedJob); store.set("config", configIndex); store.set("unit", traceState.unitId); }, [setId, generation, step, preview, jobs, selectedJob, configIndex, traceState.unitId]);
 
-  const loadCaps = useCallback(() => safeCall("strategy.capabilities").then((envelope) => { if (envelope.ok && envelope.result) { setCaps(envelope.result as unknown as Capabilities); setCapsError(""); } else setCapsError(reason(envelope)); }), []);
+  const [capsKind, setCapsKind] = useState("settlement_value");
+  const loadCaps = useCallback((kind?: string) => safeCall("strategy.capabilities", { strategy_kind: kind || capsKind }).then((envelope) => { if (envelope.ok && envelope.result) { setCaps(envelope.result as unknown as Capabilities); setCapsError(""); } else setCapsError(reason(envelope)); }), [capsKind]);
   const loadSets = useCallback(() => { setSetsState({ loading: true, error: "" }); return safeCall("selection.list", { limit: 200 }).then((envelope) => { if (envelope.ok) setSets(((envelope.result?.selections as SetSummary[]) || []).slice().sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))); setSetsState({ loading: false, error: envelope.ok ? "" : reason(envelope) }); }); }, []);
   useEffect(() => { void loadCaps(); void loadSets(); }, [loadCaps, loadSets]);
   const set = sets.find((item) => item.selection_id === setId) || null;
@@ -88,7 +89,7 @@ export function ResearchWorkspace({ screen, onScreen, theme, handoff, onOpenData
   const runPreview = async (configs: ReplayConfig[], name: string) => {
     if (!set) return;
     setPreviewError(""); setBusy("preview");
-    const envelope = await safeCall("replay.preview", { selection_id: set.selection_id, name, mode: "replay", configurations: configs.map((c) => ({ name: c.name, strategy_kind: c.strategy, parameters: c.parameters, scenario: c.scenario, execution: c.execution })) });
+    const envelope = await safeCall("replay.preview", { selection_id: set.selection_id, name, mode: "replay", configurations: configs.map((c) => ({ name: c.name, strategy_kind: c.strategy, parameters: c.parameters, scenario: c.scenario, execution: c.execution, ...(c.protection ? { protection: c.protection } : {}) })) });
     setBusy("");
     if (!envelope.ok || !envelope.result?.valid) { setPreview(null); setPreviewError(!envelope.ok ? reason(envelope) : ((envelope.result?.errors as string[]) || ["The preview was refused."]).join(" ")); return; }
     setPreview(envelope.result as unknown as Preview); setStep(1); window.scrollTo(0, 0);
@@ -209,7 +210,7 @@ export function ResearchWorkspace({ screen, onScreen, theme, handoff, onOpenData
       <div className="w-setup-steps">{steps.map((label, i) => <button key={label} className={step === i ? "active" : ""} disabled={i > step || (i === 1 && !preview)} onClick={() => i <= step && setStep(i)}><span>{i + 1}</span>{label}</button>)}</div>
       {step === 0 && (!set ? <Panel title="1. Use a saved window set" sub="Choose data here, or start from Data Library → Use in experiment." action={<Button onClick={() => setDrawer("data")}>Choose / change window set</Button>}>{setsState.loading ? <p className="r-note">Loading saved window sets…</p> : setId ? <Notice tone="warning" title="The selected set is no longer listed">{setId}. Choose another saved set.</Notice> : <Notice title="No window set is selected">Choose a saved set, or save one in Data first.</Notice>}</Panel>
         : !caps ? <p className="r-note">Loading strategy capabilities…</p>
-        : <ReplayBuilder key={set.selection_id + ":" + generation} set={set} caps={caps} draftKey={draftKey(set.selection_id)} busy={busy === "preview"} onPreview={(configs, name) => void runPreview(configs, name)} onChooseData={() => setDrawer("data")} onSaved={() => void loadCaps()} />)}
+        : <ReplayBuilder key={set.selection_id + ":" + generation} set={set} caps={caps} draftKey={draftKey(set.selection_id)} busy={busy === "preview"} onPreview={(configs, name) => void runPreview(configs, name)} onChooseData={() => setDrawer("data")} onSaved={() => void loadCaps()} onStrategy={(kind) => { setCapsKind(kind); void loadCaps(kind); }} />)}
       {previewError && step === 0 && <Notice tone="warning" title="Preview was refused">{previewError}</Notice>}
       {step === 1 && preview && <div className="r-stack"><Panel title="Preview the exact replay batch" sub="No objective, no partition, no hidden parameter overlay." action={<Tag>{preview.configurations} configuration(s)</Tag>}>
         <div className="w-preview-summary"><div><strong>{preview.units}</strong><span>replay units</span></div><div><strong>{preview.experiments.length}</strong><span>experiment(s)</span></div><div><strong>{preview.windows}</strong><span>windows · whole set</span></div></div>

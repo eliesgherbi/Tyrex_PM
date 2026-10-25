@@ -18,101 +18,13 @@ import yaml
 
 from tyrex_pm.data_warehouse.config import strict
 from tyrex_pm.research.replay.config import Scenario
+from tyrex_pm.research.strategy_replay.engine_version import REPLAY_ENGINE
 from tyrex_pm.runtime.config_error import ConfigError
-from tyrex_pm.strategies.settlement_value.config import (
-    COMPARISONS,
-    K_QUALITIES,
-    PROVENANCE_STATUSES,
-    SPOT_INPUTS,
-    SUPPORTED_BACKENDS,
-    TARGET_MODES,
-)
-from tyrex_pm.strategies.settlement_value.schema import (
-    settlement_value_config_as_parameters,
-    settlement_value_config_from_parameters,
-)
+from tyrex_pm.strategies.registry import get_strategy_plugin, registered_strategy_kinds
 
 from .artifacts import REPO, now_iso, plan_digest, read, write_json
 from .contracts import WorkflowError
 
-ESSENTIALS = (
-    "entry.min_edge_per_share",
-    "entry.tau_min_s",
-    "entry.tau_max_s",
-    "sizing.max_debit_usdc",
-    "entry.max_entry_price",
-    "exit.policy",
-)
-POLICY_FIELDS = {
-    "quality.accepted_k_qualities": ["CONFIRMED_CANONICAL", "PROVISIONAL"],
-    "quality.require_verified_settlement_spec": False,
-}
-GROUPS = (
-    {
-        "id": "entry",
-        "name": "Entry & position size",
-        "description": "When to enter, price limits, spending and order sizing.",
-        "sections": ["entry", "sizing"],
-    },
-    {
-        "id": "model",
-        "name": "Model & volatility",
-        "description": "Probability inputs, uncertainty bands and volatility estimator.",
-        "sections": ["model", "volatility"],
-    },
-    {
-        "id": "exit",
-        "name": "Exit, retry & re-entry",
-        "description": "Lifecycle choices and bounded recovery of orders and positions.",
-        "sections": ["exit", "retry", "reentry"],
-    },
-    {
-        "id": "quality",
-        "name": "Settlement & research policy",
-        "description": "Payoff interpretation, input quality and the visible set policy.",
-        "sections": ["settlement", "quality"],
-    },
-    {
-        "id": "fees",
-        "name": "Strategy fee estimates",
-        "description": "Strategy fee curve. Simulation fees stay with the execution scenario.",
-        "sections": ["fees"],
-    },
-    {
-        "id": "veto",
-        "name": "Model / market disagreement",
-        "description": "Optional entry veto. It does not alter an existing hold or exit.",
-        "sections": ["disagreement_veto"],
-    },
-)
-CHOICES = {
-    "model.backend": sorted(SUPPORTED_BACKENDS),
-    "model.spot_input": sorted(SPOT_INPUTS),
-    "settlement.comparison": sorted(COMPARISONS),
-    "settlement.provenance_status": sorted(PROVENANCE_STATUSES),
-    "entry.target_mode": sorted(TARGET_MODES),
-    "quality.accepted_k_qualities": sorted(K_QUALITIES),
-    "exit.policy": ["hold_to_resolution", "managed_exit"],
-}
-LABELS = {
-    "entry.min_edge_per_share": "Minimum conservative edge",
-    "entry.tau_min_s": "Stop new entries this close to expiry",
-    "entry.tau_max_s": "Start entries with this much time left",
-    "sizing.max_debit_usdc": "Maximum acquisition spending",
-    "entry.max_entry_price": "Maximum entry price",
-    "exit.policy": "Position lifecycle",
-    "quality.accepted_k_qualities": "Accepted price-to-beat quality",
-    "quality.require_verified_settlement_spec": "Require verified settlement specification",
-}
-LABELS.update(
-    {
-        "model.backend": "Probability model",
-        "volatility.half_life_s": "Volatility half-life",
-        "exit.value_exit_enabled": "Enable value exit",
-        "retry.enabled": "Allow bounded entry retry",
-        "reentry.max_trades_per_window": "Maximum trades per window",
-    }
-)
 EXECUTION_LABELS = {
     "order_delay_ms": "Order arrival delay",
     "feed_delay_ms": "Market-data delay",
@@ -128,8 +40,8 @@ EXECUTION_LABELS = {
 }
 
 
-def field_label(key: str) -> str:
-    known = LABELS.get(key) or EXECUTION_LABELS.get(key)
+def field_label(key: str, labels: Any = None) -> str:
+    known = (labels or {}).get(key) or EXECUTION_LABELS.get(key)
     if known:
         return known
     name = key.split(".")[-1].replace("_", " ")
@@ -226,8 +138,10 @@ def _field_type(value: Any) -> tuple[str, bool]:
         return "number", True
     if isinstance(value, (float, Decimal)):
         return "number", False
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
         return "list", False
+    if isinstance(value, dict):
+        return "json", False
     return "text", False
 
 
@@ -275,7 +189,7 @@ def _scenario_document(name: str) -> dict[str, Any]:
     return loaded
 
 
-def _yaml_bases() -> list[dict[str, Any]]:
+def _yaml_bases(kind: str = "settlement_value") -> list[dict[str, Any]]:
     folder = REPO / "config" / "runs"
     rows = []
     if not folder.is_dir():
@@ -286,7 +200,7 @@ def _yaml_bases() -> list[dict[str, Any]]:
         except yaml.YAMLError:
             continue
         strategy = document.get("strategy") if isinstance(document, dict) else None
-        if not isinstance(strategy, dict) or strategy.get("kind") != "settlement_value":
+        if not isinstance(strategy, dict) or strategy.get("kind") != kind:
             continue
         parameters = (
             strategy.get("parameters") if isinstance(strategy.get("parameters"), dict) else {}
@@ -304,28 +218,39 @@ def _yaml_bases() -> list[dict[str, Any]]:
 
 
 def strategy_capabilities(request: dict, root: Path) -> dict[str, Any]:
-    del request
-    defaults = settlement_value_config_as_parameters(
-        settlement_value_config_from_parameters({}, file="capabilities"), full=True
-    )
+    """Form fields, bases and scenarios for one strategy (``strategy_kind``, default
+    settlement_value), plus the list of strategies the workspace offers."""
+    kind = str(request.get("strategy_kind") or DEFAULT_STRATEGY)
+    plugin, schema = _research(kind)
+    defaults = _defaults(kind)
     fields = []
     for section, values in defaults.items():
-        for name, value in values.items():
-            key = f"{section}.{name}"
-            kind, integer = _field_type(value)
+        # Nested configs have sections of fields; flat configs are one "parameters" section.
+        items = values.items() if isinstance(values, dict) else [(None, values)]
+        for name, value in items:
+            key = section if name is None else f"{section}.{name}"
+            kind_name, integer = _field_type(value)
             fields.append(
                 {
                     "key": key,
-                    "section": section,
-                    "type": kind,
+                    "section": "parameters" if name is None else section,
+                    "type": kind_name,
                     "integer": integer,
                     "default": _plain(value),
-                    "choices": CHOICES.get(key),
-                    "label": field_label(key),
-                    "unit": field_unit(key, kind, integer),
-                    "policy_owned": key in POLICY_FIELDS,
+                    "choices": schema.choices.get(key),
+                    "label": field_label(key, schema.labels),
+                    "unit": field_unit(key, kind_name, integer),
+                    "policy_owned": key in schema.policy_fields,
                 }
             )
+    groups = list(schema.groups) or [
+        {
+            "id": "parameters",
+            "name": "Parameters",
+            "description": "Strategy parameters, starting from the shipped configuration.",
+            "sections": sorted({item["section"] for item in fields}),
+        }
+    ]
     scenarios = []
     for name in SCENARIO_NAMES:
         document = _scenario_document(name)
@@ -349,79 +274,139 @@ def strategy_capabilities(request: dict, root: Path) -> dict[str, Any]:
             }
         )
     return {
-        "strategies": [
-            {
-                "kind": "settlement_value",
-                "label": "Settlement value",
-                "available": True,
-                "reason": "",
-            },
-            {
-                "kind": "ask70",
-                "label": "ask70",
-                "available": False,
-                "reason": "workflow replay adapter is not available",
-            },
-            {
-                "kind": "z_gap",
-                "label": "z_gap",
-                "available": False,
-                "reason": "workflow replay adapter is not available",
-            },
-        ],
-        "essentials": list(ESSENTIALS),
-        "groups": list(GROUPS),
+        "strategy_kind": kind,
+        "strategies": _offered_strategies(),
+        "essentials": list(schema.essentials),
+        "groups": groups,
         "fields": fields,
         "scenarios": scenarios,
+        "protection": _protection_default(plugin, schema),
         "bases": [
             {
                 "id": "defaults",
                 "group": "source",
                 "label": "Strategy schema defaults",
-                "source": "SettlementValueConfig()",
+                "source": f"{kind} defaults",
                 "parameters": defaults,
             }
         ]
-        + _yaml_bases()
-        + _saved_bases(root)
-        + _candidate_bases(root),
+        + _yaml_bases(kind)
+        + _saved_bases(root, kind)
+        + _candidate_bases(root, kind),
         "policy": {
-            key: {**value, "fields": POLICY_FIELDS} for key, value in REPLAY_POLICIES.items()
+            key: {**value, "fields": dict(schema.policy_fields)}
+            for key, value in REPLAY_POLICIES.items()
         },
         "default_scenario": DEFAULT_SCENARIO,
     }
 
 
-def _policy_errors(parameters: dict[str, Any], research_policy: str | None) -> list[str]:
+DEFAULT_STRATEGY = "settlement_value"
+
+
+def _research(kind: str) -> tuple[Any, Any]:
+    """The plugin and its research description; refused when the workspace cannot offer it."""
+    try:
+        plugin = get_strategy_plugin(kind)
+    except KeyError as exc:
+        raise WorkflowError(
+            "unsupported_strategy", "strategy is not registered", {"strategy_kind": kind}
+        ) from exc
+    if plugin.research is None:
+        raise WorkflowError(
+            "unsupported_strategy",
+            f"{kind} is not offered in the research workspace",
+            {"strategy_kind": kind},
+        )
+    return plugin, plugin.research
+
+
+def _defaults(kind: str) -> dict[str, Any]:
+    plugin, schema = _research(kind)
+    config = plugin.load_config(dict(schema.default_parameters), f"{kind}:defaults")
+    return schema.as_parameters(config)
+
+
+def _offered_strategies() -> list[dict[str, Any]]:
+    rows = []
+    for kind in registered_strategy_kinds():
+        schema = get_strategy_plugin(kind).research
+        rows.append(
+            {
+                "kind": kind,
+                "label": kind if schema is None or not schema.label else schema.label,
+                "available": schema is not None,
+                "reason": "" if schema is not None else "not offered in the research workspace",
+            }
+        )
+    return rows
+
+
+def _protection_default(plugin: Any, schema: Any) -> dict[str, Any] | None:
+    from tyrex_pm.strategies.registry import plugin_requires_protection
+
+    config = plugin.load_config(dict(schema.default_parameters), "protection")
+    if not plugin_requires_protection(plugin, config):
+        return None
+    return dict(schema.default_protection or {})
+
+
+def _policy_errors(
+    parameters: dict[str, Any], research_policy: str | None, policy_fields: Any = None
+) -> list[str]:
+    """The set's research policy must exist, and fields it owns must keep its values."""
     if research_policy not in REPLAY_POLICIES:
         return ["This saved set has no named research policy. Replay will not invent one."]
-    quality = parameters.get("quality")
-    if (
-        not isinstance(quality, dict)
-        or "accepted_k_qualities" not in quality
-        or "require_verified_settlement_spec" not in quality
-    ):
-        return [
-            "Missing policy field quality.accepted_k_qualities or require_verified_settlement_spec."
-        ]
-    accepted = [str(item) for item in quality.get("accepted_k_qualities") or []]
-    expected = list(POLICY_FIELDS["quality.accepted_k_qualities"])
-    if (
-        sorted(accepted) != sorted(expected)
-        or quality.get("require_verified_settlement_spec") is not False
-    ):
-        return [
-            "Submitted policy fields do not match this set. Save a different set to change them."
-        ]
+    for key, expected in dict(policy_fields or {}).items():
+        node: Any = parameters
+        for part in key.split("."):
+            node = node.get(part, _MISSING) if isinstance(node, dict) else _MISSING
+        if node is _MISSING:
+            return [f"Missing policy field {key}."]
+        if isinstance(expected, list):
+            same = isinstance(node, (list, tuple)) and sorted(map(str, node)) == sorted(
+                map(str, expected)
+            )
+        else:
+            same = node == expected
+        if not same:
+            return [
+                "Submitted policy fields do not match this set. "
+                "Save a different set to change them."
+            ]
     return []
 
 
-def _resolve_strategy(parameters: dict[str, Any]) -> dict[str, Any]:
+_MISSING = object()
+
+
+def _resolve_strategy(kind: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    plugin, schema = _research(kind)
     try:
-        config = settlement_value_config_from_parameters(parameters, file="replay")
-    except ConfigError as exc:
-        raise WorkflowError("invalid_configuration", str(exc), {"field": exc.field}) from exc
-    return settlement_value_config_as_parameters(config, full=True)
+        config = plugin.load_config(parameters, "replay")
+    except (ConfigError, ValueError, TypeError) as exc:
+        raise WorkflowError(
+            "invalid_configuration", str(exc), {"field": getattr(exc, "field", None)}
+        ) from exc
+    return schema.as_parameters(config)
+
+
+def _resolve_protection(kind: str, parameters: dict[str, Any], raw: Any) -> Any:
+    """Protection block of a configuration: required by some strategies, refused by others."""
+    from tyrex_pm.protection import ProtectionSpecError, protection_spec_from_mapping
+    from tyrex_pm.strategies.registry import plugin_requires_protection
+
+    plugin, schema = _research(kind)
+    config = plugin.load_config(parameters, "replay")
+    if raw is None and plugin_requires_protection(plugin, config):
+        raw = schema.default_protection
+    if raw is None:
+        return None
+    try:
+        protection_spec_from_mapping(dict(raw), where="protection")
+    except ProtectionSpecError as exc:
+        raise WorkflowError("invalid_protection", str(exc), {"field": "protection"}) from exc
+    return _plain(dict(raw))
 
 
 _SCENARIO_INTS = {
@@ -559,37 +544,42 @@ def _execution(
 
 def replay_validate(request: dict, root: Path) -> dict[str, Any]:
     del root
-    if request.get("strategy_kind") not in (None, "settlement_value"):
-        raise WorkflowError(
-            "unsupported_strategy",
-            "the workflow replay adapter is settlement_value",
-            {"strategy_kind": request.get("strategy_kind")},
-        )
+    kind = str(request.get("strategy_kind") or DEFAULT_STRATEGY)
+    _plugin, schema = _research(kind)
     parameters = request.get("parameters")
     if not isinstance(parameters, dict):
         raise WorkflowError("missing_field", "parameters are required", {"field": "parameters"})
-    policy_errors = _policy_errors(parameters, request.get("research_policy"))
+    policy_errors = _policy_errors(
+        parameters, request.get("research_policy"), schema.policy_fields
+    )
     if policy_errors:
         return {"valid": False, "errors": policy_errors}
     try:
-        resolved = _resolve_strategy(parameters)
+        resolved = _resolve_strategy(kind, parameters)
+        protection = _resolve_protection(kind, resolved, request.get("protection"))
         _document, execution = _execution(
             str(request.get("scenario") or DEFAULT_SCENARIO),
             request.get("execution") if isinstance(request.get("execution"), dict) else {},
         )
     except WorkflowError as exc:
         return {"valid": False, "errors": [exc.reason], "field": (exc.fields or {}).get("field")}
-    policy_after = _policy_errors(resolved, request.get("research_policy"))
+    policy_after = _policy_errors(resolved, request.get("research_policy"), schema.policy_fields)
     if policy_after:
         return {"valid": False, "errors": policy_after}
+    identity: dict[str, Any] = {"parameters": resolved, "execution": execution}
+    if kind != DEFAULT_STRATEGY:
+        identity["strategy_kind"] = kind
+    if protection is not None:
+        identity["protection"] = protection
     return {
         "valid": True,
         "errors": [],
-        "strategy_kind": "settlement_value",
+        "strategy_kind": kind,
         "parameters": resolved,
+        "protection": protection,
         "scenario": request.get("scenario") or DEFAULT_SCENARIO,
         "execution": execution,
-        "fingerprint": plan_digest({"parameters": resolved, "execution": execution}),
+        "fingerprint": plan_digest(identity),
     }
 
 
@@ -647,8 +637,9 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
             continue
         outcome = replay_validate(
             {
-                "strategy_kind": raw.get("strategy_kind") or "settlement_value",
+                "strategy_kind": raw.get("strategy_kind") or DEFAULT_STRATEGY,
                 "parameters": raw.get("parameters") or {},
+                "protection": raw.get("protection"),
                 "scenario": raw.get("scenario") or DEFAULT_SCENARIO,
                 "execution": raw.get("execution") or {},
                 "research_policy": policy,
@@ -665,14 +656,13 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
         resolved_configs.append(
             {
                 "name": str(raw["name"]).strip(),
-                "strategy_kind": "settlement_value",
+                "strategy_kind": outcome["strategy_kind"],
                 "parameters": outcome["parameters"],
+                "protection": outcome["protection"],
                 "scenario": raw.get("scenario") or DEFAULT_SCENARIO,
                 "execution": flat,
                 "execution_document": document,
-                "fingerprint": plan_digest(
-                    {"parameters": outcome["parameters"], "execution": flat}
-                ),
+                "fingerprint": outcome["fingerprint"],
             }
         )
     if errors:
@@ -708,6 +698,8 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
                         "scenario_path": str(scenario_file),
                         "scenario_name": scenario_name,
                         "parameters": config["parameters"],
+                        "strategy_kind": config["strategy_kind"],
+                        **({"protection": config["protection"]} if config["protection"] else {}),
                         "configuration_name": config["name"],
                         "configuration_fingerprint": config["fingerprint"],
                     }
@@ -721,7 +713,7 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
             "selection_id": selection_id,
             "selection_digest": saved.get("digest"),
             "research_policy": policy,
-            "strategy_kind": "settlement_value",
+            "strategy_kind": group[0]["strategy_kind"],
             "scenario_name": scenario_name,
             "configurations": [
                 {
@@ -732,6 +724,7 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
                 for item in group
             ],
             "execution": group[0]["execution"],
+            "engine": REPLAY_ENGINE,
             "units": units,
             "pins": {
                 "manifests": saved.get("manifests") or [],
@@ -749,6 +742,7 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
                 # Execution belongs to the experiment's identity: two experiments that
                 # differ only by an execution assumption are different experiments.
                 "execution": group[0]["execution"],
+                "engine": REPLAY_ENGINE,
                 "units": [
                     {k: unit[k] for k in ("id", "market_id", "parameters", "scenario_name")}
                     for unit in units
@@ -760,7 +754,7 @@ def replay_preview(request: dict, root: Path) -> dict[str, Any]:
             {
                 "experiment_id": experiment_id,
                 "digest": body["digest"],
-                "strategy_kind": "settlement_value",
+                "strategy_kind": group[0]["strategy_kind"],
                 "scenario_name": scenario_name,
                 "configurations": [item["name"] for item in group],
                 "resolved": [
@@ -1028,7 +1022,7 @@ def _job_for_experiment(root: Path, experiment_id: str) -> dict[str, Any] | None
     return _job_index(root).get(experiment_id)
 
 
-def _saved_bases(root: Path | None) -> list[dict[str, Any]]:
+def _saved_bases(root: Path | None, kind: str = "settlement_value") -> list[dict[str, Any]]:
     folder = (root / "configurations") if root else None
     if folder is None or not folder.is_dir():
         return []
@@ -1036,6 +1030,8 @@ def _saved_bases(root: Path | None) -> list[dict[str, Any]]:
     for path in sorted(folder.glob("*.json")):
         body = read(path)
         if body.get("schema") != "replay_configuration_v1":
+            continue
+        if str(body.get("strategy_kind") or "settlement_value") != kind:
             continue
         rows.append(
             {
@@ -1054,14 +1050,14 @@ def _saved_bases(root: Path | None) -> list[dict[str, Any]]:
     return rows
 
 
-def _candidate_bases(root: Path | None) -> list[dict[str, Any]]:
+def _candidate_bases(root: Path | None, kind: str = "settlement_value") -> list[dict[str, Any]]:
     folder = (root / "candidates") if root else None
     if folder is None or not folder.is_dir():
         return []
     rows = []
     for path in sorted(folder.glob("*.freeze.json")):
         body = read(path)
-        if body.get("strategy_kind") != "settlement_value" or not body.get("parameters"):
+        if body.get("strategy_kind") != kind or not body.get("parameters"):
             continue
         rows.append(
             {
@@ -1095,8 +1091,9 @@ def configuration_save(request: dict, root: Path) -> dict[str, Any]:
         "configuration_id": configuration_id,
         "name": name,
         "created_at": now_iso(),
-        "strategy_kind": "settlement_value",
+        "strategy_kind": outcome["strategy_kind"],
         "parameters": outcome["parameters"],
+        "protection": outcome["protection"],
         "scenario": outcome["scenario"],
         "execution": outcome["execution"],
         "fingerprint": outcome["fingerprint"],

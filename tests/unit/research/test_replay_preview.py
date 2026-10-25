@@ -45,7 +45,8 @@ def test_capabilities_name_the_supported_adapter(tmp_path: Path) -> None:
     caps = call("strategy.capabilities", {}, root=tmp_path)
     kinds = {item["kind"]: item for item in caps["result"]["strategies"]}
     assert kinds["settlement_value"]["available"] is True
-    assert kinds["ask70"]["available"] is False
+    # Every strategy that declares a research description is offered (v1 step 6).
+    assert kinds["ask70"]["available"] is True and kinds["z_gap"]["available"] is True
     assert "entry.min_edge_per_share" in caps["result"]["essentials"]
     names = [item["name"] for item in caps["result"]["scenarios"]]
     assert names[0] == caps["result"]["default_scenario"] == "friction_v3"

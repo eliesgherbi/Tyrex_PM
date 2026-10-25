@@ -39,14 +39,11 @@ def _canonical(value: Any) -> str:
 
 
 def config_hash(strategy_kind: str, config: Any) -> str:
-    if strategy_kind == "settlement_value":
-        from tyrex_pm.strategies.settlement_value.schema import (
-            settlement_value_config_as_parameters,
-        )
+    """Identity of a strategy configuration (the plugin's research identity when declared)."""
+    from tyrex_pm.strategies.registry import get_strategy_plugin
 
-        params: Any = settlement_value_config_as_parameters(config)
-    else:
-        params = jsonable(config)
+    research = get_strategy_plugin(strategy_kind).research
+    params: Any = jsonable(config) if research is None else research.identity_parameters(config)
     payload = _canonical({"kind": strategy_kind, "params": params})
     return hashlib.sha256(payload.encode()).hexdigest()
 

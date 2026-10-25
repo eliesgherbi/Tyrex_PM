@@ -15,6 +15,7 @@ from tyrex_pm.strategies.settlement_value.config import (
 )
 from tyrex_pm.strategies.settlement_value.driver import create_settlement_value_driver
 from tyrex_pm.strategies.settlement_value.record_schema import decision_record_schema
+from tyrex_pm.strategies.settlement_value.research import SETTLEMENT_VALUE_RESEARCH
 from tyrex_pm.strategies.settlement_value.schema import settlement_value_config_from_parameters
 
 SETTLEMENT_VALUE_INPUT_CONTRACT = InputContract(
@@ -29,7 +30,7 @@ SETTLEMENT_VALUE_INPUT_CONTRACT = InputContract(
         F.POLYMARKET_MARKET_META,
     ),
     optional=(),
-    indicators=(IndicatorSpec(name="ewma_vol", source=F.BINANCE_SPOT_TRADES),),
+    indicators=(IndicatorSpec(name="ewma_vol", source=F.BINANCE_SPOT_TRADES, gates_entry=True),),
     evaluate_on=(
         OnFact(F.BINANCE_SPOT_TRADES, coalesce_s=1.0, after_ready=F.PTB_SEALED),
         OnFact(F.POLYMARKET_BOOKS, coalesce_s=1.0, after_ready=F.PTB_SEALED),
@@ -89,7 +90,9 @@ def ewma_vol_spec(volatility: SettlementVolatilityConfig) -> IndicatorSpec:
     # another policy is a different indicator instance (and identity).
     if volatility.variance_time_policy != "per_sample_v0":
         params += (("variance_time_policy", volatility.variance_time_policy),)
-    return IndicatorSpec(name="ewma_vol", source=F.BINANCE_SPOT_TRADES, params=params)
+    return IndicatorSpec(
+        name="ewma_vol", source=F.BINANCE_SPOT_TRADES, params=params, gates_entry=True
+    )
 
 
 def spot_path_spec(config: SettlementValueConfig) -> IndicatorSpec:
@@ -114,6 +117,7 @@ SETTLEMENT_VALUE_PLUGIN = StrategyPlugin(
     entry_tau_bounds=_tau_bounds,
     max_entry_debit=lambda config: config.sizing.max_debit_usdc,
     required_depth_levels=lambda config: config.sizing.max_levels,
+    research=SETTLEMENT_VALUE_RESEARCH,
     max_clock_uncertainty_ms=_clock_uncertainty_ms,
     requires_protection=False,
     validate_run_config=_validate_run_config,

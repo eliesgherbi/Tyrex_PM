@@ -12,6 +12,8 @@ type Props = {
   onPreview: (configs: ReplayConfig[], name: string) => void;
   onChooseData: () => void;
   onSaved: () => void;
+  // Choosing another strategy loads its capabilities (fields, bases, protection).
+  onStrategy: (kind: string) => void;
   busy: boolean;
 };
 type Draft = { name: string; experimentName: string; base: string; params: Flat; scenario: string; execution: Flat; configs: ReplayConfig[]; editor: boolean; editing: string | null };
@@ -23,16 +25,19 @@ function readDraft(key: string): Partial<Draft> {
 function ParamInput({ meta, value, baseline, locked, lockedText, onChange }: { meta: { key: string; label: string; unit?: string; type: string; integer?: boolean; choices?: string[] | null }; value: unknown; baseline: unknown; locked: boolean; lockedText: string; onChange: (v: unknown) => void }) {
   const changed = !same(value, baseline);
   const listed = Array.isArray(value) || meta.type === "list";
+  // Nested values (for example a fee curve) are edited as JSON.
+  const json = meta.type === "json" || (typeof value === "object" && value !== null && !listed);
   const numeric = meta.type === "number";
   return <div className={"w-param " + (locked ? "policy" : "")}>
     <Field label={meta.label}>{meta.type === "boolean" ? <select disabled={locked} value={String(value)} onChange={(e) => onChange(e.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select>
       : meta.choices?.length && !listed ? <select disabled={locked} value={String(value)} onChange={(e) => onChange(e.target.value)}>{meta.choices.map((v) => <option key={v} value={v}>{v.replaceAll("_", " ")}</option>)}</select>
+      : json ? <textarea disabled={locked} rows={3} defaultValue={JSON.stringify(value)} onChange={(e) => { try { onChange(JSON.parse(e.target.value)); } catch { onChange(e.target.value); } }} />
       : <input disabled={locked} type={numeric ? "number" : "text"} step={meta.integer ? 1 : "any"} value={Array.isArray(value) ? value.join(", ") : String(value ?? "")} onChange={(e) => onChange(listed ? e.target.value.split(",").map((s) => s.trim()).filter(Boolean) : e.target.value)} />}</Field>
     <div className="w-param-meta"><code>{meta.key}</code><span>{locked ? lockedText : meta.unit || ""}{changed && !locked && <b>Changed</b>}</span></div>
   </div>;
 }
 
-export function ReplayBuilder({ set, caps, draftKey, onPreview, onChooseData, onSaved, busy }: Props) {
+export function ReplayBuilder({ set, caps, draftKey, onPreview, onChooseData, onSaved, onStrategy, busy }: Props) {
   const exploratory = replayablePolicy(set.research_policy);
   const policy = caps.policy[String(set.research_policy)] || Object.values(caps.policy)[0];
   const policyKeys = useMemo(() => new Set(Object.keys(policy.fields)), [policy]);
@@ -68,14 +73,17 @@ export function ReplayBuilder({ set, caps, draftKey, onPreview, onChooseData, on
   const fieldOf = (key: string) => caps.fields.find((f) => f.key === key);
   const countMatching = caps.fields.filter((f) => matches(f.key, f.label)).length;
   const groupsInBatch = new Set(configs.map((c) => JSON.stringify([c.strategy, c.execution]))).size;
-  const strategy = caps.strategies.find((item) => item.available)?.kind || "settlement_value";
+  const strategy = caps.strategy_kind || "settlement_value";
+  // A strategy switch brings other fields: start the editor again from that strategy's defaults.
+  const [shownKind, setShownKind] = useState(strategy);
+  useEffect(() => { if (strategy !== shownKind) { setShownKind(strategy); loadBase("defaults"); setName(`Replay configuration ${configs.length + 1}`); } }, [strategy]);
 
   const loadBase = (id: string) => {
     const found = findBase(id);
     setBase(found.id); setParams(baseValues(found)); setErrors([]); setNotice("");
     if (found.scenario && found.execution && Object.keys(found.execution).length) { setScenario(found.scenario); setExecution({ ...found.execution }); }
   };
-  const request = () => ({ strategy_kind: strategy, parameters: nest(params), scenario, execution, research_policy: set.research_policy, name: name.trim() });
+  const request = () => ({ strategy_kind: strategy, parameters: nest(params), scenario, execution, research_policy: set.research_policy, name: name.trim(), ...(caps.protection ? { protection: caps.protection } : {}) });
   const validate = async () => {
     const local: string[] = [];
     if (!name.trim()) local.push("Give this configuration a name.");
@@ -87,7 +95,7 @@ export function ReplayBuilder({ set, caps, draftKey, onPreview, onChooseData, on
       if (!envelope.ok || !envelope.result) { setErrors([envelope.error?.reason || "The server could not validate this configuration."]); return; }
       const body = envelope.result;
       if (!body.valid) { setErrors((body.errors as string[]) || ["The configuration was refused."]); return; }
-      const cfg: ReplayConfig = { id: editing ?? `config-${Date.now()}`, name: name.trim(), strategy, base, baseLabel: findBase(base).label, parameters: body.parameters as ReplayConfig["parameters"], scenario: String(body.scenario || scenario), execution: (body.execution as Flat) || execution, fingerprint: String(body.fingerprint || ""), validatedAt: new Date().toISOString() };
+      const cfg: ReplayConfig = { id: editing ?? `config-${Date.now()}`, name: name.trim(), strategy, protection: (body.protection as ReplayConfig["protection"]) || null, base, baseLabel: findBase(base).label, parameters: body.parameters as ReplayConfig["parameters"], scenario: String(body.scenario || scenario), execution: (body.execution as Flat) || execution, fingerprint: String(body.fingerprint || ""), validatedAt: new Date().toISOString() };
       setConfigs((old) => (editing ? old.map((c) => (c.id === editing ? cfg : c)) : [...old, cfg]));
       setEditor(false); setEditing(null); setErrors([]);
       setNotice("Configuration validated on the server and added. It is kept in this draft; save it to reuse it elsewhere.");
@@ -96,7 +104,7 @@ export function ReplayBuilder({ set, caps, draftKey, onPreview, onChooseData, on
     } finally { setChecking(false); }
   };
   const saveConfig = async (cfg: ReplayConfig) => {
-    const envelope = await call("configuration.save", { name: cfg.name, strategy_kind: cfg.strategy, parameters: cfg.parameters, scenario: cfg.scenario, execution: cfg.execution, research_policy: set.research_policy }).catch(() => null);
+    const envelope = await call("configuration.save", { name: cfg.name, strategy_kind: cfg.strategy, parameters: cfg.parameters, scenario: cfg.scenario, execution: cfg.execution, research_policy: set.research_policy, ...(cfg.protection ? { protection: cfg.protection } : {}) }).catch(() => null);
     if (!envelope?.ok) { setNotice(`Not saved: ${envelope?.error?.reason || "the workspace API is not reachable"}.`); return; }
     setNotice(`Saved “${cfg.name}” for reuse. It appears under Saved configurations in Start from.`);
     onSaved();
@@ -119,11 +127,11 @@ export function ReplayBuilder({ set, caps, draftKey, onPreview, onChooseData, on
     </Panel>}
     {notice && <div className="w-local-notice" role="status">{notice}</div>}
     {editor && <Panel title={editing ? "Edit this configuration" : configs.length ? "Configure another configuration in this replay" : "2. Configure your replay"} sub="Start from one base. Edit what matters. Give it a name when you validate." action={<Tag>{editing ? "Unvalidated edit" : "Draft"}</Tag>}>
-      <div className="r-two-fields"><Field label="Strategy"><select value={strategy} onChange={() => undefined}>{caps.strategies.map((s) => <option key={s.kind} value={s.kind} disabled={!s.available}>{s.label}{s.available ? "" : ` · ${s.reason}`}</option>)}</select></Field>
+      <div className="r-two-fields"><Field label="Strategy"><select value={strategy} onChange={(e) => onStrategy(e.target.value)}>{caps.strategies.map((s) => <option key={s.kind} value={s.kind} disabled={!s.available}>{s.label}{s.available ? "" : ` · ${s.reason}`}</option>)}</select></Field>
         <Field label="Start from"><select value={base} onChange={(e) => loadBase(e.target.value)}><optgroup label="Source configurations">{groupsByOrigin("source").map((b) => <option key={b.id} value={b.id}>{b.id === "defaults" ? b.label : `${b.label} · YAML`}</option>)}</optgroup>{groupsByOrigin("saved").length > 0 && <optgroup label="Saved configurations">{groupsByOrigin("saved").map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}</optgroup>}{groupsByOrigin("candidate").length > 0 && <optgroup label="Frozen candidates">{groupsByOrigin("candidate").map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}</optgroup>}</select></Field></div>
       <div className="w-base-source"><span>Base source</span><code>{findBase(base).source}{findBase(base).group === "source" && base !== "defaults" ? " · strategy parameters only, not venue or host settings" : ""}</code></div>
       <div className="w-editor-toolbar"><Field label="Find any strategy or execution parameter"><input placeholder="Search edge, retry, volatility, delay…" value={query} onChange={(e) => setQuery(e.target.value)} /></Field><button className="text-button" onClick={() => setAll((v) => !v)}>{all ? "Show essentials first" : "Show all parameters"}</button></div>
-      {!all && !query && <><div className="w-subheading"><strong>Essentials</strong><span>Six controls to start. Every other field is available below.</span></div><div className="w-param-grid">{caps.essentials.map((key) => fieldOf(key)).filter((f): f is FieldMeta => Boolean(f)).map(renderParam)}</div></>}
+      {!all && !query && caps.essentials.length > 0 && <><div className="w-subheading"><strong>Essentials</strong><span>{caps.essentials.length} controls to start. Every other field is available below.</span></div><div className="w-param-grid">{caps.essentials.map((key) => fieldOf(key)).filter((f): f is FieldMeta => Boolean(f)).map(renderParam)}</div></>}
       <div className="w-section-groups">{caps.groups.map((group) => {
         const fields = caps.fields.filter((f) => group.sections.includes(f.section) && matches(f.key, f.label) && (all || query || !caps.essentials.includes(f.key)));
         if (!fields.length) return null;
